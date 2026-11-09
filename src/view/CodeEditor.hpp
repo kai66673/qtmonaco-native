@@ -2,6 +2,7 @@
 
 #include <QElapsedTimer>
 #include <QFont>
+#include <QMetaType>
 #include <QPoint>
 #include <QScrollBar>
 #include <QString>
@@ -17,8 +18,17 @@ struct TextPosition {
     int line = 0;
     int col = 0;
 
+    // A real constructor (not aggregate init) is what the Python binding needs
+    // to expose TextPosition(line, col) the way qtmonaco's set_cursor does.
+    // Brace uses like TextPosition{1, 0} keep working unchanged.
+    TextPosition() = default;
+    TextPosition(int line, int col) : line(line), col(col) {}
+
     bool operator==(const TextPosition&) const = default;
 };
+
+// (Q_DECLARE_METATYPE for this type is at the bottom of this header, at global
+// scope, where Qt requires it - see the note there.)
 
 // Editor widget: a raw QWidget painting visible lines with QPainter.
 //
@@ -129,3 +139,9 @@ private:
 };
 
 } // namespace qmn::view
+
+// Needed by the Python binding only: PySide's generic signal connector resolves
+// signal parameter types through QMetaType, so cursorMoved(TextPosition) is not
+// connectable from Python without this. Qt insists the declaration sit at global
+// scope - putting it inside qmn::view does not compile. Harmless for C++ users.
+Q_DECLARE_METATYPE(qmn::view::TextPosition)

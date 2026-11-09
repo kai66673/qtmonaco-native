@@ -1,0 +1,32 @@
+# Python packaging for the PySide6 extension (PLAN.md Phase B; hardened for
+# distribution in Phase F). The plain C++ build never reads this file, and
+# QMN_BUILD_PYTHON stays OFF by default, so CI and the spike are unaffected.
+
+[build-system]
+build-backend = "scikit_build_core.build"
+# PySide6 + shiboken6_generator are build requirements because their CMake
+# configs and headers live inside the wheels (the wheels ship no Qt headers of
+# their own - Qt comes from CMAKE_PREFIX_PATH, see bindings/CMakeLists.txt).
+requires = [
+    "scikit-build-core>=0.10",
+    "cmake>=3.22",
+    "ninja",
+    "PySide6-Essentials==6.12.0",
+    "shiboken6_generator==6.12.0",
+]
+
+[project]
+name = "qmn-native"
+version = "0.1.0"
+description = "Native Qt6 code-editor widget exposed to PySide6 (drop-in target for qtmonaco.Monaco)"
+requires-python = ">=3.10"
+dependencies = ["PySide6-Essentials>=6.12"]
+
+[tool.scikit-build]
+cmake.version = ">=3.22"
+cmake.build-type = "Release"
+cmake.args = ["-DQMN_BUILD_PYTHON=ON"]
+# bindings/python/qmn is the pure-Python shim package; the compiled _qmn.abi3.so
+# is installed to the wheel root by CMake (install(TARGETS _qmn ...) in
+# bindings/CMakeLists.txt) because the module's real name is _qmn.
+wheel.packages = ["bindings/python/qmn"]

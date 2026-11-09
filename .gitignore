@@ -1,5 +1,7 @@
 build/
+build-py/
 cmake-build-*/
+__pycache__/
 .venv/
 *.egg-info/
 dist/

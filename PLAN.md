@@ -95,6 +95,14 @@ imports it, instantiates `CodeEditor`, round-trips text, and receives a Qt
 signal in Python. That proves ABI + packaging — nothing else is in scope.
 **Kill criterion:** if it mismatches, pin the PySide6/Qt pair and document it.
 
+**Status: DONE (2026-11).** No ABI mismatch: exactly one `libQt6Core.so.6`
+(PySide6's) is mapped in both the build-tree and installed-wheel smokes
+(`/proc/self/maps` assertion in `bindings/tests/_smoke_checks.py`). The pair
+is pinned anyway — PySide6 **6.12.0** + Qt **6.12.0** (`bindings/Dockerfile`);
+`bindings/build_in_container.sh` runs the whole chain (codegen via the official
+macro, compile, smoke, wheel). Gotchas that cost time are recorded in AGENTS.md.
+Next binding widening happens only after Phase C (M2 graphemes).
+
 ## Phase C — M2 text correctness (must precede widening the bound API)
 
 Grapheme/word boundaries, IME composition. Position semantics change here, so

@@ -6,6 +6,18 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- PySide6 binding spine (PLAN.md Phase B): the Shiboken6 extension module
+  `_qmn` wraps `qmn::view::CodeEditor` + `TextPosition` via the official
+  `shiboken_generator_create_binding()` macro; codegen, compile and wheel all
+  run in the `bindings/Dockerfile` container (rockylinux:9, PySide6 6.12.0 +
+  matching Qt 6.12.0 from pinned mirror archives), driven by
+  `bindings/build_in_container.sh`. Packaged with scikit-build-core into a
+  `qmn-native` wheel: `_qmn.abi3.so` at site-packages root plus a pure-Python
+  `qmn/` shim exposing `qmn.CodeEditor` / `qmn.TextPosition`. Smoke tests
+  (build-tree and installed-wheel) assert text round trip, `TextPosition`
+  marshalling, `cursorMoved`/`selectionChanged` reaching Python callables, and
+  exactly one `libQt6Core.so.6` in the process. Opt-in via
+  `-DQMN_BUILD_PYTHON=ON`; host CTest and CI are unaffected.
 - M1 selections: Shift+arrows/Home/End/PageUp/PageDown extend from the caret
   (the caret is the active end), Ctrl+Shift+Home/End extend to document
   bounds, Ctrl+A selects all, Escape collapses. Mouse: plain click collapses,

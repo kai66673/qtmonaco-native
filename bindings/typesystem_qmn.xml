@@ -1,0 +1,50 @@
+<?xml version="1.0"?>
+<!--
+  Shiboken6 typesystem for the native editor binding - the Phase B "thin spine"
+  of PLAN.md.
+
+  Bound on purpose: only the stable, position-semantics-agnostic surface -
+  text in/out, caret get/set, selection, and the two signals. Nothing
+  grapheme-sensitive is bound yet, because PLAN.md Phase C (M2) changes what a
+  column means and the bound surface is what freezes the C++ API.
+
+  Deliberately not bound: PerfStats (the per-keystroke latency counters) and the
+  protected paint/event overrides. Shiboken would otherwise happily generate
+  wrappers for them.
+
+  The load-typesystem line is what makes QWidget a known base class, so
+  qmn::view::CodeEditor inherits PySide6.QtWidgets.QWidget instead of becoming a
+  standalone Shiboken object. Search path (-T) for it is provided by
+  find_package(PySide6) -> PYSIDE_TYPESYSTEMS.
+-->
+<!--
+  Shiboken 6.12 rejects '::' inside name attributes ("Nesting types by
+  specifying '::' is no longer supported"), so the C++ namespace is mirrored
+  with nested <namespace-type> elements - the same shape PySide6 uses for
+  QNativeInterface / QColorConstants::Svg.
+-->
+<typesystem package="_qmn">
+    <load-typesystem name="typesystem_widgets.xml" generate="no"/>
+
+    <namespace-type name="qmn">
+      <namespace-type name="view">
+        <!-- Plain struct exposed by value; fields line/col become Python
+             attributes, and operator== becomes __eq__. -->
+        <value-type name="TextPosition">
+            <include file-name="view/CodeEditor.hpp" location="global"/>
+        </value-type>
+
+        <object-type name="CodeEditor">
+            <include file-name="view/CodeEditor.hpp" location="global"/>
+            <!-- resetPerfStats() is removed explicitly; perfStats() needs no
+                 rule at all: its return type qmn::view::CodeEditor::PerfStats
+                 has no type entry, so Shiboken drops the function by itself and
+                 writes that to gen/mjb_rejected_functions.log. A
+                 <modify-function> for it would only warn ("signature ... not
+                 found") because the function is already gone by then.
+                 Audit that log, it is the list of silently unbound API. -->
+            <modify-function signature="resetPerfStats()" remove="all"/>
+        </object-type>
+      </namespace-type>
+    </namespace-type>
+</typesystem>

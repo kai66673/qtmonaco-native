@@ -34,10 +34,62 @@ scaffolding exists yet, so this shapes how `CodeEditor`'s API is designed *today
   PySide6≥6.8). Build the extension against that Qt, not the distro's system Qt,
   or it ABI-mismatches PySide6 at import. Portable wheels ⇒ cibuildwheel on
   manylinux/musllinux, not against Arch's rolling system Qt.
-- **Shiboken codegen does not run on the Arch host.** The pip generator needs
-  `libxml2.so.2`; Arch ships `libxml2.so.16` (incompatible ABI — do not symlink).
-  Run binding codegen in a manylinux/RHEL9-base container, which also has
-  `clang-libs` (libclang). Keep C++ dev + CTest on the host.
+- **Shiboken codegen does not run on the Arch host.** The pip generator binary
+  needs `libxml2.so.2` and `libxslt.so.1`; Arch ships `libxml2.so.16`
+  (incompatible ABI — do not symlink). Run binding codegen in a manylinux/
+  RHEL9-base container (`bindings/Dockerfile`), which also supplies `clang-libs`
+  — the wheel's libclang is statically linked but has no resource dir of its
+  own, so point `CLANG_INSTALL_DIR=/usr` at clang-libs' `/usr/lib/clang/<v>/
+  include` or ApiExtractor fails on builtin headers. Keep C++ dev + CTest on
+  the host.
+- **The PySide6 wheel ships no Qt headers and no `Qt6Config.cmake`** — only
+  `PySide6Config`/`Shiboken6Config`, PySide6's own wrapper headers, and Qt
+  *runtime* libs under `PySide6/Qt/lib`. There is no `qwidget.h`/`qglobal.h`
+  anywhere in it. So an extension build always needs a real Qt install for
+  headers, `moc` and link libraries; `bindings/Dockerfile` pins Qt **6.12.0**
+  (exact match for the Qt PySide6 6.12.0 bundles). Configure also needs
+  `libglvnd-devel` or `Qt6Gui` fails via `WrapOpenGL`.
+- **Qt download:** `download.qt.io` and `master.qt.io` connect-timeout from this
+  network; `mirror.yandex.ru/mirrors/qt.io` answers in 0.32 s from inside the
+  container (`ftp.fau.de/qtproject` 0.40 s works too). RHEL9 has no Qt6 dev
+  packages, so Qt is unpacked from the repository's own archives.
+- **Qt ≥ 6.9 Linux desktop is one package** (`qt.qt6.6120.linux_gcc_64`), and
+  aqt 3.3.0 **cannot parse it** ("The packages ['qt_base', 'qtbase'] were not
+  found", with or without `-m qtbase`) — `bindings/Dockerfile` instead curls the
+  pinned archive pair straight from the mirror's rev directory and verifies the
+  mirror's `.7z.sha1` sidecars. Only `qtbase-…-RHEL_9_6-GCC-….7z` + the **ICU**
+  bundle are needed; the archives are `RHEL_9_6` based, which lines up with our
+  manylinux_2_34 target. In these new archives there are **no flat forwarding
+  headers at `include/` top level** (unlike old `gcc_64`): only per-module dirs,
+  so a bare `#include <QWidget>`/`<QElapsedTimer>` needs that module's
+  `include/Qt<Module>` dir on the search path.
+- **Single-Qt-at-runtime rule (measured on glibc):** a `DT_NEEDED
+  libQt6Core.so.6` is satisfied by an **already-loaded object of that SONAME**, so
+  the extension binds to the Qt bundled in the PySide6 wheel even though it was
+  *linked* against a different Qt 6.12.0 build and carries a RUNPATH to it (two
+  builds, one `liba.so.1` SONAME probe: the dependent lib resolved to the
+  first-loaded instance). But `dlopen()` **by path** of a same-SONAME library
+  loads a **second copy**. So never load Qt by absolute path and never ship Qt
+  libs beside the extension; the smoke test asserts one `libQt6Core` in
+  `/proc/self/maps` — it passes for both the build-tree and installed-wheel
+  smokes. PySide6's wheel Qt has SONAME `libQt6Core.so.6` and bundles **ICU 73**;
+  Qt's exported CMake interface mentions no `ICU::` targets, so no `libicu-devel`
+  is needed (RHEL9's ICU 67 headers would only poison the link interface).
+- **Binding macro gotchas (Shiboken 6.12.0, measured):** `shiboken_generator_
+  create_binding()` forwards `-I` only for the *listed* `QT_MODULES` targets'
+  own interface dirs (`Qt6::Widgets` = `[include, include/QtWidgets]`), so
+  Core/Gui dirs must be added via `SHIBOKEN_EXTRA_OPTIONS` (one `-I` per dir —
+  a multi-dir property expands into bare positional args otherwise). Compiling
+  the generated code needs `PySide6/include/PySide6/Qt{Core,Gui}` subdirs for
+  the `pyside6_qtgui_python.h` include chain. `typesystem_widgets.xml` comes
+  from `PySide6/typesystems` (`PYSIDE_TYPESYSTEMS` is set only by the abi3
+  config flavour). `PySide6::pyside6` links no Qt — our CMake links Qt6 itself.
+- **Wheel layout:** `_qmn.abi3.so` sits at site-packages root (a `qmn/`
+  subpackage does NOT put `_qmn` on `sys.path`), with the pure-Python `qmn/`
+  shim importing `PySide6.QtWidgets` **before** `_qmn` — the generated wrapper
+  resolves its `QWidget` base through shiboken's converter registry at import.
+  scikit-build-core spells the option `cmake.build-type`, not top-level
+  `build-type`.
 
 ## Hard rule: layering is contractual
 
