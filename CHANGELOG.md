@@ -5,6 +5,22 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- M1 selections: Shift+arrows/Home/End/PageUp/PageDown extend from the caret
+  (the caret is the active end), Ctrl+Shift+Home/End extend to document
+  bounds, Ctrl+A selects all, Escape collapses. Mouse: plain click collapses,
+  Shift+click extends, left-drag selects with edge auto-scroll; the caret
+  lands at the drag end. Typing/Enter replace the selection; Backspace and
+  Delete remove it without touching neighboring text (`selectedText()`,
+  `selectedLength()`, `hasSelection()`, `selectionChanged()` signal; the demo
+  window title shows cursor position and selection size). Fully covered lines
+  paint their selection through EOL using a semi-transparent highlight.
+- View-layer edits never split a surrogate pair: Backspace/Delete remove the
+  whole pair when adjacent to one (full grapheme clusters remain an M2 item).
+- Up/Down navigation on the first/last line now collapses to the line
+  start/end (previously it was a no-op, which also made Shift+Down on a
+  single-line document select nothing).
+
 ### Fixed
 - Caret drifted left along the line: cell width was taken from integer
   `QFontMetrics` (e.g. 8px) while the glyph engine advances the pen by the

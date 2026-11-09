@@ -30,10 +30,11 @@ The core is under constant property-test attack: 2,000 random
 insert/delete operations with a naive `QString` reference and a full
 treap-invariant check after **every** operation (`tests/tst_textbuffer.cpp`).
 
-Deliberately **not implemented yet** (see roadmap): selection, IME,
-soft wrap, horizontal scrolling, undo/redo, syntax highlighting, grapheme-safe
-edits (UTF-16 offsets may split surrogate pairs; the view layer does not do
-this yet), diff view, LSP, scrolling past the end.
+Deliberately **not implemented yet** (see roadmap): clipboard, IME,
+soft wrap, horizontal scrolling, undo/redo, syntax highlighting, word
+navigation, column memory, full grapheme-cluster segmentation (backspace and
+delete never split a surrogate pair, but arrow keys and mouse clicks still
+count UTF-16 code units), diff view, LSP, scrolling past the end.
 
 ## Layout & layering
 
@@ -69,7 +70,9 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-spike --exit-after-ms 2000 bigfile
 Milestones, in build order:
 
 - [x] M0 spike: model + painting + caret + typing + v-scroll + perf stats
-- [ ] M1 selection (logical + visual), clipboard
+- [x] M1 selection: shift-navigation, drag (with autoscroll), shift+click,
+      Ctrl+A, replace-on-type/Enter/Backspace/Delete, Escape clears
+- [ ] M1b clipboard: copy/cut/paste, middle-click paste, X11 primary selection
 - [ ] M2 IME composition, grapheme/word boundaries (QStringConverter iterators)
 - [ ] M3 undo/redo (piece-list snapshots/ops), multiple carets
 - [ ] M4 syntax highlighting (KSyntaxHighlighting + async rehighlight with state checkpoints)

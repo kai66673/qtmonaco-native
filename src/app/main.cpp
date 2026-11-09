@@ -50,6 +50,7 @@ int main(int argc, char* argv[])
     editor.resize(1000, 700);
 
     const QStringList args = parser.positionalArguments();
+    QString baseTitle = QStringLiteral("qmn-spike");
     if (!args.isEmpty()) {
         QTextStream err(stderr);
         QElapsedTimer loadTimer;
@@ -59,13 +60,28 @@ int main(int argc, char* argv[])
         if (!text.isNull()) {
             loadTimer.restart();
             editor.setPlainText(text);
-            editor.setWindowTitle(QFileInfo(args.first()).fileName());
+            baseTitle = QFileInfo(args.first()).fileName();
             fprintf(stderr, "loaded %s: read %lld ms, setPlainText %lld ms, %lld lines\n",
                     qPrintable(args.first()), readMs, loadTimer.elapsed(),
                     static_cast<long long>(editor.lineCount()));
             fflush(stderr);
         }
     }
+
+    // Live status in the title bar: cursor position and selection size.
+    // selectedLength() is O(log P) with no text copy, so this is cheap.
+    auto updateTitle = [&editor, baseTitle] {
+        QString title = baseTitle
+                        + QStringLiteral("  \u2014  %1:%2")
+                              .arg(editor.position().line + 1)
+                              .arg(editor.position().col + 1);
+        if (editor.hasSelection())
+            title += QStringLiteral("  (%1 code units selected)").arg(editor.selectedLength());
+        editor.setWindowTitle(title);
+    };
+    QObject::connect(&editor, &qmn::view::CodeEditor::cursorMoved, &editor, updateTitle);
+    QObject::connect(&editor, &qmn::view::CodeEditor::selectionChanged, &editor, updateTitle);
+    updateTitle();
 
     editor.show();
 

@@ -3,7 +3,6 @@
 #include <QApplication>
 #include <QFocusEvent>
 #include <QFontDatabase>
-#include <QFontMetrics>
 #include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QMouseEvent>
@@ -76,8 +75,11 @@ void CodeEditor::setPlainText(const QString& text)
 {
     buffer_.setText(text);
     caret_ = {};
+    anchor_ = {};
+    hasSelection_ = false;
     setVScroll(0);
     updateScrollBarRange();
+    emit selectionChanged();
     update();
 }
 
@@ -108,6 +110,9 @@ void CodeEditor::setPosition(TextPosition pos)
 void CodeEditor::setCaret(TextPosition pos)
 {
     caret_ = pos;
+    const bool had = hasSelection_;
+    hasSelection_ = false;
+    anchor_ = pos;
     caretOn_ = true;
     if (hasFocus())
         blinkTimer_.start();
@@ -115,6 +120,133 @@ void CodeEditor::setCaret(TextPosition pos)
     updateScrollBarRange();
     update();
     emit cursorMoved(caret_);
+    if (had)
+        emit selectionChanged();
+}
+
+void CodeEditor::setSelection(TextPosition anchor, TextPosition caret)
+{
+    anchor_ = clampPos(anchor);
+    caret_ = clampPos(caret);
+    hasSelection_ = !(anchor_ == caret_);
+    caretOn_ = true;
+    if (hasFocus())
+        blinkTimer_.start();
+    ensureCaretVisible();
+    updateScrollBarRange();
+    update();
+    emit cursorMoved(caret_);
+    emit selectionChanged();
+}
+
+void CodeEditor::moveCaret(TextPosition target, bool extend)
+{
+    target = clampPos(target);
+    if (!extend) {
+        setCaret(target);
+        return;
+    }
+    if (!hasSelection_)
+        anchor_ = caret_; // shift+arrow from no selection: the caret becomes
+                          // the anchor; mid-selection the anchor stays put
+    if (target == caret_) {
+        // At a boundary (e.g. shift+Left at 0:0): nothing to extend into.
+        return;
+    }
+    const bool had = hasSelection_;
+    caret_ = target;
+    hasSelection_ = !(anchor_ == caret_);
+    caretOn_ = true;
+    if (hasFocus())
+        blinkTimer_.start();
+    ensureCaretVisible();
+    updateScrollBarRange();
+    update();
+    emit cursorMoved(caret_);
+    if (had != hasSelection_)
+        emit selectionChanged();
+}
+
+TextPosition CodeEditor::selStart() const
+{
+    if (anchor_.line < caret_.line
+        || (anchor_.line == caret_.line && anchor_.col <= caret_.col))
+        return anchor_;
+    return caret_;
+}
+
+TextPosition CodeEditor::selEnd() const
+{
+    if (anchor_.line < caret_.line
+        || (anchor_.line == caret_.line && anchor_.col <= caret_.col))
+        return caret_;
+    return anchor_;
+}
+
+QString CodeEditor::selectedText() const
+{
+    if (!hasSelection_)
+        return {};
+    const int start = buffer_.offsetOf(selStart().line, selStart().col);
+    const int end = buffer_.offsetOf(selEnd().line, selEnd().col);
+    return buffer_.textRange(start, end);
+}
+
+int CodeEditor::selectedLength() const
+{
+    if (!hasSelection_)
+        return 0;
+    const int start = buffer_.offsetOf(selStart().line, selStart().col);
+    const int end = buffer_.offsetOf(selEnd().line, selEnd().col);
+    return end - start;
+}
+
+void CodeEditor::selectAll()
+{
+    const int lastLine = buffer_.lineCount() - 1;
+    setSelection({0, 0}, {lastLine, lineLength(lastLine)});
+}
+
+void CodeEditor::clearSelection()
+{
+    if (hasSelection_)
+        setSelection(caret_, caret_);
+}
+
+bool CodeEditor::deleteSelection()
+{
+    if (!hasSelection_)
+        return false;
+    const TextPosition start = selStart();
+    const int startOff = buffer_.offsetOf(start.line, start.col);
+    const int endOff = buffer_.offsetOf(selEnd().line, selEnd().col);
+    hasSelection_ = false;
+    buffer_.removeRange(startOff, endOff);
+    setCaret(start);
+    return true;
+}
+
+int CodeEditor::surrogateBackspaceLen() const
+{
+    // Never split a surrogate pair from the view layer: if the code unit
+    // before the caret is a low surrogate preceded by a high one, remove
+    // both units (full grapheme clusters are an M2 item).
+    if (caret_.col >= 2) {
+        const QString line = buffer_.lineText(caret_.line);
+        if (line.at(caret_.col - 1).isLowSurrogate() && line.at(caret_.col - 2).isHighSurrogate())
+            return 2;
+    }
+    return 1;
+}
+
+int CodeEditor::surrogateDeleteLen() const
+{
+    if (caret_.col + 1 < lineLength(caret_.line)) {
+        const QString line = buffer_.lineText(caret_.line);
+        if (line.at(caret_.col).isHighSurrogate() && line.at(caret_.col + 1).isLowSurrogate())
+            return 2;
+    }
+    return 1;
 }
 
 void CodeEditor::ensureCaretVisible()
@@ -176,6 +308,7 @@ void CodeEditor::insertTextAtCaret(const QString& text)
 {
     if (text.isEmpty())
         return;
+    deleteSelection(); // typing replaces the selection (Monaco semantics)
     const int offset = buffer_.offsetOf(caret_.line, caret_.col);
     buffer_.insertAtOffset(offset, text);
     TextPosition pos = caret_;
@@ -191,10 +324,13 @@ void CodeEditor::insertTextAtCaret(const QString& text)
 
 void CodeEditor::backspace()
 {
+    if (deleteSelection())
+        return; // Backspace with a selection deletes only the selection
     if (caret_.col > 0) {
+        const int len = surrogateBackspaceLen();
         const int pos = buffer_.offsetOf(caret_.line, caret_.col);
-        buffer_.removeRange(pos - 1, pos);
-        setCaret({caret_.line, caret_.col - 1});
+        buffer_.removeRange(pos - len, pos);
+        setCaret({caret_.line, caret_.col - len});
     } else if (caret_.line > 0) {
         const int prevLen = lineLength(caret_.line - 1);
         const int nlPos = buffer_.offsetOfLine(caret_.line) - 1;
@@ -205,10 +341,13 @@ void CodeEditor::backspace()
 
 void CodeEditor::deleteForward()
 {
+    if (deleteSelection())
+        return;
     const int len = lineLength(caret_.line);
     if (caret_.col < len) {
+        const int units = surrogateDeleteLen();
         const int pos = buffer_.offsetOf(caret_.line, caret_.col);
-        buffer_.removeRange(pos, pos + 1);
+        buffer_.removeRange(pos, pos + units);
         setCaret(caret_);
     } else if (caret_.line + 1 < buffer_.lineCount()) {
         const int nlPos = buffer_.offsetOfLine(caret_.line + 1) - 1;
@@ -228,6 +367,31 @@ void CodeEditor::paintEvent(QPaintEvent*)
     const int first = firstVisibleLine();
     const int last = std::min(buffer_.lineCount() - 1, first + visibleLineCount());
     const int colsVisible = static_cast<int>(width() / cellWidth_) + 2;
+
+    // Selection pass first: paint the background under the glyphs.
+    // Semi-transparent highlight so text stays legible on light and dark
+    // palettes alike (Monaco uses the same trick with ~40% opacity).
+    if (hasSelection_) {
+        const TextPosition s = selStart();
+        const TextPosition e = selEnd();
+        QColor selColor = palette().color(QPalette::Highlight);
+        selColor.setAlpha(90);
+        for (int line = std::max(first, s.line); line <= std::min(last, e.line); ++line) {
+            const int startCol = (line == s.line) ? s.col : 0;
+            // On fully covered lines the selection extends past the text to
+            // visualize the selected newline; on the end line it stops at
+            // the selection end. Clamp to what is visible.
+            const int textLen = lineLength(line);
+            int endCol = (line == e.line) ? e.col : std::max(textLen, 1);
+            endCol = std::min(endCol, std::max(colsVisible, startCol + 1));
+            const int x0 = padding_ + qRound(startCol * cellWidth_);
+            const int x1 = padding_ + qRound(endCol * cellWidth_);
+            if (x1 > x0) {
+                const int yTop = padding_ + line * lh - vScroll_;
+                p.fillRect(QRect(x0, yTop, x1 - x0, lh), selColor);
+            }
+        }
+    }
 
     for (int line = first; line <= last; ++line) {
         const int yTop = padding_ + line * lh - vScroll_;
@@ -267,19 +431,21 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         }
     };
 
-    const Qt::KeyboardModifiers mods =
-        event->modifiers() & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier);
+    const Qt::KeyboardModifiers allMods = event->modifiers();
+    const bool shift = allMods & Qt::ShiftModifier;
+    const Qt::KeyboardModifiers ctrl =
+        allMods & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier);
     const int key = event->key();
 
-    if (mods != Qt::NoModifier) {
+    if (ctrl != Qt::NoModifier) {
         switch (key) {
         case Qt::Key_Home:
-            setPosition({0, 0});
+            moveCaret({0, 0}, shift);
             finish();
             return;
         case Qt::Key_End: {
             const int lastLine = buffer_.lineCount() - 1;
-            setPosition({lastLine, lineLength(lastLine)});
+            moveCaret({lastLine, lineLength(lastLine)}, shift);
             finish();
             return;
         }
@@ -289,6 +455,10 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             return;
         case Qt::Key_Up:
             setVScroll(vScroll_ - lineHeight_);
+            finish();
+            return;
+        case Qt::Key_A:
+            selectAll();
             finish();
             return;
         default:
@@ -319,7 +489,7 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             --pos.line;
             pos.col = lineLength(pos.line);
         }
-        setPosition(pos);
+        moveCaret(pos, shift);
         finish();
         return;
     }
@@ -331,24 +501,37 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             ++pos.line;
             pos.col = 0;
         }
-        setPosition(pos);
+        moveCaret(pos, shift);
         finish();
         return;
     }
     case Qt::Key_Up:
     case Qt::Key_Down: {
+        // Column is re-clamped to the target line; visual column memory
+        // arrives with M9 (soft wrap work). On the first/last line the
+        // motion collapses to the line start/end like real editors do.
         TextPosition pos = caret_;
-        pos.line += (key == Qt::Key_Up) ? -1 : 1;
-        setPosition(pos);
+        if (key == Qt::Key_Up) {
+            if (pos.line > 0)
+                --pos.line;
+            else
+                pos.col = 0;
+        } else {
+            if (pos.line + 1 < buffer_.lineCount())
+                ++pos.line;
+            else
+                pos.col = lineLength(pos.line);
+        }
+        moveCaret(pos, shift);
         finish();
         return;
     }
     case Qt::Key_Home:
-        setPosition({caret_.line, 0});
+        moveCaret({caret_.line, 0}, shift);
         finish();
         return;
     case Qt::Key_End:
-        setPosition({caret_.line, lineLength(caret_.line)});
+        moveCaret({caret_.line, lineLength(caret_.line)}, shift);
         finish();
         return;
     case Qt::Key_PageUp:
@@ -356,16 +539,23 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         TextPosition pos = caret_;
         const int page = std::max(1, visibleLineCount() - 2);
         pos.line += (key == Qt::Key_PageUp) ? -page : page;
-        setPosition(pos);
+        moveCaret(pos, shift);
         finish();
         return;
     }
     case Qt::Key_Tab:
     case Qt::Key_Backtab:
-        // Indentation policy is a later milestone; swallow for now.
+        // Indentation policy is a later milestone; typing with a selection
+        // present, however, must still replace it — but Tab indenting is
+        // deferred, so swallow the key for now.
         finish();
         return;
     case Qt::Key_Escape:
+        if (hasSelection_) {
+            clearSelection();
+            finish();
+            return;
+        }
         event->ignore();
         return;
     default:
@@ -393,10 +583,37 @@ TextPosition CodeEditor::posFromEvent(const QPoint& widgetPos) const
 
 void CodeEditor::mousePressEvent(QMouseEvent* event)
 {
-    if (event->button() == Qt::LeftButton) {
-        setFocus(Qt::MouseFocusReason);
-        setPosition(posFromEvent(event->position().toPoint()));
+    if (event->button() != Qt::LeftButton)
+        return;
+    setFocus(Qt::MouseFocusReason);
+    const TextPosition pos = posFromEvent(event->position().toPoint());
+    // Shift+click extends the selection from the existing anchor; a plain
+    // click collapses it at the new position.
+    if (event->modifiers() & Qt::ShiftModifier)
+        moveCaret(pos, true);
+    else
+        setCaret(pos);
+}
+
+void CodeEditor::mouseMoveEvent(QMouseEvent* event)
+{
+    if (!(event->buttons() & Qt::LeftButton)) {
+        event->ignore();
+        return;
     }
+    QPoint pos = event->position().toPoint();
+    // Drag auto-scroll: moving past the top/bottom edge scrolls one line
+    // per event and maps the position inside the viewport.
+    const int margin = padding_ + 2;
+    if (pos.y() < margin) {
+        setVScroll(vScroll_ - lineHeight_);
+        pos.setY(margin + 1);
+    } else if (pos.y() > height() - margin) {
+        setVScroll(vScroll_ + lineHeight_);
+        pos.setY(height() - margin - 1);
+    }
+    moveCaret(posFromEvent(pos), true);
+    event->accept();
 }
 
 void CodeEditor::wheelEvent(QWheelEvent* event)
