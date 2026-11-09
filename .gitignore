@@ -1,0 +1,8 @@
+build/
+cmake-build-*/
+.ninja_log
+CMakeCache.txt
+*.user
+.idea/
+.vscode/
+compile_commands.json
