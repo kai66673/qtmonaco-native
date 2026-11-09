@@ -18,22 +18,49 @@ Python binding **freezes the C++ public API**. So: run a *thin* binding slice
 early, widen it later. Conversely M2 grapheme segmentation **changes position
 semantics**, so it must land before the bound surface grows.
 
-## Phase 0 — toolchain unblock (before any binding work)
+## Phase 0 — toolchain unblock (**done**, 2026-11-09)
 
-Measured on this box: Qt **6.12.0** in `/usr/lib`, gcc 16.2.1, cmake 4.4.4,
-ninja 1.13.2, Python **3.14.8**, **no PySide6 installed**, **no
-KF6SyntaxHighlighting installed**. PyPI currently has `PySide6 == 6.12.0`
-(ships its own Qt; `abi3`, cp310+; `requires_python >=3.10,<3.16` ⇒ 3.14 OK),
-plus pip-installable `shiboken6_generator == 6.12.0`.
+Host: Qt **6.12.0** in `/usr/lib`, gcc 16.2.1, cmake 4.4.4, ninja 1.13.2,
+system Python 3.14.8, **no KF6SyntaxHighlighting**.
+
+Setup actually used (note: Arch's system `python3` has **no pip**; `uv 0.13.6` is
+on PATH, and `python3 -m venv` does bootstrap pip on its own):
 
 ```bash
-python3 -m venv .venv && . .venv/bin/activate
-pip install "PySide6[full]"        # [full] pulls shiboken6_generator
-python -c "import PySide6.QtCore as C; print(C.qVersion())"
+uv venv .venv                                  # picked CPython 3.13.18
+uv pip install --python .venv "PySide6-Essentials==6.12.0" \
+    "shiboken6_generator==6.12.0" scikit-build-core ninja cmake
 ```
 
-**DoD:** venv reports PySide6's Qt version; compare it to `/usr/lib` Qt and
-record the pin. Today they coincide at 6.12.0 — that is luck, not design.
+Result: PySide6 6.12.0, **bundled Qt 6.12.0 == system Qt 6.12.0** — today they
+coincide, which is luck, not design. `Essentials` is enough (QtWidgets +
+QtPrintSupport); no need to pull the large Addons. glibc is **2.44**, well above
+PySide6's `manylinux_2_34` baseline.
+
+### Blocker found: Shiboken codegen cannot run on this Arch host
+
+The pip `shiboken6_generator` binary fails immediately:
+
+```
+error while loading shared libraries: libxml2.so.2: cannot open shared object file
+```
+
+Arch ships `libxml2.so.16` (2.14 renamed the soname), and the wheel does **not**
+bundle libxml2 or libclang. Don't work around this with a
+`libxml2.so.2 -> libxml2.so.16` symlink — the ABI is not compatible.
+
+**Verified resolution — do the codegen in a container.** The RHEL9 base that
+manylinux_2_34 is built on has everything the generator needs:
+
+```bash
+docker run --rm rockylinux:9 bash -lc \
+  'ls /usr/lib64/libxml2*; dnf -q repoquery --whatprovides "libclang.so*"'
+# -> /usr/lib64/libxml2.so.2 (2.9.13); clang-libs provides libclang.so
+```
+
+So: C++ development and the existing CTest suite stay on the Arch host;
+**binding codegen + wheel building go into a manylinux container**, which is the
+same environment Phase F/cibuildwheel needs anyway. Docker 29.9.2 works here.
 
 ## Phase A — M1b clipboard
 
@@ -50,13 +77,18 @@ Bind exactly one class and the *smallest stable surface*: `setPlainText`/
 `toPlainText`, cursor get/set, insert/delete text, `cursorMoved` /
 `selectionChanged` signals. **Do not bind grapheme-sensitive API yet.**
 
-- `pyproject.toml` with `scikit-build-core`; Shiboken typespec + `.glue` driven
-  by `shiboken6_generator`; `find_package(Shiboken6)`/`find_package(PySide6)`.
-- **Unverified:** PySide6's CMake helper/macro names for generating a module.
-  Discover them from the installed package before writing CMakeLists, e.g.
-  `ls "$(python -c 'import PySide6,os;print(os.path.dirname(PySide6.__file__))')"/lib/cmake"`.
+- `pyproject.toml` with `scikit-build-core`; binding driven by the **verified**
+  macro `shiboken_generator_create_binding()`, provided by
+  `find_package(Shiboken6Tools)` (lives in
+  `shiboken6_generator/lib/cmake/Shiboken6Tools/Shiboken6ToolsMacros.cmake`).
+  Required kwargs: `EXTENSION_TARGET`, `GENERATED_SOURCES`, `HEADERS`,
+  `TYPESYSTEM_FILE`, `LIBRARY_TARGET`; optional `QT_MODULES`,
+  `SHIBOKEN_EXTRA_OPTIONS`, `FORCE_LIMITED_API`. It emits an `add_library(... MODULE)`,
+  sets `PREFIX ""` + a python extension suffix, and links
+  `Shiboken6::libshiboken` + `PySide6::pyside6` + `Qt6::<module>`.
 - Build against **PySide6's own Qt headers/libs from site-packages**, never
-  `/usr/lib`.
+  `/usr/lib` — and run the codegen in the container from Phase 0, not on the
+  Arch host.
 
 **DoD:** a local wheel installs into a fresh venv; an offscreen smoke script
 imports it, instantiates `CodeEditor`, round-trips text, and receives a Qt
@@ -118,8 +150,10 @@ Pin `PySide6>=<the version we built against>` in the wheel metadata.
 
 ## Top risks
 
-1. **Qt drift** — Arch's system Qt rolls forward; PySide6 lags and ships its
-   own. Always build against the venv's PySide6 Qt and pin the pair.
+1. **Qt drift + host toolchain mismatch** — Arch's system Qt rolls forward while
+   PySide6 lags and ships its own. Always build against the venv's PySide6 Qt and
+   pin the pair. This already bit once: the pip Shiboken generator cannot run on
+   the host at all (missing `libxml2.so.2`) — see Phase 0 for the container fix.
 2. **1-based vs 0-based** — silent off-by-one across the whole parity surface.
 3. **M9 already failed once** — the horizontal-scroll attempt was committed as
    `2809945` and dropped from `main` (recoverable via reflog while present).

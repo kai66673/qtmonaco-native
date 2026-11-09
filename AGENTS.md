@@ -34,6 +34,10 @@ scaffolding exists yet, so this shapes how `CodeEditor`'s API is designed *today
   PySide6≥6.8). Build the extension against that Qt, not the distro's system Qt,
   or it ABI-mismatches PySide6 at import. Portable wheels ⇒ cibuildwheel on
   manylinux/musllinux, not against Arch's rolling system Qt.
+- **Shiboken codegen does not run on the Arch host.** The pip generator needs
+  `libxml2.so.2`; Arch ships `libxml2.so.16` (incompatible ABI — do not symlink).
+  Run binding codegen in a manylinux/RHEL9-base container, which also has
+  `clang-libs` (libclang). Keep C++ dev + CTest on the host.
 
 ## Hard rule: layering is contractual
 

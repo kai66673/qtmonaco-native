@@ -1,5 +1,8 @@
 build/
 cmake-build-*/
+.venv/
+*.egg-info/
+dist/
 .ninja_log
 CMakeCache.txt
 *.user
