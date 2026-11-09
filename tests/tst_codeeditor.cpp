@@ -48,6 +48,16 @@ private slots:
     void escapeClearsSelection();
     void graphemeSafeBackspaceAndDelete();
 
+    void graphemeArrowKeysMoveOneCluster();
+    void graphemeBackspaceCombiningMarks();
+    void graphemeDeleteMovesWholeFamilyAndFlag();
+    void caretInsideClusterSnapsWithoutOrphans();
+    void wordNavigationRightSteps();
+    void wordNavigationLeftSteps();
+    void wordNavigationCrossesLines();
+    void ctrlDeleteWordRight();
+    void ctrlDeleteNeverSplitsClusters();
+
     void copyThenPasteRoundTrip();
     void copyWithoutSelectionGrabsWholeLine();
     void copyLastLineHasNoTrailingNewline();
@@ -412,6 +422,197 @@ void TestCodeEditor::graphemeSafeBackspaceAndDelete()
     QTest::keyClick(editor, Qt::Key_Delete); // removes the pair again
     QCOMPARE(editor->toPlainText(), QStringLiteral("a"));
     QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+}
+
+// --- M2 graphemes and word motion --------------------------------------
+
+void TestCodeEditor::graphemeArrowKeysMoveOneCluster()
+{
+    // x | 👨‍👩‍👧 (ZWJ family, 8 units) | y | 🇺🇸 (RI flag, 4 units)
+    // | e+U+0301 (combining, 2 units) = 16 UTF-16 units, 5 clusters.
+    const QString text = QString::fromUtf8(
+        "x\U0001F468\u200D\U0001F469\u200D\U0001F467"
+        "y\U0001F1FA\U0001F1F8" "e\u0301");
+    editor->setPlainText(text);
+    QCOMPARE(editor->toPlainText().size(), qsizetype(16));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+
+    const int rightStops[] = {1, 9, 10, 14, 16};
+    for (int col : rightStops) {
+        QTest::keyClick(editor, Qt::Key_Right);
+        QCOMPARE(editor->position(), (qmn::view::TextPosition{0, col}));
+    }
+    QTest::keyClick(editor, Qt::Key_Right); // at end: stays
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 16}));
+
+    const int leftStops[] = {14, 10, 9, 1, 0};
+    for (int col : leftStops) {
+        QTest::keyClick(editor, Qt::Key_Left);
+        QCOMPARE(editor->position(), (qmn::view::TextPosition{0, col}));
+    }
+}
+
+void TestCodeEditor::graphemeBackspaceCombiningMarks()
+{
+    // "e + U+0301" then 'x': three clusters worth of backspace, plus the
+    // mid-cluster caret case (only reachable via setPlainText/setPosition).
+    editor->setPlainText(QString::fromUtf8("e\u0301x"));
+    editor->setPosition({0, 3});
+
+    QTest::keyClick(editor, Qt::Key_Backspace); // removes 'x' only
+    QCOMPARE(editor->toPlainText(), QString::fromUtf8("e\u0301"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+
+    QTest::keyClick(editor, Qt::Key_Backspace); // removes the whole e+mark cluster
+    QCOMPARE(editor->toPlainText(), QString()); // nothing left, no dangling mark
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+
+    editor->setPlainText(QString::fromUtf8("e\u0301x"));
+    editor->setPosition({0, 1}); // INSIDE the cluster (between base and mark)
+    QTest::keyClick(editor, Qt::Key_Backspace); // still removes the whole cluster
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x")); // no dangling mark
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+}
+
+void TestCodeEditor::graphemeDeleteMovesWholeFamilyAndFlag()
+{
+    const QString family = QString::fromUtf8("\U0001F468\u200D\U0001F469\u200D\U0001F467");
+    const QString flag = QString::fromUtf8("\U0001F1FA\U0001F1F8");
+    editor->setPlainText(family + "a" + flag);
+    QCOMPARE(editor->toPlainText().size(), qsizetype(13));
+
+    QTest::keyClick(editor, Qt::Key_Delete); // whole family in one press
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a") + flag);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+
+    QTest::keyClick(editor, Qt::Key_Delete); // then the plain 'a'
+    QCOMPARE(editor->toPlainText(), flag);
+
+    QTest::keyClick(editor, Qt::Key_Delete); // whole flag in one press
+    QCOMPARE(editor->toPlainText(), QString());
+    QCOMPARE(editor->lineCount(), 1);
+}
+
+void TestCodeEditor::caretInsideClusterSnapsWithoutOrphans()
+{
+    // 'a' + U+1F600 (cols 1..2) + 'b': a mouse click or setPosition can put
+    // the caret at col 2, INSIDE the surrogate pair. Arrows must snap out;
+    // edits must take the whole cluster and leave no orphan half behind.
+    editor->setPlainText(QString::fromUtf8("a\U0001F600" "b"));
+
+    editor->setPosition({0, 2});
+    QTest::keyClick(editor, Qt::Key_Right); // snap right: past the pair
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+
+    editor->setPosition({0, 2});
+    QTest::keyClick(editor, Qt::Key_Left); // snap left: before the pair
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+
+    editor->setPosition({0, 2});
+    QTest::keyClick(editor, Qt::Key_Delete); // deletes the whole pair
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab")); // no orphan low
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+
+    editor->setPlainText(QString::fromUtf8("a\U0001F600" "b"));
+    editor->setPosition({0, 2});
+    QTest::keyClick(editor, Qt::Key_Backspace); // same from the other side
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab")); // no orphan high
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+}
+
+void TestCodeEditor::wordNavigationRightSteps()
+{
+    editor->setPlainText(QStringLiteral("foo_bar baz!! qux"));
+    editor->setPosition({0, 0});
+    // One press per class run (VS Code cursorWordRight); targets are the
+    // ends of word / space / punctuation runs.
+    const int stops[] = {7, 8, 11, 13, 14, 17};
+    for (int col : stops) {
+        QTest::keyClick(editor, Qt::Key_Right, Qt::ControlModifier);
+        QCOMPARE(editor->position(), (qmn::view::TextPosition{0, col}));
+    }
+    QTest::keyClick(editor, Qt::Key_Right, Qt::ControlModifier); // at EOL, single line: stays
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 17}));
+}
+
+void TestCodeEditor::wordNavigationLeftSteps()
+{
+    editor->setPlainText(QStringLiteral("foo_bar baz!! qux"));
+    editor->setPosition({0, 17});
+    // Word run, then space+run combined, alternating like cursorWordLeft.
+    const int stops[] = {14, 11, 8, 0};
+    for (int col : stops) {
+        QTest::keyClick(editor, Qt::Key_Left, Qt::ControlModifier);
+        QCOMPARE(editor->position(), (qmn::view::TextPosition{0, col}));
+    }
+    QTest::keyClick(editor, Qt::Key_Left, Qt::ControlModifier); // at 0, single line: stays
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+
+    // Ctrl+Shift+Left extends the selection to the word target.
+    editor->setPosition({0, 8});
+    QTest::keyClick(editor, Qt::Key_Left, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+    QCOMPARE(editor->selectedText(), QStringLiteral("foo_bar "));
+}
+
+void TestCodeEditor::wordNavigationCrossesLines()
+{
+    editor->setPlainText(QStringLiteral("ab\ncde"));
+    editor->setPosition({0, 2}); // at EOL of line 0
+    QTest::keyClick(editor, Qt::Key_Right, Qt::ControlModifier); // wraps to next line start
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0}));
+    QTest::keyClick(editor, Qt::Key_Left, Qt::ControlModifier); // wraps back to prev line end
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+}
+
+void TestCodeEditor::ctrlDeleteWordRight()
+{
+    editor->setPlainText(QStringLiteral("foo bar baz"));
+    editor->setPosition({0, 0});
+
+    QTest::keyClick(editor, Qt::Key_Delete, Qt::ControlModifier); // "foo"
+    QCOMPARE(editor->toPlainText(), QStringLiteral(" bar baz"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+
+    QTest::keyClick(editor, Qt::Key_Delete, Qt::ControlModifier); // the space run
+    QCOMPARE(editor->toPlainText(), QStringLiteral("bar baz"));
+
+    QTest::keyClick(editor, Qt::Key_Delete, Qt::ControlModifier); // "bar"
+    QCOMPARE(editor->toPlainText(), QStringLiteral(" baz"));
+    QVERIFY(!editor->hasSelection());
+
+    // At EOL Ctrl+Del joins the lines, like plain Delete.
+    editor->setPlainText(QStringLiteral("ab\ncd"));
+    editor->setPosition({0, 2});
+    QTest::keyClick(editor, Qt::Key_Delete, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcd"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+
+    // With a selection, Ctrl+Del removes the selection (like Delete).
+    editor->setPlainText(QStringLiteral("hello world"));
+    editor->setPosition({0, 6});
+    QTest::keyClick(editor, Qt::Key_End, Qt::ShiftModifier);
+    QTest::keyClick(editor, Qt::Key_Delete, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("hello "));
+}
+
+void TestCodeEditor::ctrlDeleteNeverSplitsClusters()
+{
+    // "e + U+0301" then "x y": the word run ends mid-cluster at the mark;
+    // Ctrl+Del must take the whole cluster, not orphan the mark.
+    editor->setPlainText(QString::fromUtf8("e\u0301x y"));
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_Delete, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x y"));
+    QVERIFY(!editor->toPlainText().contains(QChar(0x0301)));
+
+    // ZWJ family: all units are punctuation-class, the run ends exactly at
+    // the cluster's outer boundary, so the family dies whole in one press.
+    const QString family = QString::fromUtf8("\U0001F468\u200D\U0001F469\u200D\U0001F467");
+    editor->setPlainText(family + "a b");
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_Delete, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a b"));
 }
 
 // --- Clipboard (M1b) ----------------------------------------------------

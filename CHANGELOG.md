@@ -5,6 +5,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- M2 word navigation: Ctrl+Left/Right (and Ctrl+Shift to extend) move by
+  editor-style word runs (word / space / punctuation classes, VS Code
+  `cursorWordRight`/`cursorWordLeft` semantics, deliberately not the ICU
+  `Word` boundary), Ctrl+Right then one press crossing the trailing space
+  run, Ctrl+Left additionally swallowing the space run before the target
+  word. At a line end Ctrl+Right wraps to the next line start (and vice
+  versa); at EOL Ctrl+Del joins lines like plain Delete, with a selection
+  Ctrl+Del deletes the selection. Targets are always snapped to grapheme
+  boundaries.
+- M2 grapheme-cluster correctness via `QTextBoundaryFinder` (QtCore,
+  ICU-backed): Left/Right arrows move one whole cluster per press (ZWJ
+  family sequences, regional-indicator flags, skin-tone modifiers, VS16
+  and combining marks measured as single clusters); Backspace/Delete
+  remove whole clusters too, superseding the earlier surrogate-pair-only
+  guards. A caret sitting inside a cluster (reachable via `setPlainText`,
+  `setPosition` or a mid-cluster click) snaps outward on arrows, and
+  Backspace/Delete take the WHOLE cluster in both directions, so orphan
+  surrogate halves or dangling combining marks can never accumulate.
+  `col` numbering stays UTF-16 code units (LSP semantics, deliberate).
+
+### Fixed
+- PLAN.md/README M2 tooling note: the earlier "QTextBoundaryRunner
+  (Qt ≥ 6.9)" correction was itself wrong — no such class exists in any
+  Qt release (verified against the v6.9.0 source tree and the host
+  Qt 6.12 headers/symbols); `find_package(Qt6 6.6)` needs no bump.
+
 ## [0.2.0] — 2026-11-09
 
 First milestone on the release train (git tag + alpha wheel per milestone).

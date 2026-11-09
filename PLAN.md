@@ -92,15 +92,28 @@ is pinned there. The bound surface stays *thin* until Phase C lands.
 
 ## Phase C — M2 text correctness (must precede binding widening)
 
-Grapheme/word boundaries + IME composition. Use **QTextBoundaryRunner**
-(Qt ≥ 6.9) — README's old "QStringConverter iterators" phrasing was wrong
-(corrected in README). Bump root `find_package(Qt6 6.6)` → `6.9` (all our
-environments are ≥ 6.12). Arrow Left/Right move by grapheme clusters;
-Backspace/Delete already surrogate-safe (view job, stays view-only); word
-navigation (Ctrl+arrows, Ctrl+Del) via the runner. `col` numbering **stays
-UTF-16 code units** (LSP semantics — deliberate).
+Grapheme/word boundaries + IME composition. Use **QTextBoundaryFinder**
+(public since Qt 4; `Grapheme`/`Word` BoundaryTypes). History of this line:
+README once said "QStringConverter iterators" (wrong: those are codec
+classes), and the earlier "correction" to **QTextBoundaryRunner (Qt ≥ 6.9)**
+was itself wrong — **no such class exists in any Qt release** (verified
+2026-11-09 against the v6.9.0 `src/corelib/text` tree and against the host
+Qt 6.12 headers + `nm -D libQt6Core`: only `QTextBoundaryFinder` is shipped).
+ZWJ/emoji cluster correctness comes from the ICU backend: Arch's Qt and the
+PySide6-bundled Qt are both ICU builds (fallback tables predate the GB11 ZWJ
+rule) — keep `find_package(Qt6 6.6)` as is, no 6.9 floor is needed for M2.
+Arrow Left/Right move by grapheme clusters; Backspace/Delete remove whole
+clusters (superseding the surrogate-pair-only guards, still view-only); word
+navigation (Ctrl+arrows, Ctrl+Del) is **editor-style** (word/space/punct
+class runs, VS Code semantics; deliberately not the ICU `Word` boundary,
+which splits `foo_bar` and stops on spaces), targets snapped to cluster
+boundaries. `col` numbering **stays UTF-16 code units** (LSP semantics —
+deliberate).
 **DoD:** numeric assertions for ZWJ emoji sequences, combining marks,
 surrogate pairs; no screenshots (`AGENTS.md`).
+**Status (2026-11-09):** boundaries + word motion done (9 tests:
+clusters move/delete as units, mid-cluster carets snap without orphans,
+`ctrlDeleteNeverSplitsClusters`); IME composition still open.
 
 ## Phase D — editing depth
 

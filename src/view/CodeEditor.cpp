@@ -12,12 +12,111 @@
 #include <QPainter>
 #include <QResizeEvent>
 #include <QScrollBar>
+#include <QTextBoundaryFinder>
 #include <QWheelEvent>
 #include <QtMath>
 
 #include <algorithm>
 
 namespace qmn::view {
+
+namespace {
+
+// M2 grapheme/word boundary helpers. QTextBoundaryFinder is ICU-backed on
+// both of our build targets (Arch's Qt links ICU 78; PySide6's Qt bundles
+// ICU) — measured here: ZWJ family sequences, regional-indicator flags,
+// skin-tone modifiers, VS16 and combining marks each form exactly ONE
+// cluster. Qt's non-ICU fallback tables predate the GB11 ZWJ rule, so the
+// ICU linkage is load-bearing (and both shipped Qt builds have it).
+// Probed semantics (Qt 6.12): after setPosition(col), toPrevious/NextBoundary
+// move strictly outward whether col is exactly on a boundary or inside a
+// cluster; at the string edges they return -1, so callers clamp.
+
+int prevGraphemeCol(const QString& text, int col)
+{
+    QTextBoundaryFinder f(QTextBoundaryFinder::Grapheme, text);
+    f.setPosition(col);
+    const int pos = f.toPreviousBoundary();
+    return pos < 0 ? 0 : pos;
+}
+
+int nextGraphemeCol(const QString& text, int col)
+{
+    QTextBoundaryFinder f(QTextBoundaryFinder::Grapheme, text);
+    f.setPosition(col);
+    const int pos = f.toNextBoundary();
+    return pos < 0 ? static_cast<int>(text.size()) : pos;
+}
+
+bool isGraphemeBoundary(const QString& text, int col)
+{
+    QTextBoundaryFinder f(QTextBoundaryFinder::Grapheme, text);
+    f.setPosition(col);
+    return f.isAtBoundary();
+}
+
+// Editor-style word motion (VS Code semantics), deliberately not the ICU
+// Word boundary: UAX#29 words treat "foo_bar" as several words and would
+// land on space runs, which is not what an editor does. Identifier-ish
+// class: letters/digits/underscore; whitespace and everything else
+// (punctuation, emoji runs) are their own classes. One press crosses one
+// run of the current class; Ctrl+Left additionally swallows the space run
+// left behind, so "word |" -> previous word start in a single press.
+enum class WordClass { Word, Space, Other };
+
+WordClass wordClassOf(QChar ch)
+{
+    if (ch.isSpace())
+        return WordClass::Space;
+    if (ch.isLetterOrNumber() || ch == u'_')
+        return WordClass::Word;
+    return WordClass::Other;
+}
+
+int wordRightCol(const QString& text, int col)
+{
+    const int n = static_cast<int>(text.size());
+    if (col >= n)
+        return col; // at EOL; the caller decides about crossing lines
+    const WordClass cls = wordClassOf(text.at(col));
+    int i = col;
+    while (i < n && wordClassOf(text.at(i)) == cls)
+        ++i;
+    // A stop inside a cluster (e.g. right after the base of "e + U+0301"):
+    // never split a cluster, snap the target to its right edge.
+    if (i < n && !isGraphemeBoundary(text, i))
+        i = nextGraphemeCol(text, i);
+    return i;
+}
+
+int wordLeftCol(const QString& text, int col)
+{
+    const int n = static_cast<int>(text.size());
+    int i = std::min(col, n);
+    // Snap out of a cluster first, then move by class runs.
+    if (i > 0 && !isGraphemeBoundary(text, i))
+        i = prevGraphemeCol(text, i);
+    if (i <= 0)
+        return 0;
+    if (wordClassOf(text.at(i - 1)) == WordClass::Space) {
+        while (i > 0 && wordClassOf(text.at(i - 1)) == WordClass::Space)
+            --i;
+        if (i > 0) { // then cross the single run before the spaces
+            const WordClass cls = wordClassOf(text.at(i - 1));
+            while (i > 0 && wordClassOf(text.at(i - 1)) == cls)
+                --i;
+        }
+    } else {
+        const WordClass cls = wordClassOf(text.at(i - 1));
+        while (i > 0 && wordClassOf(text.at(i - 1)) == cls)
+            --i;
+    }
+    if (i > 0 && !isGraphemeBoundary(text, i))
+        i = prevGraphemeCol(text, i);
+    return i;
+}
+
+} // namespace
 
 CodeEditor::CodeEditor(QWidget* parent)
     : QWidget(parent)
@@ -331,29 +430,6 @@ void CodeEditor::updatePrimarySelection()
         cb->setText(QString(), QClipboard::Selection); // release ownership
 }
 
-int CodeEditor::surrogateBackspaceLen() const
-{
-    // Never split a surrogate pair from the view layer: if the code unit
-    // before the caret is a low surrogate preceded by a high one, remove
-    // both units (full grapheme clusters are an M2 item).
-    if (caret_.col >= 2) {
-        const QString line = buffer_.lineText(caret_.line);
-        if (line.at(caret_.col - 1).isLowSurrogate() && line.at(caret_.col - 2).isHighSurrogate())
-            return 2;
-    }
-    return 1;
-}
-
-int CodeEditor::surrogateDeleteLen() const
-{
-    if (caret_.col + 1 < lineLength(caret_.line)) {
-        const QString line = buffer_.lineText(caret_.line);
-        if (line.at(caret_.col).isHighSurrogate() && line.at(caret_.col + 1).isLowSurrogate())
-            return 2;
-    }
-    return 1;
-}
-
 void CodeEditor::ensureCaretVisible()
 {
     const int caretTop = caret_.line * lineHeight_;
@@ -432,10 +508,18 @@ void CodeEditor::backspace()
     if (deleteSelection())
         return; // Backspace with a selection deletes only the selection
     if (caret_.col > 0) {
-        const int len = surrogateBackspaceLen();
-        const int pos = buffer_.offsetOf(caret_.line, caret_.col);
-        buffer_.removeRange(pos - len, pos);
-        setCaret({caret_.line, caret_.col - len});
+        // Grapheme-cluster backspace (M2): deletes exactly the cluster
+        // before the caret. When the caret sits inside a cluster (possible
+        // after a programmatic setPlainText split one, or a mid-cluster
+        // mouse click) the WHOLE cluster goes, so orphan surrogate halves
+        // or dangling combining marks never accumulate.
+        const QString line = buffer_.lineText(caret_.line);
+        const int start = prevGraphemeCol(line, caret_.col);
+        const int end = isGraphemeBoundary(line, caret_.col)
+            ? caret_.col : nextGraphemeCol(line, caret_.col);
+        buffer_.removeRange(buffer_.offsetOf(caret_.line, start),
+                            buffer_.offsetOf(caret_.line, end));
+        setCaret({caret_.line, start});
     } else if (caret_.line > 0) {
         const int prevLen = lineLength(caret_.line - 1);
         const int nlPos = buffer_.offsetOfLine(caret_.line) - 1;
@@ -450,10 +534,15 @@ void CodeEditor::deleteForward()
         return;
     const int len = lineLength(caret_.line);
     if (caret_.col < len) {
-        const int units = surrogateDeleteLen();
-        const int pos = buffer_.offsetOf(caret_.line, caret_.col);
-        buffer_.removeRange(pos, pos + units);
-        setCaret(caret_);
+        // Grapheme-cluster delete (M2); mirrors backspace's no-orphan rule,
+        // snapping the caret back when the delete started inside a cluster.
+        const QString line = buffer_.lineText(caret_.line);
+        const int start = isGraphemeBoundary(line, caret_.col)
+            ? caret_.col : prevGraphemeCol(line, caret_.col);
+        const int end = nextGraphemeCol(line, caret_.col);
+        buffer_.removeRange(buffer_.offsetOf(caret_.line, start),
+                            buffer_.offsetOf(caret_.line, end));
+        setCaret({caret_.line, start});
     } else if (caret_.line + 1 < buffer_.lineCount()) {
         const int nlPos = buffer_.offsetOfLine(caret_.line + 1) - 1;
         buffer_.removeRange(nlPos, nlPos + 1);
@@ -575,6 +664,43 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             finish();
             return;
         }
+        // M2 word navigation: one press per class run, targets already
+        // snapped to grapheme boundaries by the helpers.
+        case Qt::Key_Left: {
+            const int target = wordLeftCol(buffer_.lineText(caret_.line), caret_.col);
+            if (target < caret_.col)
+                moveCaret({caret_.line, target}, shift);
+            else if (caret_.line > 0)
+                moveCaret({caret_.line - 1, lineLength(caret_.line - 1)}, shift);
+            finish();
+            return;
+        }
+        case Qt::Key_Right: {
+            const int target = wordRightCol(buffer_.lineText(caret_.line), caret_.col);
+            if (target > caret_.col)
+                moveCaret({caret_.line, target}, shift);
+            else if (caret_.line + 1 < buffer_.lineCount())
+                moveCaret({caret_.line + 1, 0}, shift);
+            finish();
+            return;
+        }
+        case Qt::Key_Delete: {
+            if (deleteSelection()) { // selection takes precedence, as with Delete
+                finish();
+                return;
+            }
+            const int target = wordRightCol(buffer_.lineText(caret_.line), caret_.col);
+            if (target > caret_.col) {
+                const int start = buffer_.offsetOf(caret_.line, caret_.col);
+                const int end = buffer_.offsetOf(caret_.line, target);
+                buffer_.removeRange(start, end);
+                setCaret(caret_); // caret stays put; force a repaint
+            } else {
+                deleteForward(); // at EOL: join the next line
+            }
+            finish();
+            return;
+        }
         case Qt::Key_Down:
             setVScroll(vScroll_ + lineHeight_);
             finish();
@@ -610,7 +736,7 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
     case Qt::Key_Left: {
         TextPosition pos = caret_;
         if (pos.col > 0)
-            --pos.col;
+            pos.col = prevGraphemeCol(buffer_.lineText(caret_.line), pos.col);
         else if (pos.line > 0) {
             --pos.line;
             pos.col = lineLength(pos.line);
@@ -622,7 +748,7 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
     case Qt::Key_Right: {
         TextPosition pos = caret_;
         if (pos.col < lineLength(pos.line))
-            ++pos.col;
+            pos.col = nextGraphemeCol(buffer_.lineText(caret_.line), pos.col);
         else if (pos.line + 1 < buffer_.lineCount()) {
             ++pos.line;
             pos.col = 0;

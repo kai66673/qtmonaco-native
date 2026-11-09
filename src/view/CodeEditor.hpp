@@ -34,16 +34,23 @@ struct TextPosition {
 //
 // Deliberately included: viewport-culled monospace painting, caret with
 // blinking, keyboard editing (text, Enter, Backspace, Delete, arrows,
-// Home/End, PageUp/PageDown), mouse caret placement and drag selection,
+// Home/End, PageUp/PageDown), grapheme-cluster-aware arrows and editing
+// (QTextBoundaryFinder, ICU-backed: ZWJ sequences, flags, combining marks
+// move and delete as one unit), Ctrl+arrows word navigation and Ctrl+Del
+// word deletion, mouse caret placement and drag selection,
 // Shift-navigation + Ctrl+A selections with replace-on-type semantics,
 // clipboard copy/cut/paste (whole-line when no selection, Monaco-style),
 // X11 primary selection mirroring + middle-click paste, vertical scrolling,
 // per-keystroke latency instrumentation.
 //
+// `col` stays UTF-16 code units everywhere (LSP semantics); the
+// caret may sit inside a cluster only via setPlainText/setPosition/mouse
+// clicks, and arrows/edits snap outward from there without ever splitting
+// a cluster.
+//
 // Deliberately NOT included (follow-up milestones): IME composition,
 // soft wrap, horizontal scrolling, undo/redo, column memory for Up/Down,
-// word navigation, double-click word selection, full grapheme-cluster
-// safety. See README roadmap.
+// double-click word selection. See README roadmap.
 class CodeEditor : public QWidget {
     Q_OBJECT
 public:
@@ -124,8 +131,6 @@ private:
     void updatePrimarySelection(); // mirror an active selection to X11 primary
     TextPosition posFromEvent(const QPoint& widgetPos) const;
     int lineLength(int line) const;
-    int surrogateBackspaceLen() const; // 2 if a surrogate pair precedes caret
-    int surrogateDeleteLen() const;    // 2 if a surrogate pair follows caret
 
     qmn::core::TextBuffer buffer_;
     TextPosition caret_;
