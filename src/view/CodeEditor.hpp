@@ -6,10 +6,14 @@
 #include <QPoint>
 #include <QScrollBar>
 #include <QString>
+#include <QTextLayout>
+#include <QTextLine>
 #include <QTimer>
 #include <QWidget>
 
 #include "core/TextBuffer.hpp"
+
+#include <array>
 
 class QInputMethodEvent;
 
@@ -50,6 +54,13 @@ struct TextPosition {
 // caret may sit inside a cluster only via setPlainText/setPosition/mouse
 // clicks, and arrows/edits snap outward from there without ever splitting
 // a cluster.
+//
+// Geometry has a single source of truth: every visible line gets a
+// laid-out QTextLine (per-line LRU cache below), and caret x, selection
+// x, painting and mouse hit-testing all read the same glyph-engine
+// advances. Wide clusters (emoji ZWJ sequences, flags) therefore never
+// drift the caret away from the drawn text; pure-ASCII lines keep exact
+// col*cellWidth positions.
 //
 // Deliberately NOT included (follow-up milestones): soft wrap, horizontal
 // scrolling, undo/redo, column memory for Up/Down, double-click word
@@ -94,6 +105,19 @@ public:
     double cellWidth() const { return cellWidth_; }
     int padding() const { return padding_; }
 
+    // Widget-space x of the caret position at (line, col), following the
+    // glyph engine's cluster advances (not a col * cellWidth grid). A col
+    // inside a grapheme cluster is snapped to a cluster edge by the engine;
+    // the text position itself is untouched. Out-of-range line/col clamp.
+    // Public because decorations (M5: diagnostics, inlay hints) need the
+    // same geometry as the caret.
+    double xForCol(int line, int col) const;
+
+    // Text position for a widget-space point (used by mouse handling and
+    // wrappable for bindings). Cols inside a cluster resolve to the nearer
+    // cluster edge; x beyond the line's laid-out width resolves to EOL.
+    TextPosition positionAt(const QPoint& widgetPos) const;
+
     PerfStats perfStats() const { return perf_; }
     void resetPerfStats() { perf_ = {}; }
 
@@ -112,6 +136,7 @@ protected:
     void resizeEvent(QResizeEvent* event) override;
     void focusInEvent(QFocusEvent* event) override;
     void focusOutEvent(QFocusEvent* event) override;
+    void changeEvent(QEvent* event) override;
     QSize sizeHint() const override;
 
 private:
@@ -134,8 +159,41 @@ private:
     TextPosition selEnd() const;
     void pasteText(const QString& text); // sanitize + insert + primary update
     void updatePrimarySelection(); // mirror an active selection to X11 primary
-    TextPosition posFromEvent(const QPoint& widgetPos) const;
     int lineLength(int line) const;
+
+    // Per-line glyph-engine layout cache. A laid-out QTextLine is the sole
+    // authority for caret x, selection x and mouse hit-testing (measured on
+    // Qt 6.12: emoji ZWJ families occupy ~1.8 cells, not their code-unit
+    // count, so grid arithmetic drifts the caret on such lines).
+    //
+    // Key = (line index, laid-out text equality): a QTextLine depends only
+    // on (text, font, infinite width), so an identical string needs no
+    // relayout - no buffer revision needed. Font changes are NOT part of the
+    // key; changeEvent(FontChange) wipes the cache instead.
+    //
+    // QTextLayout is copy/move-DELETED and a default-constructed QTextLine
+    // makes x()/cursorToX() SEGFAULT (measured, no eng guard in Qt 6.12), so
+    // slots hold the layout in place inside the fixed array and `valid`
+    // gates every QTextLine use.
+    struct GeoSlot {
+        int keyLine = -1; // -1 = empty slot
+        QString text;     // what `line` was laid out for (possibly truncated)
+        QTextLayout layout;
+        QTextLine line;
+        quint64 stamp = 0; // LRU bookkeeping
+        bool valid = false; // false for empty lines: never touch line
+    };
+    static constexpr int kGeoSlots = 128; // >= a 4K-tall viewport of lines;
+                                          // overflow only costs relayouts
+    // Laid out with NoWrap and setLineWidth(Q_INFINITY): the line takes its
+    // natural width, horizontal scrolling (M7) is the view's problem. Very
+    // long lines are laid out only up to geoMaxUnits() code units.
+    const GeoSlot* hitLine(int line) const;
+    int geoMaxUnits() const;
+    double xInLine(const GeoSlot* s, int col) const; // line-space x (no padding)
+
+    mutable std::array<GeoSlot, kGeoSlots> geo_{};
+    mutable quint64 geoClock_ = 0;
 
     qmn::core::TextBuffer buffer_;
     TextPosition caret_;

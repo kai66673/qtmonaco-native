@@ -5,6 +5,7 @@
 #include <QtTest>
 
 #include <QClipboard>
+#include <QImage>
 #include <QInputMethodEvent>
 #include <QInputMethodQueryEvent>
 
@@ -36,6 +37,12 @@ private slots:
     void arrowNavigationClamps();
     void mousePlacesCaret();
     void cellWidthMatchesGlyphEngineAdvance();
+    void caretXFollowsClusterAdvances();
+    void caretXPinnedAcrossUnrelatedEdits();
+    void mouseClickSnapsToClusterEdges();
+    void caretPixelTracksLayoutNotGrid();
+    void emptyLineGeometry();
+    void textGlyphsShareCaretBands();
 
     void shiftSelectsToLineEnd();
     void typingReplacesSelection();
@@ -201,6 +208,211 @@ void TestCodeEditor::cellWidthMatchesGlyphEngineAdvance()
              qPrintable(QStringLiteral("engine=%1 model=%2")
                             .arg(engineAdvance)
                             .arg(modelAdvance)));
+}
+
+void TestCodeEditor::caretXFollowsClusterAdvances()
+{
+    // The caret-drift regression guard: xForCol must follow glyph-engine
+    // cluster advances, keep EXACT col*cellWidth positions on plain ASCII,
+    // and snap mid-cluster columns to a cluster edge (engine out-param).
+    const QString family = QString::fromUtf8("\U0001F468\u200D\U0001F469\u200D\U0001F467");
+    editor->setPlainText(QStringLiteral("x") + family + QStringLiteral("y")
+                         + QStringLiteral("\n0123456789"));
+    const double cw = editor->cellWidth();
+    const int pad = editor->padding();
+    QFontMetricsF fm(editor->font());
+
+    // ASCII line: identical to the grid model down to the last epsilon.
+    for (int c = 0; c <= 10; ++c)
+        QVERIFY2(qAbs(editor->xForCol(1, c) - (pad + c * cw)) < 1e-9,
+                 qPrintable(QStringLiteral("col %1: %2 vs %3")
+                                .arg(c).arg(editor->xForCol(1, c)).arg(pad + c * cw)));
+
+    // The family spans units 1..9 but occupies the advance of ONE cluster:
+    // ~1.8 cells on the measured font, never the 8 cells the grid claimed.
+    const double famStart = editor->xForCol(0, 1);
+    const double famEnd = editor->xForCol(0, 9);
+    const double engineFamily = fm.horizontalAdvance(family);
+    QVERIFY2(qAbs((famEnd - famStart) - engineFamily) < 0.5,
+             qPrintable(QStringLiteral("cluster span=%1 engine=%2")
+                            .arg(famEnd - famStart).arg(engineFamily)));
+    QVERIFY(famEnd - famStart < 4.0 * cw); // grid said 8 cells; drift is dead
+
+    // Mid-cluster caret columns all report the same edge position.
+    for (int c = 2; c <= 8; ++c)
+        QVERIFY2(qAbs(editor->xForCol(0, c) - famEnd) < 1e-9,
+                 qPrintable(QStringLiteral("mid-cluster col %1 drifted").arg(c)));
+
+    // 'y' after the family: one real cell further, not nine grid cells.
+    QVERIFY(qAbs(editor->xForCol(0, 10) - (famEnd + cw)) < 1e-9);
+    // xForCol clamps past the line end (phantom cells are paint-only).
+    QCOMPARE(editor->xForCol(0, 99), editor->xForCol(0, 10));
+}
+
+void TestCodeEditor::caretXPinnedAcrossUnrelatedEdits()
+{
+    // The layout cache keys on (line, text): an edit elsewhere must not
+    // re-shape the geometry of untouched lines, and an edit on the line
+    // itself must shift only what precedes it.
+    const QString family = QString::fromUtf8("\U0001F468\u200D\U0001F469\u200D\U0001F467");
+    editor->setPlainText(QStringLiteral("x") + family + QStringLiteral("y")
+                         + QStringLiteral("\nsecond"));
+    const double famEnd = editor->xForCol(0, 9);
+    const double eol = editor->xForCol(0, 10);
+
+    editor->setPosition({1, 0});
+    QTest::keyClick(editor, Qt::Key_Q); // insert on the OTHER line
+    QCOMPARE(editor->xForCol(0, 9), famEnd); // bit-identical: same text, no reflow
+    QCOMPARE(editor->xForCol(0, 10), eol);
+
+    const double cw = editor->cellWidth();
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_A); // 'A' enters the emoji line's front
+    // Everything after the insert slides right by exactly one real cell.
+    QVERIFY(qAbs(editor->xForCol(0, 10) - famEnd - cw) < 1e-9);
+    QVERIFY(qAbs(editor->xForCol(0, 11) - eol - cw) < 1e-9);
+}
+
+void TestCodeEditor::mouseClickSnapsToClusterEdges()
+{
+    // Hit-testing keeps floor semantics (click inside a cell -> that cell's
+    // start), and inside a wide cluster x floors to the cluster start.
+    const QString family = QString::fromUtf8("\U0001F468\u200D\U0001F469\u200D\U0001F467");
+    editor->setPlainText(QStringLiteral("x") + family + QStringLiteral("y"));
+    const int pad = editor->padding();
+    const int lh = editor->lineHeight();
+    const double cw = editor->cellWidth();
+    const double famStart = editor->xForCol(0, 1);
+    const double famEnd = editor->xForCol(0, 9);
+    const int y = pad + lh / 2;
+
+    auto clickAt = [&](double x) {
+        QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, QPoint(qRound(x), y));
+        return editor->position();
+    };
+
+    // Middle of the family ink -> the cluster's LEFT edge (floor, like every
+    // editor does inside a cell).
+    QCOMPARE(clickAt((famStart + famEnd) / 2.0).col, 1);
+    // One pixel short of the cluster end still floors to the cluster start...
+    QCOMPARE(clickAt(famEnd - 1.0).col, 1);
+    // ...one pixel past it is the next position.
+    QCOMPARE(clickAt(famEnd + 1.0).col, 9);
+    // 'y' occupies one real cell after the cluster; its middle is col 9.
+    QCOMPARE(clickAt(famEnd + cw / 2.0).col, 9);
+    // Way past the line end clamps to EOL (col 10), as the grid model did.
+    QCOMPARE(clickAt(famEnd + 500.0 * cw).col, 10);
+    QCOMPARE(clickAt(-100.0).col, 0);
+
+    // And the caret placed mid-cluster by a click then Backspace deletes the
+    // WHOLE cluster (view-level cluster safety, M2 rule, unchanged):
+    QCOMPARE(clickAt((famStart + famEnd) / 2.0).col, 1);
+    QTest::keyClick(editor, Qt::Key_Right); // one whole cluster over the family
+    QCOMPARE(editor->position().col, 9);
+}
+
+void TestCodeEditor::caretPixelTracksLayoutNotGrid()
+{
+    // Numeric pixel assertion (no vision): render the widget, scan for the
+    // solid caret fill, and require it at the layout position - not the old
+    // col*cellWidth grid position, which sat ~50px away on this very line.
+    const QString family = QString::fromUtf8("\U0001F468\u200D\U0001F469\u200D\U0001F467");
+    editor->setPlainText(QStringLiteral("x") + family + QStringLiteral("y"));
+    editor->setPosition({0, 10}); // EOL: no glyph overlaps the caret block
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const double gridX = pad + 10 * editor->cellWidth(); // the BUGGY position
+    const int layoutX = qRound(editor->xForCol(0, 10)); // what we draw with
+
+    QImage img = editor->grab().toImage();
+    const QColor textCol = editor->palette().color(QPalette::Text);
+    QVector<int> solidCols;
+    for (int x = 0; x < img.width(); ++x) {
+        // Longest vertical run of exact Text color in the first line's band.
+        // The caret is a 2px wide, line-height-tall solid fill; glyph
+        // columns antialias and never reach the full line height.
+        int run = 0, best = 0;
+        for (int y = qMax(0, pad - 2); y <= pad + lh + 2; ++y) {
+            if (img.pixelColor(x, y) == textCol) {
+                ++run;
+                best = qMax(best, run);
+            } else {
+                run = 0;
+            }
+        }
+        if (best >= lh - 1)
+            solidCols.append(x);
+    }
+    QVERIFY2(!solidCols.isEmpty(), "no solid caret column found in render");
+    // The caret is 2px wide, so solid columns come as a single tight group
+    // (glyph strokes below the line-height threshold stay excluded).
+    for (int x : solidCols)
+        QVERIFY2(qAbs(x - layoutX) <= 3,
+                 qPrintable(QStringLiteral("solid column %1 far from layout caret x=%2")
+                                .arg(x).arg(layoutX)));
+    // Anti-drift tripwire: the old grid would have put the caret far right
+    // (emoji advance << 8 code-unit cells); the render must NOT be there.
+    QVERIFY(qAbs(layoutX - qRound(gridX)) > 20);
+}
+
+void TestCodeEditor::emptyLineGeometry()
+{
+    // The cache never hands out a dead QTextLine (measured: touching one
+    // SEGFAULTS); empty lines resolve at the line start with phantom-cell
+    // extrapolation only for xForCol(== 0-length lines: any col clamps).
+    editor->setPlainText(QStringLiteral("abc\n\ndef"));
+    const int pad = editor->padding();
+    const int lh = editor->lineHeight();
+    const double cw = editor->cellWidth();
+
+    QVERIFY(qAbs(editor->xForCol(1, 0) - pad) < 1e-12);
+    QCOMPARE(editor->xForCol(1, 5), editor->xForCol(1, 0)); // clamped to EOL
+    QCOMPARE(editor->xForCol(99, 3), editor->xForCol(0, 0)); // bad line -> line start x
+
+    // A click anywhere on an empty line lands at its start.
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(pad + int(30 * cw), pad + lh + lh / 2));
+    QCOMPARE(editor->position().line, 1);
+    QCOMPARE(editor->position().col, 0);
+}
+
+void TestCodeEditor::textGlyphsShareCaretBands()
+{
+    // Numeric band tripwire (no vision): the glyph ink of every line must
+    // land INSIDE that line's band [yTop, yTop+lh). A regression had
+    // QTextLine::draw's pos treated as a baseline anchor, but the raster
+    // engine adds its own line.y()+ascent() on top - each text line then
+    // rendered ~one line-height below its caret/selection band, leaving a
+    // fake "empty line" at the top. Lowercase-only glyphs keep the vertical
+    // extent unambiguous (no ascender/cap-height font dependency), and the
+    // caret parks on the last line at col 1 so its solid block stays out of
+    // the scanned x window.
+    editor->setPlainText(QStringLiteral("x\ny\nz\nw\nv"));
+    editor->setPosition({4, 1});
+    const int pad = editor->padding();
+    const int lh = editor->lineHeight();
+    const QImage img = editor->grab().toImage();
+    const QColor base = editor->palette().color(QPalette::Base);
+    const int x1 = pad + int(editor->cellWidth()) - 1; // exclude caret cols
+
+    for (int i = 0; i < 5; ++i) {
+        const int yTop = pad + i * lh;
+        int inBand = 0, below = 0;
+        for (int x = 0; x <= x1 && x < img.width(); ++x) {
+            for (int y = yTop; y < yTop + lh && y < img.height(); ++y)
+                if (img.pixelColor(x, y) != base) { ++inBand; break; }
+            // First two rows of the NEXT band: fixed geometry cannot have
+            // ink this early (lowercase tops start ~x-height below the band
+            // top); the shifted-draw bug lands its own line's ink here.
+            for (int y = yTop + lh; y <= yTop + lh + 2 && y < img.height(); ++y)
+                if (img.pixelColor(x, y) != base) { ++below; break; }
+        }
+        QVERIFY2(inBand >= 4, qPrintable(QStringLiteral("line %1 has ink %2")
+                                             .arg(i).arg(inBand)));
+        QVERIFY2(below == 0, qPrintable(QStringLiteral("line %1 ink spills %2 cols "
+                                                       "into the next band")
+                                            .arg(i).arg(below)));
+    }
 }
 
 void TestCodeEditor::shiftSelectsToLineEnd()
@@ -676,11 +888,13 @@ void TestCodeEditor::imePreeditStaysOutOfBufferUntilCommit()
     QVERIFY(QApplication::sendEvent(editor, &preedit2));
     QTest::keyClick(editor, Qt::Key_Left); // moveCaret clears preedit_
     // caret is back at col 3 and no stale preedit trails it, so the
-    // candidate anchor must sit at the plain caret column again.
+    // candidate anchor must sit at the plain caret column again. The
+    // expectation reads the widget's own layout truth (CJK glyphs are wider
+    // than one monospace cell; the old col*cellWidth formula WAS the drift).
     QInputMethodQueryEvent queries(Qt::ImCursorRectangle);
     QVERIFY(QApplication::sendEvent(editor, &queries));
     QCOMPARE(queries.value(Qt::ImCursorRectangle).toRect().left(),
-             editor->padding() + qRound(3 * editor->cellWidth()));
+             qRound(editor->xForCol(0, 3)));
 }
 
 void TestCodeEditor::imeQueriesTrackCaretAndPreedit()

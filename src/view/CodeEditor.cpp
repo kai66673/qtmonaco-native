@@ -199,6 +199,144 @@ int CodeEditor::lineLength(int line) const
     return buffer_.lineText(line).size();
 }
 
+// --- per-line glyph-engine layout cache (caret/selection/hit-test truth) --
+//
+// Qt 6.12 removed QTextLine::x(pos)/xToPos/cursorRect; the surviving
+// primitives cursorToX(int*, Edge)/xToCursor are ancient API, so they are
+// also present at our Qt 6.6 floor. Measured semantics (probe):
+//  - ASCII monospace: cursorToX(c) == c * cellWidth EXACTLY (the old grid
+//    stays bit-for-bit intact for plain lines);
+//  - col inside a cluster: the engine snaps the col to a cluster edge and
+//    reports it via the out-param;
+//  - xToCursor: floor-like on monospace, nearer-edge resolution inside wide
+//    clusters, but x=1e9 wraps around to 0 -> callers must clamp first;
+//  - emoji ZWJ family advance = 1.77 cells while it spans 8 code units:
+//    this is exactly the drift the grid model had;
+//  - touching any accessor of a default-constructed QTextLine SEGFAULTS
+//    (no eng guard in the .so), hence the valid gate on every slot use.
+
+int CodeEditor::geoMaxUnits() const
+{
+    // Layout budget for monster lines. 4x the visible cell count covers even
+    // lines where clusters are far narrower than their code-unit count
+    // (combining marks); the truncation edge always lands off-screen, so the
+    // caret/hit-test math never notices it (horizontal scrolling is M7).
+    return std::max(64, 4 * (static_cast<int>(width() / cellWidth_) + 2));
+}
+
+const CodeEditor::GeoSlot* CodeEditor::hitLine(int line) const
+{
+    if (line < 0 || line >= buffer_.lineCount())
+        return nullptr;
+    const QString full = buffer_.lineText(line);
+    const int maxUnits = geoMaxUnits();
+    const QString text = full.size() > maxUnits ? full.left(maxUnits) : full;
+
+    for (GeoSlot& s : geo_) // geo_ is mutable: this is a const-by-API cache
+        if (s.keyLine == line && s.text == text) {
+            s.stamp = ++geoClock_;
+            return &s;
+        }
+
+    GeoSlot* victim = nullptr;
+    for (GeoSlot& s : geo_) {
+        if (s.keyLine < 0) { // first free slot wins
+            victim = &s;
+            break;
+        }
+        if (!victim || s.stamp < victim->stamp)
+            victim = &s; // plain-scan LRU victim; kGeoSlots is tiny
+    }
+    Q_ASSERT(victim);
+    victim->keyLine = line;
+    victim->text = text;
+    if (text.isEmpty()) {
+        // Empty line: NO QTextLine exists. Dead-line calls segfault, so the
+        // slot is marked invalid and every consumer routes around `line`.
+        victim->valid = false;
+        victim->line = QTextLine();
+        victim->stamp = ++geoClock_;
+        return victim;
+    }
+    // Re-arm the in-place layout (it is copy/move-deleted: never reseat it).
+    victim->layout.clearLayout();
+    victim->layout.setText(text);
+    victim->layout.setFont(font_);
+    QTextOption opt;
+    opt.setWrapMode(QTextOption::NoWrap);
+    victim->layout.setTextOption(opt);
+    victim->layout.beginLayout();
+    victim->line = victim->layout.createLine();
+    if (victim->line.isValid())
+        victim->line.setLineWidth(Q_INFINITY); // natural width; view scrolls
+    victim->layout.endLayout();
+    victim->valid = victim->line.isValid();
+    victim->stamp = ++geoClock_;
+    return victim;
+}
+
+// Line-space x (before padding_) of caret position `col`, clamped to a
+// phantom-cell extrapolation beyond the laid-out prefix (monster-line guard
+// and the selected-newline cell both land there; the region is off-screen).
+double CodeEditor::xInLine(const GeoSlot* s, int col) const
+{
+    if (!s)
+        return 0.0;
+    if (!s->valid) // empty line: col 0 or the phantom newline cell
+        return std::max(col, 0) * cellWidth_;
+    const int laidOut = static_cast<int>(s->text.size());
+    if (col <= 0)
+        return 0.0;
+    if (col > laidOut) {
+        int end = laidOut;
+        const double xEnd = s->line.cursorToX(&end, QTextLine::Leading);
+        return xEnd + (col - laidOut) * cellWidth_;
+    }
+    int snapped = col; // engine may move a mid-cluster caret to an edge
+    return s->line.cursorToX(&snapped, QTextLine::Leading);
+}
+
+double CodeEditor::xForCol(int line, int col) const
+{
+    const int c = std::clamp(col, 0, lineLength(line));
+    return padding_ + xInLine(hitLine(line), c);
+}
+
+TextPosition CodeEditor::positionAt(const QPoint& widgetPos) const
+{
+    TextPosition pos;
+    pos.line = (widgetPos.y() - padding_ + vScroll_) / lineHeight_;
+    pos.line = std::clamp(pos.line, 0, buffer_.lineCount() - 1);
+    const GeoSlot* s = hitLine(pos.line);
+    if (!s || !s->valid) {
+        pos.col = 0; // empty line: every x is the line start
+    } else {
+        // xToCursor misbehaves far outside the laid-out extent (measured:
+        // 1e9 maps back to 0), so clamp into the extent first: clicks past
+        // the line end resolve to EOL, as they used to via the grid clamp.
+        const double x = std::clamp(widgetPos.x() - static_cast<double>(padding_),
+                                    0.0, s->line.naturalTextWidth());
+        // xToCursor picks the NEAREST cursor edge; the old grid used floor
+        // (click at col*cell + cw/2 -> col), and every editor does the same.
+        // Walk back until the position's left edge is at or left of x - the
+        // grapheme-aware previousCursorPosition chain stops exactly at valid
+        // cluster edges, so a mid-wide-cluster click floors to the cluster
+        // start while x just past it jumps to the next cluster.
+        int c = std::max(s->line.xToCursor(x), 0);
+        while (c > 0) {
+            int snapped = c;
+            const double left = s->line.cursorToX(&snapped, QTextLine::Leading);
+            if (left <= x) {
+                c = snapped;
+                break;
+            }
+            c = s->layout.previousCursorPosition(snapped);
+        }
+        pos.col = std::clamp(c, 0, lineLength(pos.line));
+    }
+    return pos;
+}
+
 TextPosition CodeEditor::clampPos(TextPosition pos) const
 {
     pos.line = std::clamp(pos.line, 0, buffer_.lineCount() - 1);
@@ -564,7 +702,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
     const int lh = lineHeight_;
     const int first = firstVisibleLine();
     const int last = std::min(buffer_.lineCount() - 1, first + visibleLineCount());
-    const int colsVisible = static_cast<int>(width() / cellWidth_) + 2;
+    const QFontMetricsF fmF(font_); // preedit advance measurement
 
     // Selection pass first: paint the background under the glyphs.
     // Semi-transparent highlight so text stays legible on light and dark
@@ -576,14 +714,14 @@ void CodeEditor::paintEvent(QPaintEvent*)
         selColor.setAlpha(90);
         for (int line = std::max(first, s.line); line <= std::min(last, e.line); ++line) {
             const int startCol = (line == s.line) ? s.col : 0;
-            // On fully covered lines the selection extends past the text to
-            // visualize the selected newline; on the end line it stops at
-            // the selection end. Clamp to what is visible.
+            // On fully covered lines the selection extends one phantom cell
+            // past the text to visualize the selected newline; on the end
+            // line it stops at the selection end.
             const int textLen = lineLength(line);
-            int endCol = (line == e.line) ? e.col : std::max(textLen, 1);
-            endCol = std::min(endCol, std::max(colsVisible, startCol + 1));
-            const int x0 = padding_ + qRound(startCol * cellWidth_);
-            const int x1 = padding_ + qRound(endCol * cellWidth_);
+            const int endCol = (line == e.line) ? e.col : std::max(textLen, 1);
+            const GeoSlot* gs = hitLine(line);
+            const int x0 = padding_ + qRound(xInLine(gs, startCol));
+            const int x1 = padding_ + qRound(xInLine(gs, endCol));
             if (x1 > x0) {
                 const int yTop = padding_ + line * lh - vScroll_;
                 p.fillRect(QRect(x0, yTop, x1 - x0, lh), selColor);
@@ -593,32 +731,41 @@ void CodeEditor::paintEvent(QPaintEvent*)
 
     for (int line = first; line <= last; ++line) {
         const int yTop = padding_ + line * lh - vScroll_;
-        const int baseline = yTop + ascent_;
-
-        QString text = buffer_.lineText(line);
-        // Spike guard against monster single-line files: only paint what fits.
-        if (text.size() > colsVisible)
-            text = text.left(colsVisible);
+        const GeoSlot* gs = hitLine(line);
 
         if (line == caret_.line && caretOn_) {
-            // Caret x must follow the same fractional advance arithmetic the
-            // glyph engine uses; anchoring at padding_ keeps it aligned with
-            // the text start of the line. During composition the visual
-            // caret trails the preedit (which is not in the buffer yet).
-            const int visualCol = caret_.col + static_cast<int>(preedit_.size());
-            const int cx = padding_ + qRound(std::min(visualCol, colsVisible) * cellWidth_);
-            p.fillRect(QRect(cx, yTop, 2, lh), palette().color(QPalette::Text));
+            // The caret follows the very cluster advances the line below is
+            // drawn with (same QTextLine), so emoji ZWJ sequences no longer
+            // push the caret away from the glyphs. During composition the
+            // visual caret trails the preedit (which is not in the buffer).
+            double cx = padding_ + xInLine(gs, caret_.col);
+            if (!preedit_.isEmpty())
+                cx += fmF.horizontalAdvance(preedit_);
+            p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
         }
-        if (!text.isEmpty())
-            p.drawText(QPointF(padding_, baseline), text);
+        if (gs->valid) {
+            // Draw with the cached QTextLine itself, not a fresh drawText:
+            // glyphs, caret and hit-testing then share one layout.
+            // MEASURED (numeric band scan, raster backing store = the only
+            // engine our widgets use): draw's pos is the layout TOP-LEFT,
+            // not a baseline anchor - the engine places glyphs at
+            // pos.y + line.y() + line.ascent() on its own (first line has
+            // y()==0). Passing baseline=yTop+ascent_ here drew every line
+            // ~one line-height too low, an empty band at the top and a
+            // caret visibly a line above its text.
+            gs->line.draw(&p, QPointF(padding_, yTop));
+        }
         if (line == caret_.line && !preedit_.isEmpty()) {
             // Composition text at the caret with a dotted underline (Qt's
             // own line-edit convention) to show it is not committed yet.
-            const int px = padding_ + qRound(caret_.col * cellWidth_);
-            p.drawText(QPointF(px, baseline), preedit_);
+            // drawText below IS baseline-anchored, so align it with the
+            // layout engine's own baseline for the line above.
+            const double px = padding_ + xInLine(gs, caret_.col);
+            const double textBaseline = yTop + (gs->valid ? gs->line.ascent() : ascent_);
+            p.drawText(QPointF(px, textBaseline), preedit_);
             p.setPen(QPen(palette().color(QPalette::Text), 0, Qt::DotLine));
-            const int pw = qRound(static_cast<int>(preedit_.size()) * cellWidth_);
-            p.drawLine(px, yTop + lh - 2, px + pw, yTop + lh - 2);
+            const double pw = fmF.horizontalAdvance(preedit_);
+            p.drawLine(QPointF(px, yTop + lh - 2), QPointF(px + pw, yTop + lh - 2));
             p.setPen(palette().color(QPalette::Text));
         }
     }
@@ -863,26 +1010,17 @@ QVariant CodeEditor::inputMethodQuery(Qt::InputMethodQuery query) const
     case Qt::ImCursorRectangle: {
         // Candidate-window anchor: the visual caret, which during
         // composition trails the preedit instead of the buffer caret.
-        const int col = caret_.col + static_cast<int>(preedit_.size());
-        const int x = padding_ + qRound(col * cellWidth_);
+        double x = padding_ + xInLine(hitLine(caret_.line), caret_.col);
+        if (!preedit_.isEmpty())
+            x += QFontMetricsF(font_).horizontalAdvance(preedit_);
         const int y = padding_ + caret_.line * lineHeight_ - vScroll_;
-        return QRect(x, y, 2, lineHeight_);
+        return QRect(qRound(x), y, 2, lineHeight_);
     }
     case Qt::ImCurrentSelection:
         return hasSelection_ ? selectedText() : QString();
     default:
         return QWidget::inputMethodQuery(query);
     }
-}
-
-TextPosition CodeEditor::posFromEvent(const QPoint& widgetPos) const
-{
-    TextPosition pos;
-    pos.line = (widgetPos.y() - padding_ + vScroll_) / lineHeight_;
-    pos.line = std::clamp(pos.line, 0, buffer_.lineCount() - 1);
-    pos.col = static_cast<int>((widgetPos.x() - padding_) / cellWidth_);
-    pos.col = std::clamp(pos.col, 0, lineLength(pos.line));
-    return pos;
 }
 
 void CodeEditor::mousePressEvent(QMouseEvent* event)
@@ -893,7 +1031,7 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
         // (Wayland, offscreen) fall back to the regular clipboard, so the
         // middle-click button always does something predictable.
         setFocus(Qt::MouseFocusReason);
-        setCaret(posFromEvent(event->position().toPoint()));
+        setCaret(positionAt(event->position().toPoint()));
         if (QClipboard* cb = QGuiApplication::clipboard()) {
             QString text = cb->text(QClipboard::Selection);
             if (text.isEmpty())
@@ -906,7 +1044,7 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
     if (event->button() != Qt::LeftButton)
         return;
     setFocus(Qt::MouseFocusReason);
-    const TextPosition pos = posFromEvent(event->position().toPoint());
+    const TextPosition pos = positionAt(event->position().toPoint());
     // Shift+click extends the selection from the existing anchor; a plain
     // click collapses it at the new position.
     if (event->modifiers() & Qt::ShiftModifier)
@@ -932,7 +1070,7 @@ void CodeEditor::mouseMoveEvent(QMouseEvent* event)
         setVScroll(vScroll_ + lineHeight_);
         pos.setY(height() - margin - 1);
     }
-    moveCaret(posFromEvent(pos), true);
+    moveCaret(positionAt(pos), true);
     event->accept();
 }
 
@@ -947,6 +1085,39 @@ void CodeEditor::wheelEvent(QWheelEvent* event)
 void CodeEditor::resizeEvent(QResizeEvent*)
 {
     updateScrollBarRange();
+}
+
+void CodeEditor::changeEvent(QEvent* event)
+{
+    QWidget::changeEvent(event);
+    // The font is deliberately NOT part of the layout-cache key (lines are
+    // re-fetched by text anyway); therefore a font change must wipe the
+    // cache outright, and the derived metrics must be re-measured.
+    if (event->type() == QEvent::FontChange && !(font_ == font())) {
+        font_ = font();
+        // Same no-hinting rule as the constructor: engine advances and cell
+        // width must agree exactly, or the caret drifts along the line.
+        font_.setHintingPreference(QFont::PreferNoHinting);
+        const QFontMetricsF fm(font_);
+        cellWidth_ = fm.horizontalAdvance(QLatin1Char('0'));
+        if (!(cellWidth_ > 0.0))
+            cellWidth_ = 8.0;
+        ascent_ = qCeil(fm.ascent());
+        lineHeight_ = qCeil(fm.ascent() + fm.descent() + fm.leading());
+        if (lineHeight_ <= 0)
+            lineHeight_ = ascent_ + 4;
+        for (GeoSlot& s : geo_) { // reset in place: QTextLayout is uncopyable
+            s.keyLine = -1;
+            s.text.clear();
+            s.layout.clearLayout();
+            s.line = QTextLine();
+            s.valid = false;
+            s.stamp = 0;
+        }
+        updateScrollBarRange();
+        ensureCaretVisible();
+        update();
+    }
 }
 
 void CodeEditor::focusInEvent(QFocusEvent*)

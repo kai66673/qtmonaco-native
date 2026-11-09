@@ -5,6 +5,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- `CodeEditor::xForCol(line, col)`: widget-space x of a text position
+  following the glyph engine's cluster advances (public already now because
+  M5 decorations need exactly this geometry), and `positionAt(widgetPos)`
+  replacing the private grid-based `posFromEvent`. `QWidget::setFont` on the
+  editor now works end-to-end: `changeEvent(FontChange)` re-derives cell
+  metrics and wipes the layout cache.
+
+### Fixed
+- Caret drift on lines containing wide clusters (reported live after
+  0.4.0): caret x, selection rectangles, painting and mouse hit-testing now
+  share ONE laid-out `QTextLine` per visible line (a fixed, text-keyed LRU
+  cache in the view) instead of `col * cellWidth` grid arithmetic. A ZWJ
+  family spans 8 code units but only ~1.8 cells of advance — everything
+  after it used to slide away from the caret, hit-test and highlight.
+  Plain monospace lines keep exact `col * cellWidth` positions (measured
+  engine error 0.0), so nothing moved there; a click inside a wide cluster
+  floors to the cluster start, and hit-testing keeps the editor-style floor
+  semantics (`xToCursor`'s nearest-edge pick is walked back deliberately).
+  Qt 6.12 note: `QTextLine::x(pos)/xToPos/cursorRect` are gone — the cache
+  builds on `cursorToX`/`xToCursor`, present since Qt 4 and at our 6.6
+  floor; a default-constructed `QTextLine` SEGFAULTS on any accessor, so
+  every slot use is gated on a `valid` flag. Also measured: on the raster
+  paint engine (the widget backing store, both X11 and offscreen)
+  `QTextLine::draw`'s pos is the layout TOP-LEFT, not a baseline anchor —
+  the engine adds `line.y() + line.ascent()` itself; passing a baseline
+  there shifts every drawn line about a line-height below its caret band
+  (the first live run of this commit showed exactly that: a fake empty
+  line at top, caret a line off the glyphs). New numeric tests include a
+  pixel-scan of `grab()` pinning the caret to the layout x (~50px away
+  from the old grid position on the probe line) and a per-line ink-band
+  assertion catching that draw-anchor class of regression; 55/55 green
+  on real X11.
+
 ## [0.4.0] — 2026-11-09
 
 ### Added
