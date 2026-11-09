@@ -5,6 +5,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+## [0.2.0] — 2026-11-09
+
+First milestone on the release train (git tag + alpha wheel per milestone).
+
 ### Added
 - M1b clipboard: Ctrl+C / Ctrl+X / Ctrl+V plus the platform chains matched
   via `QKeySequence` (`Ctrl+Ins`, `Shift+Ins`, `Shift+Del`, Cmd variants on
