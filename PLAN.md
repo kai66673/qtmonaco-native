@@ -111,9 +111,12 @@ boundaries. `col` numbering **stays UTF-16 code units** (LSP semantics —
 deliberate).
 **DoD:** numeric assertions for ZWJ emoji sequences, combining marks,
 surrogate pairs; no screenshots (`AGENTS.md`).
-**Status (2026-11-09):** boundaries + word motion done (9 tests:
-clusters move/delete as units, mid-cluster carets snap without orphans,
-`ctrlDeleteNeverSplitsClusters`); IME composition still open.
+**Status: DONE (2026-11-09).** Boundaries + word motion (9 tests: clusters
+move/delete as units, mid-cluster carets snap without orphans,
+`ctrlDeleteNeverSplitsClusters`) and IME composition (preedit is
+display-only at the caret, commit goes through `insertTextAtCaret`;
+`ImCursorRectangle` trails the preedit). Phase C complete → binding
+widening may start.
 
 ## Phase D — editing depth
 

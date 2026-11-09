@@ -5,6 +5,8 @@
 #include <QtTest>
 
 #include <QClipboard>
+#include <QInputMethodEvent>
+#include <QInputMethodQueryEvent>
 
 #include "view/CodeEditor.hpp"
 
@@ -57,6 +59,10 @@ private slots:
     void wordNavigationCrossesLines();
     void ctrlDeleteWordRight();
     void ctrlDeleteNeverSplitsClusters();
+
+    void imeCommitInsertsText();
+    void imePreeditStaysOutOfBufferUntilCommit();
+    void imeQueriesTrackCaretAndPreedit();
 
     void copyThenPasteRoundTrip();
     void copyWithoutSelectionGrabsWholeLine();
@@ -615,7 +621,99 @@ void TestCodeEditor::ctrlDeleteNeverSplitsClusters()
     QCOMPARE(editor->toPlainText(), QStringLiteral("a b"));
 }
 
-// --- Clipboard (M1b) ----------------------------------------------------
+// --- IME composition (Phase C) ------------------------------------------
+
+void TestCodeEditor::imeCommitInsertsText()
+{
+    editor->setPlainText(QStringLiteral("x"));
+    editor->setPosition({0, 1});
+    // "こんにちは" — 5 UTF-16 units, a typical Japanese IME commit.
+    const QString japanese = QString::fromUtf8("こんにちは");
+    // (Qt 6.12 shape: preedit+attributes in the ctor, commit via setter.)
+    QInputMethodEvent commit;
+    commit.setCommitString(japanese);
+    QVERIFY(QApplication::sendEvent(editor, &commit));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x") + japanese);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 6}));
+    // Committed CJK text survives cluster-safe editing as one unit per
+    // kana (each is its own cluster here).
+    QTest::keyClick(editor, Qt::Key_Backspace);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x") + japanese.left(4));
+    // The trailing は (U+306F) went as one cluster; the remaining kana each
+    // stayed a cluster of their own.
+}
+
+void TestCodeEditor::imePreeditStaysOutOfBufferUntilCommit()
+{
+    editor->setPlainText(QStringLiteral("a"));
+    editor->setPosition({0, 1});
+
+    QInputMethodEvent preedit1(QStringLiteral("nihon"), {});
+    QVERIFY(QApplication::sendEvent(editor, &preedit1));
+    // Preedit is display-only: nothing reached the model or the caret.
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+
+    // Typical IME step: replace preedit with a candidate plus a new preedit
+    // tail ("日本" committed, "go" still composing). Only the commit hits
+    // the buffer.
+    QInputMethodEvent step(QStringLiteral("go"), {});
+    step.setCommitString(QStringLiteral("日本"));
+    QVERIFY(QApplication::sendEvent(editor, &step));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a日本"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+
+    // Composition cancelled (empty commit + empty preedit): buffer keeps
+    // exactly what was committed, no leftovers.
+    QInputMethodEvent cancel; // empty commit + empty preedit
+    QVERIFY(QApplication::sendEvent(editor, &cancel));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a日本"));
+
+    // A deliberate caret move also ends any stale preedit display: preedit,
+    // then Left arrow, then another preedit must not stack on the old one.
+    QInputMethodEvent preedit2(QStringLiteral("old"), {});
+    preedit2.setCommitString(QStringLiteral("x"));
+    QVERIFY(QApplication::sendEvent(editor, &preedit2));
+    QTest::keyClick(editor, Qt::Key_Left); // moveCaret clears preedit_
+    // caret is back at col 3 and no stale preedit trails it, so the
+    // candidate anchor must sit at the plain caret column again.
+    QInputMethodQueryEvent queries(Qt::ImCursorRectangle);
+    QVERIFY(QApplication::sendEvent(editor, &queries));
+    QCOMPARE(queries.value(Qt::ImCursorRectangle).toRect().left(),
+             editor->padding() + qRound(3 * editor->cellWidth()));
+}
+
+void TestCodeEditor::imeQueriesTrackCaretAndPreedit()
+{
+    editor->setPlainText(QStringLiteral("ab"));
+    editor->setPosition({0, 2});
+
+    QInputMethodQueryEvent enabled(Qt::ImEnabled);
+    QVERIFY(QApplication::sendEvent(editor, &enabled));
+    QVERIFY(enabled.value(Qt::ImEnabled).toBool());
+
+    QInputMethodQueryEvent q1(Qt::ImCursorRectangle);
+    QVERIFY(QApplication::sendEvent(editor, &q1));
+    const QRect anchor = q1.value(Qt::ImCursorRectangle).toRect();
+    QCOMPARE(anchor.left(), editor->padding() + qRound(2 * editor->cellWidth()));
+    QCOMPARE(anchor.top(), editor->padding()); // line 0, unscrolled
+    QCOMPARE(anchor.height(), editor->lineHeight());
+
+    // The candidate anchor must trail the preedit, not the buffer caret.
+    QInputMethodEvent preedit(QStringLiteral("xy"), {});
+    QVERIFY(QApplication::sendEvent(editor, &preedit));
+    QInputMethodQueryEvent q2(Qt::ImCursorRectangle);
+    QVERIFY(QApplication::sendEvent(editor, &q2));
+    QCOMPARE(q2.value(Qt::ImCursorRectangle).toRect().left(),
+             editor->padding() + qRound(4 * editor->cellWidth()));
+
+    // The IM may want the current selection to operate on.
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_End, Qt::ShiftModifier); // select "ab"
+    QInputMethodQueryEvent q3(Qt::ImCurrentSelection);
+    QVERIFY(QApplication::sendEvent(editor, &q3));
+    QCOMPARE(q3.value(Qt::ImCurrentSelection).toString(), QStringLiteral("ab"));
+}
 
 void TestCodeEditor::copyThenPasteRoundTrip()
 {

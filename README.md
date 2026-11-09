@@ -86,7 +86,7 @@ Gate 1 — Code Editor v1:
 - [x] M1b clipboard: copy/cut/paste, middle-click paste, X11 primary selection
 - [x] M2 grapheme/word boundaries (QTextBoundaryFinder): cluster-safe
       arrows/backspace/delete, editor-style Ctrl+arrows/Ctrl+Del word motion
-- [ ] M2 IME composition
+- [x] M2 IME composition (preedit rendered at caret, commit via insert)
 - [ ] M3 undo/redo (piece-list snapshots/ops), multiple carets
 - [ ] M4 syntax highlighting (vendored tree-sitter runtime + generated
       grammars; incremental, viewport-scoped — see PLAN.md D2)

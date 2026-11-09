@@ -11,6 +11,8 @@
 
 #include "core/TextBuffer.hpp"
 
+class QInputMethodEvent;
+
 namespace qmn::view {
 
 // 0-based text position. col is counted in UTF-16 code units.
@@ -40,17 +42,18 @@ struct TextPosition {
 // word deletion, mouse caret placement and drag selection,
 // Shift-navigation + Ctrl+A selections with replace-on-type semantics,
 // clipboard copy/cut/paste (whole-line when no selection, Monaco-style),
-// X11 primary selection mirroring + middle-click paste, vertical scrolling,
-// per-keystroke latency instrumentation.
+// X11 primary selection mirroring + middle-click paste, IME composition
+// (preedit rendered at the caret, only committed text reaches the model),
+// vertical scrolling, per-keystroke latency instrumentation.
 //
 // `col` stays UTF-16 code units everywhere (LSP semantics); the
 // caret may sit inside a cluster only via setPlainText/setPosition/mouse
 // clicks, and arrows/edits snap outward from there without ever splitting
 // a cluster.
 //
-// Deliberately NOT included (follow-up milestones): IME composition,
-// soft wrap, horizontal scrolling, undo/redo, column memory for Up/Down,
-// double-click word selection. See README roadmap.
+// Deliberately NOT included (follow-up milestones): soft wrap, horizontal
+// scrolling, undo/redo, column memory for Up/Down, double-click word
+// selection. See README roadmap.
 class CodeEditor : public QWidget {
     Q_OBJECT
 public:
@@ -101,6 +104,8 @@ signals:
 protected:
     void paintEvent(QPaintEvent* event) override;
     void keyPressEvent(QKeyEvent* event) override;
+    void inputMethodEvent(QInputMethodEvent* event) override;
+    QVariant inputMethodQuery(Qt::InputMethodQuery query) const override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
@@ -136,6 +141,7 @@ private:
     TextPosition caret_;
     TextPosition anchor_; // inactive end of the selection
     bool hasSelection_ = false;
+    QString preedit_; // IME composition string, display-only: never in buffer_
     QScrollBar* vBar_ = nullptr;
     bool scrollbarSync_ = false;
 

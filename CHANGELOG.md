@@ -5,6 +5,19 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- IME composition (closes Phase C / M2): `inputMethodEvent` renders the
+  preedit at the caret with a dotted underline — display-only, it never
+  enters the model — and commits arrive through the normal insert path,
+  so committed CJK/surrogate text is cluster-safe from the start. Any
+  deliberate caret move (keys, mouse, `setPosition`) or document replace
+  drops a stale preedit. `inputMethodQuery` answers `ImEnabled`,
+  `ImCurrentSelection` and `ImCursorRectangle` (the candidate-window
+  anchor trails the preedit, matching the visual caret). Tests drive raw
+  `QInputMethodEvent`/`QInputMethodQueryEvent` (Qt 6.12 event shape:
+  preedit via ctor, commit via `setCommitString`); 49/49 green on real
+  X11.
+
 ## [0.3.0] — 2026-11-09
 
 ### Added

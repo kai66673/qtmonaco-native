@@ -6,6 +6,7 @@
 #include <QFontDatabase>
 #include <QFontMetricsF>
 #include <QGuiApplication>
+#include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QKeySequence>
 #include <QMouseEvent>
@@ -175,6 +176,7 @@ QSize CodeEditor::sizeHint() const
 
 void CodeEditor::setPlainText(const QString& text)
 {
+    preedit_.clear(); // a programmatic document replace ends any composition
     buffer_.setText(text);
     caret_ = {};
     anchor_ = {};
@@ -211,6 +213,7 @@ void CodeEditor::setPosition(TextPosition pos)
 
 void CodeEditor::setCaret(TextPosition pos)
 {
+    preedit_.clear(); // any deliberate caret move ends an in-flight composition
     caret_ = pos;
     const bool had = hasSelection_;
     hasSelection_ = false;
@@ -244,6 +247,7 @@ void CodeEditor::setSelection(TextPosition anchor, TextPosition caret)
 
 void CodeEditor::moveCaret(TextPosition target, bool extend)
 {
+    preedit_.clear(); // motion keys end an in-flight composition (see setCaret)
     target = clampPos(target);
     if (!extend) {
         setCaret(target);
@@ -599,12 +603,24 @@ void CodeEditor::paintEvent(QPaintEvent*)
         if (line == caret_.line && caretOn_) {
             // Caret x must follow the same fractional advance arithmetic the
             // glyph engine uses; anchoring at padding_ keeps it aligned with
-            // the text start of the line.
-            const int cx = padding_ + qRound(std::min(caret_.col, colsVisible) * cellWidth_);
+            // the text start of the line. During composition the visual
+            // caret trails the preedit (which is not in the buffer yet).
+            const int visualCol = caret_.col + static_cast<int>(preedit_.size());
+            const int cx = padding_ + qRound(std::min(visualCol, colsVisible) * cellWidth_);
             p.fillRect(QRect(cx, yTop, 2, lh), palette().color(QPalette::Text));
         }
         if (!text.isEmpty())
             p.drawText(QPointF(padding_, baseline), text);
+        if (line == caret_.line && !preedit_.isEmpty()) {
+            // Composition text at the caret with a dotted underline (Qt's
+            // own line-edit convention) to show it is not committed yet.
+            const int px = padding_ + qRound(caret_.col * cellWidth_);
+            p.drawText(QPointF(px, baseline), preedit_);
+            p.setPen(QPen(palette().color(QPalette::Text), 0, Qt::DotLine));
+            const int pw = qRound(static_cast<int>(preedit_.size()) * cellWidth_);
+            p.drawLine(px, yTop + lh - 2, px + pw, yTop + lh - 2);
+            p.setPen(palette().color(QPalette::Text));
+        }
     }
 }
 
@@ -821,6 +837,42 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         return;
     }
     event->ignore();
+}
+
+// --- IME composition (Phase C) ------------------------------------------
+
+void CodeEditor::inputMethodEvent(QInputMethodEvent* event)
+{
+    // Deliberately minimal composition: the preedit is rendered at the caret
+    // but never enters the model, and only the commit string reaches the
+    // buffer. The replacement start/length the event carries address the
+    // interior of our single preedit run (attributes, styling); since we do
+    // not render those, they are unused here.
+    if (!event->commitString().isEmpty())
+        insertTextAtCaret(event->commitString()); // setCaret inside clears preedit_
+    preedit_ = event->preeditString(); // assigned after the insert on purpose
+    ensureCaretVisible(); // the preedit can overflow the viewport
+    update();
+}
+
+QVariant CodeEditor::inputMethodQuery(Qt::InputMethodQuery query) const
+{
+    switch (query) {
+    case Qt::ImEnabled:
+        return true; // StrongFocus widget: composition is always available
+    case Qt::ImCursorRectangle: {
+        // Candidate-window anchor: the visual caret, which during
+        // composition trails the preedit instead of the buffer caret.
+        const int col = caret_.col + static_cast<int>(preedit_.size());
+        const int x = padding_ + qRound(col * cellWidth_);
+        const int y = padding_ + caret_.line * lineHeight_ - vScroll_;
+        return QRect(x, y, 2, lineHeight_);
+    }
+    case Qt::ImCurrentSelection:
+        return hasSelection_ ? selectedText() : QString();
+    default:
+        return QWidget::inputMethodQuery(query);
+    }
 }
 
 TextPosition CodeEditor::posFromEvent(const QPoint& widgetPos) const
