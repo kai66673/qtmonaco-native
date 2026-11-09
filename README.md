@@ -3,9 +3,16 @@
 A native code editor widget for Qt6, built from scratch on a raw `QWidget`:
 own text model, own rendering, no Scintilla, no QPlainTextEdit, no Chromium.
 
-This is the start of a long-term hobby project intended to eventually replace
-the embedded Monaco editor used by [qtmonaco](../qtmonaco) with a native
-implementation exposing the same high-level API (see *Roadmap* below).
+This is the start of a long-term hobby project. Goals:
+
+- A native Qt widget for editing source code.
+- Two final artifacts: a **Qt6 C++ library**, and a **PySide6 binding packaged
+  as a wheel (`.whl`)**, to be generated with Shiboken6.
+- Grow the widget's features toward **Monaco parity** — specifically the public
+  API of [`qtmonaco`](https://github.com/bec-project/qtmonaco)'s `Monaco` class,
+  which today embeds the Monaco JS editor in a `QWebEngineView` (Chromium).
+  qtmonaco-native is meant to replace that with a native, dependency-light
+  widget. Deliberate exception: no vim mode. See *Roadmap* below.
 
 ## Current state (v0.1 — spike)
 
@@ -83,8 +90,13 @@ Milestones, in build order:
 - [ ] M9 soft wrap, horizontal scrolling
 - [ ] M10 diff view
 - [ ] M11 accessibility (QAccessible), final polish
+- [ ] M12 PySide6 binding + wheel: expose `CodeEditor` via Shiboken6
+      (scikit-build-core + cibuildwheel), a drop-in for `qtmonaco.Monaco`
+      (same public API; the vim setter is kept but only warns)
 
-Out of scope by design: vim mode (explicitly dropped).
+Out of scope by design: vim mode. The `set_vim_mode_enabled` setter is still
+exposed by the Python binding for API compatibility, but only warns (see
+*PLAN.md*).
 
 License: TBD (parent project qtmonaco is BSD-3-Clause).
 
