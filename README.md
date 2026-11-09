@@ -23,7 +23,12 @@ The spike validates the two make-or-break risks of the plan:
   O(log P) line↔offset conversion and O(log P) insert/delete, P = piece count.
 - **Rendering** — viewport-culled painting of visible lines with QPainter on
   a raw QWidget, with blinking caret, keyboard/mouse editing, and vertical
-  scrolling.
+  scrolling. Geometry has a single source of truth: each visible line is
+  laid out once (per-line `QTextLine` cache), and caret x, selection
+  rectangles, drawn glyphs and mouse hit-testing all read the same glyph
+  engine advances — wide clusters (emoji ZWJ sequences, flags) never drift
+  the caret off the text; on monospace ASCII the result is bit-identical to
+  the original `col * cellWidth` grid model.
 
 Measured on a 62 MB / 1,000,001-line document (Linux, GCC 16, `-O3`):
 
@@ -37,11 +42,12 @@ The core is under constant property-test attack: 2,000 random
 insert/delete operations with a naive `QString` reference and a full
 treap-invariant check after **every** operation (`tests/tst_textbuffer.cpp`).
 
-Deliberately **not implemented yet** (see roadmap): clipboard, IME,
-soft wrap, horizontal scrolling, undo/redo, syntax highlighting, word
-navigation, column memory, full grapheme-cluster segmentation (backspace and
-delete never split a surrogate pair, but arrow keys and mouse clicks still
-count UTF-16 code units), diff view, LSP, scrolling past the end.
+Deliberately **not implemented yet** (see roadmap): soft wrap, horizontal
+scrolling, undo/redo, syntax highlighting, decorations (diagnostics /
+breakpoints / inlay hints), gutter, multiple carets, column memory, full
+grapheme segmentation (`col` still counts UTF-16 code units even though
+arrow keys and edits snap to cluster boundaries), diff view, LSP, scrolling
+past the end.
 
 ## Layout & layering
 
