@@ -59,8 +59,9 @@ if [ "${1:-}" = "--wheel" ]; then
         docker build -f "$REPO/bindings/Dockerfile" -t "$IMAGE" "$REPO"
     fi
     run '
-/opt/venv/bin/pip wheel --no-build-isolation --no-deps -w /tmp/wheels /work
-WHL=$(ls /tmp/wheels/qmn_native-*.whl)
+mkdir -p /work/dist && rm -f /work/dist/qmn_native-*.whl
+/opt/venv/bin/pip wheel --no-build-isolation --no-deps -w /work/dist /work
+WHL=$(ls /work/dist/qmn_native-*.whl)
 # Guard: a leftover from an earlier partial install would make the smoke pass
 # for the wrong reason - qmn must be unimportable until the wheel is installed.
 if /opt/venv/bin/python -c "import qmn" 2>/dev/null; then
