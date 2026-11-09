@@ -194,6 +194,10 @@ g++ -O3 -std=c++20 tools/bench_model.cpp -Isrc/core/.. \
 - Consumer + parity target: `qtmonaco` (GitHub `bec-project/qtmonaco`) — the
   PySide6/`QWebEngineView`-based editor this project aims to replace natively.
 - Changelog for what shipped per milestone (M1 selections are in): `CHANGELOG.md`.
+- **Two product gates (PLAN.md):** Gate 1 = editor v1 (no LSP/DAP/diff/soft
+  wrap); Gate 2 = IDE surface after the v1 API freeze. Never start Gate-2
+  work while Gate 1 is open; the M5 decoration API must already cover
+  diagnostics, breakpoints and inlay hints so Gate 2 needs no view surgery.
 - CI is the source of truth for the supported build: `.github/workflows/ci.yml`
   (archlinux container + ubuntu-24.04, both `-DCMAKE_BUILD_TYPE=Release`).
 - Deliberately out of scope: vim mode.

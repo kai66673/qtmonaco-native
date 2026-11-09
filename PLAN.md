@@ -1,30 +1,68 @@
 # PLAN
 
-Working plan for qtmonaco-native. Phases map to the `README.md` roadmap
-(M0…M12) and obey the constraints in `AGENTS.md` (layering rule, wrap-friendly
-public API, no vision ⇒ numeric assertions only).
+Working plan for qtmonaco-native. Milestones map to the `README.md` roadmap
+(M0…M13) and obey the constraints in `AGENTS.md` (layering rule, Shiboken-
+wrappable public API, no vision ⇒ numeric assertions only). Toolchain facts
+that were *measured* (container, Qt download, macro gotchas, single-Qt rule)
+live in `AGENTS.md` — this file is the phase plan, not the fact log.
 
-## Status (2026-11-09, baseline `9362281`)
+## Status (2026-11-09, baseline `9666f71`)
 
-Done: **M0** spike (piece table + painter + caret + typing + v-scroll), caret-drift
-fix (fractional cell metrics), **M1** selections, bench tool.
-Nothing else is started.
+Done: **M0** spike (piece table + painter + caret + typing + v-scroll + perf
+stats), caret-drift fix (fractional cell metrics), **M1** selections, bench
+tool, **Phase B** thin binding spine (wheel + single-QtCore ABI proof),
+**M4 engine decision** (vendored tree-sitter). Next up: **Phase A — M1b
+clipboard**, then Phase C.
 
-## Why this order
+## Product model — two gates (decided 2026-11-09)
 
-The PySide6 wheel is a *deliverable*, and its failure modes (Qt ABI drift,
-packaging matrix) are cheap to find early and expensive to find late — and the
-Python binding **freezes the C++ public API**. So: run a *thin* binding slice
-early, widen it later. Conversely M2 grapheme segmentation **changes position
-semantics**, so it must land before the bound surface grows.
+**Gate 1 — Code Editor v1.** A complete, self-sufficient native editor
+widget: graphemes/IME, undo/redo + multiple carets, syntax highlighting,
+gutter + decorations, find/replace, overview ruler, horizontal scroll, code
+folding. **Exit DoD:** the same widget usable from **C++** (installed +
+CMake-exported package, frozen public headers) **and PySide6** (production
+manylinux wheel, plain `pip install` works). No LSP, no DAP, no diff view,
+no soft wrap inside Gate 1.
+
+**Gate 2 — IDE surface.** LSP client, DAP-aware features, diff view
+(`open_diffs`), soft wrap, remaining qtmonaco parity hooks. Starts only
+after the v1 API freeze. Design-forward requirement: the Gate-1
+decoration/inline API (Phase D3) must already cover diagnostics,
+breakpoints and inlay hints — Gate 2 must never re-operate on the view.
+
+Why this shape: the editor alone is a shippable product (writing code
+without an IDE is most of real usage), while IDE integration carries its own
+failure surface (server/process lifecycle, protocol churn) that must not
+gate the editor release. The thin-binding-slice-first logic still holds:
+Python bindings freeze the C++ API, and packaging failure modes are cheap to
+find early, expensive late — which is why Phase B ran before feature depth.
+
+**Release train** (counterweight to Gate 1's length, decided 2026-11-09):
+every completed milestone gets a git tag `v0.x` and an alpha wheel from the
+container into `dist/` (its `cp311` tag stays cosmetic until Phase F's real
+abi3 retag). Keeps the wheel pipeline hot and progress tangible.
+
+**Hard ordering rules inside Gate 1:**
+- **M2 graphemes before any binding widening** — position semantics change;
+  API-freeze rule (risk #6).
+- **M4 tree-sitter before M13 folding** — fold ranges come from the AST.
+- **M9 h-scroll before M13 folding** — E1/E2 together are one deliberate
+  view-line-mapping effort (model line ↔ visible line map), not scattered
+  features. Folding makes lines *disappear* from the viewport; h-scroll
+  already failed once (risk #3).
+
+# GATE 1 — Code Editor v1
 
 ## Phase 0 — toolchain unblock (**done**, 2026-11-09)
 
-Host: Qt **6.12.0** in `/usr/lib`, gcc 16.2.1, cmake 4.4.4, ninja 1.13.2,
-system Python 3.14.8, **no KF6SyntaxHighlighting**.
-
-Setup actually used (note: Arch's system `python3` has **no pip**; `uv 0.13.6` is
-on PATH, and `python3 -m venv` does bootstrap pip on its own):
+Host reality: Qt **6.12.0** system + PySide6 **6.12.0** venv (they coincide —
+luck, not design), glibc 2.44, Docker works. **Shiboken codegen cannot run on
+the Arch host** (pip generator needs `libxml2.so.2`; Arch ships
+`libxml2.so.16` — never symlink it). Resolution actually used and now pinned
+in `bindings/Dockerfile` + `bindings/build_in_container.sh`: **rockylinux:9
+container** (the RHEL9 base manylinux_2_34 is built on) runs codegen,
+compile, smoke and wheel; C++ dev + CTest stay on the host. The venv that
+bootstrapped it (Arch's system python3 has no pip; `uv` is on PATH):
 
 ```bash
 uv venv .venv                                  # picked CPython 3.13.18
@@ -32,173 +70,247 @@ uv pip install --python .venv "PySide6-Essentials==6.12.0" \
     "shiboken6_generator==6.12.0" scikit-build-core ninja cmake
 ```
 
-Result: PySide6 6.12.0, **bundled Qt 6.12.0 == system Qt 6.12.0** — today they
-coincide, which is luck, not design. `Essentials` is enough (QtWidgets +
-QtPrintSupport); no need to pull the large Addons. glibc is **2.44**, well above
-PySide6's `manylinux_2_34` baseline.
-
-### Blocker found: Shiboken codegen cannot run on this Arch host
-
-The pip `shiboken6_generator` binary fails immediately:
-
-```
-error while loading shared libraries: libxml2.so.2: cannot open shared object file
-```
-
-Arch ships `libxml2.so.16` (2.14 renamed the soname), and the wheel does **not**
-bundle libxml2 or libclang. Don't work around this with a
-`libxml2.so.2 -> libxml2.so.16` symlink — the ABI is not compatible.
-
-**Verified resolution — do the codegen in a container.** The RHEL9 base that
-manylinux_2_34 is built on has everything the generator needs:
-
-```bash
-docker run --rm rockylinux:9 bash -lc \
-  'ls /usr/lib64/libxml2*; dnf -q repoquery --whatprovides "libclang.so*"'
-# -> /usr/lib64/libxml2.so.2 (2.9.13); clang-libs provides libclang.so
-```
-
-So: C++ development and the existing CTest suite stay on the Arch host;
-**binding codegen + wheel building go into a manylinux container**, which is the
-same environment Phase F/cibuildwheel needs anyway. Docker 29.9.2 works here.
-
 ## Phase A — M1b clipboard
 
 copy/cut/paste, middle-click X11 primary, paste replaces selection.
 **DoD:** state-based tests for copy→paste round trip, primary selection, and
 paste-over-selection; no surrogate pair split.
-**Watch:** X11 clipboard under `QT_QPA_PLATFORM=offscreen` may not work — that
-test may need a real/Xvfb display (qtmonaco itself uses `pytest-xvfb`). Gate it
-rather than making the suite depend on a display.
+**Watch:** X11 clipboard under `QT_QPA_PLATFORM=offscreen` may not work —
+that test may need a real/Xvfb display (qtmonaco itself uses `pytest-xvfb`).
+Gate it rather than making the suite depend on a display.
 
-## Phase B — thin binding spine (risk spike, do it before feature depth)
+## Phase B — thin binding spine (**DONE** 2026-11)
 
-Bind exactly one class and the *smallest stable surface*: `setPlainText`/
-`toPlainText`, cursor get/set, insert/delete text, `cursorMoved` /
-`selectionChanged` signals. **Do not bind grapheme-sensitive API yet.**
+Bound exactly one class (`CodeEditor`) + smallest stable surface; the macro
+`shiboken_generator_create_binding()` + scikit-build-core produce
+`_qmn.abi3.so` + `qmn/` shim; container chain green end-to-end; wheel smoke
+asserts exactly one `libQt6Core.so.6` in `/proc/self/maps`. All measured
+gotchas (macro signature and its `-I` limits, `CLANG_INSTALL_DIR`,
+`libglvnd-devel`, pinned Qt archives, wheel layout) are in **AGENTS.md** —
+re-read them before touching `bindings/`. The pair PySide6 6.12.0 / Qt 6.12.0
+is pinned there. The bound surface stays *thin* until Phase C lands.
 
-- `pyproject.toml` with `scikit-build-core`; binding driven by the **verified**
-  macro `shiboken_generator_create_binding()`, provided by
-  `find_package(Shiboken6Tools)` (lives in
-  `shiboken6_generator/lib/cmake/Shiboken6Tools/Shiboken6ToolsMacros.cmake`).
-  Required kwargs: `EXTENSION_TARGET`, `GENERATED_SOURCES`, `HEADERS`,
-  `TYPESYSTEM_FILE`, `LIBRARY_TARGET`; optional `QT_MODULES`,
-  `SHIBOKEN_EXTRA_OPTIONS`, `FORCE_LIMITED_API`. It emits an `add_library(... MODULE)`,
-  sets `PREFIX ""` + a python extension suffix, and links
-  `Shiboken6::libshiboken` + `PySide6::pyside6` + `Qt6::<module>`.
-- Build against **PySide6's own Qt headers/libs from site-packages**, never
-  `/usr/lib` — and run the codegen in the container from Phase 0, not on the
-  Arch host.
+## Phase C — M2 text correctness (must precede binding widening)
 
-**DoD:** a local wheel installs into a fresh venv; an offscreen smoke script
-imports it, instantiates `CodeEditor`, round-trips text, and receives a Qt
-signal in Python. That proves ABI + packaging — nothing else is in scope.
-**Kill criterion:** if it mismatches, pin the PySide6/Qt pair and document it.
-
-**Status: DONE (2026-11).** No ABI mismatch: exactly one `libQt6Core.so.6`
-(PySide6's) is mapped in both the build-tree and installed-wheel smokes
-(`/proc/self/maps` assertion in `bindings/tests/_smoke_checks.py`). The pair
-is pinned anyway — PySide6 **6.12.0** + Qt **6.12.0** (`bindings/Dockerfile`);
-`bindings/build_in_container.sh` runs the whole chain (codegen via the official
-macro, compile, smoke, wheel). Gotchas that cost time are recorded in AGENTS.md.
-Next binding widening happens only after Phase C (M2 graphemes).
-
-## Phase C — M2 text correctness (must precede widening the bound API)
-
-Grapheme/word boundaries, IME composition. Position semantics change here, so
-finish it before the binding surface grows.
-**DoD:** arrows/Backspace/Delete act on grapheme clusters; verified by numeric
-assertions (no screenshots — see `AGENTS.md`).
+Grapheme/word boundaries + IME composition. Use **QTextBoundaryRunner**
+(Qt ≥ 6.9) — README's old "QStringConverter iterators" phrasing was wrong
+(corrected in README). Bump root `find_package(Qt6 6.6)` → `6.9` (all our
+environments are ≥ 6.12). Arrow Left/Right move by grapheme clusters;
+Backspace/Delete already surrogate-safe (view job, stays view-only); word
+navigation (Ctrl+arrows, Ctrl+Del) via the runner. `col` numbering **stays
+UTF-16 code units** (LSP semantics — deliberate).
+**DoD:** numeric assertions for ZWJ emoji sequences, combining marks,
+surrogate pairs; no screenshots (`AGENTS.md`).
 
 ## Phase D — editing depth
 
-M3 undo/redo (+ multiple carets) · M4 syntax highlighting · M5 decoration
-layers + line-number gutter + markers · M6 find/replace.
-**Open decision (M4) — highlight engine.** Three options; tree-sitter facts
-verified against v0.27.2 sources (released 2026-11-07):
+### D1 — M3 undo/redo, then multiple carets
 
-- **A. KF6 `KSyntaxHighlighting`** — not installed here; a KF6 framework that
-  drags KDE cmake infra + KConfigCore/KCoreAddons into the dependency set.
-  Problematic for the wheel deliverable: PySide6 wheels bundle no KDE libs, so
-  we would ship KF6 runtime libs + definition XMLs beside `_qmn`. Only
+Undo/redo over the piece table (op log with inverses; snapshots as periodic
+compaction). **Multiple carets deliberately inside Gate 1** (decided
+2026-11-09): a v1 editor without them looks incomplete; generalize the
+selection model to a list. Alt+Click / Alt+Drag add carets; typed edits,
+Backspace and selection ops fan out per caret; undo groups one user action
+into one step.
+**DoD:** undo/redo round-trip property test against a naive reference (same
+style as `randomOpsVsReference`); multi-caret state tests (N carets → one
+edit → N model edits; caret-normalization on overlapping selection).
+
+### D2 — M4 syntax highlighting: vendored tree-sitter (engine decided)
+
+Three options were considered; facts verified against tree-sitter v0.27.2
+sources (released 2026-11-07):
+
+- **A. KF6 `KSyntaxHighlighting`** — not installed; a KF6 framework dragging
+  KDE cmake infra + KConfigCore/KCoreAddons into the dependency set.
+  Problematic for the wheel deliverable: PySide6 wheels bundle no KDE libs,
+  so we would ship KF6 runtime libs + definition XMLs beside `_qmn`. Only
   attractive if the wheel stops being first-class.
-- **B. Own Monarch-style line highlighter** — zero deps, UTF-16 native, mirrors
-  the Monaco look qtmonaco users expect (Monarch is Monaco's own engine). But
-  no syntax tree: nothing reusable for folding/smart-select, M10 structural
-  diff or M8 assist, and every language definition is ours to author forever.
+- **B. Own Monarch-style line highlighter** — zero deps, UTF-16 native,
+  mirrors the Monaco look (Monarch is Monaco's own engine). But no syntax
+  tree: nothing reusable for folding, smart-select, M10 structural diff or
+  M8 assist; every language definition ours forever.
 - **C. Vendored tree-sitter** (runtime + committed generated `parser.c` per
   grammar) — pure C, compiles straight into the library/`_qmn` (single
   amalgamation TU `lib/src/lib.c` + one `parser.c` per grammar), wheel-safe,
-  no runtime deps. Verified fit with our model: `TSInputEncodingUTF16LE` is
-  first-class and the lexer advances by encoded-unit size, so a tree-sitter
-  byte offset is **exactly 2×** our 0-based UTF-16-unit offset — no
-  transcoding, no byte/rope mapping pain; the pull-model `read` callback can
-  hand out piece-table chunks (QString data *is* UTF-16LE on LE) zero-copy.
-  Incremental is built-in: `ts_tree_edit` + reparse with old tree,
-  `ts_parser_set_included_ranges` for viewport-scoped parsing,
-  `TSParseOptions.progress_callback` for time-sliced parses. ABI 15 runtime,
-  accepts grammars ≥13 — pin the vendored copy, commit generated parsers
-  (CLI needed only to regenerate, not to build). Costs: adapter plumbing
-  (piece table ↔ `TSInput`, edits in byte units), per-language `.scm` query
-  curation, ~0.1–1 MB of parser tables per grammar in the wheel.
-**Decided: C — vendored tree-sitter** (pin v0.27.2), with a thin engine seam
-so grammar-less languages (plain text, …) keep a trivial fallback. Options A
-and B are kept above as the recorded rationale.
+  no runtime deps. Verified fit: `TSInputEncodingUTF16LE` is first-class and
+  the lexer advances by encoded-unit size, so a tree-sitter byte offset is
+  **exactly 2×** our UTF-16-unit offset (see AGENTS.md) — no transcoding; the
+  pull-model `read` callback hands out piece-table chunks (QString data *is*
+  UTF-16LE on LE) zero-copy. Incremental built-in: `ts_tree_edit` +
+  reparse-with-old-tree, `ts_parser_set_included_ranges` for
+  viewport-scoped parses, `TSParseOptions.progress_callback` for
+  time-sliced parses. ABI 15 runtime accepts grammars ≥ 13; pin the vendored
+  copy, commit generated parsers (CLI only needed to regenerate).
 
-## Phase E — M7…M10 + parity surface
+**Decided: C** — pin v0.27.2, with a thin engine seam so grammar-less modes
+(plain text, …) keep a trivial fallback. A and B stay as the recorded
+rationale.
 
-| qtmonaco API | our state today | where |
-|---|---|---|
-| `set_text` / `get_text` | `setPlainText` / `toPlainText` | bind now |
-| `insert_text` / `delete_line` | `insertAtOffset` / `removeRange` | thin, now |
-| `set_cursor` / `current_cursor` | `setPosition` / `position` | bind now |
-| `set_language` / `get_language` | none | M4 |
-| `set_highlighted_lines` / `clear_highlighted_lines` | none | M5 |
-| `set_line_numbers_mode` (on/off/relative/interval) | gutter not built | M5 |
-| `set_theme`, `set_readonly` | none | new view flags |
-| `set_scroll_beyond_last_line_enabled` | explicitly not implemented | tie to it |
-| `set_minimap_enabled` | no minimap by design | M7 ruler (**maps to it**, decided) |
-| `open_diffs` | none | M10 |
-| LSP hooks (`update_workspace_configuration`, `add_action`, lsp header) | none | M8 |
-| `set_vim_mode_enabled` | out of scope | binding **warns, never implements** |
+First steps: vendor `third_party/tree-sitter` (v0.27.2, verified archive);
+grammars python + json + javascript first (c later), generated `parser.c`
+committed; `HighlightEngine` seam in `src/view/` (core stays untouched —
+tree-sitter never enters `src/core/`). Open sub-decision at D2 start:
+threading model — time-sliced parsing via `progress_callback` on the GUI
+thread keeps it lock-free; a concurrent parser would need read-only
+piece-table views — decide with a bench, not by taste.
+**DoD:** capture ranges from `.scm` queries map to model offsets under
+numeric assertions (feed edits, compare token spans to a reference on
+`QString`); incremental reparse stays O(edit neighborhood), proven by the
+bench tool on a big file.
 
-**Off-by-one trap (do this deliberately, not accidentally):** qtmonaco is
-**1-based** — `delete_line(line)` says so in its docstring, `set_cursor(line,
-column=1)` and `set_highlighted_lines(start, end)` are 1-based, and
-`insert_text` defaults `column` to 1. Our `TextPosition` is 0-based for both.
-The binding must convert explicitly and be covered by its own tests. Also match
-error semantics: qtmonaco raises `ValueError` when readonly, and
-`current_cursor` is a *property*.
+### D3 — M5 decoration layers + line-number gutter + markers
+
+Decoration API is the **design-forward bridge to Gate 2** (decided
+2026-11-09): three consumer classes must be expressible without new view
+primitives — (1) gutter glyph layer (diagnostics icons, breakpoint dots,
+fold triangles), (2) whole-line layer (current line, highlighted lines,
+stack-frame line), (3) inline text layer (underlines/wavy lines, inlay
+hints rendered after/between text). Gutter: line numbers with the
+qtmonaco modes (off/on/relative/interval, `set_line_numbers_mode`), current
+line, M4 markers ride layer (1).
+**DoD:** state tests — decoration add/update/remove round-trips, gutter
+width growth at 9→10 lines, relative-mode math; renderer stays
+viewport-only (no off-screen cost beyond the ruler's scaled view).
+
+### D4 — M6 find/replace
+
+Inside Gate 1 because Chromium-Monaco ships its own find widget — a drop-in
+user must not lose it. Ctrl+F bar, `QRegularExpression`, match highlights
+via decoration layer (3), `F3`/`Shift+F3`, replace + replace-all with
+confirm step.
+**DoD:** match ranges as model ranges (numeric assertions incl. surrogate
+safety); replace-all is one undoable D1 action.
+
+## Phase E — viewport mapping (one deliberate effort, two steps)
+
+### E1 — M7 overview ruler + M9 horizontal scroll
+
+**First: study the failed attempt** — the h-scroll try was committed as
+`2809945` and dropped from `main` (risk #3); review the reflog while present
+instead of re-deriving it. Deliverables: h-scrollbar + caret-keep-visible on
+long lines, `set_scroll_beyond_last_line_enabled` flag, M7 overview ruler
+(`set_minimap_enabled` maps onto it — decided) showing the full-document
+minimap of lines/markers/folds.
+**DoD:** numeric viewport assertions (x-offset after arrow/scroll, caret
+scroll-into-view), ruler geometry state tests; no off-screen paint cost.
+
+### E2 — M13 code folding (**new milestone**, added to README roadmap)
+
+Fold ranges from tree-sitter `@fold` captures per grammar + an
+indent-based fallback for grammar-less modes. Fold/unfold via gutter
+triangles (D3 layer 1) and keyboard. This is where lines *disappear* from
+the viewport: introduce a single **view-line map** (model line ↔ visible
+line, fold ranges) and route *everything* through it — painting, caret
+navigation (folds jump as units), selection, gutter, ruler, h-scroll from
+E1. Folding is only correct if E1's mapping landed first.
+**DoD:** numeric state tests — visible-line count after fold, map lookups
+across fold boundaries, caret jump over a fold, unfolded content unchanged,
+ruler reflects fold ranges; large file stays O(viewport) via D2's
+included-ranges story.
+
+## Phase F — ship v1 (gate exit)
+
+- **Python:** cibuildwheel matrix on `manylinux_2_34_x86_64` (match PySide6's
+  own baseline) + `auditwheel` repair; real **abi3** wheel tag (`cp310-abi3`,
+  Python floor 3.10); pin `PySide6>=6.12` in wheel metadata; the `cp311`
+  cosmetic tag from Phase B dies here.
+- **C++:** `install(TARGETS)` + exported namespace `qmn::` +
+  `qmnConfig.cmake`/version-file + public-header review (re-check
+  Shiboken-wrappability) + an example consumer built against the *installed*
+  package. Today the repo has no install/export at all — this is what makes
+  "usable from C++" real.
+- **Parity surface (Gate-1 rows bound at freeze):**
+
+  | qtmonaco API | our state today | where |
+  |---|---|---|
+  | `set_text` / `get_text` | `setPlainText` / `toPlainText` | bind at F |
+  | `insert_text` / `delete_line` | `insertAtOffset` / `removeRange` | bind at F |
+  | `set_cursor` / `current_cursor` | `setPosition` / `position` | thin, since B |
+  | `set_language` / `get_language` | none | D2, bind at F |
+  | `set_highlighted_lines` / `clear_highlighted_lines` | none | D3 |
+  | `set_line_numbers_mode` | gutter not built | D3 |
+  | `set_theme`, `set_readonly` | none | D2–D3 (token palette + view flags) |
+  | `set_scroll_beyond_last_line_enabled` | not implemented | E1 |
+  | `set_minimap_enabled` | no minimap by design | E1 ruler (**maps to it**, decided) |
+  | `set_vim_mode_enabled` | out of scope | binding **warns, never implements** |
+  | `open_diffs` | none | **Gate 2** (M10) |
+  | LSP hooks (`update_workspace_configuration`, `add_action`, lsp header) | none | **Gate 2** (M8) |
+
+- **Freeze:** bump `SOVERSION`, CHANGELOG discipline, then the v1 tag.
+  M11 accessibility (QAccessible — a custom-painted widget gives screen
+  readers nothing by default) is Gate-1 **polish**, non-gating: ship alpha
+  without it, close it before calling v1 "finished".
+
+**Off-by-one trap (deliberate, never accidental):** qtmonaco is **1-based** —
+`delete_line(line)` docstring says so; `set_cursor(line, column=1)`,
+`set_highlighted_lines(start, end)` and `insert_text`'s default `column=1`
+too. Our `TextPosition` is 0-based. The binding converts explicitly, with its
+own tests. Match error semantics: qtmonaco raises `ValueError` when readonly,
+and `current_cursor` is a *property*.
 
 **Decided divergences (binding-level behavior):**
-- **vim** — out of scope, but `set_vim_mode_enabled` is *exposed* and emits a
-  warning instead of being omitted, so drop-in callers don't hit
-  `AttributeError`. Never implement vim.
-- **minimap** — `set_minimap_enabled` maps onto the M7 overview ruler (same
-  on/off meaning). No Chromium-style minimap is ever built.
+- **vim** — out of scope forever, but `set_vim_mode_enabled` is *exposed* and
+  warns instead of being omitted, so drop-in callers don't hit
+  `AttributeError`.
+- **minimap** — `set_minimap_enabled` maps onto the E1 overview ruler. No
+  Chromium-style minimap is ever built.
 
-## Phase F — M12 packaging/CI hardening
+**Gate-1 exit checklist:** ctest green + wheel smoke + C++ consumer smoke +
+bench within perf targets (README) on the big file → tag `v1.0`.
 
-cibuildwheel matrix + `auditwheel` repair. Note PySide6's own manylinux baseline
-is `manylinux_2_34_x86_64`; match it and set the Python floor to 3.10 (abi3).
-Pin `PySide6>=<the version we built against>` in the wheel metadata.
+# GATE 2 — IDE surface (after v1 freeze)
+
+Everything here is a *consumer* of the frozen v1 widget API; none of it may
+require new view primitives (if it does, that is a Gate-1 design bug to fix,
+not a Gate-2 workaround).
+
+- **M8 LSP client** — new layer `src/lsp/`, QtCore/QtNetwork only, **zero
+  widget dependency**; glue (diagnostics → decoration layer 1+3, hover/
+  completion popups) is a thin consumer. **Transport correction:** LSP speaks
+  JSON-RPC over **stdio pipes to a spawned server process** (`QProcess`);
+  README's old "QWebSocket" claim was wrong (websocket is a rare secondary
+  transport) — corrected in README.
+- **DAP features** — the widget's contribution already exists after D3:
+  breakpoint glyphs, current-stack-frame line, inlay hints for variable
+  values. A DAP protocol client would sit at the same QtCore level as
+  `src/lsp/`. No view surgery needed or allowed.
+- **M10 diff view** — structural alignment on tree-sitter ASTs + inline or
+  side-by-side layout (open decision at start); bind `open_diffs`.
+- **Soft wrap** — the deferred half of M9 (decided 2026-11-09: v1 ships
+  h-scroll only); rides E2's view-line map.
+- **Parity leftovers:** LSP hooks + `open_diffs` rows from the F table.
 
 ## Top risks
 
-1. **Qt drift + host toolchain mismatch** — Arch's system Qt rolls forward while
-   PySide6 lags and ships its own. Always build against the venv's PySide6 Qt and
-   pin the pair. This already bit once: the pip Shiboken generator cannot run on
-   the host at all (missing `libxml2.so.2`) — see Phase 0 for the container fix.
-2. **1-based vs 0-based** — silent off-by-one across the whole parity surface.
-3. **M9 already failed once** — the horizontal-scroll attempt was committed as
-   `2809945` and dropped from `main` (recoverable via reflog while present).
-   Review that attempt before retrying instead of re-deriving it; treat M9 as
-   high-risk.
-4. **Highlight-engine weight** — see M4 open decision above (KF6 wheel burden
-   vs vendored tree-sitter vs own highlighter).
-5. **No vision** — every rendering milestone (gutter, ruler, diff, wrap) must be
-   proven by numeric/state assertions; precedent is
-   `cellWidthMatchesGlyphEngineAdvance`.
-6. **API freeze ordering** — don't widen the bound surface before M2 lands.
+1. **Qt drift + host toolchain mismatch** — Arch's system Qt rolls forward
+   while PySide6 lags and ships its own. Always build against the venv's
+   PySide6 Qt and pin the pair. This already bit once: the pip Shiboken
+   generator cannot run on the host at all (missing `libxml2.so.2`) — the
+   container fix is Phase 0 / AGENTS.md.
+2. **1-based vs 0-based** — silent off-by-one across the whole parity
+   surface; conversion only at the binding layer, with its own tests.
+3. **Viewport mapping is the scar tissue** — M9 already failed once
+   (`2809945`, recoverable via reflog while present) and M13 folding piles a
+   second mapping axis on top. Treat E1→E2 as one mapping core: unit-test
+   the view-line map as a pure thing *before* wiring the widget, and review
+   the old attempt before retrying.
+4. **Highlight engine — decided** (vendored tree-sitter, v0.27.2). Residual
+   risks: adapter byte-unit correctness (mitigation: property tests feeding
+   random edits and asserting token spans, `TSInputEdit` in exactly-2×
+   units), per-language `.scm` curation load, ABI hygiene only when bumping
+   the vendored copy (grammars ≥ 13, runtime ABI 15).
+5. **No vision** — every rendering milestone (gutter, ruler, folding,
+   h-scroll, later wrap/diff) is proven by numeric/state assertions only;
+   precedent is `cellWidthMatchesGlyphEngineAdvance`.
+6. **API freeze ordering** — never widen the bound surface before M2 lands;
+   never freeze v1 before Phase F's C++-export + wheel work is green.
+7. **Gate 1 is long** — the two-gate model's one real downside; the release
+   train (alpha wheel + `v0.x` tag per milestone) is the agreed mitigation
+   for hobby-scale motivation accounting.
 
-Out of scope by design: vim mode.
+Out of scope by design: vim mode (setter exists and warns). Soft wrap is
+*deferred* to Gate 2, not out of scope.
+
+
+

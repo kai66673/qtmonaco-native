@@ -74,25 +74,36 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-spike --exit-after-ms 2000 bigfile
 
 ## Roadmap (hobby-scale, see estimates in the qtmonaco discussion)
 
-Milestones, in build order:
+Milestones, in build order. **Gate 1** (editor v1: M1b…M13 + M12 completion)
+ships a self-contained editor usable from C++ and PySide6; **Gate 2** (IDE
+surface) starts only after the v1 API freeze — details in *PLAN.md*.
+
+Gate 1 — Code Editor v1:
 
 - [x] M0 spike: model + painting + caret + typing + v-scroll + perf stats
 - [x] M1 selection: shift-navigation, drag (with autoscroll), shift+click,
       Ctrl+A, replace-on-type/Enter/Backspace/Delete, Escape clears
 - [ ] M1b clipboard: copy/cut/paste, middle-click paste, X11 primary selection
-- [ ] M2 IME composition, grapheme/word boundaries (QStringConverter iterators)
+- [ ] M2 IME composition, grapheme/word boundaries (QTextBoundaryRunner)
 - [ ] M3 undo/redo (piece-list snapshots/ops), multiple carets
-- [ ] M4 syntax highlighting (KSyntaxHighlighting + async rehighlight with state checkpoints)
+- [ ] M4 syntax highlighting (vendored tree-sitter runtime + generated
+      grammars; incremental, viewport-scoped — see PLAN.md D2)
 - [ ] M5 decoration layers + line-number gutter + markers
 - [ ] M6 find/replace (QRegularExpression)
 - [ ] M7 overview ruler (replaces minimap)
-- [ ] M8 LSP client (QWebSocket + JSON-RPC) — completion, diagnostics, hover
-- [ ] M9 soft wrap, horizontal scrolling
-- [ ] M10 diff view
-- [ ] M11 accessibility (QAccessible), final polish
+- [ ] M9 horizontal scrolling (soft wrap deferred to Gate 2)
+- [ ] M13 code folding (tree-sitter `@fold` ranges + indent fallback; gutter toggles)
+- [ ] M11 accessibility (QAccessible), final polish (non-gating)
 - [ ] M12 PySide6 binding + wheel: expose `CodeEditor` via Shiboken6
-      (scikit-build-core + cibuildwheel), a drop-in for `qtmonaco.Monaco`
-      (same public API; the vim setter is kept but only warns)
+      (scikit-build-core + cibuildwheel), production abi3 wheel +
+      C++ install/export — the v1 API freeze (see PLAN.md Phase F)
+
+Gate 2 — IDE surface (after the freeze):
+
+- [ ] M8 LSP client (stdio JSON-RPC via QProcess) — completion, diagnostics, hover
+- [ ] M10 diff view → `open_diffs` parity
+- [ ] Soft wrap (the deferred half of M9)
+- [ ] DAP features via decorations (breakpoints, current frame, value hints)
 
 Out of scope by design: vim mode. The `set_vim_mode_enabled` setter is still
 exposed by the Python binding for API compatibility, but only warns (see
