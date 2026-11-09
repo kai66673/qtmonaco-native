@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- M1b clipboard: Ctrl+C / Ctrl+X / Ctrl+V plus the platform chains matched
+  via `QKeySequence` (`Ctrl+Ins`, `Shift+Ins`, `Shift+Del`, Cmd variants on
+  macOS). With no selection copy/cut target the whole current line,
+  Monaco-style: the non-last line goes with its trailing newline; cutting the
+  last line also takes the newline that preceded it (VS Code line-cut
+  semantics) so no phantom trailing line appears. Paste replaces any
+  selection, normalizes `\r\n`/lone `\r` to `\n`, is a no-op on an empty
+  clipboard and never splits a surrogate pair. X11 primary selection: every
+  selection (mouse, keyboard, Ctrl+A) mirrors into it and it is released on
+  clear/cut; middle-click pastes it at the click position, falling back to
+  the regular clipboard where no primary selection exists (Wayland,
+  offscreen). Public `copy()`/`cut()`/`paste()`. The suite runs green both
+  offscreen (primary-mode tests gate on `supportsSelection()`) and on real
+  X11, where all 37 tests execute unskipped.
 - PySide6 binding spine (PLAN.md Phase B): the Shiboken6 extension module
   `_qmn` wraps `qmn::view::CodeEditor` + `TextPosition` via the official
   `shiboken_generator_create_binding()` macro; codegen, compile and wheel all

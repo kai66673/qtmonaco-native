@@ -1,10 +1,13 @@
 #include "CodeEditor.hpp"
 
 #include <QApplication>
+#include <QClipboard>
 #include <QFocusEvent>
 #include <QFontDatabase>
 #include <QFontMetricsF>
+#include <QGuiApplication>
 #include <QKeyEvent>
+#include <QKeySequence>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QResizeEvent>
@@ -137,6 +140,7 @@ void CodeEditor::setSelection(TextPosition anchor, TextPosition caret)
     update();
     emit cursorMoved(caret_);
     emit selectionChanged();
+    updatePrimarySelection();
 }
 
 void CodeEditor::moveCaret(TextPosition target, bool extend)
@@ -165,6 +169,7 @@ void CodeEditor::moveCaret(TextPosition target, bool extend)
     emit cursorMoved(caret_);
     if (had != hasSelection_)
         emit selectionChanged();
+    updatePrimarySelection(); // keep primary in step with shift-drag/motion
 }
 
 TextPosition CodeEditor::selStart() const
@@ -223,7 +228,107 @@ bool CodeEditor::deleteSelection()
     hasSelection_ = false;
     buffer_.removeRange(startOff, endOff);
     setCaret(start);
+    updatePrimarySelection(); // the removed text must not linger in primary
     return true;
+}
+
+// --- Clipboard (M1b) ----------------------------------------------------
+
+void CodeEditor::copy()
+{
+    QClipboard* cb = QGuiApplication::clipboard();
+    if (!cb)
+        return;
+    if (hasSelection_) {
+        cb->setText(selectedText(), QClipboard::Clipboard);
+        return; // primary already mirrors the live selection
+    }
+    // Empty selection: copy the whole current line, Monaco-style. A
+    // non-last line comes with its trailing newline (so one Ctrl+C, Ctrl+V
+    // sequence clones the line wherever the caret sits); the last line has
+    // no newline of its own to give.
+    const int line = caret_.line;
+    const int start = buffer_.offsetOfLine(line);
+    const int end = (line + 1 < buffer_.lineCount())
+        ? buffer_.offsetOfLine(line + 1)
+        : buffer_.offsetOf(line, lineLength(line));
+    cb->setText(buffer_.textRange(start, end), QClipboard::Clipboard);
+}
+
+void CodeEditor::cut()
+{
+    QClipboard* cb = QGuiApplication::clipboard();
+    if (!cb)
+        return;
+    if (hasSelection_) {
+        cb->setText(selectedText(), QClipboard::Clipboard);
+        deleteSelection(); // also drops the primary mirror
+        return;
+    }
+    const int line = caret_.line;
+    if (line + 1 < buffer_.lineCount()) {
+        // Whole-line cut (newline included): the following line slides up
+        // and the caret waits at its start, ready for another Ctrl+X.
+        const int start = buffer_.offsetOfLine(line);
+        const int end = buffer_.offsetOfLine(line + 1);
+        cb->setText(buffer_.textRange(start, end), QClipboard::Clipboard);
+        buffer_.removeRange(start, end);
+        setCaret({line, 0});
+    } else {
+        // Last line: take the newline that ends the previous line instead
+        // (VS Code line-cut semantics), so the document does not gain a
+        // phantom trailing line; the caret lands at the previous line end.
+        const int start = line > 0
+            ? buffer_.offsetOf(line - 1, lineLength(line - 1)) // the '\n' before this line
+            : buffer_.offsetOfLine(0);
+        const int end = buffer_.offsetOf(line, lineLength(line));
+        cb->setText(buffer_.textRange(start, end), QClipboard::Clipboard);
+        buffer_.removeRange(start, end);
+        if (line > 0)
+            setCaret({line - 1, lineLength(line - 1)});
+        else
+            setCaret({0, 0});
+    }
+}
+
+void CodeEditor::paste()
+{
+    QClipboard* cb = QGuiApplication::clipboard();
+    if (!cb)
+        return;
+    pasteText(cb->text(QClipboard::Clipboard));
+}
+
+void CodeEditor::pasteText(const QString& text)
+{
+    QString clean = text;
+    // The buffer only knows '\n' separators, so clipboard text arriving with
+    // '\r\n' (Windows) or lone '\r' must be normalized. Order matters: the
+    // two-char sequence first, then whatever '\r' remains.
+    clean.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    clean.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+    if (clean.isEmpty())
+        return; // empty clipboard: paste is a no-op, not a delete
+    insertTextAtCaret(clean);
+    if (QClipboard* cb = QGuiApplication::clipboard();
+        cb && cb->supportsSelection()) {
+        // X11 convention: the freshly pasted text becomes the new primary
+        // selection (the old primary was the selection it just replaced).
+        cb->setText(clean, QClipboard::Selection);
+    }
+}
+
+void CodeEditor::updatePrimarySelection()
+{
+    QClipboard* cb = QGuiApplication::clipboard();
+    // Wayland and the offscreen platform have no primary selection;
+    // supportsSelection() is the gate (tests must gate on it the same way).
+    if (!cb || !cb->supportsSelection())
+        return;
+    if (hasSelection_)
+        cb->setText(selectedText(), QClipboard::Selection);
+    else
+        cb->setText(QString(), QClipboard::Selection); // release ownership
 }
 
 int CodeEditor::surrogateBackspaceLen() const
@@ -437,6 +542,27 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         allMods & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier);
     const int key = event->key();
 
+    // Clipboard shortcuts go through QKeySequence matching so the full
+    // standard key chains are covered (Ctrl+C / Ctrl+Ins / Cmd+C for copy,
+    // Shift+Del for cut on X11, Shift+Ins for paste…). This must run before
+    // the modifier catch-all below, which would otherwise swallow Ctrl+C.
+    // matches() checks the modifier set exactly, so Ctrl+Alt+C stays free.
+    if (event->matches(QKeySequence::Copy)) {
+        copy();
+        finish();
+        return;
+    }
+    if (event->matches(QKeySequence::Cut)) {
+        cut();
+        finish();
+        return;
+    }
+    if (event->matches(QKeySequence::Paste)) {
+        paste();
+        finish();
+        return;
+    }
+
     if (ctrl != Qt::NoModifier) {
         switch (key) {
         case Qt::Key_Home:
@@ -583,6 +709,22 @@ TextPosition CodeEditor::posFromEvent(const QPoint& widgetPos) const
 
 void CodeEditor::mousePressEvent(QMouseEvent* event)
 {
+    if (event->button() == Qt::MiddleButton) {
+        // X11 paste gesture: place the caret at the click, then insert the
+        // primary selection there. Platforms without a primary selection
+        // (Wayland, offscreen) fall back to the regular clipboard, so the
+        // middle-click button always does something predictable.
+        setFocus(Qt::MouseFocusReason);
+        setCaret(posFromEvent(event->position().toPoint()));
+        if (QClipboard* cb = QGuiApplication::clipboard()) {
+            QString text = cb->text(QClipboard::Selection);
+            if (text.isEmpty())
+                text = cb->text(QClipboard::Clipboard);
+            pasteText(text);
+        }
+        event->accept();
+        return;
+    }
     if (event->button() != Qt::LeftButton)
         return;
     setFocus(Qt::MouseFocusReason);

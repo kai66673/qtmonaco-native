@@ -36,12 +36,14 @@ struct TextPosition {
 // blinking, keyboard editing (text, Enter, Backspace, Delete, arrows,
 // Home/End, PageUp/PageDown), mouse caret placement and drag selection,
 // Shift-navigation + Ctrl+A selections with replace-on-type semantics,
-// vertical scrolling, per-keystroke latency instrumentation.
+// clipboard copy/cut/paste (whole-line when no selection, Monaco-style),
+// X11 primary selection mirroring + middle-click paste, vertical scrolling,
+// per-keystroke latency instrumentation.
 //
-// Deliberately NOT included (follow-up milestones): clipboard, IME
-// composition, soft wrap, horizontal scrolling, undo/redo, column memory
-// for Up/Down, word navigation, double-click word selection, full
-// grapheme-cluster safety. See README roadmap.
+// Deliberately NOT included (follow-up milestones): IME composition,
+// soft wrap, horizontal scrolling, undo/redo, column memory for Up/Down,
+// word navigation, double-click word selection, full grapheme-cluster
+// safety. See README roadmap.
 class CodeEditor : public QWidget {
     Q_OBJECT
 public:
@@ -70,6 +72,13 @@ public:
     int selectedLength() const; // UTF-16 code units, O(log P), no copy
     void selectAll();
     void clearSelection();
+
+    // Clipboard (M1b). With no selection, copy/cut target the whole current
+    // line (newline included) — Monaco semantics. paste() inserts the
+    // clipboard text, replacing the selection, with CRLF normalized to '\n'.
+    void copy();
+    void cut();
+    void paste();
 
     int lineHeight() const { return lineHeight_; }
     double cellWidth() const { return cellWidth_; }
@@ -111,6 +120,8 @@ private:
     // Sorted ends of the current selection (valid only if hasSelection_).
     TextPosition selStart() const;
     TextPosition selEnd() const;
+    void pasteText(const QString& text); // sanitize + insert + primary update
+    void updatePrimarySelection(); // mirror an active selection to X11 primary
     TextPosition posFromEvent(const QPoint& widgetPos) const;
     int lineLength(int line) const;
     int surrogateBackspaceLen() const; // 2 if a surrogate pair precedes caret
