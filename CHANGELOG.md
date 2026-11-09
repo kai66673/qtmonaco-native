@@ -24,6 +24,30 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Ctrl+A) freezes the typing chain, so click-then-type is its own undo step;
   paste/cut are bracketed into single steps, Backspace runs coalesce, Enter
   breaks chains.
+- Multiple carets (Phase D1). Alt+Click adds a caret (the clicked caret
+  becomes PRIMARY, the old one demotes to an extra); Alt+press on an
+  existing caret arms an Alt+Drag that selects inside that slot; plain
+  click, middle click, `setPosition()`, `selectAll()` and `setPlainText()`
+  collapse the set back to the primary caret. Escape is two-stage: the
+  extras drop first, the primary selection second; a third Escape passes
+  through. Typed keys, Enter, Backspace/Delete, Ctrl+Backspace/Ctrl+Delete
+  (word runs), clipboard cut/paste and every navigation key fan out per
+  caret; copy joins ALL slots' selection texts (or the distinct caret lines
+  when nothing is selected) with `\n`. One key press is ONE bracketed undo
+  group across all carets, and undo/redo restores every slot (the undo mark
+  carries the extras). Public surface: `additionalCaretCount()`,
+  `additionalCarets()` (doc order), `clearAdditionalCarets()`.
+  Normalization after every gesture/edit: exactly-stacked slots fold (the
+  primary survives), a selection contained in another dies, a bare caret
+  strictly inside another slot's selection dies.
+  Deliberate v1 divergences from VS Code, pinned by tests: overlapping
+  per-caret edits keep the RIGHTMOST edit and drop the colliding leftward
+  one (no merge); paste puts the SAME text at every caret (multi-line
+  clipboards are never distributed line-per-caret); whole-line cut lands
+  stacked carets at the merged block start and folds them in one action;
+  Alt+click does not remove a caret (no toggle); a reverse selection
+  extended past its own anchor collapses to zero-length instead of
+  re-orienting.
 
 ### Fixed
 - `TextBuffer`'s constructor never created the add buffer: a document fed

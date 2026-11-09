@@ -100,6 +100,27 @@ private slots:
     void setPlainTextClearsUndoHistory();
     void undoOnEmptyHistoryIsNoOp();
 
+    // Multiple carets (Phase D1).
+    void altClickAddsCaretsInDocOrder();
+    void altClickInsideSelectionFollowsRules();
+    void altDragSelectsExtraAndPrimary();
+    void plainClickAndEscapeCollapseCarets();
+    void programmaticPathsCollapseCarets();
+    void navigationFoldDuplicatesAndKeepSelections();
+    void typingFansOutToOneEditPerCaret();
+    void typingOverSelectionsFansOut();
+    void enterFansOutAsOneUndoStep();
+    void backspaceAndDeleteFansOut();
+    void backspaceOnExtraAtDocStartIsSkipped();
+    void overlappingEditsKeepRightDropLeft();
+    void ctrlDeleteWordFansOut();
+    void caretKeysAndShiftNavFanOut();
+    void copyWithCaretsJoinsLines();
+    void cutSelectionsAtCaretsDeletesAll();
+    void cutLinesAtCaretsJoinsClipboard();
+    void pasteFansOutToAllCarets();
+    void undoRestoresAllCaretsOneStepPerPress();
+
 private:
     CodeEditor* editor = nullptr;
 };
@@ -1407,6 +1428,478 @@ void TestCodeEditor::undoOnEmptyHistoryIsNoOp()
     editor->redo();
     QCOMPARE(editor->toPlainText(), QStringLiteral("x"));
     QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+}
+
+// --- multiple carets (Phase D1) -------------------------------------------
+
+namespace {
+
+// Pixel for a (line, col) hit in the monospace test font: the cell-center
+// convention of mousePlacesCaret, plus a y nudge so the click never lands
+// inside the glyph of an adjacent cell.
+QPoint caretPixel(CodeEditor* e, int line, int col, double xNudge = 0.4)
+{
+    const int pad = e->padding();
+    const double cw = e->cellWidth();
+    const int lh = e->lineHeight();
+    return QPoint(pad + int(col * cw + cw / 2 + xNudge), pad + line * lh + lh / 2);
+}
+
+void altClick(CodeEditor* e, int line, int col)
+{
+    QTest::mousePress(e, Qt::LeftButton, Qt::AltModifier, caretPixel(e, line, col));
+}
+
+// Alt+press at `from`, drag to `to`, release. Button state rides the move
+// event (QTest::mouseMove would drop it); never Q_ASSERT the sends.
+void altDrag(CodeEditor* e, const QPoint& from, const QPoint& to)
+{
+    const QPointF f(from), t(to);
+    QMouseEvent press(QEvent::MouseButtonPress, f, f, Qt::LeftButton, Qt::LeftButton, Qt::AltModifier);
+    QMouseEvent move(QEvent::MouseMove, t, t, Qt::NoButton, Qt::LeftButton, Qt::AltModifier);
+    QMouseEvent release(QEvent::MouseButtonRelease, t, t, Qt::LeftButton, Qt::NoButton, Qt::AltModifier);
+    QTEST_ASSERT(QApplication::sendEvent(e, &press));
+    QTEST_ASSERT(QApplication::sendEvent(e, &move));
+    QTEST_ASSERT(QApplication::sendEvent(e, &release));
+}
+
+} // namespace
+
+void TestCodeEditor::altClickAddsCaretsInDocOrder()
+{
+    editor->setPlainText(QStringLiteral("aa bb cc"));
+    editor->setPosition({0, 0});
+
+    altClick(editor, 0, 6); // adds at 6; the clicked caret becomes PRIMARY
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 6}));
+    QCOMPARE(editor->additionalCaretCount(), 1);
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 0}})); // old primary demoted
+
+    altClick(editor, 0, 3);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+    QCOMPARE(editor->additionalCaretCount(), 2);
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 0}, {0, 6}})); // document order
+
+    // Alt+click exactly on the primary caret adds nothing (it arms a drag).
+    altClick(editor, 0, 3);
+    QCOMPARE(editor->additionalCaretCount(), 2);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+
+    // Same on an extra caret's spot: that slot is dragged, no new caret.
+    altClick(editor, 0, 0);
+    QCOMPARE(editor->additionalCaretCount(), 2);
+
+    // A plain click collapses the whole set back to one caret.
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, caretPixel(editor, 0, 1));
+    QCOMPARE(editor->additionalCaretCount(), 0);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+}
+
+void TestCodeEditor::altClickInsideSelectionFollowsRules()
+{
+    editor->setPlainText(QStringLiteral("abcdefgh"));
+    editor->setPosition({0, 0});
+
+    altDrag(editor, caretPixel(editor, 0, 0), caretPixel(editor, 0, 5));
+    QVERIFY(editor->hasSelection()); // primary owns [0,5)
+    QCOMPARE(editor->additionalCaretCount(), 0);
+
+    altClick(editor, 0, 7); // adds, demoting the [0,5) selection into an extra
+    QCOMPARE(editor->additionalCaretCount(), 1);
+
+    // Alt+click strictly inside the extra's selection: the added caret is
+    // PRIMARY, so the extra holding the enclosing selection loses its slot
+    // (the primary caret always survives).
+    altClick(editor, 0, 3);
+    QCOMPARE(editor->additionalCaretCount(), 1);
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 7}}));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+    QVERIFY(!editor->hasSelection());
+}
+
+void TestCodeEditor::altDragSelectsExtraAndPrimary()
+{
+    editor->setPlainText(QStringLiteral("abcdefgh"));
+    editor->setPosition({0, 0});
+
+    altClick(editor, 0, 6); // primary 6, extra at 0
+    altDrag(editor, caretPixel(editor, 0, 0), caretPixel(editor, 0, 3));
+    // The dragged EXTRA got [0,3); the click landed on that slot's caret.
+    QCOMPARE(editor->additionalCaretCount(), 1);
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 3}})); // caret rode the drag
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 6})); // primary kept
+
+    altDrag(editor, caretPixel(editor, 0, 6), caretPixel(editor, 0, 4));
+    // Alt+press on the PRIMARY caret drags it; the anchor stays pinned at 6.
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("ef")); // [4,6)
+    QCOMPARE(editor->additionalCaretCount(), 1); // no overlap with [0,3): survives
+
+    // Partial overlap: drag the primary selection [4,6) LEFT across [0,3).
+    // R2: the LEFT-starting extra [0,3) keeps its range, the primary
+    // collapses to a bare caret at 1. The chained R3 then finds that caret
+    // strictly inside the surviving [0,3): the caret is PRIMARY, so the
+    // extra slot dies too. v1 outcome: one bare primary caret.
+    altDrag(editor, caretPixel(editor, 0, 4), caretPixel(editor, 0, 1));
+    QVERIFY(!editor->hasSelection());
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+    QCOMPARE(editor->additionalCaretCount(), 0);
+}
+
+void TestCodeEditor::plainClickAndEscapeCollapseCarets()
+{
+    editor->setPlainText(QStringLiteral("aa bb cc"));
+    editor->setPosition({0, 0});
+    altClick(editor, 0, 3);
+    altClick(editor, 0, 6);
+    QCOMPARE(editor->additionalCaretCount(), 2);
+
+    // Two-stage Escape: the extras go first...
+    QTest::keyClick(editor, Qt::Key_Escape);
+    QCOMPARE(editor->additionalCaretCount(), 0);
+    QVERIFY(!editor->hasSelection());
+    // ...the primary selection is stage two. Alt+Drag adds a caret on press
+    // (the old primary demotes), so Escape first drops THAT extra, then the
+    // selection on the next press.
+    altDrag(editor, caretPixel(editor, 0, 2), caretPixel(editor, 0, 4));
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->additionalCaretCount(), 1);
+    QTest::keyClick(editor, Qt::Key_Escape);
+    QCOMPARE(editor->additionalCaretCount(), 0);
+    QVERIFY(editor->hasSelection()); // selection survives stage one
+    QTest::keyClick(editor, Qt::Key_Escape);
+    QVERIFY(!editor->hasSelection()); // stage two clears it
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4}));
+    // Nothing left: a further Escape is passed through (event->ignore()).
+    QTest::keyClick(editor, Qt::Key_Escape);
+
+    // Middle click collapses too (X11 paste gesture targets one caret).
+    editor->setPosition({0, 0});
+    altClick(editor, 0, 3);
+    altClick(editor, 0, 6);
+    QCOMPARE(editor->additionalCaretCount(), 2);
+    QTest::mousePress(editor, Qt::MiddleButton, Qt::NoModifier, caretPixel(editor, 0, 1));
+    QCOMPARE(editor->additionalCaretCount(), 0);
+}
+
+void TestCodeEditor::programmaticPathsCollapseCarets()
+{
+    editor->setPlainText(QStringLiteral("ab\ncd"));
+    altClick(editor, 1, 0); // primary is now the clicked caret
+    QCOMPARE(editor->additionalCaretCount(), 1);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0}));
+    editor->clearAdditionalCarets();
+    QCOMPARE(editor->additionalCaretCount(), 0);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0})); // primary kept
+
+    altClick(editor, 0, 0); // add: primary moves, (1,0) demotes
+    editor->setPosition({1, 1});
+    QCOMPARE(editor->additionalCaretCount(), 0);
+
+    altClick(editor, 1, 0);
+    editor->selectAll(); // public single-caret selection (routes setSelection)
+    QCOMPARE(editor->additionalCaretCount(), 0);
+    QVERIFY(editor->hasSelection());
+
+    altClick(editor, 1, 0);
+    editor->setPlainText(QStringLiteral("fresh"));
+    QCOMPARE(editor->additionalCaretCount(), 0);
+}
+
+void TestCodeEditor::navigationFoldDuplicatesAndKeepSelections()
+{
+    editor->setPlainText(QStringLiteral("aa bb cc"));
+    altClick(editor, 0, 3);
+    altClick(editor, 0, 6);
+
+    // Ctrl+Home drives every caret to (0,0): the stacked extras fold (R1).
+    QTest::keyClick(editor, Qt::Key_Home, Qt::ControlModifier);
+    QCOMPARE(editor->additionalCaretCount(), 0);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+
+    // Rebuild carets, then Shift+End extends EVERY slot: three collinear
+    // right-to-left selections normalize to the single outermost one, and
+    // the survivor belongs to the primary (caret on top).
+    altClick(editor, 0, 3);
+    altClick(editor, 0, 6);
+    QTest::keyClick(editor, Qt::Key_End, Qt::ShiftModifier);
+    QCOMPARE(editor->additionalCaretCount(), 0);
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("cc")); // caret at EOD
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 8}));
+}
+
+void TestCodeEditor::typingFansOutToOneEditPerCaret()
+{
+    editor->setPlainText(QStringLiteral("hello world"));
+    altClick(editor, 0, 6); // primary at the 'w', extra at (0,0)
+
+    QTest::keyClick(editor, Qt::Key_X);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("xhello xworld"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 8}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 1}}));
+
+    // One key press = one bracketed undo group (no cross-press coalescing).
+    // (keyClick Key_Y delivers lowercase 'y', hence the lower-case joins.)
+    QTest::keyClick(editor, Qt::Key_Y);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("xyhello xyworld"));
+    editor->undo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("xhello xworld"));
+    // The caret state is restored for EVERY slot, not just the primary.
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 8}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 1}}));
+}
+
+void TestCodeEditor::typingOverSelectionsFansOut()
+{
+    editor->setPlainText(QStringLiteral("abcdefg"));
+    altDrag(editor, caretPixel(editor, 0, 0), caretPixel(editor, 0, 2)); // primary [0,2)
+    altClick(editor, 0, 4); // primary moves to 4, the [0,2) slot demotes
+    altDrag(editor, caretPixel(editor, 0, 4), caretPixel(editor, 0, 6)); // primary [4,6)
+
+    // [0,2) and [4,6) are disjoint; both slots replace their selections.
+    QTest::keyClick(editor, Qt::Key_Q); // keyClick delivers lowercase 'q'
+    QCOMPARE(editor->toPlainText(), QStringLiteral("qcdqg"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4})); // after the primary's 'q'
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 1}}));
+
+    editor->undo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefg")); // ONE step for both edits
+    QCOMPARE(editor->additionalCaretCount(), 1); // pre-press selection pair restored
+}
+
+void TestCodeEditor::enterFansOutAsOneUndoStep()
+{
+    editor->setPlainText(QStringLiteral("ab\ncd"));
+    altClick(editor, 1, 2); // primary at EOL of line 1, extra at (0,0)
+
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("\nab\ncd\n"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{3, 0}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{1, 0}}));
+
+    editor->undo(); // the whole Enter is ONE step across both carets
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab\ncd"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 2}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 0}}));
+    QVERIFY(!editor->canUndo());
+}
+
+void TestCodeEditor::backspaceAndDeleteFansOut()
+{
+    editor->setPlainText(QStringLiteral("abc\ndef"));
+    altClick(editor, 1, 1); // primary mid line 1, extra at (0,0)
+    QTest::keyClick(editor, Qt::Key_Backspace);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abc\nef")); // only the primary could act
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 0}}));
+
+    editor->setPlainText(QStringLiteral("ab\nab\nab"));
+    altClick(editor, 1, 2);
+    altClick(editor, 2, 2); // primary EOL line 2, extras EOL 0 and 1
+    QTest::keyClick(editor, Qt::Key_Delete);
+    // Delete is FORWARD: (0,0) eats its line's first char (the caret lands
+    // at the now-empty line start), (1,2) joins the next line, the doc-end
+    // caret edits nothing but rides both deletes to (1,4).
+    QCOMPARE(editor->toPlainText(), QStringLiteral("b\nabab"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 4}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 0}, {1, 2}}));
+}
+
+void TestCodeEditor::backspaceOnExtraAtDocStartIsSkipped()
+{
+    editor->setPlainText(QStringLiteral("abc\ndef"));
+    altClick(editor, 1, 1); // primary (1,1); the extra sits at the doc start
+
+    QTest::keyClick(editor, Qt::Key_Backspace);
+    QCOMPARE(editor->additionalCaretCount(), 1); // the no-op extra survives
+    editor->undo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abc\ndef"));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 0}})); // restored at its spot
+    QVERIFY(!editor->canUndo()); // the whole press was ONE bracketed step
+}
+
+void TestCodeEditor::overlappingEditsKeepRightDropLeft()
+{
+    editor->setPlainText(QStringLiteral("abcdef"));
+    altClick(editor, 0, 2); // primary at 2, extra at 0
+
+    // Ctrl+Delete runs word deletes from both carets; "abcdef" is ONE word,
+    // so the primary's [2,6) edit lands first and the extra's [0,6) edit
+    // clashes with it and is DROPPED (documented v1 divergence vs VS Code's
+    // merge). The extra's caret at 0 is left of the cut and rides along.
+    QTest::keyClick(editor, Qt::Key_Delete, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 0}}));
+
+    editor->undo(); // dropped and applied: still ONE undo step
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdef"));
+    QVERIFY(!editor->canUndo());
+}
+
+void TestCodeEditor::ctrlDeleteWordFansOut()
+{
+    editor->setPlainText(QStringLiteral("ab cd ef gh"));
+    altClick(editor, 0, 3); // three carets end up at 6 (primary), 3 and 0
+
+    altClick(editor, 0, 6);
+
+    QTest::keyClick(editor, Qt::Key_Delete, Qt::ControlModifier);
+    // Word runs deleted at every caret: [0,2) "ab", [3,5) "cd", [6,8) "ef".
+    QCOMPARE(editor->toPlainText(), QStringLiteral("   gh"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 0}, {0, 1}}));
+}
+
+void TestCodeEditor::caretKeysAndShiftNavFanOut()
+{
+    editor->setPlainText(QStringLiteral("abcd\nefgh\nijkl"));
+    altClick(editor, 1, 2);
+    altClick(editor, 2, 3); // primary (2,3), extras (0,0) and (1,2)
+
+    QTest::keyClick(editor, Qt::Key_Home);
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 0}, {1, 0}}));
+    QTest::keyClick(editor, Qt::Key_End);
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 4}, {1, 4}}));
+    QTest::keyClick(editor, Qt::Key_Up);
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 0}, {0, 4}})); // (0,4) pinned at col 0
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 4})); // top clamp
+
+    // Shift+Left extends every slot: the (0,0) caret cannot move and stays
+    // bare, the other two pick up one character each.
+    QTest::keyClick(editor, Qt::Key_Left, Qt::ShiftModifier);
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("h"));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 0}, {0, 3}}));
+
+    // Ctrl+Shift+Right word-extends: the bare (0,0) caret sweeps the whole
+    // line into a [0,4) selection. The (0,3) slot's REVERSE selection
+    // [3,4) extends right past its own anchor and collapses to an empty
+    // selection (anchor == caret == 4), so it survives normalization next
+    // to the sweeping one — v1 semantics, pinned here on purpose. The
+    // primary's [8,9) extension walks right back onto its anchor (1,4)
+    // and likewise collapses to zero-length.
+    QTest::keyClick(editor, Qt::Key_Right, Qt::ControlModifier | Qt::ShiftModifier);
+    QVERIFY(!editor->hasSelection()); // anchor == caret: zero-length extend
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 4}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 4}, {0, 4}}));
+}
+
+void TestCodeEditor::copyWithCaretsJoinsLines()
+{
+    QClipboard* cb = QApplication::clipboard();
+    QVERIFY(cb);
+    editor->setPlainText(QStringLiteral("aa\nbb\ncc"));
+    altClick(editor, 1, 1); // primary mid line 1, extra at (0,0)
+
+    cb->setText(QStringLiteral("sentinel"), QClipboard::Clipboard);
+    editor->copy(); // no selections: distinct caret lines joined by \n
+    QCOMPARE(cb->text(QClipboard::Clipboard), QStringLiteral("aa\nbb"));
+
+    // With selections the join covers EVERY slot: Shift+Right fanned out,
+    // so both carets selected a character and both texts are joined.
+    QTest::keyClick(editor, Qt::Key_Right, Qt::ShiftModifier);
+    editor->copy();
+    QCOMPARE(cb->text(QClipboard::Clipboard), QStringLiteral("a\nb"));
+}
+
+void TestCodeEditor::cutSelectionsAtCaretsDeletesAll()
+{
+    QClipboard* cb = QApplication::clipboard();
+    QVERIFY(cb);
+    editor->setPlainText(QStringLiteral("abcdefg"));
+    altDrag(editor, caretPixel(editor, 0, 0), caretPixel(editor, 0, 2)); // primary [0,2)
+    altClick(editor, 0, 4); // [0,2) demotes to an extra
+    altDrag(editor, caretPixel(editor, 0, 4), caretPixel(editor, 0, 6)); // primary [4,6)
+
+    cb->setText(QStringLiteral("sentinel"), QClipboard::Clipboard);
+    QTest::keyClick(editor, Qt::Key_X, Qt::ControlModifier);
+    QCOMPARE(cb->text(QClipboard::Clipboard), QStringLiteral("ab\nef")); // doc-order join
+    QCOMPARE(editor->toPlainText(), QStringLiteral("cdg")); // BOTH selections cut
+}
+
+void TestCodeEditor::cutLinesAtCaretsJoinsClipboard()
+{
+    QClipboard* cb = QApplication::clipboard();
+    QVERIFY(cb);
+    editor->setPlainText(QStringLiteral("aa\nbb\ncc"));
+    altClick(editor, 1, 1); // carets on lines 0 and 1, none selected
+
+    cb->setText(QStringLiteral("sentinel"), QClipboard::Clipboard);
+    QTest::keyClick(editor, Qt::Key_X, Qt::ControlModifier);
+    QCOMPARE(cb->text(QClipboard::Clipboard), QStringLiteral("aa\nbb")); // distinct lines
+    QCOMPARE(editor->toPlainText(), QStringLiteral("cc")); // whole-line cut per caret
+    // Both carets land at the start of the merged deleted block and stack-
+    // fold (documented v1: stacked landings collapse in one action).
+    QCOMPARE(editor->additionalCaretCount(), 0);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+}
+
+void TestCodeEditor::pasteFansOutToAllCarets()
+{
+    QClipboard* cb = QApplication::clipboard();
+    QVERIFY(cb);
+    editor->setPlainText(QStringLiteral("hello world"));
+    altClick(editor, 0, 6); // primary at 'w', extra at (0,0)
+
+    // v1 divergence from VS Code: the SAME text lands at every caret; the
+    // multi-line clipboard is never distributed one line per caret.
+    cb->setText(QStringLiteral("12\n34"), QClipboard::Clipboard);
+    QTest::keyClick(editor, Qt::Key_V, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("12\n34hello 12\n34world"));
+    // The two inserts are 11 code units apart, so the carets land at (1,2)
+    // (extra) and (2,2) (primary) — no stack fold this deep.
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 2}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{1, 2}}));
+    editor->undo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("hello world")); // ONE step
+    QCOMPARE(editor->additionalCaretCount(), 1); // the pre-action pair is back
+}
+
+void TestCodeEditor::undoRestoresAllCaretsOneStepPerPress()
+{
+    editor->setPlainText(QStringLiteral("ab\ncd"));
+    altClick(editor, 1, 2); // primary (1,2), extra at (0,0)
+    QTest::keyClick(editor, Qt::Key_X); // 'x' lands at 5 and 0
+    QTest::keyClick(editor, Qt::Key_Return); // two presses = two undo steps
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x\nab\ncdx\n"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{3, 0}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{1, 0}}));
+
+    editor->undo(); // the Enter step only
+    QCOMPARE(editor->toPlainText(), QStringLiteral("xab\ncdx"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 3})); // caret before the Enter
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 1}}));
+
+    editor->undo(); // the X step
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab\ncd"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 2}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 0}}));
+    QVERIFY(!editor->canUndo()); // exactly ONE step per multi-caret press
 }
 
 QTEST_MAIN(TestCodeEditor)

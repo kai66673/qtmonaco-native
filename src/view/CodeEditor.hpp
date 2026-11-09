@@ -15,6 +15,8 @@
 #include "core/TextBuffer.hpp"
 
 #include <array>
+#include <functional>
+#include <utility>
 
 class QInputMethodEvent;
 
@@ -113,6 +115,21 @@ public:
     bool canUndo() const { return buffer_.canUndo(); }
     bool canRedo() const { return buffer_.canRedo(); }
 
+    // Multiple carets (Phase D1). Alt+Click adds a caret, Alt+Drag drags a
+    // selection for the caret under its start; typed edits, Enter,
+    // Backspace/Delete, paste, cut and the navigation keys then act on
+    // EVERY caret (one key press = one bracketed undo step; multi-caret
+    // typing deliberately does NOT coalesce across presses). The "primary"
+    // caret is the one position() reports and the one the mouse/keyboard
+    // last owned; a plain click, setPosition, selectAll or Escape
+    // collapses back to it. Carets normalize VS Code-style on add, drag
+    // end, navigation and edits: duplicate carets fold, a caret inside
+    // another slot's selection is dropped (the extra goes if the caret is
+    // primary), and intersecting selections keep the LEFT one.
+    int additionalCaretCount() const { return static_cast<int>(extraCarets_.size()); }
+    QVector<TextPosition> additionalCarets() const; // caret positions, doc order
+    void clearAdditionalCarets(); // collapse to the primary caret
+
     int lineHeight() const { return lineHeight_; }
     double cellWidth() const { return cellWidth_; }
     int padding() const { return padding_; }
@@ -144,6 +161,7 @@ protected:
     QVariant inputMethodQuery(Qt::InputMethodQuery query) const override;
     void mousePressEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
+    void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void focusInEvent(QFocusEvent* event) override;
@@ -152,6 +170,70 @@ protected:
     QSize sizeHint() const override;
 
 private:
+    // --- multiple carets (Phase D1) ---------------------------------------
+    // A caret plus its optional selection. The primary caret keeps living
+    // in the classic caret_/anchor_/hasSelection_ fields (single-caret
+    // semantics unchanged); extraCarets_ holds the additional slots in
+    // document order. All fan-out helpers treat the union.
+    struct CaretSlot {
+        TextPosition caret;
+        TextPosition anchor;
+        bool hasSelection = false;
+    };
+
+    // --- undo mirror (M3) ------------------------------------------------
+    // The core owns the op log (see core/TextBuffer.hpp); the view stacks
+    // caret/selection states 1:1 underneath it: undoMarks_[i] is the state
+    // before core undo-group i (front-aligned after core cap-drops), and
+    // redoMarks_[j] is the state an undone group left behind. Alignment is
+    // reconciled after every mutating action via (undoDepth, undoPushSerial)
+    // deltas, which distinguish "coalesced into top" from "pushed, oldest
+    // dropped at the cap" from "nothing recorded".
+    struct UndoMark {
+        TextPosition caret;
+        TextPosition anchor;
+        bool hasSelection = false;
+        // Multi-caret (D1): the additional slots as they stood before the
+        // action. A multi-caret key press is ONE bracketed core group, so
+        // one mark covers all carets and undo/redo restores every caret.
+        QVector<CaretSlot> extras;
+    };
+    UndoMark captureEditMark() const;
+    void reconcileUndoMarks(const UndoMark& pre); // after any mutating action
+    void applyEditMark(const UndoMark& m);        // restore caret/selection
+    void breakUndoChain(); // freeze coalescing on deliberate caret motion
+
+    // One fan-out key's edit for a single caret, computed against the
+    // PRE-ACTION document (offsets and newCaret alike). Applying the edits
+    // right-to-left keeps every not-yet-applied edit's offsets valid, and
+    // a slot's own newCaret is already the post-edit position, so it is
+    // only shifted by edits strictly LEFT of it when those apply.
+    struct SlotEdit {
+        int start = 0;
+        int end = 0;
+        QString text; // replacement (empty = pure delete)
+        TextPosition newCaret;
+    };
+    // The per-slot edit for one fan-out key; return false if the slot edits
+    // nothing (e.g. Backspace at the document start).
+    using SlotEditFn = std::function<bool(const CaretSlot&, SlotEdit&)>;
+    // Fans one action out to all carets (primary included) as ONE bracketed
+    // core group. Returns true if anything was edited; also normalizes.
+    bool applyCaretsFanOut(const SlotEditFn& editFn);
+    // One shared caret-movement target fn applied to every caret (nav fan-
+    // out; no document change). `extend` grows each caret's own selection.
+    void moveCarets(const std::function<TextPosition(const CaretSlot&)>& targetFn,
+                    bool extend);
+    // VS Code-style caret cleanup after adds/moves: fold duplicate carets,
+    // drop carets strictly inside another slot's selection, and resolve
+    // intersecting selections by keeping the LEFT one and collapsing the
+    // right slot's selection to its caret. Never drops the primary.
+    void normalizeCarets();
+    QVector<CaretSlot> allCarets() const; // extras + primary, doc order
+    // Sorted [start,end) buffer offsets of a slot's selection (equal ends
+    // when the slot has none) — the offset view the normalization rules use.
+    static std::pair<int, int> selRangeOf(const qmn::core::TextBuffer& buf, const CaretSlot& s);
+
     int firstVisibleLine() const;
     int visibleLineCount() const;
     int totalHeight() const;
@@ -172,24 +254,6 @@ private:
     void pasteText(const QString& text); // sanitize + insert + primary update
     void updatePrimarySelection(); // mirror an active selection to X11 primary
     int lineLength(int line) const;
-
-    // --- undo mirror (M3) ------------------------------------------------
-    // The core owns the op log (see core/TextBuffer.hpp); the view stacks
-    // caret/selection states 1:1 underneath it: undoMarks_[i] is the state
-    // before core undo-group i (front-aligned after core cap-drops), and
-    // redoMarks_[j] is the state an undone group left behind. Alignment is
-    // reconciled after every mutating action via (undoDepth, undoPushSerial)
-    // deltas, which distinguish "coalesced into top" from "pushed, oldest
-    // dropped at the cap" from "nothing recorded".
-    struct UndoMark {
-        TextPosition caret;
-        TextPosition anchor;
-        bool hasSelection = false;
-    };
-    UndoMark captureEditMark() const;
-    void reconcileUndoMarks(const UndoMark& pre); // after any mutating action
-    void applyEditMark(const UndoMark& m);        // restore caret/selection
-    void breakUndoChain(); // freeze coalescing on deliberate caret motion
 
     // Per-line glyph-engine layout cache. A laid-out QTextLine is the sole
     // authority for caret x, selection x and mouse hit-testing (measured on
@@ -232,6 +296,14 @@ private:
     TextPosition caret_;
     TextPosition anchor_; // inactive end of the selection
     bool hasSelection_ = false;
+    // D1 additional caret slots in document order (the primary caret is
+    // NOT inside this list; allCarets() merges the two views).
+    QVector<CaretSlot> extraCarets_;
+    // Which extra slot an Alt+Drag currently resizes (index into
+    // extraCarets_; -1 = no Alt drag on an extra), plus whether the drag
+    // targets the primary caret instead (Alt+Press landed on it).
+    int altDragSlot_ = -1;
+    bool altDragPrimary_ = false;
     QString preedit_; // IME composition string, display-only: never in buffer_
     QScrollBar* vBar_ = nullptr;
     bool scrollbarSync_ = false;

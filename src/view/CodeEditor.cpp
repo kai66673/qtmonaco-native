@@ -13,6 +13,7 @@
 #include <QPainter>
 #include <QResizeEvent>
 #include <QScrollBar>
+#include <QStringList>
 #include <QTextBoundaryFinder>
 #include <QWheelEvent>
 #include <QtMath>
@@ -22,6 +23,13 @@
 namespace qmn::view {
 
 namespace {
+
+// Document order for text positions (multi-caret bookkeeping). Lexicographic
+// (line, col) is exactly document order for resolved positions.
+bool posLess(const TextPosition& a, const TextPosition& b)
+{
+    return a.line != b.line ? a.line < b.line : a.col < b.col;
+}
 
 // M2 grapheme/word boundary helpers. QTextBoundaryFinder is ICU-backed on
 // both of our build targets (Arch's Qt links ICU 78; PySide6's Qt bundles
@@ -184,6 +192,9 @@ void CodeEditor::setPlainText(const QString& text)
     caret_ = {};
     anchor_ = {};
     hasSelection_ = false;
+    extraCarets_.clear(); // the document replace collapses to one caret
+    altDragSlot_ = -1;
+    altDragPrimary_ = false;
     setVScroll(0);
     updateScrollBarRange();
     emit selectionChanged();
@@ -350,6 +361,7 @@ TextPosition CodeEditor::clampPos(TextPosition pos) const
 void CodeEditor::setPosition(TextPosition pos)
 {
     breakUndoChain(); // a deliberate programmatic move ends any edit chain
+    clearAdditionalCarets(); // programmatic single-caret semantics (D1)
     setCaret(clampPos(pos));
 }
 
@@ -374,6 +386,9 @@ void CodeEditor::setCaret(TextPosition pos)
 void CodeEditor::setSelection(TextPosition anchor, TextPosition caret)
 {
     breakUndoChain(); // deliberate selection motion ends any edit chain
+    extraCarets_.clear(); // a programmatic selection is single-caret (D1)
+    altDragSlot_ = -1;
+    altDragPrimary_ = false;
     anchor_ = clampPos(anchor);
     caret_ = clampPos(caret);
     hasSelection_ = !(anchor_ == caret_);
@@ -488,6 +503,32 @@ void CodeEditor::copy()
     QClipboard* cb = QGuiApplication::clipboard();
     if (!cb)
         return;
+    if (!extraCarets_.isEmpty()) {
+        // Multi-caret copy (D1, VS Code): with any selections active the
+        // clipboard is those selection texts joined by newlines (carets
+        // without a selection contribute nothing); with none it is the
+        // distinct caret lines in document order joined by newlines.
+        QStringList parts;
+        bool anySel = false;
+        for (const CaretSlot& s : allCarets()) {
+            if (!s.hasSelection)
+                continue;
+            anySel = true;
+            const auto [st, en] = selRangeOf(buffer_, s);
+            parts << buffer_.textRange(st, en);
+        }
+        if (!anySel) {
+            int prevLine = -1;
+            for (const CaretSlot& s : allCarets()) {
+                if (s.caret.line == prevLine)
+                    continue; // two carets on one line copy that line once
+                prevLine = s.caret.line;
+                parts << buffer_.lineText(s.caret.line);
+            }
+        }
+        cb->setText(parts.join(QLatin1Char('\n')), QClipboard::Clipboard);
+        return;
+    }
     if (hasSelection_) {
         cb->setText(selectedText(), QClipboard::Clipboard);
         return; // primary already mirrors the live selection
@@ -512,6 +553,128 @@ void CodeEditor::cut()
     // Unbracketed: the cut's delete may coalesce with an adjacent delete
     // chain (the preceding selection motion already froze any older chain).
     const UndoMark pre = captureEditMark();
+    if (!extraCarets_.isEmpty()) {
+        // Multi-caret cut (D1). VS Code line-cut semantics with selections
+        // present are a documented v1 divergence: any selections cut delete
+        // ALL selections and the clipboard is the selection texts joined
+        // (carets without a selection stay put, riding the remap).
+        bool anySel = false;
+        for (const CaretSlot& s : extraCarets_)
+            anySel = anySel || s.hasSelection;
+        anySel = anySel || hasSelection_;
+        if (anySel) {
+            QStringList parts;
+            for (const CaretSlot& s : allCarets()) {
+                if (!s.hasSelection)
+                    continue;
+                const auto [st, en] = selRangeOf(buffer_, s);
+                parts << buffer_.textRange(st, en);
+            }
+            cb->setText(parts.join(QLatin1Char('\n')), QClipboard::Clipboard);
+            applyCaretsFanOut([this](const CaretSlot& s, SlotEdit& ed) {
+                if (!s.hasSelection)
+                    return false;
+                const auto [st, en] = selRangeOf(buffer_, s);
+                ed.start = st;
+                ed.end = en;
+                return true;
+            });
+            reconcileUndoMarks(pre);
+            return;
+        }
+        // No selections: whole-line cut at every caret (distinct lines once,
+        // document order). Clipboard = the line texts joined by newlines
+        // (the join replaces the per-line '\n'; a trailing-newline-free
+        // v1 clipboard).
+        QStringList parts;
+        QVector<int> lines; // distinct caret lines, ascending (allCarets is caret-sorted)
+        for (const CaretSlot& s : allCarets()) {
+            if (lines.isEmpty() || lines.last() != s.caret.line)
+                lines.append(s.caret.line);
+        }
+        for (const int line : lines)
+            parts << buffer_.lineText(line);
+        // Cut ranges: [lineStart, nextLineStart) carries the line's own
+        // '\n'; the last line borrows the PRECEDING newline (as the single
+        // caret path does) so no phantom trailing line appears. Adjacent
+        // ranges then merge into one delete.
+        QVector<std::pair<int, int>> ranges; // ascending, will be merged
+        for (const int line : lines) {
+            int st, en;
+            if (line + 1 < buffer_.lineCount()) {
+                st = buffer_.offsetOfLine(line);
+                en = buffer_.offsetOfLine(line + 1);
+            } else {
+                st = line > 0
+                    ? buffer_.offsetOf(line - 1, lineLength(line - 1))
+                    : buffer_.offsetOfLine(0);
+                en = buffer_.offsetOf(line, lineLength(line));
+            }
+            if (!ranges.isEmpty() && st <= ranges.last().second)
+                ranges.last().second = std::max(ranges.last().second, en);
+            else
+                ranges.append({st, en});
+        }
+        cb->setText(parts.join(QLatin1Char('\n')), QClipboard::Clipboard);
+        // Caret landing: every cut caret ends at the start of its (merged)
+        // cut range, i.e. where the deleted block used to begin. Track the
+        // pre-action caret offsets right-to-left like the fan-out does.
+        struct CutSlot {
+            CaretSlot slot;
+            bool primary;
+            int fp;
+        };
+        QVector<CutSlot> cutSlots;
+        for (const CaretSlot& s : extraCarets_)
+            cutSlots.append({s, false, buffer_.offsetOf(s.caret.line, s.caret.col)});
+        cutSlots.append({CaretSlot{caret_, anchor_, hasSelection_}, true,
+                         buffer_.offsetOf(caret_.line, caret_.col)});
+        buffer_.beginEditGroup(); // whole multi-line cut = one undo step
+        for (int i = ranges.size() - 1; i >= 0; --i) {
+            const auto [st, en] = ranges[i];
+            for (CutSlot& sl : cutSlots) {
+                if (en <= sl.fp)
+                    sl.fp += st - en;
+                else if (st < sl.fp && sl.fp < en)
+                    sl.fp = st;
+            }
+            buffer_.removeRange(st, en);
+        }
+        buffer_.endEditGroup();
+        for (CutSlot& sl : cutSlots) {
+            const auto lc = buffer_.lineColAt(sl.fp);
+            sl.slot.caret = clampPos(TextPosition{lc.line, lc.col});
+            sl.slot.anchor = sl.slot.caret;
+            sl.slot.hasSelection = false;
+        }
+        for (const CutSlot& sl : cutSlots) {
+            if (sl.primary) {
+                caret_ = sl.slot.caret;
+                anchor_ = sl.slot.anchor;
+                hasSelection_ = sl.slot.hasSelection;
+            }
+        }
+        QVector<CaretSlot> kept;
+        for (const CutSlot& sl : cutSlots) {
+            if (!sl.primary)
+                kept.append(sl.slot);
+        }
+        std::stable_sort(kept.begin(), kept.end(),
+                         [](const CaretSlot& a, const CaretSlot& b) { return posLess(a.caret, b.caret); });
+        extraCarets_ = kept;
+        normalizeCarets(); // stacked landing points fold (documented v1)
+        caretOn_ = true;
+        if (hasFocus())
+            blinkTimer_.start();
+        ensureCaretVisible();
+        updateScrollBarRange();
+        update();
+        emit cursorMoved(caret_);
+        emit selectionChanged();
+        updatePrimarySelection();
+        reconcileUndoMarks(pre);
+        return;
+    }
     if (hasSelection_) {
         cb->setText(selectedText(), QClipboard::Clipboard);
         deleteSelection(); // also drops the primary mirror
@@ -589,7 +752,7 @@ void CodeEditor::pasteText(const QString& text)
 
 CodeEditor::UndoMark CodeEditor::captureEditMark() const
 {
-    return UndoMark{caret_, anchor_, hasSelection_};
+    return UndoMark{caret_, anchor_, hasSelection_, extraCarets_};
 }
 
 void CodeEditor::reconcileUndoMarks(const UndoMark& pre)
@@ -620,6 +783,17 @@ void CodeEditor::applyEditMark(const UndoMark& m)
     caret_ = clampPos(m.caret);
     anchor_ = clampPos(m.anchor);
     hasSelection_ = m.hasSelection && !(anchor_ == caret_);
+    // Multi-caret (D1): the mark was taken before the action, so the text
+    // restored by the core puts these positions back in range exactly.
+    extraCarets_.clear();
+    for (const CaretSlot& s : m.extras) {
+        CaretSlot r;
+        r.caret = clampPos(s.caret);
+        r.anchor = clampPos(s.anchor);
+        r.hasSelection = s.hasSelection && !(r.caret == r.anchor);
+        extraCarets_.append(r);
+    }
+    altDragSlot_ = -1;
     caretOn_ = true;
     if (hasFocus())
         blinkTimer_.start();
@@ -634,6 +808,358 @@ void CodeEditor::applyEditMark(const UndoMark& m)
 void CodeEditor::breakUndoChain()
 {
     buffer_.breakUndoCoalescing();
+}
+
+// --- multiple carets (Phase D1) ------------------------------------------
+// extraCarets_ holds every slot except the primary (caret_/anchor_/
+// hasSelection_ keep their exact single-caret semantics, so every
+// single-caret path below stays byte-for-byte the behavior the suite
+// pins). Fan-out paths run only when extraCarets_ is non-empty.
+
+std::pair<int, int> CodeEditor::selRangeOf(const qmn::core::TextBuffer& buf, const CaretSlot& s)
+{
+    // Same sorted-ends logic as the primary's selStart()/selEnd(), factored
+    // out so the normalization rules can address every slot alike. Ends are
+    // equal when the slot carries no selection.
+    if (s.caret == s.anchor)
+        return {buf.offsetOf(s.caret.line, s.caret.col), buf.offsetOf(s.caret.line, s.caret.col)};
+    const int a = buf.offsetOf(s.caret.line, s.caret.col);
+    const int b = buf.offsetOf(s.anchor.line, s.anchor.col);
+    return a < b ? std::pair{a, b} : std::pair{b, a};
+}
+
+QVector<TextPosition> CodeEditor::additionalCarets() const
+{
+    QVector<TextPosition> out;
+    out.reserve(extraCarets_.size());
+    for (const CaretSlot& s : extraCarets_)
+        out.append(s.caret);
+    return out;
+}
+
+void CodeEditor::clearAdditionalCarets()
+{
+    if (extraCarets_.isEmpty())
+        return;
+    extraCarets_.clear();
+    altDragSlot_ = -1;
+    update();
+    emit selectionChanged(); // the painted extra selections are gone
+}
+
+QVector<CodeEditor::CaretSlot> CodeEditor::allCarets() const
+{
+    QVector<CaretSlot> all = extraCarets_;
+    all.append(CaretSlot{caret_, anchor_, hasSelection_});
+    std::stable_sort(all.begin(), all.end(),
+                     [](const CaretSlot& a, const CaretSlot& b) { return posLess(a.caret, b.caret); });
+    return all;
+}
+
+void CodeEditor::normalizeCarets()
+{
+    if (extraCarets_.isEmpty())
+        return;
+
+    // Refs view the whole caret set (extras + primary) so the rules below
+    // can express "the extra goes, not the primary".
+    struct Ref {
+        CaretSlot slot;
+        bool primary;
+        bool dead = false;
+    };
+    QVector<Ref> refs;
+    refs.reserve(extraCarets_.size() + 1);
+    for (const CaretSlot& s : extraCarets_)
+        refs.append({s, false, false});
+    refs.append({CaretSlot{caret_, anchor_, hasSelection_}, true, false});
+
+    // R1: exact duplicate slots (same caret AND selection): the primary
+    // wins, the later extra is dropped.
+    for (int i = 0; i < refs.size(); ++i) {
+        if (refs[i].dead)
+            continue;
+        for (int j = i + 1; j < refs.size(); ++j) {
+            if (refs[j].dead)
+                continue;
+            const CaretSlot& a = refs[i].slot;
+            const CaretSlot& b = refs[j].slot;
+            if (a.caret == b.caret && a.anchor == b.anchor && a.hasSelection == b.hasSelection)
+                refs[refs[j].primary ? i : j].dead = true; // primary survives
+        }
+    }
+
+    // R2: overlapping selections. A fully contained selection loses its
+    // whole slot when it belongs to an extra (it is redundant with the
+    // outer caret anyway); when the contained one is primary, the extra
+    // holding the outer selection goes instead. Partial overlaps keep the
+    // LEFT-starting selection and collapse the other to a bare caret.
+    auto overlaps = [this](const CaretSlot& a, const CaretSlot& b) {
+        if (!a.hasSelection || !b.hasSelection)
+            return false;
+        const auto [as, ae] = selRangeOf(buffer_, a);
+        const auto [bs, be] = selRangeOf(buffer_, b);
+        return as < be && bs < ae;
+    };
+    auto contains = [this](const CaretSlot& outer, const CaretSlot& inner) {
+        const auto [os, oe] = selRangeOf(buffer_, outer);
+        const auto [is, ie] = selRangeOf(buffer_, inner);
+        return os <= is && ie <= oe && !(os == is && ie == oe); // strictly smaller
+    };
+    for (int i = 0; i < refs.size(); ++i) {
+        if (refs[i].dead || !refs[i].slot.hasSelection)
+            continue;
+        for (int j = i + 1; j < refs.size(); ++j) {
+            if (refs[j].dead || !refs[j].slot.hasSelection)
+                continue;
+            if (!overlaps(refs[i].slot, refs[j].slot))
+                continue;
+            Ref& a = refs[i];
+            Ref& b = refs[j];
+            if (contains(a.slot, b.slot)) { // b inside a
+                if (b.primary)
+                    a.dead = true; // the extra yields to the primary
+                else
+                    b.dead = true;
+            } else if (contains(b.slot, a.slot)) { // a inside b
+                if (a.primary)
+                    b.dead = true;
+                else
+                    a.dead = true;
+            } else { // partial overlap: the LEFT selection keeps its range
+                const auto [as, ae] = selRangeOf(buffer_, a.slot);
+                const auto [bs, be] = selRangeOf(buffer_, b.slot);
+                Ref* loser = nullptr;
+                if (as != bs)
+                    loser = as < bs ? &b : &a;
+                else
+                    loser = a.primary ? &b : &a; // equal starts: primary wins
+                if (loser->primary) { // the primary never dies: it just
+                    loser->slot.hasSelection = false; // collapses to a caret
+                    loser->slot.anchor = loser->slot.caret;
+                } else {
+                    loser->dead = true;
+                }
+            }
+        }
+    }
+
+    // R3: a bare caret sitting strictly INSIDE another slot's selection is
+    // redundant; if that caret is primary, the extra's selection goes.
+    for (int i = 0; i < refs.size(); ++i) {
+        if (refs[i].dead || refs[i].slot.hasSelection)
+            continue;
+        for (int j = 0; j < refs.size(); ++j) {
+            if (i == j || refs[j].dead || !refs[j].slot.hasSelection)
+                continue;
+            const auto [s, e] = selRangeOf(buffer_, refs[j].slot);
+            const int c = buffer_.offsetOf(refs[i].slot.caret.line, refs[i].slot.caret.col);
+            if (s < c && c < e) {
+                if (refs[i].primary)
+                    refs[j].dead = true;
+                else
+                    refs[i].dead = true;
+                break;
+            }
+        }
+    }
+
+    // Rebuild: primary back into the classic fields, surviving extras
+    // re-sorted into document order.
+    for (const Ref& r : refs) {
+        if (!r.primary)
+            continue;
+        caret_ = r.slot.caret;
+        anchor_ = r.slot.anchor;
+        hasSelection_ = r.slot.hasSelection;
+    }
+    QVector<CaretSlot> kept;
+    for (const Ref& r : refs) {
+        if (!r.primary && !r.dead)
+            kept.append(r.slot);
+    }
+    std::stable_sort(kept.begin(), kept.end(),
+                     [](const CaretSlot& a, const CaretSlot& b) { return posLess(a.caret, b.caret); });
+    extraCarets_ = kept;
+    altDragSlot_ = -1; // indices just moved; any in-flight drag anchor is moot
+}
+
+bool CodeEditor::applyCaretsFanOut(const SlotEditFn& editFn)
+{
+    normalizeCarets();
+
+    struct Target {
+        CaretSlot slot;
+        bool primary;
+        bool edited = false;
+        SlotEdit ed;
+        int finalOffset = -1; // caret after this slot's edit, in the frame
+                              // where every edit to its RIGHT is already applied
+    };
+    QVector<Target> targets;
+    targets.reserve(extraCarets_.size() + 1);
+    for (const CaretSlot& s : extraCarets_)
+        targets.append({s, false, false, {}, -1});
+    targets.append({CaretSlot{caret_, anchor_, hasSelection_}, true, false, {}, -1});
+    for (Target& t : targets)
+        t.edited = editFn(t.slot, t.ed);
+
+    // Apply right-to-left so not-yet-applied (leftward) offsets never shift.
+    QVector<int> order;
+    for (int i = 0; i < targets.size(); ++i) {
+        if (targets[i].edited)
+            order.append(i);
+    }
+    std::sort(order.begin(), order.end(), [&targets](int a, int b) {
+        if (targets[a].ed.start != targets[b].ed.start)
+            return targets[a].ed.start > targets[b].ed.start;
+        return targets[a].ed.end > targets[b].ed.end;
+    });
+    struct Applied { int start; int end; };
+    QVector<Applied> appliedRanges; // disjoint, to the RIGHT of the candidate
+    QVector<int> applyOrder;
+    for (int idx : order) {
+        const SlotEdit& ed = targets[idx].ed;
+        bool clash = false;
+        for (const Applied& a : appliedRanges) {
+            if (ed.end > a.start) { // leftward candidate running into it
+                clash = true;
+                break;
+            }
+        }
+        if (clash) { // v1 divergence: VS Code merges/adjusts; we KEEP the
+            targets[idx].edited = false; // right edit and drop this leftward
+            continue;                    // candidate's colliding edit
+        }
+        applyOrder.append(idx);
+        appliedRanges.append({ed.start, ed.end});
+    }
+    if (applyOrder.isEmpty())
+        return false; // nothing to record: NOT even an empty bracket
+
+    // Unedited slots still have a caret that must ride every edit's
+    // remap, so seed them with their pre-action offset.
+    for (Target& t : targets) {
+        if (!t.edited)
+            t.finalOffset = buffer_.offsetOf(t.slot.caret.line, t.slot.caret.col);
+    }
+
+    buffer_.beginEditGroup();
+    for (int idx : applyOrder) {
+        Target& t = targets[idx];
+        const int delta = t.ed.text.size() - (t.ed.end - t.ed.start);
+        // Slots whose own edit is still pending never shift (their final
+        // offsets sit left of this edit); everyone else follows the rule.
+        for (Target& o : targets) {
+            if (o.edited && o.finalOffset < 0)
+                continue; // pending: its finalOffset is frame-independent
+            int& p = o.finalOffset;
+            if (t.ed.end <= p)
+                p += delta;
+            else if (t.ed.start < p && p < t.ed.end)
+                p = t.ed.start;
+        }
+        // Self first: our own final caret is start + text in this frame.
+        t.finalOffset = t.ed.start + t.ed.text.size();
+        if (t.ed.end > t.ed.start)
+            buffer_.removeRange(t.ed.start, t.ed.end);
+        if (!t.ed.text.isEmpty())
+            buffer_.insertAtOffset(t.ed.start, t.ed.text);
+    }
+    buffer_.endEditGroup();
+
+    // Commit the caret state. EVERY slot lands where its tracked offset
+    // says: edited slots own theirs, unedited (and clash-dropped) ones
+    // rode the remap from their pre-action caret.
+    for (Target& t : targets) {
+        const auto lc = buffer_.lineColAt(t.finalOffset);
+        t.slot.caret = clampPos(TextPosition{lc.line, lc.col});
+        t.slot.anchor = t.slot.caret;
+        t.slot.hasSelection = false;
+    }
+    for (Target& t : targets) {
+        if (t.primary) {
+            caret_ = t.slot.caret;
+            anchor_ = t.slot.anchor;
+            hasSelection_ = t.slot.hasSelection;
+        }
+    }
+    QVector<CaretSlot> kept;
+    for (const Target& t : targets) {
+        if (!t.primary)
+            kept.append(t.slot);
+    }
+    std::stable_sort(kept.begin(), kept.end(),
+                     [](const CaretSlot& a, const CaretSlot& b) { return posLess(a.caret, b.caret); });
+    extraCarets_ = kept;
+    normalizeCarets(); // edits can stack carets onto one point: fold
+
+    caretOn_ = true;
+    if (hasFocus())
+        blinkTimer_.start();
+    ensureCaretVisible();
+    updateScrollBarRange();
+    update();
+    emit cursorMoved(caret_);
+    emit selectionChanged();
+    return true;
+}
+
+void CodeEditor::moveCarets(const std::function<TextPosition(const CaretSlot&)>& targetFn,
+                            bool extend)
+{
+    breakUndoChain(); // deliberate motion freezes any edit chain
+
+    struct Ref {
+        CaretSlot slot;
+        bool primary;
+    };
+    QVector<Ref> refs;
+    refs.reserve(extraCarets_.size() + 1);
+    for (const CaretSlot& s : extraCarets_)
+        refs.append({s, false});
+    refs.append({CaretSlot{caret_, anchor_, hasSelection_}, true});
+    for (Ref& r : refs) {
+        const TextPosition target = clampPos(targetFn(r.slot));
+        if (extend) {
+            if (!r.slot.hasSelection) {
+                r.slot.anchor = r.slot.caret; // the walk starts at the caret
+                r.slot.hasSelection = true;
+            }
+            r.slot.caret = target;
+            if (r.slot.caret == r.slot.anchor)
+                r.slot.hasSelection = false; // a zero-length extend is no selection
+        } else {
+            r.slot.caret = target;
+            r.slot.anchor = target;
+            r.slot.hasSelection = false;
+        }
+    }
+    for (const Ref& r : refs) {
+        if (!r.primary)
+            continue;
+        caret_ = r.slot.caret;
+        anchor_ = r.slot.anchor;
+        hasSelection_ = r.slot.hasSelection;
+    }
+    QVector<CaretSlot> kept;
+    for (const Ref& r : refs) {
+        if (!r.primary)
+            kept.append(r.slot);
+    }
+    std::stable_sort(kept.begin(), kept.end(),
+                     [](const CaretSlot& a, const CaretSlot& b) { return posLess(a.caret, b.caret); });
+    extraCarets_ = kept;
+    normalizeCarets(); // stacked/duplicated targets fold like VS Code
+
+    caretOn_ = true;
+    if (hasFocus())
+        blinkTimer_.start();
+    ensureCaretVisible();
+    update();
+    emit cursorMoved(caret_);
+    emit selectionChanged();
+    updatePrimarySelection();
 }
 
 void CodeEditor::undo()
@@ -667,6 +1193,19 @@ void CodeEditor::updatePrimarySelection()
     // supportsSelection() is the gate (tests must gate on it the same way).
     if (!cb || !cb->supportsSelection())
         return;
+    if (!extraCarets_.isEmpty()) {
+        // Multi-caret (D1): the primary selection mirrors ALL slot
+        // selections joined by newlines, mirroring the copy() rule.
+        QStringList parts;
+        for (const CaretSlot& s : allCarets()) {
+            if (!s.hasSelection)
+                continue;
+            const auto [st, en] = selRangeOf(buffer_, s);
+            parts << buffer_.textRange(st, en);
+        }
+        cb->setText(parts.join(QLatin1Char('\n')), QClipboard::Selection);
+        return;
+    }
     if (hasSelection_)
         cb->setText(selectedText(), QClipboard::Selection);
     else
@@ -733,6 +1272,25 @@ void CodeEditor::insertTextAtCaret(const QString& text)
     if (text.isEmpty())
         return;
     const UndoMark pre = captureEditMark();
+    if (!extraCarets_.isEmpty()) {
+        // Multi-caret typing (D1): one bracketed group per key press, so a
+        // multi-caret action is exactly ONE undo step and deliberately does
+        // NOT coalesce across presses (the bracket fences every group).
+        applyCaretsFanOut([this, &text](const CaretSlot& s, SlotEdit& ed) {
+            if (s.hasSelection) {
+                const auto [st, en] = selRangeOf(buffer_, s);
+                ed.start = st;
+                ed.end = en;
+            } else {
+                ed.start = buffer_.offsetOf(s.caret.line, s.caret.col);
+                ed.end = ed.start;
+            }
+            ed.text = text;
+            return true;
+        });
+        reconcileUndoMarks(pre);
+        return;
+    }
     // Typing over a selection: the delete + insert is ONE compound undo
     // step; the bracket also fences the pair off from neighboring chains.
     // Without a selection the insert stays unbracketed so consecutive
@@ -760,8 +1318,37 @@ void CodeEditor::insertTextAtCaret(const QString& text)
 void CodeEditor::backspace()
 {
     const UndoMark pre = captureEditMark(); // unbracketed: backspace runs
-    if (!deleteSelection())                 // coalesce into one chunk
-    {
+    if (!extraCarets_.isEmpty()) {         // coalesce into one chunk
+        // Multi-caret (D1): per-slot grapheme-safe deletes, one bracketed
+        // group per press (see insertTextAtCaret for the undo rationale).
+        applyCaretsFanOut([this](const CaretSlot& s, SlotEdit& ed) {
+            if (s.hasSelection) {
+                const auto [st, en] = selRangeOf(buffer_, s);
+                ed.start = st;
+                ed.end = en;
+                return true;
+            }
+            if (s.caret.col > 0) {
+                const QString line = buffer_.lineText(s.caret.line);
+                const int start = prevGraphemeCol(line, s.caret.col);
+                const int end = isGraphemeBoundary(line, s.caret.col)
+                    ? s.caret.col : nextGraphemeCol(line, s.caret.col);
+                ed.start = buffer_.offsetOf(s.caret.line, start);
+                ed.end = buffer_.offsetOf(s.caret.line, end);
+                return true;
+            }
+            if (s.caret.line > 0) {
+                const int nl = buffer_.offsetOfLine(s.caret.line) - 1;
+                ed.start = nl;
+                ed.end = nl + 1;
+                return true;
+            }
+            return false; // at the document start: this slot edits nothing
+        });
+        reconcileUndoMarks(pre);
+        return;
+    }
+    if (!deleteSelection()) {
         if (caret_.col > 0) {
             // Grapheme-cluster backspace (M2): deletes exactly the cluster
             // before the caret. When the caret sits inside a cluster (possible
@@ -788,6 +1375,35 @@ void CodeEditor::backspace()
 void CodeEditor::deleteForward()
 {
     const UndoMark pre = captureEditMark(); // unbracketed, see backspace
+    if (!extraCarets_.isEmpty()) {
+        applyCaretsFanOut([this](const CaretSlot& s, SlotEdit& ed) {
+            if (s.hasSelection) {
+                const auto [st, en] = selRangeOf(buffer_, s);
+                ed.start = st;
+                ed.end = en;
+                return true;
+            }
+            const int len = lineLength(s.caret.line);
+            if (s.caret.col < len) {
+                const QString line = buffer_.lineText(s.caret.line);
+                const int start = isGraphemeBoundary(line, s.caret.col)
+                    ? s.caret.col : prevGraphemeCol(line, s.caret.col);
+                const int end = nextGraphemeCol(line, s.caret.col);
+                ed.start = buffer_.offsetOf(s.caret.line, start);
+                ed.end = buffer_.offsetOf(s.caret.line, end);
+                return true;
+            }
+            if (s.caret.line + 1 < buffer_.lineCount()) {
+                const int nl = buffer_.offsetOfLine(s.caret.line + 1) - 1;
+                ed.start = nl;
+                ed.end = nl + 1;
+                return true;
+            }
+            return false; // at the very document end: this slot edits nothing
+        });
+        reconcileUndoMarks(pre);
+        return;
+    }
     if (!deleteSelection()) {
         const int len = lineLength(caret_.line);
         if (caret_.col < len) {
@@ -824,11 +1440,15 @@ void CodeEditor::paintEvent(QPaintEvent*)
     // Selection pass first: paint the background under the glyphs.
     // Semi-transparent highlight so text stays legible on light and dark
     // palettes alike (Monaco uses the same trick with ~40% opacity).
-    if (hasSelection_) {
-        const TextPosition s = selStart();
-        const TextPosition e = selEnd();
-        QColor selColor = palette().color(QPalette::Highlight);
-        selColor.setAlpha(90);
+    // D1: every caret slot's selection is painted, not just the primary.
+    QColor selColor = palette().color(QPalette::Highlight);
+    selColor.setAlpha(90);
+    for (const CaretSlot& slot : allCarets()) {
+        if (!slot.hasSelection)
+            continue;
+        const bool anchorFirst = posLess(slot.anchor, slot.caret);
+        const TextPosition s = anchorFirst ? slot.anchor : slot.caret;
+        const TextPosition e = anchorFirst ? slot.caret : slot.anchor;
         for (int line = std::max(first, s.line); line <= std::min(last, e.line); ++line) {
             const int startCol = (line == s.line) ? s.col : 0;
             // On fully covered lines the selection extends one phantom cell
@@ -858,6 +1478,14 @@ void CodeEditor::paintEvent(QPaintEvent*)
             double cx = padding_ + xInLine(gs, caret_.col);
             if (!preedit_.isEmpty())
                 cx += fmF.horizontalAdvance(preedit_);
+            p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
+        }
+        // D1: additional carets blink in sync with the primary (one shared
+        // blink timer), drawn with the same 2px rule off the same layout.
+        for (const CaretSlot& slot : extraCarets_) {
+            if (slot.caret.line != line || !caretOn_)
+                continue;
+            const double cx = padding_ + xInLine(gs, slot.caret.col);
             p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
         }
         if (gs->valid) {
@@ -961,11 +1589,25 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
     if (ctrl != Qt::NoModifier) {
         switch (key) {
         case Qt::Key_Home:
+            if (!extraCarets_.isEmpty()) {
+                moveCarets([](const CaretSlot&) { return TextPosition{0, 0}; }, shift);
+                finish();
+                return;
+            }
             nav({0, 0}, shift);
             finish();
             return;
         case Qt::Key_End: {
             const int lastLine = buffer_.lineCount() - 1;
+            if (!extraCarets_.isEmpty()) {
+                moveCarets(
+                    [this, lastLine](const CaretSlot&) {
+                        return TextPosition{lastLine, lineLength(lastLine)};
+                    },
+                    shift);
+                finish();
+                return;
+            }
             nav({lastLine, lineLength(lastLine)}, shift);
             finish();
             return;
@@ -973,6 +1615,20 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         // M2 word navigation: one press per class run, targets already
         // snapped to grapheme boundaries by the helpers.
         case Qt::Key_Left: {
+            if (!extraCarets_.isEmpty()) {
+                moveCarets(
+                    [this](const CaretSlot& s) {
+                        const int target = wordLeftCol(buffer_.lineText(s.caret.line), s.caret.col);
+                        if (target < s.caret.col)
+                            return TextPosition{s.caret.line, target};
+                        if (s.caret.line > 0)
+                            return TextPosition{s.caret.line - 1, lineLength(s.caret.line - 1)};
+                        return s.caret; // boundary: this caret stays put
+                    },
+                    shift);
+                finish();
+                return;
+            }
             const int target = wordLeftCol(buffer_.lineText(caret_.line), caret_.col);
             if (target < caret_.col)
                 nav({caret_.line, target}, shift);
@@ -982,6 +1638,20 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             return;
         }
         case Qt::Key_Right: {
+            if (!extraCarets_.isEmpty()) {
+                moveCarets(
+                    [this](const CaretSlot& s) {
+                        const int target = wordRightCol(buffer_.lineText(s.caret.line), s.caret.col);
+                        if (target > s.caret.col)
+                            return TextPosition{s.caret.line, target};
+                        if (s.caret.line + 1 < buffer_.lineCount())
+                            return TextPosition{s.caret.line + 1, 0};
+                        return s.caret; // boundary: this caret stays put
+                    },
+                    shift);
+                finish();
+                return;
+            }
             const int target = wordRightCol(buffer_.lineText(caret_.line), caret_.col);
             if (target > caret_.col)
                 nav({caret_.line, target}, shift);
@@ -991,6 +1661,34 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             return;
         }
         case Qt::Key_Delete: {
+            if (!extraCarets_.isEmpty()) {
+                // Multi-caret word delete (D1): bracketed group, one step.
+                const UndoMark pre = captureEditMark();
+                applyCaretsFanOut([this](const CaretSlot& s, SlotEdit& ed) {
+                    if (s.hasSelection) { // selections win, as with Delete
+                        const auto [st, en] = selRangeOf(buffer_, s);
+                        ed.start = st;
+                        ed.end = en;
+                        return true;
+                    }
+                    const int target = wordRightCol(buffer_.lineText(s.caret.line), s.caret.col);
+                    if (target > s.caret.col) {
+                        ed.start = buffer_.offsetOf(s.caret.line, s.caret.col);
+                        ed.end = buffer_.offsetOf(s.caret.line, target);
+                        return true;
+                    }
+                    if (s.caret.line + 1 < buffer_.lineCount()) {
+                        const int nl = buffer_.offsetOfLine(s.caret.line + 1) - 1; // join next line
+                        ed.start = nl;
+                        ed.end = nl + 1;
+                        return true;
+                    }
+                    return false;
+                });
+                reconcileUndoMarks(pre);
+                finish();
+                return;
+            }
             const UndoMark pre = captureEditMark(); // unbracketed word delete
             if (deleteSelection()) { // selection takes precedence, as with Delete
                 reconcileUndoMarks(pre);
@@ -1043,6 +1741,22 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         finish();
         return;
     case Qt::Key_Left: {
+        if (!extraCarets_.isEmpty()) {
+            moveCarets(
+                [this](const CaretSlot& s) {
+                    TextPosition p = s.caret;
+                    if (p.col > 0)
+                        p.col = prevGraphemeCol(buffer_.lineText(p.line), p.col);
+                    else if (p.line > 0) {
+                        --p.line;
+                        p.col = lineLength(p.line);
+                    }
+                    return p;
+                },
+                shift);
+            finish();
+            return;
+        }
         TextPosition pos = caret_;
         if (pos.col > 0)
             pos.col = prevGraphemeCol(buffer_.lineText(caret_.line), pos.col);
@@ -1055,6 +1769,22 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         return;
     }
     case Qt::Key_Right: {
+        if (!extraCarets_.isEmpty()) {
+            moveCarets(
+                [this](const CaretSlot& s) {
+                    TextPosition p = s.caret;
+                    if (p.col < lineLength(p.line))
+                        p.col = nextGraphemeCol(buffer_.lineText(p.line), p.col);
+                    else if (p.line + 1 < buffer_.lineCount()) {
+                        ++p.line;
+                        p.col = 0;
+                    }
+                    return p;
+                },
+                shift);
+            finish();
+            return;
+        }
         TextPosition pos = caret_;
         if (pos.col < lineLength(pos.line))
             pos.col = nextGraphemeCol(buffer_.lineText(caret_.line), pos.col);
@@ -1071,6 +1801,28 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         // Column is re-clamped to the target line; visual column memory
         // arrives with M9 (soft wrap work). On the first/last line the
         // motion collapses to the line start/end like real editors do.
+        if (!extraCarets_.isEmpty()) {
+            const bool up = key == Qt::Key_Up;
+            moveCarets(
+                [this, up](const CaretSlot& s) {
+                    TextPosition p = s.caret;
+                    if (up) {
+                        if (p.line > 0)
+                            --p.line;
+                        else
+                            p.col = 0;
+                    } else {
+                        if (p.line + 1 < buffer_.lineCount())
+                            ++p.line;
+                        else
+                            p.col = lineLength(p.line);
+                    }
+                    return p;
+                },
+                shift);
+            finish();
+            return;
+        }
         TextPosition pos = caret_;
         if (key == Qt::Key_Up) {
             if (pos.line > 0)
@@ -1088,15 +1840,44 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         return;
     }
     case Qt::Key_Home:
+        if (!extraCarets_.isEmpty()) {
+            moveCarets(
+                [this](const CaretSlot& s) { return TextPosition{s.caret.line, 0}; },
+                shift);
+            finish();
+            return;
+        }
         nav({caret_.line, 0}, shift);
         finish();
         return;
     case Qt::Key_End:
+        if (!extraCarets_.isEmpty()) {
+            moveCarets(
+                [this](const CaretSlot& s) {
+                    return TextPosition{s.caret.line, lineLength(s.caret.line)};
+                },
+                shift);
+            finish();
+            return;
+        }
         nav({caret_.line, lineLength(caret_.line)}, shift);
         finish();
         return;
     case Qt::Key_PageUp:
     case Qt::Key_PageDown: {
+        if (!extraCarets_.isEmpty()) {
+            const int page = std::max(1, visibleLineCount() - 2);
+            const int delta = key == Qt::Key_PageUp ? -page : page;
+            moveCarets(
+                [this, delta](const CaretSlot& s) {
+                    TextPosition p = s.caret;
+                    p.line += delta;
+                    return p; // clampPos inside moveCarets pins the edges
+                },
+                shift);
+            finish();
+            return;
+        }
         TextPosition pos = caret_;
         const int page = std::max(1, visibleLineCount() - 2);
         pos.line += (key == Qt::Key_PageUp) ? -page : page;
@@ -1112,6 +1893,13 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         finish();
         return;
     case Qt::Key_Escape:
+        // Two-stage (D1): Escape drops the additional carets FIRST, the
+        // primary selection second, matching multi-caret editor muscle memory.
+        if (!extraCarets_.isEmpty()) {
+            clearAdditionalCarets();
+            finish();
+            return;
+        }
         if (hasSelection_) {
             clearSelection();
             finish();
@@ -1178,6 +1966,7 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
         // middle-click button always does something predictable.
         setFocus(Qt::MouseFocusReason);
         breakUndoChain(); // the click move freezes any prior edit chain
+        clearAdditionalCarets(); // a click targets ONE caret (D1)
         setCaret(positionAt(event->position().toPoint()));
         if (QClipboard* cb = QGuiApplication::clipboard()) {
             QString text = cb->text(QClipboard::Selection);
@@ -1193,6 +1982,49 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
     setFocus(Qt::MouseFocusReason);
     breakUndoChain(); // a click is deliberate motion: freeze the edit chain
     const TextPosition pos = positionAt(event->position().toPoint());
+    if (event->modifiers() & Qt::AltModifier) {
+        // D1 multi-caret add gesture (left button only). Clicking exactly
+        // on an existing caret starts an Alt+Drag that resizes THAT slot
+        // (its anchor stays put); anywhere else adds a new caret, which
+        // becomes the primary (the mouse owns position()) while the old
+        // primary demotes into the extras. v1 has no Alt+click REMOVE
+        // toggle; duplicates fold via normalizeCarets.
+        altDragPrimary_ = false;
+        altDragSlot_ = -1;
+        if (pos == caret_) {
+            altDragPrimary_ = true; // resize the primary slot on drag
+            if (!hasSelection_)
+                anchor_ = pos; // anchor pinned at the pressed caret
+        } else {
+            for (int i = 0; i < extraCarets_.size(); ++i) {
+                if (extraCarets_[i].caret == pos) {
+                    altDragSlot_ = i; // anchor is wherever that slot has it
+                    break;
+                }
+            }
+            if (altDragSlot_ < 0) {
+                CaretSlot demoted{caret_, anchor_, hasSelection_};
+                caret_ = pos;
+                anchor_ = pos;
+                hasSelection_ = false;
+                extraCarets_.append(demoted);
+                std::stable_sort(extraCarets_.begin(), extraCarets_.end(),
+                                 [](const CaretSlot& a, const CaretSlot& b) { return posLess(a.caret, b.caret); });
+                altDragPrimary_ = true; // dragging follows the newest click
+                normalizeCarets(); // Alt+click inside a selection: the rules decide
+                altDragPrimary_ = pos == caret_; // normalize may have dropped the add
+                emit cursorMoved(caret_);
+                emit selectionChanged();
+            }
+        }
+        update();
+        event->accept();
+        return;
+    }
+    // A plain (or Shift+) left click collapses the caret set to ONE (D1).
+    extraCarets_.clear();
+    altDragSlot_ = -1;
+    altDragPrimary_ = false;
     // Shift+click extends the selection from the existing anchor; a plain
     // click collapses it at the new position.
     if (event->modifiers() & Qt::ShiftModifier)
@@ -1219,8 +2051,58 @@ void CodeEditor::mouseMoveEvent(QMouseEvent* event)
         setVScroll(vScroll_ + lineHeight_);
         pos.setY(height() - margin - 1);
     }
-    moveCaret(positionAt(pos), true);
+    const TextPosition target = positionAt(pos);
+    if (altDragPrimary_) {
+        // Alt+Drag on the primary caret: resize its selection, the anchor
+        // pinned at Alt+Press (a plain extend-drag from that caret end).
+        caret_ = target;
+        hasSelection_ = !(anchor_ == caret_);
+        caretOn_ = true;
+        if (hasFocus())
+            blinkTimer_.start();
+        update();
+        emit cursorMoved(caret_);
+        emit selectionChanged();
+        updatePrimarySelection();
+        event->accept();
+        return;
+    }
+    if (altDragSlot_ >= 0 && altDragSlot_ < extraCarets_.size()) {
+        CaretSlot& s = extraCarets_[altDragSlot_];
+        if (!s.hasSelection) {
+            s.anchor = s.caret; // the drag starts at the pressed caret
+            s.hasSelection = true;
+        }
+        s.caret = target;
+        if (s.caret == s.anchor)
+            s.hasSelection = false;
+        caretOn_ = true;
+        update();
+        emit selectionChanged();
+        updatePrimarySelection();
+        event->accept();
+        return;
+    }
+    moveCaret(target, true);
     event->accept();
+}
+
+void CodeEditor::mouseReleaseEvent(QMouseEvent* event)
+{
+    if (event->button() == Qt::LeftButton && (altDragPrimary_ || altDragSlot_ >= 0)) {
+        // End the Alt+Drag: the dragged selection may now overlap others,
+        // so let the normalization rules settle the caret set.
+        altDragPrimary_ = false;
+        altDragSlot_ = -1;
+        normalizeCarets();
+        update();
+        emit cursorMoved(caret_);
+        emit selectionChanged();
+        updatePrimarySelection();
+        event->accept();
+        return;
+    }
+    QWidget::mouseReleaseEvent(event);
 }
 
 void CodeEditor::wheelEvent(QWheelEvent* event)

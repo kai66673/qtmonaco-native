@@ -43,8 +43,8 @@ insert/delete operations with a naive `QString` reference and a full
 treap-invariant check after **every** operation (`tests/tst_textbuffer.cpp`).
 
 Deliberately **not implemented yet** (see roadmap): soft wrap, horizontal
-scrolling, undo/redo, syntax highlighting, decorations (diagnostics /
-breakpoints / inlay hints), gutter, multiple carets, column memory, full
+scrolling, syntax highlighting, decorations (diagnostics /
+breakpoints / inlay hints), gutter, column memory, full
 grapheme segmentation (`col` still counts UTF-16 code units even though
 arrow keys and edits snap to cluster boundaries), diff view, LSP, scrolling
 past the end.
@@ -95,7 +95,9 @@ Gate 1 — Code Editor v1:
 - [x] M2 IME composition (preedit rendered at caret, commit via insert)
 - [x] M3 undo/redo: op log in the core with coalescing + compound groups,
       caret/selection-restoring undo in the view (Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y)
-- [ ] multiple carets (one undo step per multi-caret user action)
+- [x] multiple carets: Alt+Click/Alt+Drag add and select per slot, typing,
+      deletion, clipboard and navigation fan out per caret; one undo step
+      per multi-caret user action (see CHANGELOG for v1 divergences)
 - [ ] M4 syntax highlighting (vendored tree-sitter runtime + generated
       grammars; incremental, viewport-scoped — see PLAN.md D2)
 - [ ] M5 decoration layers + line-number gutter + markers

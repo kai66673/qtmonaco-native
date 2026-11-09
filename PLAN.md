@@ -136,6 +136,14 @@ pr-hole adjacency, bracketed compound groups, 2048-group/32MB caps), view
 mirror marks restore caret+selection per step; 11 core tests (incl.
 `randomUndoRedoVsReference`, the DoD property test) + 11 widget tests.
 Multiple carets: next, D1 stays open until they land.
+**D1 COMPLETE (2026-11-09)** — multiple carets landed: Alt+Click/Alt+Drag
+gestures, per-slot fan-out for typing/Enter/Backspace/Delete/word-delete/
+clipboard/navigation, one bracketed undo group per key press with every
+slot restored from the undo mark, normalization rules (stack fold,
+contained-selection death, bare-caret-inside-selection death) and 19 state
+tests in `tst_codeeditor.cpp`. Documented v1 divergences (overlap keeps the
+right edit, no paste line-distribution, no Alt+click remove) are pinned by
+tests.
 
 ### D2 — M4 syntax highlighting: vendored tree-sitter (engine decided)
 
