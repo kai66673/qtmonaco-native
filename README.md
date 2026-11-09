@@ -84,3 +84,12 @@ Milestones, in build order:
 Out of scope by design: vim mode (explicitly dropped).
 
 License: TBD (parent project qtmonaco is BSD-3-Clause).
+
+## Model micro-benchmark
+
+```bash
+g++ -O3 -std=c++20 tools/bench_model.cpp -Isrc/core/.. \
+    build/src/core/libqmn_core.a \
+    -isystem /usr/include/qt6/QtCore -isystem /usr/include/qt6 \
+    -lQt6Core -o bench_model && ./bench_model <big-file>
+```
