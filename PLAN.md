@@ -114,9 +114,36 @@ assertions (no screenshots — see `AGENTS.md`).
 
 M3 undo/redo (+ multiple carets) · M4 syntax highlighting · M5 decoration
 layers + line-number gutter + markers · M6 find/replace.
-**Open decision (M4):** `KSyntaxHighlighting` is **not installed** here and is a
-KF6 framework (drags KDE cmake infra). Choose: take the KF6 dependency, or write
-a small purpose-built highlighter.
+**Open decision (M4) — highlight engine.** Three options; tree-sitter facts
+verified against v0.27.2 sources (released 2026-11-07):
+
+- **A. KF6 `KSyntaxHighlighting`** — not installed here; a KF6 framework that
+  drags KDE cmake infra + KConfigCore/KCoreAddons into the dependency set.
+  Problematic for the wheel deliverable: PySide6 wheels bundle no KDE libs, so
+  we would ship KF6 runtime libs + definition XMLs beside `_qmn`. Only
+  attractive if the wheel stops being first-class.
+- **B. Own Monarch-style line highlighter** — zero deps, UTF-16 native, mirrors
+  the Monaco look qtmonaco users expect (Monarch is Monaco's own engine). But
+  no syntax tree: nothing reusable for folding/smart-select, M10 structural
+  diff or M8 assist, and every language definition is ours to author forever.
+- **C. Vendored tree-sitter** (runtime + committed generated `parser.c` per
+  grammar) — pure C, compiles straight into the library/`_qmn` (single
+  amalgamation TU `lib/src/lib.c` + one `parser.c` per grammar), wheel-safe,
+  no runtime deps. Verified fit with our model: `TSInputEncodingUTF16LE` is
+  first-class and the lexer advances by encoded-unit size, so a tree-sitter
+  byte offset is **exactly 2×** our 0-based UTF-16-unit offset — no
+  transcoding, no byte/rope mapping pain; the pull-model `read` callback can
+  hand out piece-table chunks (QString data *is* UTF-16LE on LE) zero-copy.
+  Incremental is built-in: `ts_tree_edit` + reparse with old tree,
+  `ts_parser_set_included_ranges` for viewport-scoped parsing,
+  `TSParseOptions.progress_callback` for time-sliced parses. ABI 15 runtime,
+  accepts grammars ≥13 — pin the vendored copy, commit generated parsers
+  (CLI needed only to regenerate, not to build). Costs: adapter plumbing
+  (piece table ↔ `TSInput`, edits in byte units), per-language `.scm` query
+  curation, ~0.1–1 MB of parser tables per grammar in the wheel.
+**Decided: C — vendored tree-sitter** (pin v0.27.2), with a thin engine seam
+so grammar-less languages (plain text, …) keep a trivial fallback. Options A
+and B are kept above as the recorded rationale.
 
 ## Phase E — M7…M10 + parity surface
 
@@ -167,7 +194,8 @@ Pin `PySide6>=<the version we built against>` in the wheel metadata.
    `2809945` and dropped from `main` (recoverable via reflog while present).
    Review that attempt before retrying instead of re-deriving it; treat M9 as
    high-risk.
-4. **KF6 weight** — see M4 open decision above.
+4. **Highlight-engine weight** — see M4 open decision above (KF6 wheel burden
+   vs vendored tree-sitter vs own highlighter).
 5. **No vision** — every rendering milestone (gutter, ruler, diff, wrap) must be
    proven by numeric/state assertions; precedent is
    `cellWidthMatchesGlyphEngineAdvance`.

@@ -114,6 +114,11 @@ Include headers relative to `src/` (CMake adds `src/` as a PUBLIC include dir):
   backspace/delete are surrogate-safe). Don't add that safety to core.
 - `lineCount()` is always `>= 1`, even for an empty document.
 - `lineColAt(offset)` pointing at a `'\n'` resolves to the position *before* it.
+- **M4 engine is vendored tree-sitter** (pinned v0.27.2, ABI 15). Fed
+  `TSInputEncodingUTF16LE` straight from piece-table chunks — never transcode.
+  A tree-sitter byte offset (and `TSPoint.column`, which is byte-based too) is
+  **exactly 2×** our UTF-16-code-unit offset; the `get_column()` scanner
+  callback counts code points instead, but that never crosses our boundary.
 
 ## Build & test
 
