@@ -30,6 +30,15 @@ private slots:
     void lineColAtMatchesReference();
     void surrogateSplitIsCodeUnitLevel();
     void randomOpsVsReference();
+    void undoRedoBasics();
+    void undoCoalescingRules();
+    void editGroupsAreAtomic();
+    void breakUndoCoalescingFreezesChain();
+    void undoRedoBranching();
+    void historyClearing();
+    void capDropsOldestGroups();
+    void capByLogBytes();
+    void randomUndoRedoVsReference();
 
 private:
     static void verifyAllLines(const TextBuffer& buf, const QString& ref);
@@ -138,6 +147,252 @@ void TestTextBuffer::surrogateSplitIsCodeUnitLevel()
     QVERIFY(buffer->debugCheckInvariants());
 }
 
+void TestTextBuffer::undoRedoBasics()
+{
+    QCOMPARE(buffer->canUndo(), false);
+    QCOMPARE(buffer->canRedo(), false);
+    QCOMPARE(buffer->undoDepth(), 0);
+
+    buffer->setText(QStringLiteral("hello")); // setText never records
+    QCOMPARE(buffer->undoDepth(), 0);
+
+    buffer->insertAtOffset(5, QStringLiteral(" world"));
+    QCOMPARE(buffer->undoDepth(), 1);
+    QVERIFY(buffer->canUndo());
+    buffer->removeRange(0, 5);
+    QCOMPARE(buffer->undoDepth(), 2); // insert and delete are separate steps
+    QCOMPARE(buffer->text(), QStringLiteral(" world"));
+
+    QVERIFY(buffer->undo()); // re-inserts "hello"
+    QCOMPARE(buffer->text(), QStringLiteral("hello world"));
+    QVERIFY(buffer->undo()); // re-removes " world"
+    QCOMPARE(buffer->text(), QStringLiteral("hello"));
+    QCOMPARE(buffer->undoDepth(), 0);
+    QVERIFY(!buffer->undo());
+    QCOMPARE(buffer->redoDepth(), 2);
+
+    QVERIFY(buffer->redo()); // G1 first: re-inserts " world"
+    QCOMPARE(buffer->text(), QStringLiteral("hello world"));
+    QVERIFY(buffer->redo()); // then G2: deletes "hello" again
+    QCOMPARE(buffer->text(), QStringLiteral(" world"));
+    QCOMPARE(buffer->redoDepth(), 0);
+    QVERIFY(!buffer->redo());
+    QCOMPARE(buffer->undoDepth(), 2);
+
+    // No-op edits record nothing.
+    buffer->insertAtOffset(3, QString());
+    buffer->removeRange(2, 2);
+    QCOMPARE(buffer->undoDepth(), 2);
+    QVERIFY(buffer->debugCheckInvariants());
+}
+
+void TestTextBuffer::undoCoalescingRules()
+{
+    // Adjacent pure inserts coalesce (typing), but newlines break the chain.
+    buffer->insertAtOffset(0, QStringLiteral("a"));
+    buffer->insertAtOffset(1, QStringLiteral("b"));
+    QCOMPARE(buffer->undoDepth(), 1);
+    buffer->insertAtOffset(2, QStringLiteral("\n"));
+    QCOMPARE(buffer->undoDepth(), 2);
+    buffer->insertAtOffset(3, QStringLiteral("c"));
+    QCOMPARE(buffer->undoDepth(), 3);
+    // Not adjacent: caret moved to the front (no caret here, so only the
+    // op geometry matters; the view freezes chains on motion separately).
+    buffer->insertAtOffset(0, QStringLiteral("Z"));
+    QCOMPARE(buffer->undoDepth(), 4);
+
+    QVERIFY(buffer->undo());
+    QCOMPARE(buffer->text(), QStringLiteral("ab\nc"));
+    QVERIFY(buffer->undo());
+    QCOMPARE(buffer->text(), QStringLiteral("ab\n"));
+    QVERIFY(buffer->undo()); // the whole "ab" burst returns as one step
+    QCOMPARE(buffer->text(), QStringLiteral("ab"));
+    QVERIFY(buffer->undo());
+    QCOMPARE(buffer->text(), QString());
+
+    // Typing leftwards (each insert lands before the previous run) also
+    // coalesces into one merged op.
+    buffer->insertAtOffset(1, QStringLiteral("b"));
+    buffer->insertAtOffset(0, QStringLiteral("a"));
+    QCOMPARE(buffer->undoDepth(), 1);
+    buffer->breakUndoCoalescing();
+    buffer->insertAtOffset(2, QStringLiteral("c"));
+    QCOMPARE(buffer->undoDepth(), 2);
+    QCOMPARE(buffer->text(), QStringLiteral("abc"));
+    QVERIFY(buffer->undo());
+    QCOMPARE(buffer->text(), QStringLiteral("ab"));
+
+    // Adjacent pure deletions merge without a size cap; mixed kinds never.
+    buffer->setText(QStringLiteral("abcdef"));
+    const qint64 s0 = buffer->undoPushSerial();
+    buffer->removeRange(4, 6);
+    buffer->removeRange(2, 4);
+    buffer->removeRange(0, 2);
+    QCOMPARE(buffer->undoDepth(), 1);
+    QCOMPARE(buffer->text(), QString());
+    QVERIFY(buffer->undo()); // all of "abcdef" returns in one step
+    QCOMPARE(buffer->text(), QStringLiteral("abcdef"));
+    QVERIFY(!buffer->canUndo());
+    QCOMPARE(buffer->undoPushSerial(), s0 + 1); // the merged deletes pushed once
+
+    // Mixed adjacent insert+delete stay separate steps.
+    buffer->removeRange(3, 6); // delete "def"
+    buffer->insertAtOffset(3, QStringLiteral("def")); // adjacent insert
+    QCOMPARE(buffer->undoDepth(), 2);
+
+    // The merged-insert cap: beyond a typing burst each edit is its own step.
+    buffer->setText(QString());
+    for (int i = 0; i < 10; ++i)
+        buffer->insertAtOffset(buffer->charCount(), QStringLiteral("0123456789"));
+    QCOMPARE(buffer->undoDepth(), 2); // chain breaks once >64 units: 60 + 40
+    QVERIFY(buffer->debugCheckInvariants());
+}
+
+void TestTextBuffer::editGroupsAreAtomic()
+{
+    buffer->setText(QStringLiteral("hello"));
+    buffer->beginEditGroup();
+    buffer->removeRange(0, 2); // "he"
+    buffer->insertAtOffset(0, QStringLiteral("XY"));
+    buffer->endEditGroup();
+    QCOMPARE(buffer->undoDepth(), 1); // the compound action is ONE step
+    QCOMPARE(buffer->text(), QStringLiteral("XYllo"));
+
+    QVERIFY(buffer->undo()); // reverted atomically, inverse order
+    QCOMPARE(buffer->text(), QStringLiteral("hello"));
+    QVERIFY(buffer->redo()); // re-applied atomically, forward order
+    QCOMPARE(buffer->text(), QStringLiteral("XYllo"));
+
+    // Nesting: the group commits only at the outer endEditGroup.
+    buffer->beginEditGroup();
+    buffer->beginEditGroup();
+    buffer->insertAtOffset(0, QStringLiteral("Q"));
+    buffer->endEditGroup(); // inner end: nothing pushed yet
+    QCOMPARE(buffer->undoDepth(), 1);
+    buffer->endEditGroup(); // outer end: commits the accumulated group
+    QCOMPARE(buffer->undoDepth(), 2);
+
+    // A bracketed no-op records nothing and leaves redo alone.
+    QVERIFY(buffer->undo()); // drops the "Q" group again
+    QVERIFY(buffer->canRedo());
+    buffer->beginEditGroup();
+    buffer->endEditGroup();
+    QCOMPARE(buffer->undoDepth(), 1);
+    QVERIFY(buffer->canRedo());
+
+    // undo/redo while a group is open are refused (stack state ambiguous).
+    buffer->beginEditGroup();
+    buffer->insertAtOffset(0, QStringLiteral("R"));
+    QVERIFY(!buffer->undo());
+    QVERIFY(!buffer->redo());
+    buffer->endEditGroup();
+    QVERIFY(buffer->undo()); // only the "R" group goes back: redo was
+    // truncated when R was recorded, so "Q" never comes back
+    QCOMPARE(buffer->text(), QStringLiteral("XYllo"));
+    QVERIFY(buffer->debugCheckInvariants());
+}
+
+void TestTextBuffer::breakUndoCoalescingFreezesChain()
+{
+    buffer->beginEditGroup();
+    buffer->insertAtOffset(0, QStringLiteral("bracketed"));
+    buffer->endEditGroup();
+    // Adjacent to the bracketed run, but brackets never grow:
+    buffer->insertAtOffset(9, QStringLiteral("x"));
+    QCOMPARE(buffer->undoDepth(), 2);
+
+    // A frozen unbracketed chain likewise refuses the adjacent merge:
+    buffer->insertAtOffset(10, QStringLiteral("chain")); // merges into "x"
+    buffer->breakUndoCoalescing();
+    buffer->insertAtOffset(15, QStringLiteral("more"));
+    QCOMPARE(buffer->undoDepth(), 3); // bracketed | x+chain | more
+
+    buffer->breakUndoCoalescing(); // on an empty-ish stack: harmless
+    QVERIFY(buffer->debugCheckInvariants());
+}
+
+void TestTextBuffer::undoRedoBranching()
+{
+    buffer->setText(QStringLiteral("base"));
+    buffer->insertAtOffset(4, QStringLiteral(" one"));
+    buffer->breakUndoCoalescing(); // " two" touches " one": without the break
+    buffer->insertAtOffset(8, QStringLiteral(" two")); // they would coalesce
+    QCOMPARE(buffer->text(), QStringLiteral("base one two"));
+    QCOMPARE(buffer->undoDepth(), 2);
+
+    QVERIFY(buffer->undo());
+    QVERIFY(buffer->undo());
+    QCOMPARE(buffer->text(), QStringLiteral("base"));
+    QCOMPARE(buffer->redoDepth(), 2);
+
+    // A new edit truncates the whole redo branch on its first op.
+    buffer->insertAtOffset(4, QStringLiteral(" three"));
+    QCOMPARE(buffer->redoDepth(), 0);
+    QVERIFY(!buffer->redo());
+    QCOMPARE(buffer->text(), QStringLiteral("base three"));
+    QVERIFY(buffer->debugCheckInvariants());
+}
+
+void TestTextBuffer::historyClearing()
+{
+    buffer->insertAtOffset(0, QStringLiteral("gone"));
+    buffer->beginEditGroup();
+    buffer->insertAtOffset(4, QStringLiteral(" group"));
+    const qint64 s0 = buffer->undoPushSerial();
+    QVERIFY(s0 > 0);
+
+    buffer->setText(QStringLiteral("fresh")); // setText clears the history...
+    QCOMPARE(buffer->undoDepth(), 0);
+    QCOMPARE(buffer->redoDepth(), 0);
+    QVERIFY(!buffer->canUndo());
+    // ...and clearUndoHistory() too, while the push serial stays monotonic
+    // so callers can keep their mirror alignment across clears.
+    buffer->insertAtOffset(5, QStringLiteral(" data"));
+    buffer->clearUndoHistory();
+    QCOMPARE(buffer->undoDepth(), 0);
+    QVERIFY(buffer->undoPushSerial() > s0);
+    QVERIFY(buffer->debugCheckInvariants());
+}
+
+void TestTextBuffer::capDropsOldestGroups()
+{
+    // Each insert contains a '\n' so nothing coalesces: exactly one group
+    // per edit, and the chain is never merged.
+    const int total = TextBuffer::kMaxUndoGroups + 100;
+    for (int i = 0; i < total; ++i)
+        buffer->insertAtOffset(buffer->charCount(), QStringLiteral("%1\n").arg(i, 5, 10, QLatin1Char('0')));
+    QCOMPARE(buffer->undoDepth(), TextBuffer::kMaxUndoGroups);
+    QCOMPARE(buffer->undoPushSerial(), static_cast<qint64>(total));
+
+    // Undo the whole retained history: the document rewinds only to the
+    // state the drop-oldest cap left behind, not to empty.
+    int undos = 0;
+    while (buffer->undo())
+        ++undos;
+    QCOMPARE(undos, TextBuffer::kMaxUndoGroups); // one undo per retained group
+    const int dropped = total - TextBuffer::kMaxUndoGroups;
+    QString expected;
+    for (int i = 0; i < dropped; ++i)
+        expected += QStringLiteral("%1\n").arg(i, 5, 10, QLatin1Char('0'));
+    QCOMPARE(buffer->text(), expected);
+    QVERIFY(!buffer->canUndo());
+    QVERIFY(buffer->debugCheckInvariants());
+}
+
+void TestTextBuffer::capByLogBytes()
+{
+    // Big non-coalescible inserts (each over the 64-unit merge cap): the
+    // byte cap drops oldest groups long before the count cap.
+    const int big = 2 * 1024 * 1024; // 2M units = 4MB of log per group
+    const QString chunk(big, QLatin1Char('X'));
+    for (int i = 0; i < 10; ++i)
+        buffer->insertAtOffset(0, chunk); // adjacent, but far past the merge cap
+    const int expectedDepth = static_cast<int>(TextBuffer::kMaxUndoLogBytes / (2ll * big));
+    QCOMPARE(buffer->undoDepth(), expectedDepth); // 32MB / 4MB: exactly 8 kept
+    QCOMPARE(buffer->charCount(), 10 * big); // the document itself keeps all text
+    QVERIFY(buffer->debugCheckInvariants());
+}
+
 void TestTextBuffer::verifyAllLines(const TextBuffer& buf, const QString& ref)
 {
     const QStringList refLines = ref.split(QLatin1Char('\n'));
@@ -203,6 +458,164 @@ void TestTextBuffer::randomOpsVsReference()
     }
     verifyAllLines(*buffer, ref);
     QVERIFY(buffer->debugNodeCount() > 0);
+}
+
+void TestTextBuffer::randomUndoRedoVsReference()
+{
+    // M3 DoD: undo/redo round-trip against a naive QString reference,
+    // same style as randomOpsVsReference. The model mirrors the CORE's
+    // public contract only (undoDepth + undoPushSerial + canUndo/canRedo),
+    // exactly like the view does - so it also exercises the alignment
+    // scheme end to end, coalescing and all.
+    std::mt19937 rng(0xBADCAFE0u);
+    const QString alphabet = QStringLiteral("ab\nc\u00e9\U0001F600z");
+    auto randomChunk = [&](int minLen, int maxLen) {
+        std::uniform_int_distribution<int> lenDist(minLen, maxLen);
+        const int len = lenDist(rng);
+        QString chunk;
+        chunk.reserve(len);
+        std::uniform_int_distribution<int> charDist(0, alphabet.size() - 1);
+        for (int i = 0; i < len; ++i) {
+            const QChar c = alphabet.at(charDist(rng));
+            if (c.isHighSurrogate() && i + 1 < len) {
+                chunk += c;
+                chunk += alphabet.at(charDist(rng)); // may be a low surrogate by chance
+                ++i;
+            } else {
+                chunk += c;
+            }
+        }
+        return chunk;
+    };
+    auto randPos = [&](int limit) {
+        std::uniform_int_distribution<int> posDist(0, limit);
+        return posDist(rng);
+    };
+
+    QString ref;
+    buffer->setText(ref);
+    QStringList hist; // hist[i] = reference state after core group i
+    QStringList future; // undone group states, LIFO (core redoStack mirror)
+    hist.append(ref);
+
+    int undoSteps = 0, redoSteps = 0;
+
+    for (int step = 0; step < 800; ++step) {
+        const int d0 = buffer->undoDepth();
+        const qint64 s0 = buffer->undoPushSerial();
+        std::uniform_int_distribution<int> choice(0, 99);
+        const int c = choice(rng);
+
+        if (c < 40 || ref.isEmpty()) { // plain unbracketed insert
+            const QString chunk = randomChunk(1, 12);
+            const int at = randPos(ref.size());
+            ref.insert(at, chunk);
+            buffer->insertAtOffset(at, chunk);
+            future.clear(); // any recorded edit truncates the redo branch
+        } else if (c < 62) { // plain unbracketed delete
+            const int a = randPos(ref.size() - 1);
+            const int len = std::min(1 + randPos(9), static_cast<int>(ref.size()) - a);
+            ref.remove(a, len);
+            buffer->removeRange(a, a + len);
+            future.clear();
+        } else if (c < 74) { // bracketed delete+insert (replace-selection)
+            const int a = randPos(ref.size() - 1);
+            const int len = std::min(1 + randPos(6), static_cast<int>(ref.size()) - a);
+            const QString chunk = randomChunk(1, 8);
+            ref.remove(a, len);
+            ref.insert(a, chunk);
+            buffer->beginEditGroup();
+            buffer->removeRange(a, a + len);
+            buffer->insertAtOffset(a, chunk);
+            buffer->endEditGroup();
+            future.clear();
+        } else if (c < 84) { // bracketed multi-op compound action
+            buffer->beginEditGroup();
+            const int ops = 2 + randPos(2);
+            for (int k = 0; k < ops; ++k) {
+                if ((k % 2) == 0 || ref.isEmpty()) {
+                    const QString chunk = randomChunk(1, 6);
+                    const int at = randPos(ref.size());
+                    ref.insert(at, chunk);
+                    buffer->insertAtOffset(at, chunk);
+                } else {
+                    const int a = randPos(ref.size() - 1);
+                    const int len = std::min(1 + randPos(4), static_cast<int>(ref.size()) - a);
+                    ref.remove(a, len);
+                    buffer->removeRange(a, a + len);
+                }
+            }
+            buffer->endEditGroup();
+            future.clear();
+        } else if (c < 88) { // the view breaks chains on deliberate motion
+            buffer->breakUndoCoalescing();
+        } else if (c < 95) { // partial undos
+            if (buffer->canUndo()) {
+                QVERIFY2(hist.size() >= 2, qPrintable(QStringLiteral("mirror lost sync at step %1").arg(step)));
+                QVERIFY(buffer->undo());
+                future.append(hist.takeLast());
+                ref = hist.back();
+                ++undoSteps;
+                // Follow-up redo burst: real callers hammer Ctrl+Shift+Z
+                // right after undoing; the plain redo bucket alone leaves
+                // too few redos because edits usually clear the branch first.
+                if (randPos(9) < 5) {
+                    const int extra = 1 + randPos(2);
+                    for (int k = 0; k < extra; ++k) {
+                        if (!buffer->canRedo())
+                            break;
+                        QVERIFY(!future.isEmpty());
+                        QVERIFY(buffer->redo());
+                        ref = future.takeLast();
+                        hist.append(ref);
+                        ++redoSteps;
+                    }
+                }
+            } else {
+                QVERIFY(!buffer->undo());
+                QCOMPARE(hist.size(), 1);
+            }
+        } else { // redos
+            if (buffer->canRedo()) {
+                QVERIFY(!future.isEmpty());
+                QVERIFY(buffer->redo());
+                ref = future.takeLast();
+                hist.append(ref);
+                ++redoSteps;
+            } else {
+                QVERIFY(future.isEmpty());
+                QVERIFY(!buffer->redo());
+            }
+        }
+
+        // Mirror reconciliation (the view's contract): a pushed group grew
+        // the serial by one; coalescing or no-ops did not touch it.
+        const int d1 = buffer->undoDepth();
+        const qint64 s1 = buffer->undoPushSerial();
+        if (s1 == s0 + 1) {
+            QCOMPARE(d1, d0 + 1); // view-side guarantee: one group per action
+            hist.append(ref);
+        } else {
+            QCOMPARE(s1, s0);
+        }
+        hist[hist.size() - 1] = ref; // coalesced, undone/redone or unchanged
+
+        // Lockstep assertions between the two models.
+        QCOMPARE(buffer->undoDepth(), static_cast<int>(hist.size()) - 1);
+        QCOMPARE(buffer->redoDepth(), static_cast<int>(future.size()));
+        QVERIFY2(buffer->debugCheckInvariants(), qPrintable(QStringLiteral("invariant broken at step %1").arg(step)));
+        const QString full = buffer->text();
+        if (full != ref)
+            qWarning() << "undo-model mismatch at step" << step << "op class" << c;
+        QCOMPARE(full, ref);
+        if ((step % 40) == 0)
+            verifyAllLines(*buffer, ref);
+    }
+
+    // The property test must actually have exercised both branches.
+    QVERIFY2(undoSteps > 50, "too few undos in the random stream");
+    QVERIFY2(redoSteps > 10, "too few redos in the random stream");
+    QVERIFY(buffer->debugCheckInvariants());
 }
 
 QTEST_GUILESS_MAIN(TestTextBuffer)

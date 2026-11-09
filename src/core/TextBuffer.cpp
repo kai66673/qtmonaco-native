@@ -15,6 +15,8 @@ TextBuffer::TextBuffer()
 {
     nodes_.resize(1); // index 0 = null sentinel
     buffers_.emplace_back(); // buffers_[0] = "" placeholder
+    buffers_.emplace_back(); // buffers_[1] = the add buffer pieces append to
+    addBuf_ = 1; // setText() restates this invariant after reshaping buffers_
 }
 
 quint32 TextBuffer::nextRand()
@@ -180,6 +182,7 @@ TextBuffer::Piece TextBuffer::appendToAddBuffer(const QString& text)
 
 void TextBuffer::setText(const QString& text)
 {
+    clearUndoHistory();
     recycleTree(root_);
     root_ = kNull;
     buffers_.resize(2); // drop all buffers except the placeholder + old add buffer
@@ -195,14 +198,10 @@ void TextBuffer::setText(const QString& text)
 void TextBuffer::insertAtOffset(int offset, const QString& text)
 {
     if (text.isEmpty())
-        return;
+        return; // a no-op records nothing: neither coalescing nor redo-clear
     offset = std::clamp(offset, 0, charCount());
-    int a = kNull;
-    int b = kNull;
-    splitChars(root_, offset, a, b);
-    const Piece p = appendToAddBuffer(text);
-    const int mid = newNode(p);
-    root_ = mergeTrees(mergeTrees(a, mid), b);
+    recordEdit(EditOp{offset, offset, QString(), text});
+    applyInsert(offset, text);
 }
 
 void TextBuffer::removeRange(int startOffset, int endOffset)
@@ -213,6 +212,30 @@ void TextBuffer::removeRange(int startOffset, int endOffset)
     endOffset = std::clamp(endOffset, 0, charCount());
     if (startOffset == endOffset)
         return;
+    // The inverse text must be captured before the mutation. Walking the
+    // pieces for it is O(pieces-before-end), fine at our piece counts (the
+    // op cap keeps history-bounded edits from exploding the treap anyway).
+    const QString removed = textRange(startOffset, endOffset);
+    recordEdit(EditOp{startOffset, endOffset, removed, QString()});
+    applyRemove(startOffset, endOffset);
+}
+
+void TextBuffer::applyInsert(int offset, const QString& text)
+{
+    if (text.isEmpty())
+        return;
+    int a = kNull;
+    int b = kNull;
+    splitChars(root_, offset, a, b);
+    const Piece p = appendToAddBuffer(text);
+    const int mid = newNode(p);
+    root_ = mergeTrees(mergeTrees(a, mid), b);
+}
+
+void TextBuffer::applyRemove(int startOffset, int endOffset)
+{
+    if (startOffset >= endOffset)
+        return;
     int mid = kNull;
     int c = kNull;
     splitChars(root_, endOffset, mid, c);
@@ -221,6 +244,192 @@ void TextBuffer::removeRange(int startOffset, int endOffset)
     splitChars(mid, startOffset, a, doomed);
     recycleTree(doomed);
     root_ = mergeTrees(a, c);
+}
+
+// --- undo/redo (M3) ------------------------------------------------------
+
+qint64 TextBuffer::opsBytes(const std::vector<EditOp>& ops)
+{
+    qint64 units = 0;
+    for (const EditOp& op : ops)
+        units += op.removed.size() + op.inserted.size();
+    return 2 * units; // UTF-16 code units -> bytes
+}
+
+void TextBuffer::recordEdit(EditOp op)
+{
+    // Any new recorded edit invalidates the redo branch (standard editor
+    // semantics). Dropping the groups must also release their log bytes.
+    if (!redoStack_.empty()) {
+        for (const UndoGroup& g : redoStack_)
+            logBytes_ -= opsBytes(g.ops);
+        redoStack_.clear();
+    }
+    logBytes_ += opsBytes({op});
+
+    if (groupDepth_ > 0) {
+        openGroup_.push_back(std::move(op));
+        return; // the group lands on the stack at the outermost endEditGroup
+    }
+    if (!undoStack_.empty() && tryCoalesce(undoStack_.back(), op)) {
+        enforceCapacity();
+        return; // top group grew in place; undoDepth() is unchanged
+    }
+    UndoGroup g;
+    g.ops.push_back(std::move(op));
+    g.coalescable = true;
+    undoStack_.push_back(std::move(g));
+    ++pushSerial_;
+    enforceCapacity();
+}
+
+bool TextBuffer::tryCoalesce(UndoGroup& top, const EditOp& nu)
+{
+    // Only single-op chains of unbracketed edits grow; bracketed compound
+    // groups stay frozen. Mixed insert+delete never merges (a selection
+    // replacement is always view-bracketed anyway).
+    if (!top.coalescable || top.ops.size() != 1)
+        return false;
+    const EditOp& pr = top.ops.front();
+    const bool ins = !nu.inserted.isEmpty();
+    if (ins != !pr.inserted.isEmpty())
+        return false;
+
+    EditOp merged;
+    // Geometry note: nu's offsets are in the document state pr PRODUCED,
+    // so "adjacent" is defined against pr's hole position: in the post-pr
+    // document, pr's inserted text sits at [pr.start, pr.start+|pr.inserted|)
+    // and pr's deleted range is an empty hole AT pr.start.
+    if (ins) {
+        // Newlines break the typing chain: like every editor, Enter makes
+        // its own undo step and stops the merge before and after it.
+        if (pr.inserted.contains(kNewline) || nu.inserted.contains(kNewline))
+            return false;
+        if (pr.inserted.size() + nu.inserted.size() > kMaxCoalesceUnits)
+            return false; // past a typing burst, give each edit its own step
+        const int prEnd = pr.start + static_cast<int>(pr.inserted.size());
+        if (nu.start == prEnd)
+            // Right-adjacent (typing forwards): "ab|" then text at prEnd.
+            merged = EditOp{pr.start, nu.start + static_cast<int>(nu.inserted.size()),
+                            QString(), pr.inserted + nu.inserted};
+        else if (nu.start == pr.start)
+            // Left-adjacent (typing backwards): the new text lands directly
+            // before pr's run, pushing it right.
+            merged = EditOp{nu.start, pr.start + static_cast<int>(pr.inserted.size() + nu.inserted.size()),
+                            QString(), nu.inserted + pr.inserted};
+        else
+            return false; // not adjacent: caret moved away, new step
+    } else {
+        // Adjacent pure deletions merge without a size cap: the text is in
+        // the log either way, and repeated Backspace/Delete reads better
+        // as one chunk. Ranges are in document order after the fold;
+        // nu.end is a post-pr coordinate, so right-side merges must shift
+        // it back over pr's removed text to land in the merged op's state.
+        if (nu.start == pr.start)
+            // Right-adjacent: nu starts at pr's hole (forward Delete runs).
+            merged = EditOp{pr.start, nu.end + static_cast<int>(pr.removed.size()),
+                            pr.removed + nu.removed, QString()};
+        else if (nu.end == pr.start)
+            // Left-adjacent: nu ends exactly at pr's hole (Backspace runs).
+            merged = EditOp{nu.start, pr.end, nu.removed + pr.removed, QString()};
+        else
+            return false;
+    }
+    top.ops.front() = std::move(merged);
+    return true;
+}
+
+void TextBuffer::enforceCapacity()
+{
+    // Drop-oldest. The newest group is never dropped: one giant edit's log
+    // entry simply stays, so the byte cap degrades to "one oversized op".
+    // Redo stacks cannot grow past the cap on their own: undo()/redo() only
+    // move groups between the stacks, and recordEdit() clears redo before
+    // adding, so undoStack_ is the only growing side.
+    while (undoStack_.size() > 1 && (undoStack_.size() > static_cast<std::size_t>(kMaxUndoGroups) ||
+                                     logBytes_ > kMaxUndoLogBytes)) {
+        logBytes_ -= opsBytes(undoStack_.front().ops);
+        undoStack_.erase(undoStack_.begin());
+    }
+}
+
+void TextBuffer::beginEditGroup()
+{
+    // Nesting is depth-counted so a bracketed action can wrap another
+    // bracketed one (paste over selection) without closing early. The
+    // fresh openGroup_ also starts a new chain: the group built here is
+    // never coalescable, before or after.
+    if (groupDepth_++ == 0)
+        openGroup_.clear();
+}
+
+void TextBuffer::endEditGroup()
+{
+    if (groupDepth_ == 0)
+        return;
+    if (--groupDepth_ > 0)
+        return; // inner group of a nested bracket: keep accumulating
+    if (openGroup_.empty())
+        return; // bracketed no-op: no group, and redo was never touched
+    UndoGroup g;
+    g.ops = std::move(openGroup_);
+    openGroup_.clear();
+    g.coalescable = false;
+    undoStack_.push_back(std::move(g));
+    ++pushSerial_;
+    enforceCapacity();
+}
+
+void TextBuffer::breakUndoCoalescing()
+{
+    if (!undoStack_.empty())
+        undoStack_.back().coalescable = false;
+}
+
+void TextBuffer::clearUndoHistory()
+{
+    undoStack_.clear();
+    redoStack_.clear();
+    openGroup_.clear();
+    groupDepth_ = 0;
+    logBytes_ = 0;
+    // pushSerial_ deliberately NOT reset: callers align mirrors by
+    // (undoDepth, undoPushSerial) deltas across clears and rebuilds.
+}
+
+bool TextBuffer::undo()
+{
+    if (groupDepth_ > 0 || undoStack_.empty())
+        return false;
+    UndoGroup g = std::move(undoStack_.back());
+    undoStack_.pop_back();
+    // Inverse order restores the pre-state exactly: within a group, op
+    // offsets are valid in the state left by the preceding ops.
+    for (auto it = g.ops.rbegin(); it != g.ops.rend(); ++it) {
+        const EditOp& op = *it;
+        if (!op.inserted.isEmpty())
+            applyRemove(op.start, op.start + static_cast<int>(op.inserted.size()));
+        else
+            applyInsert(op.start, op.removed);
+    }
+    redoStack_.push_back(std::move(g));
+    return true;
+}
+
+bool TextBuffer::redo()
+{
+    if (groupDepth_ > 0 || redoStack_.empty())
+        return false;
+    UndoGroup g = std::move(redoStack_.back());
+    redoStack_.pop_back();
+    for (const EditOp& op : g.ops) {
+        if (!op.inserted.isEmpty())
+            applyInsert(op.start, op.inserted);
+        else
+            applyRemove(op.start, op.end);
+    }
+    undoStack_.push_back(std::move(g));
+    return true;
 }
 
 int TextBuffer::charCount() const

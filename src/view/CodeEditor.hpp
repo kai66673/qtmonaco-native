@@ -9,6 +9,7 @@
 #include <QTextLayout>
 #include <QTextLine>
 #include <QTimer>
+#include <QVector>
 #include <QWidget>
 
 #include "core/TextBuffer.hpp"
@@ -63,8 +64,8 @@ struct TextPosition {
 // col*cellWidth positions.
 //
 // Deliberately NOT included (follow-up milestones): soft wrap, horizontal
-// scrolling, undo/redo, column memory for Up/Down, double-click word
-// selection. See README roadmap.
+// scrolling, column memory for Up/Down, double-click word selection. See
+// README roadmap.
 class CodeEditor : public QWidget {
     Q_OBJECT
 public:
@@ -100,6 +101,17 @@ public:
     void copy();
     void cut();
     void paste();
+
+    // Undo/redo (M3). One step = one user action: typing runs coalesce into
+    // a burst step (broken by Enter, caret moves and selection-replacing
+    // edits), paste and over-selection typing are single compound steps.
+    // undo() restores the caret/selection as it stood before the action;
+    // redo() restores the state from when it was undone. setPlainText()
+    // clears the history. Keys: Ctrl+Z, Ctrl+Shift+Z / Ctrl+Y.
+    void undo();
+    void redo();
+    bool canUndo() const { return buffer_.canUndo(); }
+    bool canRedo() const { return buffer_.canRedo(); }
 
     int lineHeight() const { return lineHeight_; }
     double cellWidth() const { return cellWidth_; }
@@ -161,6 +173,24 @@ private:
     void updatePrimarySelection(); // mirror an active selection to X11 primary
     int lineLength(int line) const;
 
+    // --- undo mirror (M3) ------------------------------------------------
+    // The core owns the op log (see core/TextBuffer.hpp); the view stacks
+    // caret/selection states 1:1 underneath it: undoMarks_[i] is the state
+    // before core undo-group i (front-aligned after core cap-drops), and
+    // redoMarks_[j] is the state an undone group left behind. Alignment is
+    // reconciled after every mutating action via (undoDepth, undoPushSerial)
+    // deltas, which distinguish "coalesced into top" from "pushed, oldest
+    // dropped at the cap" from "nothing recorded".
+    struct UndoMark {
+        TextPosition caret;
+        TextPosition anchor;
+        bool hasSelection = false;
+    };
+    UndoMark captureEditMark() const;
+    void reconcileUndoMarks(const UndoMark& pre); // after any mutating action
+    void applyEditMark(const UndoMark& m);        // restore caret/selection
+    void breakUndoChain(); // freeze coalescing on deliberate caret motion
+
     // Per-line glyph-engine layout cache. A laid-out QTextLine is the sole
     // authority for caret x, selection x and mouse hit-testing (measured on
     // Qt 6.12: emoji ZWJ families occupy ~1.8 cells, not their code-unit
@@ -196,6 +226,9 @@ private:
     mutable quint64 geoClock_ = 0;
 
     qmn::core::TextBuffer buffer_;
+    QVector<UndoMark> undoMarks_; // aligned with buffer_ undo groups
+    QVector<UndoMark> redoMarks_; // aligned with buffer_ redo groups
+    qint64 lastPushSerial_ = 0;   // last seen buffer_.undoPushSerial()
     TextPosition caret_;
     TextPosition anchor_; // inactive end of the selection
     bool hasSelection_ = false;

@@ -177,7 +177,10 @@ QSize CodeEditor::sizeHint() const
 void CodeEditor::setPlainText(const QString& text)
 {
     preedit_.clear(); // a programmatic document replace ends any composition
-    buffer_.setText(text);
+    buffer_.setText(text); // also clears the core undo/redo stacks
+    undoMarks_.clear();
+    redoMarks_.clear();
+    lastPushSerial_ = buffer_.undoPushSerial();
     caret_ = {};
     anchor_ = {};
     hasSelection_ = false;
@@ -346,6 +349,7 @@ TextPosition CodeEditor::clampPos(TextPosition pos) const
 
 void CodeEditor::setPosition(TextPosition pos)
 {
+    breakUndoChain(); // a deliberate programmatic move ends any edit chain
     setCaret(clampPos(pos));
 }
 
@@ -369,6 +373,7 @@ void CodeEditor::setCaret(TextPosition pos)
 
 void CodeEditor::setSelection(TextPosition anchor, TextPosition caret)
 {
+    breakUndoChain(); // deliberate selection motion ends any edit chain
     anchor_ = clampPos(anchor);
     caret_ = clampPos(caret);
     hasSelection_ = !(anchor_ == caret_);
@@ -449,6 +454,7 @@ int CodeEditor::selectedLength() const
 
 void CodeEditor::selectAll()
 {
+    breakUndoChain(); // deliberate selection motion ends any edit chain
     const int lastLine = buffer_.lineCount() - 1;
     setSelection({0, 0}, {lastLine, lineLength(lastLine)});
 }
@@ -470,6 +476,8 @@ bool CodeEditor::deleteSelection()
     buffer_.removeRange(startOff, endOff);
     setCaret(start);
     updatePrimarySelection(); // the removed text must not linger in primary
+    emit selectionChanged();  // the edit path also annihilates a selection:
+    // keep the signal as faithful as the navigation paths already are
     return true;
 }
 
@@ -501,9 +509,13 @@ void CodeEditor::cut()
     QClipboard* cb = QGuiApplication::clipboard();
     if (!cb)
         return;
+    // Unbracketed: the cut's delete may coalesce with an adjacent delete
+    // chain (the preceding selection motion already froze any older chain).
+    const UndoMark pre = captureEditMark();
     if (hasSelection_) {
         cb->setText(selectedText(), QClipboard::Clipboard);
         deleteSelection(); // also drops the primary mirror
+        reconcileUndoMarks(pre);
         return;
     }
     const int line = caret_.line;
@@ -530,6 +542,7 @@ void CodeEditor::cut()
         else
             setCaret({0, 0});
     }
+    reconcileUndoMarks(pre);
 }
 
 void CodeEditor::paste()
@@ -550,13 +563,101 @@ void CodeEditor::pasteText(const QString& text)
     clean.replace(QLatin1Char('\r'), QLatin1Char('\n'));
     if (clean.isEmpty())
         return; // empty clipboard: paste is a no-op, not a delete
+    const UndoMark pre = captureEditMark();
+    // Paste is its own undo step: the bracket fences it off from the
+    // typing chain (even when inserted right after typed text) and merges
+    // a replace-selection + insert into one compound group. begin/
+    // endEditGroup nest, so the bracket inside insertTextAtCaret (over a
+    // selection) commits only at this outer end.
+    buffer_.beginEditGroup();
     insertTextAtCaret(clean);
+    buffer_.endEditGroup();
     if (QClipboard* cb = QGuiApplication::clipboard();
         cb && cb->supportsSelection()) {
         // X11 convention: the freshly pasted text becomes the new primary
         // selection (the old primary was the selection it just replaced).
         cb->setText(clean, QClipboard::Selection);
     }
+    reconcileUndoMarks(pre);
+}
+
+// --- undo/redo mirror (M3) -----------------------------------------------
+// The core TextBuffer owns the op log; the view keeps caret/selection
+// states stacked underneath it 1:1 and reconciles after every mutating
+// action. See the UndoMark declaration in the header for the alignment
+// scheme.
+
+CodeEditor::UndoMark CodeEditor::captureEditMark() const
+{
+    return UndoMark{caret_, anchor_, hasSelection_};
+}
+
+void CodeEditor::reconcileUndoMarks(const UndoMark& pre)
+{
+    const int u = buffer_.undoDepth();
+    const qint64 s = buffer_.undoPushSerial();
+    if (s > lastPushSerial_) {
+        // A fresh group landed (one action pushes at most one group;
+        // coalescing and no-ops leave the serial alone): its mark is the
+        // pre-action state captured at the action's start.
+        undoMarks_.append(pre);
+    }
+    lastPushSerial_ = s;
+    // The core drops oldest groups at its history caps: realign by
+    // dropping our oldest marks too.
+    if (undoMarks_.size() > u)
+        undoMarks_.remove(0, undoMarks_.size() - u);
+    if (buffer_.redoDepth() == 0)
+        redoMarks_.clear(); // the core truncated the redo branch
+    Q_ASSERT(undoMarks_.size() == static_cast<int>(buffer_.undoDepth()));
+}
+
+void CodeEditor::applyEditMark(const UndoMark& m)
+{
+    // Text changed under the marks, so positions are re-clamped (a mark is
+    // normally in range by construction, but clamping keeps state total).
+    preedit_.clear();
+    caret_ = clampPos(m.caret);
+    anchor_ = clampPos(m.anchor);
+    hasSelection_ = m.hasSelection && !(anchor_ == caret_);
+    caretOn_ = true;
+    if (hasFocus())
+        blinkTimer_.start();
+    ensureCaretVisible();
+    updateScrollBarRange();
+    update();
+    emit cursorMoved(caret_);
+    emit selectionChanged();
+    updatePrimarySelection(); // keep primary in step with the restored state
+}
+
+void CodeEditor::breakUndoChain()
+{
+    buffer_.breakUndoCoalescing();
+}
+
+void CodeEditor::undo()
+{
+    if (!buffer_.canUndo() || undoMarks_.isEmpty())
+        return; // out of sync would be a bug; refuse rather than corrupt
+    const UndoMark current = captureEditMark(); // what redo must restore
+    const UndoMark pre = undoMarks_.takeLast();
+    buffer_.undo();
+    redoMarks_.append(current);
+    lastPushSerial_ = buffer_.undoPushSerial(); // a move does not bump it
+    applyEditMark(pre);
+}
+
+void CodeEditor::redo()
+{
+    if (!buffer_.canRedo() || redoMarks_.isEmpty())
+        return;
+    const UndoMark current = captureEditMark(); // the group's pre-state again
+    const UndoMark after = redoMarks_.takeLast(); // state the undo tore down
+    buffer_.redo();
+    undoMarks_.append(current);
+    lastPushSerial_ = buffer_.undoPushSerial();
+    applyEditMark(after);
 }
 
 void CodeEditor::updatePrimarySelection()
@@ -631,9 +732,19 @@ void CodeEditor::insertTextAtCaret(const QString& text)
 {
     if (text.isEmpty())
         return;
+    const UndoMark pre = captureEditMark();
+    // Typing over a selection: the delete + insert is ONE compound undo
+    // step; the bracket also fences the pair off from neighboring chains.
+    // Without a selection the insert stays unbracketed so consecutive
+    // typing coalesces in the core (see core/TextBuffer.hpp).
+    const bool bracket = hasSelection_;
+    if (bracket)
+        buffer_.beginEditGroup();
     deleteSelection(); // typing replaces the selection (Monaco semantics)
     const int offset = buffer_.offsetOf(caret_.line, caret_.col);
     buffer_.insertAtOffset(offset, text);
+    if (bracket)
+        buffer_.endEditGroup();
     TextPosition pos = caret_;
     const int newlines = text.count(QLatin1Char('\n'));
     if (newlines > 0) {
@@ -643,53 +754,59 @@ void CodeEditor::insertTextAtCaret(const QString& text)
         pos.col += static_cast<int>(text.size());
     }
     setCaret(clampPos(pos));
+    reconcileUndoMarks(pre);
 }
 
 void CodeEditor::backspace()
 {
-    if (deleteSelection())
-        return; // Backspace with a selection deletes only the selection
-    if (caret_.col > 0) {
-        // Grapheme-cluster backspace (M2): deletes exactly the cluster
-        // before the caret. When the caret sits inside a cluster (possible
-        // after a programmatic setPlainText split one, or a mid-cluster
-        // mouse click) the WHOLE cluster goes, so orphan surrogate halves
-        // or dangling combining marks never accumulate.
-        const QString line = buffer_.lineText(caret_.line);
-        const int start = prevGraphemeCol(line, caret_.col);
-        const int end = isGraphemeBoundary(line, caret_.col)
-            ? caret_.col : nextGraphemeCol(line, caret_.col);
-        buffer_.removeRange(buffer_.offsetOf(caret_.line, start),
-                            buffer_.offsetOf(caret_.line, end));
-        setCaret({caret_.line, start});
-    } else if (caret_.line > 0) {
-        const int prevLen = lineLength(caret_.line - 1);
-        const int nlPos = buffer_.offsetOfLine(caret_.line) - 1;
-        buffer_.removeRange(nlPos, nlPos + 1);
-        setCaret({caret_.line - 1, prevLen});
+    const UndoMark pre = captureEditMark(); // unbracketed: backspace runs
+    if (!deleteSelection())                 // coalesce into one chunk
+    {
+        if (caret_.col > 0) {
+            // Grapheme-cluster backspace (M2): deletes exactly the cluster
+            // before the caret. When the caret sits inside a cluster (possible
+            // after a programmatic setPlainText split one, or a mid-cluster
+            // mouse click) the WHOLE cluster goes, so orphan surrogate halves
+            // or dangling combining marks never accumulate.
+            const QString line = buffer_.lineText(caret_.line);
+            const int start = prevGraphemeCol(line, caret_.col);
+            const int end = isGraphemeBoundary(line, caret_.col)
+                ? caret_.col : nextGraphemeCol(line, caret_.col);
+            buffer_.removeRange(buffer_.offsetOf(caret_.line, start),
+                                buffer_.offsetOf(caret_.line, end));
+            setCaret({caret_.line, start});
+        } else if (caret_.line > 0) {
+            const int prevLen = lineLength(caret_.line - 1);
+            const int nlPos = buffer_.offsetOfLine(caret_.line) - 1;
+            buffer_.removeRange(nlPos, nlPos + 1);
+            setCaret({caret_.line - 1, prevLen});
+        }
     }
+    reconcileUndoMarks(pre);
 }
 
 void CodeEditor::deleteForward()
 {
-    if (deleteSelection())
-        return;
-    const int len = lineLength(caret_.line);
-    if (caret_.col < len) {
-        // Grapheme-cluster delete (M2); mirrors backspace's no-orphan rule,
-        // snapping the caret back when the delete started inside a cluster.
-        const QString line = buffer_.lineText(caret_.line);
-        const int start = isGraphemeBoundary(line, caret_.col)
-            ? caret_.col : prevGraphemeCol(line, caret_.col);
-        const int end = nextGraphemeCol(line, caret_.col);
-        buffer_.removeRange(buffer_.offsetOf(caret_.line, start),
-                            buffer_.offsetOf(caret_.line, end));
-        setCaret({caret_.line, start});
-    } else if (caret_.line + 1 < buffer_.lineCount()) {
-        const int nlPos = buffer_.offsetOfLine(caret_.line + 1) - 1;
-        buffer_.removeRange(nlPos, nlPos + 1);
-        setCaret(caret_);
+    const UndoMark pre = captureEditMark(); // unbracketed, see backspace
+    if (!deleteSelection()) {
+        const int len = lineLength(caret_.line);
+        if (caret_.col < len) {
+            // Grapheme-cluster delete (M2); mirrors backspace's no-orphan rule,
+            // snapping the caret back when the delete started inside a cluster.
+            const QString line = buffer_.lineText(caret_.line);
+            const int start = isGraphemeBoundary(line, caret_.col)
+                ? caret_.col : prevGraphemeCol(line, caret_.col);
+            const int end = nextGraphemeCol(line, caret_.col);
+            buffer_.removeRange(buffer_.offsetOf(caret_.line, start),
+                                buffer_.offsetOf(caret_.line, end));
+            setCaret({caret_.line, start});
+        } else if (caret_.line + 1 < buffer_.lineCount()) {
+            const int nlPos = buffer_.offsetOfLine(caret_.line + 1) - 1;
+            buffer_.removeRange(nlPos, nlPos + 1);
+            setCaret(caret_);
+        }
     }
+    reconcileUndoMarks(pre);
 }
 
 void CodeEditor::paintEvent(QPaintEvent*)
@@ -814,16 +931,42 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         finish();
         return;
     }
+    // M3 undo/redo shortcuts. QKeySequence matching covers Ctrl+Z and
+    // Ctrl+Shift+Z (measured on Qt 6.12 generic defaults; Redo there does
+    // NOT contain Ctrl+Y). Every mainstream editor binds Ctrl+Y too and
+    // our Ctrl switch ignores it otherwise, so wire it as an explicit
+    // fallback. The Undo match runs first, so even on platform styles that
+    // map Undo to Ctrl+Y this fallback can never steal it.
+    if (event->matches(QKeySequence::Undo)) {
+        undo();
+        finish();
+        return;
+    }
+    if (event->matches(QKeySequence::Redo) ||
+        (key == Qt::Key_Y && ctrl == Qt::ControlModifier)) {
+        redo();
+        finish();
+        return;
+    }
+
+    // Any deliberate caret motion freezes the edit chain in the core, so
+    // click + type is its own undo step even when the offsets touch; wrap
+    // all pure-navigation moves (edit actions break chains themselves via
+    // their brackets or the delete/insert kind switch).
+    auto nav = [this](TextPosition target, bool extend) {
+        breakUndoChain();
+        moveCaret(target, extend);
+    };
 
     if (ctrl != Qt::NoModifier) {
         switch (key) {
         case Qt::Key_Home:
-            moveCaret({0, 0}, shift);
+            nav({0, 0}, shift);
             finish();
             return;
         case Qt::Key_End: {
             const int lastLine = buffer_.lineCount() - 1;
-            moveCaret({lastLine, lineLength(lastLine)}, shift);
+            nav({lastLine, lineLength(lastLine)}, shift);
             finish();
             return;
         }
@@ -832,23 +975,25 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         case Qt::Key_Left: {
             const int target = wordLeftCol(buffer_.lineText(caret_.line), caret_.col);
             if (target < caret_.col)
-                moveCaret({caret_.line, target}, shift);
+                nav({caret_.line, target}, shift);
             else if (caret_.line > 0)
-                moveCaret({caret_.line - 1, lineLength(caret_.line - 1)}, shift);
+                nav({caret_.line - 1, lineLength(caret_.line - 1)}, shift);
             finish();
             return;
         }
         case Qt::Key_Right: {
             const int target = wordRightCol(buffer_.lineText(caret_.line), caret_.col);
             if (target > caret_.col)
-                moveCaret({caret_.line, target}, shift);
+                nav({caret_.line, target}, shift);
             else if (caret_.line + 1 < buffer_.lineCount())
-                moveCaret({caret_.line + 1, 0}, shift);
+                nav({caret_.line + 1, 0}, shift);
             finish();
             return;
         }
         case Qt::Key_Delete: {
+            const UndoMark pre = captureEditMark(); // unbracketed word delete
             if (deleteSelection()) { // selection takes precedence, as with Delete
+                reconcileUndoMarks(pre);
                 finish();
                 return;
             }
@@ -861,6 +1006,7 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             } else {
                 deleteForward(); // at EOL: join the next line
             }
+            reconcileUndoMarks(pre);
             finish();
             return;
         }
@@ -904,7 +1050,7 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             --pos.line;
             pos.col = lineLength(pos.line);
         }
-        moveCaret(pos, shift);
+        nav(pos, shift);
         finish();
         return;
     }
@@ -916,7 +1062,7 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             ++pos.line;
             pos.col = 0;
         }
-        moveCaret(pos, shift);
+        nav(pos, shift);
         finish();
         return;
     }
@@ -937,16 +1083,16 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             else
                 pos.col = lineLength(pos.line);
         }
-        moveCaret(pos, shift);
+        nav(pos, shift);
         finish();
         return;
     }
     case Qt::Key_Home:
-        moveCaret({caret_.line, 0}, shift);
+        nav({caret_.line, 0}, shift);
         finish();
         return;
     case Qt::Key_End:
-        moveCaret({caret_.line, lineLength(caret_.line)}, shift);
+        nav({caret_.line, lineLength(caret_.line)}, shift);
         finish();
         return;
     case Qt::Key_PageUp:
@@ -954,7 +1100,7 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         TextPosition pos = caret_;
         const int page = std::max(1, visibleLineCount() - 2);
         pos.line += (key == Qt::Key_PageUp) ? -page : page;
-        moveCaret(pos, shift);
+        nav(pos, shift);
         finish();
         return;
     }
@@ -1031,6 +1177,7 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
         // (Wayland, offscreen) fall back to the regular clipboard, so the
         // middle-click button always does something predictable.
         setFocus(Qt::MouseFocusReason);
+        breakUndoChain(); // the click move freezes any prior edit chain
         setCaret(positionAt(event->position().toPoint()));
         if (QClipboard* cb = QGuiApplication::clipboard()) {
             QString text = cb->text(QClipboard::Selection);
@@ -1044,6 +1191,7 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
     if (event->button() != Qt::LeftButton)
         return;
     setFocus(Qt::MouseFocusReason);
+    breakUndoChain(); // a click is deliberate motion: freeze the edit chain
     const TextPosition pos = positionAt(event->position().toPoint());
     // Shift+click extends the selection from the existing anchor; a plain
     // click collapses it at the new position.
@@ -1059,6 +1207,7 @@ void CodeEditor::mouseMoveEvent(QMouseEvent* event)
         event->ignore();
         return;
     }
+    breakUndoChain(); // drag motion freezes the edit chain (idempotent)
     QPoint pos = event->position().toPoint();
     // Drag auto-scroll: moving past the top/bottom edge scrolls one line
     // per event and maps the position inside the viewport.

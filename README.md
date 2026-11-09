@@ -93,7 +93,9 @@ Gate 1 — Code Editor v1:
 - [x] M2 grapheme/word boundaries (QTextBoundaryFinder): cluster-safe
       arrows/backspace/delete, editor-style Ctrl+arrows/Ctrl+Del word motion
 - [x] M2 IME composition (preedit rendered at caret, commit via insert)
-- [ ] M3 undo/redo (piece-list snapshots/ops), multiple carets
+- [x] M3 undo/redo: op log in the core with coalescing + compound groups,
+      caret/selection-restoring undo in the view (Ctrl+Z/Ctrl+Shift+Z/Ctrl+Y)
+- [ ] multiple carets (one undo step per multi-caret user action)
 - [ ] M4 syntax highlighting (vendored tree-sitter runtime + generated
       grammars; incremental, viewport-scoped — see PLAN.md D2)
 - [ ] M5 decoration layers + line-number gutter + markers

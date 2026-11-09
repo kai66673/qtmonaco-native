@@ -3,6 +3,41 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- M3 undo/redo, core + view. `TextBuffer` now owns the undo history: every
+  `insertAtOffset`/`removeRange` is recorded as an op (`start/end/removed/
+  inserted`), grouped into undo steps with auto-coalescing — typing bursts
+  merge into one step (64-code-unit cap, newlines break the chain),
+  Backspace/Delete runs merge into one chunk without a size cap, and only
+  same-kind ops ever coalesce. `beginEditGroup`/`endEditGroup` bracket a
+  compound user action into one atomic step (nesting depth-counted, bracketed
+  groups never coalesce), `breakUndoCoalescing()` freezes the top chain, and
+  `undo()/redo()/undoDepth()/redoDepth()/undoPushSerial()` drive the stacks.
+  History caps at 2048 groups / 32 MB of logged text, dropping oldest groups;
+  `setText()` wipes both stacks.
+- `CodeEditor::undo()/redo()/canUndo()/canRedo()` bound to Ctrl+Z,
+  Ctrl+Shift+Z and Ctrl+Y. The view mirrors the core stacks one mark per
+  group, so undo/redo restores the caret — and the selection, when the undone
+  action consumed one. Caret motion (arrows, click, drag, `setPosition`,
+  Ctrl+A) freezes the typing chain, so click-then-type is its own undo step;
+  paste/cut are bracketed into single steps, Backspace runs coalesce, Enter
+  breaks chains.
+
+### Fixed
+- `TextBuffer`'s constructor never created the add buffer: a document fed
+  without a leading `setText()` wrote its pieces into the empty placeholder
+  buffer (`buf = 0`), tripping the "piece out of buffer" invariant check.
+  Only paths that skip `setText` were affected (exposed by the new cap tests).
+- `deleteSelection()` now emits `selectionChanged()` — it was the only path
+  annihilating a selection that stayed silent.
+
+### Notes
+- Qt 6.12 generic-defaults probe: `QKeySequence::Redo` contains only
+  Ctrl+Shift+Z (Ctrl+Y does NOT match), so Ctrl+Y is wired as an explicit
+  fallback after the standard-key matches.
+
 ## [0.5.0] — 2026-11-09
 
 ### Added

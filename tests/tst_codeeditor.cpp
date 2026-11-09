@@ -88,6 +88,18 @@ private slots:
     void middleClickPastesPrimarySelection();
     void middleClickFallsBackToClipboard();
 
+    void undoTypingBurstIsOneStep();
+    void undoEnterBreaksTypingChain();
+    void undoCaretMoveBreaksChain();
+    void undoOverSelectionTypingRestoresTextAndSelection();
+    void undoPasteIsOneStep();
+    void undoCutRestoresCutLine();
+    void undoBackspaceChainIsOneChunk();
+    void redoViaCtrlShiftZAndCtrlY();
+    void newEditTruncatesRedoBranch();
+    void setPlainTextClearsUndoHistory();
+    void undoOnEmptyHistoryIsNoOp();
+
 private:
     CodeEditor* editor = nullptr;
 };
@@ -1177,6 +1189,224 @@ void TestCodeEditor::middleClickFallsBackToClipboard()
                       QPoint(pad + int(2 * cw + cw / 2), pad + lh / 2));
     QCOMPARE(editor->toPlainText(), QStringLiteral("abZZcdef"));
     QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4}));
+}
+
+// --- undo/redo (M3) ------------------------------------------------------
+
+void TestCodeEditor::undoTypingBurstIsOneStep()
+{
+    editor->setPlainText(QStringLiteral("ab"));
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClicks(editor, "cdef"); // one continuous typing burst -> one group
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdef"));
+
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab")); // the whole burst goes at once
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2})); // caret before the burst
+    QVERIFY(!editor->canUndo());
+    QVERIFY(editor->canRedo());
+
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdef"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 6})); // caret as it stood when undone
+}
+
+void TestCodeEditor::undoEnterBreaksTypingChain()
+{
+    editor->setPlainText(QString());
+    QTest::keyClicks(editor, "ab");
+    QTest::keyClick(editor, Qt::Key_Return);
+    QTest::keyClicks(editor, "cd");
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab\ncd"));
+
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab\n")); // "cd" alone steps back
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0}));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab")); // Enter is its own step
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QString());
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+    QVERIFY(!editor->canUndo());
+}
+
+void TestCodeEditor::undoCaretMoveBreaksChain()
+{
+    editor->setPlainText(QStringLiteral("abc"));
+    editor->setPosition({0, 0});
+    QTest::keyClicks(editor, "X"); // "Xabc"
+    editor->setPosition({0, 1});  // deliberate move freezes the chain
+    QTest::keyClicks(editor, "Y"); // adjacent to X, but must be its own step
+    QCOMPARE(editor->toPlainText(), QStringLiteral("XYabc"));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Xabc")); // only Y reverts
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+
+    // The same freeze via a mouse click landing on the adjacent edge:
+    const int pad = editor->padding();
+    const double cw = editor->cellWidth();
+    const int lh = editor->lineHeight();
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(pad + int(cw + cw / 2), pad + lh / 2)); // col 1
+    QTest::keyClicks(editor, "W");
+    QCOMPARE(editor->toPlainText(), QStringLiteral("XWabc"));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Xabc")); // only W reverts
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abc"));
+}
+
+void TestCodeEditor::undoOverSelectionTypingRestoresTextAndSelection()
+{
+    editor->setPlainText(QStringLiteral("abcdef"));
+    editor->setPosition({0, 1});
+    QTest::keyClick(editor, Qt::Key_Right, Qt::ShiftModifier);
+    QTest::keyClick(editor, Qt::Key_Right, Qt::ShiftModifier); // anchor {0,1}, caret {0,3}: "bc"
+    QSignalSpy selSpy(editor, &CodeEditor::selectionChanged);
+    QTest::keyClicks(editor, "X");
+    QCOMPARE(editor->toPlainText(), QStringLiteral("aXdef"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+    QVERIFY(!editor->hasSelection());
+    const int afterType = selSpy.count(); // the replace dropped the selection
+    QVERIFY(afterType >= 1);
+
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdef"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+    QVERIFY(editor->hasSelection()); // the pre-action selection comes back
+    QCOMPARE(editor->selectedText(), QStringLiteral("bc"));
+    QVERIFY(selSpy.count() > afterType); // and the change is announced
+
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("aXdef"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+    QVERIFY(!editor->hasSelection());
+}
+
+void TestCodeEditor::undoPasteIsOneStep()
+{
+    editor->setPlainText(QStringLiteral("ab"));
+    editor->setPosition({0, 2});
+    QClipboard* cb = QApplication::clipboard();
+    cb->setText(QStringLiteral("XY\nZW"), QClipboard::Clipboard);
+    QTest::keyClick(editor, Qt::Key_V, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abXY\nZW"));
+    cb->setText(QStringLiteral("Q"), QClipboard::Clipboard);
+    QTest::keyClick(editor, Qt::Key_V, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abXY\nZWQ"));
+
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abXY\nZW")); // pastes never chain
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 2}));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+
+    // Paste over a selection is ONE compound step (nested brackets commit at
+    // the outer paste bracket), and undo brings the selection back.
+    editor->setPlainText(QStringLiteral("abcdef"));
+    editor->setPosition({0, 2});
+    QTest::keyClick(editor, Qt::Key_Right, Qt::ShiftModifier);
+    QTest::keyClick(editor, Qt::Key_Right, Qt::ShiftModifier); // "cd"
+    cb->setText(QStringLiteral("XY"), QClipboard::Clipboard);
+    QTest::keyClick(editor, Qt::Key_V, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abXYef"));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdef"));
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("cd"));
+}
+
+void TestCodeEditor::undoCutRestoresCutLine()
+{
+    editor->setPlainText(QStringLiteral("abc\ndef"));
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_X, Qt::ControlModifier); // whole-line cut
+    QCOMPARE(editor->toPlainText(), QStringLiteral("def"));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abc\ndef"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+}
+
+void TestCodeEditor::undoBackspaceChainIsOneChunk()
+{
+    editor->setPlainText(QStringLiteral("abcd"));
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClick(editor, Qt::Key_Backspace); // deletes d
+    QTest::keyClick(editor, Qt::Key_Backspace); // deletes c
+    QTest::keyClick(editor, Qt::Key_Backspace); // deletes b
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a"));
+    QVERIFY(editor->canUndo());
+
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcd")); // the chain is one chunk
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4})); // caret before the first Backspace
+    QVERIFY(!editor->canUndo());
+    QVERIFY(editor->canRedo());
+}
+
+void TestCodeEditor::redoViaCtrlShiftZAndCtrlY()
+{
+    editor->setPlainText(QStringLiteral("ab"));
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClicks(editor, "c");
+
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab"));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abc"));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab"));
+
+    // Qt's generic Redo sequence holds only Ctrl+Shift+Z (measured on Qt
+    // 6.12 offscreen); the view binds Ctrl+Y explicitly, editor-style.
+    QTest::keyClick(editor, Qt::Key_Y, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abc"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+}
+
+void TestCodeEditor::newEditTruncatesRedoBranch()
+{
+    editor->setPlainText(QString());
+    QTest::keyClicks(editor, "ab");
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QString());
+    QVERIFY(editor->canRedo());
+
+    QTest::keyClicks(editor, "Q"); // a fresh edit truncates the redo branch
+    QVERIFY(!editor->canRedo());
+    editor->redo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Q"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+}
+
+void TestCodeEditor::setPlainTextClearsUndoHistory()
+{
+    editor->setPlainText(QString());
+    QTest::keyClicks(editor, "abc");
+    editor->setPosition({0, 1}); // break the chain: two groups exist
+    QTest::keyClicks(editor, "d");
+    QVERIFY(editor->canUndo());
+
+    editor->setPlainText(QStringLiteral("fresh"));
+    QVERIFY(!editor->canUndo());
+    QVERIFY(!editor->canRedo());
+    editor->undo(); // refused outright against the emptied history
+    editor->redo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("fresh"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+}
+
+void TestCodeEditor::undoOnEmptyHistoryIsNoOp()
+{
+    editor->setPlainText(QStringLiteral("x"));
+    QVERIFY(!editor->canUndo());
+    QVERIFY(!editor->canRedo());
+    editor->undo();
+    editor->redo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
 }
 
 QTEST_MAIN(TestCodeEditor)

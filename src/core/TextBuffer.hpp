@@ -53,9 +53,56 @@ public:
     int offsetOf(int line, int col) const;
 
     // Edits. Offsets are clamped; removeRange(start, end) with start > end
-    // swaps them. Inserting/removing empty ranges is a no-op.
+    // swaps them. Inserting/removing empty ranges is a no-op. Both record
+    // onto the undo log (see undo section); setText replaces the document
+    // and clears the history.
     void insertAtOffset(int offset, const QString& text);
     void removeRange(int startOffset, int endOffset);
+
+    // --- undo/redo (M3) -----------------------------------------------
+    // Op log with inverses. One undo step = one group: a group of ops is
+    // applied/reverted atomically, so the view brackets compound actions
+    // (e.g. delete-selection + insert) with begin/endEditGroup.
+    //
+    // Consecutive UNBRACKETED single edits coalesce: adjacent pure inserts
+    // with no newline in either text (so typing is one word-ish undo step,
+    // matching editor conventions), and adjacent pure deletions (so
+    // repeated Backspace undoes as a chunk). Coalesced edits keep
+    // undoDepth() unchanged - the caller reconciles via undoDepth().
+    // The model has no caret, so caret moves cannot break chains by
+    // themselves: the view calls breakUndoCoalescing() on deliberate caret
+    // motion so a click + type is its own undo step even at an adjacent
+    // offset. begin/endEditGroup nest (depth-counted); begin also starts a
+    // fresh chain and end fences it against later coalescing.
+    //
+    // History is capped by op count and by log bytes (both measured before
+    // appending), dropping the OLDEST entries first: the cap keeps memory
+    // bounded for monster documents. Documented divergence from PLAN.md's
+    // "snapshot compaction": cap-drop instead of periodic snapshots; the
+    // log stores text, so the common typing case is bounded by the cap
+    // alone, and snapshot machinery is not needed in v1.
+    //
+    // undo()/redo() return false and do nothing when the stack is empty or
+    // a group is open. Redo truncates on the first new recorded edit.
+    bool undo();
+    bool redo();
+    bool canUndo() const { return !undoStack_.empty(); }
+    bool canRedo() const { return !redoStack_.empty(); }
+    int undoDepth() const { return static_cast<int>(undoStack_.size()); }
+    int redoDepth() const { return static_cast<int>(redoStack_.size()); }
+    void beginEditGroup();
+    void endEditGroup();
+    void breakUndoCoalescing(); // freeze the top group against merging
+    void clearUndoHistory();
+
+    // Monotonic count of groups ever pushed onto the undo stack: grows on
+    // every push (cap-drops included), unchanged by coalescing, undo/redo
+    // moves and clears. Paired with undoDepth() it lets the view keep its
+    // caret marks aligned with the core stack without guessing.
+    qint64 undoPushSerial() const { return pushSerial_; }
+
+    static constexpr int kMaxUndoGroups = 2048;
+    static constexpr qint64 kMaxUndoLogBytes = 32ll * 1024 * 1024;
 
     int debugNodeCount() const;
     bool debugCheckInvariants() const;
@@ -102,6 +149,43 @@ private:
     Piece appendToAddBuffer(const QString& text);
 
     int checkSubtree(int root, bool& ok) const;
+
+    // --- undo log internals (public semantics documented above) --------
+    // One op = one recorded insertAtOffset/removeRange. Ops are pure:
+    // inserts carry `inserted` with start == end, deletes carry `removed`
+    // for [start, end). Offsets refer to the state right before the op.
+    struct EditOp {
+        int start = 0;
+        int end = 0;
+        QString removed;
+        QString inserted;
+    };
+
+    struct UndoGroup {
+        std::vector<EditOp> ops;
+        // true when built/grown from single unbracketed edits; bracketed
+        // groups never coalesce (the view brackets compound actions).
+        bool coalescable = false;
+    };
+
+    // Piece-table mutations without logging (used by the logging entry
+    // points and by undo()/redo()).
+    void applyInsert(int offset, const QString& text);
+    void applyRemove(int startOffset, int endOffset);
+
+    void recordEdit(EditOp op); // truncates redo, coalesces when possible
+    static bool tryCoalesce(UndoGroup& top, const EditOp& nu);
+    static qint64 opsBytes(const std::vector<EditOp>& ops);
+    void enforceCapacity(); // drop-oldest of undoStack_ against both caps
+
+    static constexpr int kMaxCoalesceUnits = 64; // merged-insert text cap
+
+    std::vector<UndoGroup> undoStack_;
+    std::vector<UndoGroup> redoStack_;
+    std::vector<EditOp> openGroup_; // accumulated between begin/endEditGroup
+    int groupDepth_ = 0;            // begin/endEditGroup nest depth
+    qint64 logBytes_ = 0;           // stored removed/inserted text across both stacks
+    qint64 pushSerial_ = 0;
 
     std::vector<QString> buffers_; // index 0 is the empty placeholder
     int addBuf_ = 0;               // buffers_ index the add buffer appends to

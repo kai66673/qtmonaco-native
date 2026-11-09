@@ -131,6 +131,11 @@ into one step.
 **DoD:** undo/redo round-trip property test against a naive reference (same
 style as `randomOpsVsReference`); multi-caret state tests (N carets → one
 edit → N model edits; caret-normalization on overlapping selection).
+**Status: M3 DONE (2026-11-09)** — op log in `TextBuffer` (coalescing by
+pr-hole adjacency, bracketed compound groups, 2048-group/32MB caps), view
+mirror marks restore caret+selection per step; 11 core tests (incl.
+`randomUndoRedoVsReference`, the DoD property test) + 11 widget tests.
+Multiple carets: next, D1 stays open until they land.
 
 ### D2 — M4 syntax highlighting: vendored tree-sitter (engine decided)
 
