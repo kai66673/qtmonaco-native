@@ -26,6 +26,7 @@ private slots:
     void deleteForwardMergesLines();
     void arrowNavigationClamps();
     void mousePlacesCaret();
+    void cellWidthMatchesGlyphEngineAdvance();
 
 private:
     CodeEditor* editor = nullptr;
@@ -113,15 +114,30 @@ void TestCodeEditor::arrowNavigationClamps()
     QCOMPARE(editor->position().col, 0);
 }
 
+void TestCodeEditor::cellWidthMatchesGlyphEngineAdvance()
+{
+    // Regression guard for caret drift: the model-side cell width must match
+    // the cumulative advance the glyph engine uses, within half a pixel over
+    // a full 120-column line.
+    const int cols = 120;
+    QFontMetricsF fm(editor->font());
+    const double engineAdvance = fm.horizontalAdvance(QString(cols, QLatin1Char('0')));
+    const double modelAdvance = cols * editor->cellWidth();
+    QVERIFY2(qAbs(engineAdvance - modelAdvance) < 0.5,
+             qPrintable(QStringLiteral("engine=%1 model=%2")
+                            .arg(engineAdvance)
+                            .arg(modelAdvance)));
+}
+
 void TestCodeEditor::mousePlacesCaret()
 {
     editor->setPlainText(QStringLiteral("abcdef\nxyz"));
     const int pad = editor->padding();
-    const int cw = editor->charWidth();
+    const double cw = editor->cellWidth();
     const int lh = editor->lineHeight();
 
     QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier,
-                     QPoint(pad + 3 * cw + cw / 2, pad + lh / 2));
+                      QPoint(pad + int(3 * cw + cw / 2), pad + lh / 2));
     QCOMPARE(editor->position().line, 0);
     QCOMPARE(editor->position().col, 3);
 
@@ -129,7 +145,7 @@ void TestCodeEditor::mousePlacesCaret()
     QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, QPoint(pad, pad + 100 * lh));
     QCOMPARE(editor->position().line, 1);
     // far right clamps to line length
-    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, QPoint(pad + 90 * cw, pad + lh / 2));
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, QPoint(pad + int(90 * cw), pad + lh / 2));
     QCOMPARE(editor->position().line, 0);
     QCOMPARE(editor->position().col, 6);
 }

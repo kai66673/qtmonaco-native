@@ -3,6 +3,19 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Fixed
+- Caret drifted left along the line: cell width was taken from integer
+  `QFontMetrics` (e.g. 8px) while the glyph engine advances the pen by the
+  font's fractional advance (monospace @14px measures 8.3906px), ~0.39px/col
+  drift. The editor now measures the cell width with `QFontMetricsF` (double),
+  uses fractional hinting-free metrics (`PreferNoHinting`), places the caret
+  at `padding + round(col * cellWidth)`, draws text with a fractional pen
+  position, and hit-tests clicks against the same fractional cell grid.
+  Regression test: engine advance of a 120-column line must equal
+  `120 * cellWidth()` within half a pixel.
+
 ## [0.1.0] — 2026-11-09
 
 Initial spike validating the two riskiest layers.

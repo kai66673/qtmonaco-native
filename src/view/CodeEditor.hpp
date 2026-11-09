@@ -49,7 +49,7 @@ public:
     int lineCount() const { return buffer_.lineCount(); }
 
     int lineHeight() const { return lineHeight_; }
-    int charWidth() const { return charWidth_; }
+    double cellWidth() const { return cellWidth_; }
     int padding() const { return padding_; }
 
     PerfStats perfStats() const { return perf_; }
@@ -89,7 +89,7 @@ private:
     bool scrollbarSync_ = false;
 
     QFont font_;
-    int charWidth_ = 8;
+    double cellWidth_ = 8.0;
     int lineHeight_ = 18;
     int ascent_ = 14;
 

@@ -4,12 +4,14 @@
 #include <QFocusEvent>
 #include <QFontDatabase>
 #include <QFontMetrics>
+#include <QFontMetricsF>
 #include <QKeyEvent>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QResizeEvent>
 #include <QScrollBar>
 #include <QWheelEvent>
+#include <QtMath>
 
 #include <algorithm>
 
@@ -23,14 +25,23 @@ CodeEditor::CodeEditor(QWidget* parent)
 
     font_ = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     font_.setPixelSize(14);
-    const QFontMetrics fm(font_);
-    charWidth_ = fm.horizontalAdvance(QLatin1Char('0'));
-    if (charWidth_ <= 0)
-        charWidth_ = 8;
-    ascent_ = fm.ascent();
-    lineHeight_ = fm.ascent() + fm.descent() + fm.leading();
+    // Monospace cell arithmetic must exactly match what the glyph engine
+    // advances the pen by. With fontconfig autohinting the engine lays out
+    // glyphs on fractional (design) advances while integer QFontMetrics
+    // rounding would make the caret drift left along the line (the cell
+    // delta is smaller than the drawn cell width). Disable hinting so both
+    // the engine and our cell width use the design advances, and measure
+    // them with QFontMetricsF (fractional).
+    font_.setHintingPreference(QFont::PreferNoHinting);
+    const QFontMetricsF fm(font_);
+    cellWidth_ = fm.horizontalAdvance(QLatin1Char('0'));
+    if (!(cellWidth_ > 0.0))
+        cellWidth_ = 8.0;
+    ascent_ = qCeil(fm.ascent());
+    lineHeight_ = qCeil(fm.ascent() + fm.descent() + fm.leading());
     if (lineHeight_ <= 0)
         lineHeight_ = ascent_ + 4;
+    setFont(font_); // keep QWidget::font() in sync with the metrics above
 
     vBar_ = new QScrollBar(Qt::Vertical, this);
     vBar_->hide();
@@ -216,7 +227,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
     const int lh = lineHeight_;
     const int first = firstVisibleLine();
     const int last = std::min(buffer_.lineCount() - 1, first + visibleLineCount());
-    const int colsVisible = width() / charWidth_ + 2;
+    const int colsVisible = static_cast<int>(width() / cellWidth_) + 2;
 
     for (int line = first; line <= last; ++line) {
         const int yTop = padding_ + line * lh - vScroll_;
@@ -228,11 +239,14 @@ void CodeEditor::paintEvent(QPaintEvent*)
             text = text.left(colsVisible);
 
         if (line == caret_.line && caretOn_) {
-            const int cx = padding_ + std::min(caret_.col, colsVisible) * charWidth_;
+            // Caret x must follow the same fractional advance arithmetic the
+            // glyph engine uses; anchoring at padding_ keeps it aligned with
+            // the text start of the line.
+            const int cx = padding_ + qRound(std::min(caret_.col, colsVisible) * cellWidth_);
             p.fillRect(QRect(cx, yTop, 2, lh), palette().color(QPalette::Text));
         }
         if (!text.isEmpty())
-            p.drawText(padding_, baseline, text);
+            p.drawText(QPointF(padding_, baseline), text);
     }
 }
 
@@ -372,7 +386,7 @@ TextPosition CodeEditor::posFromEvent(const QPoint& widgetPos) const
     TextPosition pos;
     pos.line = (widgetPos.y() - padding_ + vScroll_) / lineHeight_;
     pos.line = std::clamp(pos.line, 0, buffer_.lineCount() - 1);
-    pos.col = (widgetPos.x() - padding_) / charWidth_;
+    pos.col = static_cast<int>((widgetPos.x() - padding_) / cellWidth_);
     pos.col = std::clamp(pos.col, 0, lineLength(pos.line));
     return pos;
 }
