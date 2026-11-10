@@ -20,6 +20,9 @@
 
 #include "view/CodeEditor.hpp"
 
+#include <algorithm> // std::min in the ruler mapping contract
+#include <functional> // std::function for the probe predicates
+
 using qmn::view::CodeEditor;
 
 class TestCodeEditor : public QObject {
@@ -170,6 +173,14 @@ private slots:
     void findBarStaysTopRightOnResize();
     void paintMatchQuadsNumericProbe();
     void paintZeroWidthMatchPhantomCell();
+
+    // Overview ruler (M7, Phase E1). DoD: ruler geometry state tests
+    // (numeric mapping contract), the click/drag scroll gesture (state
+    // assertions), and O(strip) marker paint proven by pixel probes
+    // bounded to the ruler's x window (no off-screen document cost).
+    void overviewRulerGeometryAndMapping();
+    void overviewRulerScrollGesture();
+    void overviewRulerMarkerPaintProbe();
 
 private:
     CodeEditor* editor = nullptr;
@@ -3133,6 +3144,242 @@ void TestCodeEditor::paintZeroWidthMatchPhantomCell()
 
     editor->setFindText(QString()); // control: every quad gone
     QCOMPARE(warmQuadPixels(editor->grab().toImage(), x0, pad, pad + lh), 0);
+}
+
+// --- Overview ruler (M7, Phase E1) ---------------------------------------
+
+void TestCodeEditor::overviewRulerGeometryAndMapping()
+{
+    // Ruler GEOMETRY STATE (the E1 DoD entry): strip rect, the linear
+    // doc-pixel mapping, and the viewport rectangle. The test duplicates
+    // the ONE ratio formula (doc px space [0, 2*padding + lineCount*lh)
+    // onto [0, height())): implementation and test must agree exactly,
+    // because the click gesture, the viewport frame and the paint all
+    // ride that single mapping.
+    const int h = editor->height();
+    const int w = editor->width();
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+
+    QVERIFY(editor->overviewRulerEnabled()); // default on: minimap parity
+    QCOMPARE(CodeEditor::kOverviewRulerWidth, 44);
+    QCOMPARE(editor->overviewRulerWidth(), CodeEditor::kOverviewRulerWidth);
+    QCOMPARE(editor->overviewRulerGeometry(),
+             QRect(w - CodeEditor::kOverviewRulerWidth, 0, CodeEditor::kOverviewRulerWidth, h));
+
+    QString doc;
+    for (int i = 0; i < 200; ++i) {
+        if (i)
+            doc += QLatin1Char('\n'); // NO trailing newline: lineCount is exact
+        doc += QStringLiteral("line %1").arg(i);
+    }
+    editor->setPlainText(doc);
+    const int lineCount = editor->lineCount();
+    QCOMPARE(lineCount, 200);
+    const int total = 2 * pad + lineCount * lh; // duplicated contract constant
+
+    // One strip row at a time: rulerLineAt == the same integer math
+    // (floor(y*total/h), then (docPx - pad)/lh clamped to the document).
+    int prev = -1;
+    QVector<bool> hit(lineCount, false);
+    for (int y = 0; y < h; ++y) {
+        const int yy = y < h - 1 ? y : h - 1;
+        const int docPx = int(qint64(yy) * total / h);
+        int want = (docPx - pad) / lh;
+        want = want < 0 ? 0 : (want > lineCount - 1 ? lineCount - 1 : want);
+        const int got = editor->rulerLineAt(y);
+        QCOMPARE(got, want);
+        QVERIFY2(got >= prev, qPrintable(QStringLiteral("mapping not monotonic at y=%1").arg(y)));
+        prev = got;
+        hit[got] = true;
+    }
+    QCOMPARE(editor->rulerLineAt(0), 0);
+    QCOMPARE(editor->rulerLineAt(h - 1), lineCount - 1);
+    // 200 lines on a 400px strip: ~2 strip px per line, so NO line may be
+    // skipped by the sampling (each doc line owns >= 1 strip row).
+    for (int line = 0; line < lineCount; ++line)
+        QVERIFY2(hit[line], qPrintable(QStringLiteral("line %1 got no strip row").arg(line)));
+
+    // Viewport rectangle: the strip's own scroll STATE, exact formula.
+    const auto vpWant = [&](int vScroll) {
+        const int y0 = int(qint64(vScroll) * h / total);
+        const int y1 = int(qint64(std::min(total, vScroll + h)) * h / total);
+        const int thick = y1 - y0;
+        return QRect(w - CodeEditor::kOverviewRulerWidth, y0, CodeEditor::kOverviewRulerWidth,
+                     thick < 1 ? 1 : thick);
+    };
+    QCOMPARE(editor->verticalScrollOffset(), 0);
+    QCOMPARE(editor->overviewRulerViewportRect(), vpWant(0));
+
+    QWheelEvent wheel(QPointF(300, 200), QPointF(300, 200), QPoint(0, 0), QPoint(0, -360),
+                      Qt::NoButton, Qt::NoModifier, Qt::NoScrollPhase, false);
+    QVERIFY(QApplication::sendEvent(editor, &wheel));
+    const int scrolled = editor->verticalScrollOffset();
+    QVERIFY(scrolled > 0); // the wheel throw moved the strip state
+    QCOMPARE(editor->overviewRulerViewportRect(), vpWant(scrolled));
+    QVERIFY(editor->overviewRulerViewportRect().top() > vpWant(0).top());
+
+    // Disabled = the set_minimap_enabled(False) path: every geometry API
+    // reads empty/zero/-1 (the binding never sees a phantom strip).
+    editor->setOverviewRulerEnabled(false);
+    QVERIFY(!editor->overviewRulerEnabled());
+    QCOMPARE(editor->overviewRulerWidth(), 0);
+    QVERIFY(editor->overviewRulerGeometry().isEmpty());
+    QVERIFY(editor->overviewRulerViewportRect().isEmpty());
+    QCOMPARE(editor->rulerLineAt(h / 2), -1);
+    editor->setOverviewRulerEnabled(true);
+    QCOMPARE(editor->overviewRulerGeometry(),
+             QRect(w - CodeEditor::kOverviewRulerWidth, 0, CodeEditor::kOverviewRulerWidth, h));
+
+    // The strip follows the right edge across a resize.
+    editor->resize(700, h);
+    QCOMPARE(editor->overviewRulerGeometry(),
+             QRect(700 - CodeEditor::kOverviewRulerWidth, 0, CodeEditor::kOverviewRulerWidth, h));
+    editor->resize(w, h); // keep the geometry contract stable for later slots
+}
+
+void TestCodeEditor::overviewRulerScrollGesture()
+{
+    // Strip clicks/drag scroll and NEVER touch the caret or the selection
+    // (the strip is chrome, not a hit-test surface). Click-to-center uses
+    // the same mapping math asserted in the geometry slot.
+    QString doc;
+    for (int i = 0; i < 500; ++i) {
+        if (i)
+            doc += QLatin1Char('\n');
+        doc += QStringLiteral("line %1").arg(i);
+    }
+    editor->setPlainText(doc);
+    QCOMPARE(editor->lineCount(), 500);
+    QCOMPARE(editor->verticalScrollOffset(), 0);
+    const int h = editor->height();
+    const int w = editor->width();
+    // Inside the strip, left of the vBar_ overlay (it only covers the
+    // strip's right edge; direct sendEvent bypasses child hit-testing,
+    // this x just keeps the gesture honest w.r.t. real mouse routing).
+    const int stripX = w - CodeEditor::kOverviewRulerWidth + 4;
+
+    const auto clickStrip = [&](int y, Qt::MouseButton button) {
+        const QPointF p(stripX, y);
+        QMouseEvent press(QEvent::MouseButtonPress, p, p, button, button, Qt::NoModifier);
+        QMouseEvent release(QEvent::MouseButtonRelease, p, p, button, Qt::NoButton, Qt::NoModifier);
+        QVERIFY(QApplication::sendEvent(editor, &press));
+        QVERIFY(QApplication::sendEvent(editor, &release));
+    };
+
+    clickStrip(h - 2, Qt::LeftButton); // strip bottom: the doc end centers
+    QVERIFY(editor->firstVisibleLine() > 450);
+    QVERIFY(editor->verticalScrollOffset() > 0);
+
+    clickStrip(2, Qt::LeftButton); // strip top: back to the doc start
+    QCOMPARE(editor->verticalScrollOffset(), 0);
+    QCOMPARE(editor->firstVisibleLine(), 0);
+
+    // Drag pans continuously while the button is held (manual events:
+    // QTest::mouseMove carries no button state).
+    const QPointF p1(stripX, 30), p2(stripX, 250);
+    QMouseEvent press(QEvent::MouseButtonPress, p1, p1, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QMouseEvent move(QEvent::MouseMove, p2, p2, Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+    QMouseEvent release(QEvent::MouseButtonRelease, p2, p2, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QVERIFY(QApplication::sendEvent(editor, &press));
+    const int afterPress = editor->firstVisibleLine();
+    QVERIFY(afterPress > 5); // the press scrolled (near-top line centered)
+    QVERIFY(QApplication::sendEvent(editor, &move));
+    const int afterMove = editor->firstVisibleLine();
+    QVERIFY2(afterMove > afterPress,
+             qPrintable(QStringLiteral("ruler drag did not pan: %1 -> %2").arg(afterPress).arg(afterMove)));
+    QVERIFY(QApplication::sendEvent(editor, &release));
+    QCOMPARE(editor->firstVisibleLine(), afterMove); // release ends, does not move
+
+    // Middle click inside the strip: scroll, but NO X11 paste and no caret
+    // placement (the gesture intercept runs before the paste branch).
+    clickStrip(h - 2, Qt::MiddleButton);
+    QVERIFY(editor->firstVisibleLine() > 450);
+    QCOMPARE(editor->position(), qmn::view::TextPosition(0, 0)); // caret never moved
+    QVERIFY(!editor->hasSelection());
+    QCOMPARE(editor->toPlainText(), doc); // no paste landed in the doc
+
+    // Guard the other half of the contract: OUTSIDE the strip a normal
+    // click still places the caret (the intercept is region-bounded).
+    const QPointF outside(400, 200);
+    QMouseEvent np(QEvent::MouseButtonPress, outside, outside, Qt::LeftButton, Qt::LeftButton, Qt::NoModifier);
+    QMouseEvent nr(QEvent::MouseButtonRelease, outside, outside, Qt::LeftButton, Qt::NoButton, Qt::NoModifier);
+    QVERIFY(QApplication::sendEvent(editor, &np));
+    QVERIFY(QApplication::sendEvent(editor, &nr));
+    QVERIFY(editor->position().line > 400); // deep-scroll state: hit-test tracks it
+}
+
+void TestCodeEditor::overviewRulerMarkerPaintProbe()
+{
+    // Numeric strip-only probe (no vision): x bounded to the ruler window,
+    // so every sampled pixel is ruler chrome. The chrome palette is cool
+    // (R==G==B bg/stripes/viewport frame), hence all three predicates are
+    // EXACTLY 0 as negative controls; each marker layer then lights its own
+    // predicate and keeps the other two dark. Small doc: maxScroll == 0,
+    // vBar_ hidden, nothing else paints into the window.
+    editor->setPlainText(QStringLiteral("alpha\nbeta gamma\ndelta"));
+    QCOMPARE(editor->lineCount(), 3);
+    const int h = editor->height();
+    const int w = editor->width();
+    const int xs = w - CodeEditor::kOverviewRulerWidth;
+    const auto countIf = [&](const std::function<bool(const QColor&)>& pred) {
+        const QImage img = editor->grab().toImage();
+        int n = 0;
+        for (int y = 0; y < h; ++y)
+            for (int x = xs; x < w; ++x)
+                if (pred(img.pixelColor(x, y)))
+                    ++n;
+        return n;
+    };
+    const std::function<bool(const QColor&)> reddish = [](const QColor& c) {
+        return c.red() > c.green() + 60 && c.red() > c.blue() + 60;
+    };
+    const std::function<bool(const QColor&)> warmish = [](const QColor& c) {
+        return c.red() >= c.green() + 10 && c.green() >= c.blue() + 10 && c.red() <= 200
+            && c.green() >= 55;
+    };
+    const std::function<bool(const QColor&)> coolBlue = [](const QColor& c) {
+        return c.blue() > c.red() + 20 && c.blue() > c.green() + 5;
+    };
+
+    QCOMPARE(countIf(reddish), 0); // negative controls: chrome is cool
+    QCOMPARE(countIf(warmish), 0);
+    QCOMPARE(countIf(coolBlue), 0);
+
+    editor->setBreakpointLines({1}); // M5 ink reuse: the gutter red dot is
+    QVERIFY(countIf(reddish) >= 50); // OUTSIDE the window; only the ruler
+    QCOMPARE(countIf(warmish), 0);   // band may light the predicates here
+    QCOMPARE(countIf(coolBlue), 0);
+    editor->setBreakpointLines({});
+    QCOMPARE(countIf(reddish), 0);
+
+    editor->setHighlightedLines(1, 1); // the M5 highlighted-line band
+    QVERIFY(countIf(coolBlue) >= 50);
+    QCOMPARE(countIf(reddish), 0);
+    editor->clearHighlightedLines();
+    QCOMPARE(countIf(coolBlue), 0);
+
+    // M6 match ink, all-matches only (no findNext): the current-match ink
+    // (246,169,0) is deliberately invisible to the warm predicate (R>200),
+    // and the all-match ink (196,136,30) invisible to reddish — the bands
+    // are exactly as colour-separated as in the text viewport.
+    editor->setFindText(QStringLiteral("lpha")); // line 0
+    QVERIFY(editor->matchCount() >= 1);
+    QVERIFY(countIf(warmish) >= 20);
+    QCOMPARE(countIf(reddish), 0);
+    editor->clearFind();
+    QCOMPARE(countIf(warmish), 0); // ruler ink follows the live find state
+
+    // Disabled ruler = zero chrome: the probes stay dead even with every
+    // marker layer armed (the paint pass is skipped, not recoloured).
+    editor->setFindText(QStringLiteral("lpha"));
+    editor->setBreakpointLines({0});
+    editor->setOverviewRulerEnabled(false);
+    QCOMPARE(countIf(reddish), 0);
+    QCOMPARE(countIf(warmish), 0);
+    QCOMPARE(countIf(coolBlue), 0);
+    editor->setOverviewRulerEnabled(true);
+    QVERIFY(countIf(warmish) >= 20); // and the band is back, live state intact
 }
 
 QTEST_MAIN(TestCodeEditor)

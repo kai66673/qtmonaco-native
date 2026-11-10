@@ -1306,6 +1306,58 @@ void CodeEditor::updateScrollBarRange()
         setVScroll(maxScroll);
 }
 
+// --- M7 overview ruler: pure viewport-strip mapping (numeric contract,
+// PLAN E1 DoD "ruler geometry state tests"). The strip maps the document
+// pixel space [0, totalHeight()) linearly onto [0, height()); every
+// mapping goes through that one ratio so the click gesture, the viewport
+// rectangle and the tests never disagree.
+
+void CodeEditor::setOverviewRulerEnabled(bool enabled)
+{
+    if (enabled == rulerEnabled_)
+        return;
+    rulerEnabled_ = enabled;
+    update();
+}
+
+QRect CodeEditor::overviewRulerGeometry() const
+{
+    if (!rulerEnabled_)
+        return {};
+    return QRect(width() - kOverviewRulerWidth, 0, kOverviewRulerWidth, height());
+}
+
+int CodeEditor::rulerLineAt(int y) const
+{
+    if (!rulerEnabled_)
+        return -1;
+    const int total = std::max(1, totalHeight());
+    const int h = std::max(1, height());
+    const int docPx = int(qint64(std::clamp(y, 0, h - 1)) * total / h);
+    return std::clamp((docPx - padding_) / lineHeight_, 0, buffer_.lineCount() - 1);
+}
+
+QRect CodeEditor::overviewRulerViewportRect() const
+{
+    if (!rulerEnabled_)
+        return {};
+    const int total = std::max(1, totalHeight());
+    const int h = std::max(1, height());
+    const int y0 = int(qint64(vScroll_) * h / total);
+    const int y1 = int(qint64(std::min(total, vScroll_ + height())) * h / total);
+    return QRect(width() - kOverviewRulerWidth, y0, kOverviewRulerWidth, std::max(1, y1 - y0));
+}
+
+// Center the line under the strip point in the viewport (Monaco minimap
+// click gesture). setVScroll does the clamping and the repaint.
+void CodeEditor::rulerScrollTo(int y)
+{
+    const int line = rulerLineAt(y);
+    if (line < 0)
+        return;
+    setVScroll(padding_ + line * lineHeight_ + lineHeight_ / 2 - height() / 2);
+}
+
 void CodeEditor::insertTextAtCaret(const QString& text)
 {
     if (text.isEmpty())
@@ -1512,6 +1564,26 @@ QRgb findMatchInk(bool current)
     return current ? QColor(246, 169, 0).rgb() : QColor(196, 136, 30).rgb();
 }
 
+// Shared by the gutter dot (M5) and the ruler marker band (M7): one
+// fixed red constant until set_theme routes it.
+QRgb breakpointInk()
+{
+    return QColor(220, 61, 66).rgb();
+}
+
+// M7 overview ruler chrome ink: FIXED COOL constants (R==G==B) — the
+// ruler background/stripes/viewport frame must never satisfy the
+// warm-quad or red-diagnostic numeric probe predicates; only marker
+// layers reuse the warm/red inks above, by design.
+QRgb rulerBackground()
+{
+    return QColor(22, 22, 22).rgb();
+}
+QColor rulerStripe()
+{
+    return QColor(140, 140, 140, 110); // muted cool gray over the dark bg
+}
+
 } // namespace
 
 void CodeEditor::paintEvent(QPaintEvent*)
@@ -1651,7 +1723,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
             }
             if (std::binary_search(breakpointLines_.begin(), breakpointLines_.end(), line)) {
                 p.setPen(Qt::NoPen);
-                p.setBrush(QColor(220, 61, 66)); // fixed red: set_theme pass routes it
+                p.setBrush(QColor::fromRgb(breakpointInk())); // fixed red: set_theme pass routes it
                 const double r = std::max(3.0, cellWidth_ * 0.45);
                 p.drawEllipse(QPointF(qreal(bpCx), yTop + lh / 2.0), r, r);
             }
@@ -1774,6 +1846,84 @@ void CodeEditor::paintEvent(QPaintEvent*)
         }
         p.setPen(palette().color(QPalette::Text));
     }
+
+    // M7: the overview ruler is the LAST pass — opaque chrome that
+    // overpaints the text's right edge (the viewport is chrome-bounded,
+    // VS Code-style). Cost rides the strip, never the document.
+    paintOverviewRuler(p);
+}
+
+// M7: the strip is chrome, not a render of the document: sampled line
+// stripes (step = ceil(1/pxPerLine), so O(strip height) stripes), marker
+// layers from the already-sorted decoration vectors (subsampled to the
+// strip when huge), and the viewport frame. Line reads are capped
+// textRange windows — a 1M-unit line costs the strip one small slice,
+// never a materialization (the E1 "no off-screen paint cost" DoD).
+void CodeEditor::paintOverviewRuler(QPainter& p) const
+{
+    const QRect g = overviewRulerGeometry();
+    if (g.isNull())
+        return;
+    p.fillRect(g, QColor::fromRgb(rulerBackground()));
+
+    const int total = std::max(1, totalHeight());
+    const int h = std::max(1, height());
+    const auto rulerY = [&](int docPx) { return int(qint64(docPx) * h / total); };
+    // one-line marker band, thickened so it survives the squashing
+    const auto band = [&](int line, const QColor& c, int minThick = 2) {
+        const int y0 = rulerY(padding_ + line * lineHeight_);
+        const int y1 = rulerY(padding_ + (line + 1) * lineHeight_);
+        p.fillRect(QRect(g.left() + 3, y0, kOverviewRulerWidth - 6, qMax(minThick, y1 - y0)), c);
+    };
+
+    const int lineCount = buffer_.lineCount();
+    const double pxPerLine = double(h) * lineHeight_ / total;
+    const int step = pxPerLine >= 1.0 ? 1 : int(std::ceil(1.0 / pxPerLine));
+    const int cap = kOverviewRulerWidth - 6; // stripe-precision budget in units
+
+    p.setPen(Qt::NoPen);
+    p.setBrush(rulerStripe());
+    for (int line = 0; line < lineCount; line += step) {
+        const int off = buffer_.offsetOfLine(line);
+        const QString chunk = buffer_.textRange(off, qMin(off + cap + 1, buffer_.charCount()));
+        const int nl = chunk.indexOf(QLatin1Char('\n'));
+        const int len = nl >= 0 ? nl : chunk.size(); // '\n' excluded; capped
+        if (len <= 0)
+            continue; // empty line: no stripe (Monaco draws nothing there)
+        int indent = 0;
+        while (indent < len && (chunk.at(indent) == QLatin1Char(' ') || chunk.at(indent) == QLatin1Char('\t')))
+            ++indent; // tabs count as 1 unit: v1 approximation
+        const int x0 = g.left() + 3 + qMin(indent, cap - 1);
+        const int w = qMax(1, qMin(len, cap) - qMin(indent, cap - 1));
+        const int y0 = rulerY(padding_ + line * lineHeight_);
+        const int y1 = rulerY(padding_ + (line + 1) * lineHeight_);
+        p.fillRect(QRect(x0, y0, w, qMax(1, y1 - y0)), rulerStripe());
+    }
+
+    // Marker layers, cool selection band first, then the warm/red state
+    // inks (M5/M6 constants). Huge sets are stride-subsampled to a few
+    // stripes per strip pixel — the paint never walks the whole vector.
+    if (highlightEnd_ >= highlightStart_ && highlightStart_ >= 0) {
+        const int y0 = rulerY(padding_ + highlightStart_ * lineHeight_);
+        const int y1 = rulerY(padding_ + (highlightEnd_ + 1) * lineHeight_);
+        p.fillRect(QRect(g.left() + 3, y0, kOverviewRulerWidth - 6, qMax(2, y1 - y0)),
+                   QColor(96, 144, 196, 90)); // cool blue: passes every probe predicate
+    }
+    const auto strideFor = [h](int n) { return n > 4 * h ? n / (4 * h) + 1 : 1; };
+    for (int i = 0; i < breakpointLines_.size(); i += strideFor(breakpointLines_.size()))
+        band(breakpointLines_[i], QColor::fromRgb(breakpointInk()));
+    for (int i = 0; i < diagnostics_.size(); i += strideFor(diagnostics_.size()))
+        band(diagnostics_[i].startLine, QColor::fromRgb(severityInk(diagnostics_[i].severity)));
+    for (int i = 0; i < matches_.size(); i += strideFor(matches_.size()))
+        band(matches_[i].startLine, QColor::fromRgb(findMatchInk(false)), 1);
+    if (currentMatch_ >= 0 && currentMatch_ < matches_.size())
+        band(matches_[currentMatch_].startLine, QColor::fromRgb(findMatchInk(true)), 1);
+
+    // Viewport frame last (the strip's own scroll state: state, not ink).
+    const QRect vp = overviewRulerViewportRect();
+    p.setBrush(QColor(210, 210, 210, 26)); // faint cool fill (R==G==B)
+    p.setPen(QPen(QColor(190, 190, 190, 110), 1.0));
+    p.drawRect(vp.marginsRemoved({0, 0, 1, 1}));
 }
 
 QVector<QTextLayout::FormatRange> CodeEditor::formatRangesForLine(int line, const GeoSlot* gs) const
@@ -3034,6 +3184,16 @@ QVariant CodeEditor::inputMethodQuery(Qt::InputMethodQuery query) const
 
 void CodeEditor::mousePressEvent(QMouseEvent* event)
 {
+    // M7 ruler gesture FIRST (left = click/drag scroll, middle too: paste
+    // in the chrome strip would surprise): the strip scrolls, the caret
+    // never moves. The scrollbar child already swallows its own area.
+    if (rulerEnabled_ && overviewRulerGeometry().contains(event->position().toPoint())
+        && (event->button() == Qt::LeftButton || event->button() == Qt::MiddleButton)) {
+        rulerDrag_ = true;
+        rulerScrollTo(int(event->position().y()));
+        event->accept();
+        return;
+    }
     if (event->button() == Qt::MiddleButton) {
         // X11 paste gesture: place the caret at the click, then insert the
         // primary selection there. Platforms without a primary selection
@@ -3110,6 +3270,13 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
 
 void CodeEditor::mouseMoveEvent(QMouseEvent* event)
 {
+    // M7 ruler drag: continuous scroll while the press started in the
+    // strip (before any caret-selection drag logic).
+    if (rulerDrag_) {
+        rulerScrollTo(int(event->position().y()));
+        event->accept();
+        return;
+    }
     if (!(event->buttons() & Qt::LeftButton)) {
         event->ignore();
         return;
@@ -3164,6 +3331,12 @@ void CodeEditor::mouseMoveEvent(QMouseEvent* event)
 
 void CodeEditor::mouseReleaseEvent(QMouseEvent* event)
 {
+    if (rulerDrag_
+        && (event->button() == Qt::LeftButton || event->button() == Qt::MiddleButton)) {
+        rulerDrag_ = false; // end the ruler scroll gesture
+        event->accept();
+        return;
+    }
     if (event->button() == Qt::LeftButton && (altDragPrimary_ || altDragSlot_ >= 0)) {
         // End the Alt+Drag: the dragged selection may now overlap others,
         // so let the normalization rules settle the caret set.

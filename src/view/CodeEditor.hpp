@@ -18,6 +18,9 @@
 #include <array>
 #include <functional>
 #include <memory>
+
+// Used by a private method signature only (the paint pass lives in the .cpp).
+QT_FORWARD_DECLARE_CLASS(QPainter)
 #include <utility>
 
 class QInputMethodEvent;
@@ -358,6 +361,31 @@ public:
     // does not hide the bar.
     void clearFind();
 
+    // Overview ruler (M7, Phase E1) — the minimap substitute: a right-edge
+    // strip in which the WHOLE document is scaled to pixels (model px
+    // space [0, 2*padding + lineCount*lineHeight) maps linearly onto the
+    // strip height). It paints sampled line stripes (one stripe per strip
+    // pixel-row budget, never more — the document is never rendered
+    // off-screen: cost is O(strip height), not O(document)), the marker
+    // layers (breakpoints, diagnostics, highlighted lines, search matches
+    // — subsampled to the strip when huge) and the viewport rectangle.
+    // Click/drag inside the strip scrolls (the clicked line centers in the
+    // viewport); it never moves the caret. The vertical scrollbar
+    // overlays the strip's right edge, VS Code-style. The Python binding
+    // maps qtmonaco's set_minimap_enabled here — never onto a
+    // Chromium-style token minimap.
+    static constexpr int kOverviewRulerWidth = 44; // px, fixed until set_theme
+    void setOverviewRulerEnabled(bool enabled);
+    bool overviewRulerEnabled() const { return rulerEnabled_; }
+    int overviewRulerWidth() const { return rulerEnabled_ ? kOverviewRulerWidth : 0; }
+    QRect overviewRulerGeometry() const; // empty rect when disabled
+    // Pure mapping math (numeric contract, drives the click gesture):
+    // doc line under a widget-space y inside the strip; -1 when disabled.
+    int rulerLineAt(int y) const;
+    // Rectangle marking the visible window inside the strip (empty when
+    // disabled). The DoD "ruler geometry state" entry point.
+    QRect overviewRulerViewportRect() const;
+
     int lineHeight() const { return lineHeight_; }
     double cellWidth() const { return cellWidth_; }
     int padding() const { return padding_; } // vertical/top-edge padding
@@ -367,6 +395,7 @@ public:
     // wheel/scrollbar. Public for consumers, bindings and the policy test.
     int firstVisibleLine() const;
     int visibleLineCount() const;
+    int verticalScrollOffset() const { return vScroll_; } // px, clamped
 
     // Widget-space x of the caret position at (line, col), following the
     // glyph engine's cluster advances (not a col * cellWidth grid), gutter
@@ -590,6 +619,14 @@ private:
     void recomputeFindMatches(); // full per-line scan (the DoD math)
     void syncFindBarLabel() const; // bar count label after state moves
     bool replaceRange(const MatchRange& m, const QString& replacement);
+
+    // --- M7 overview ruler state (semantics: public API comments) ---
+    bool rulerEnabled_ = true; // Monaco-minimap-parity default (the
+                               // set_minimap_enabled hook defaults on too)
+    bool rulerDrag_ = false;   // left/middle press inside the strip
+    void paintOverviewRuler(QPainter& p) const; // last pass: it OVERPAINTS
+                                                // the text's right edge
+    void rulerScrollTo(int y); // center the strip point's line in the view
 
     QTimer blinkTimer_;
     bool caretOn_ = true;

@@ -175,6 +175,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   observer). Painting rides the decoration pass: the match list is
   sorted and the paint binary-searches the viewport window
   (viewport-only renderer preserved).
+- M7 overview ruler (Phase E1), the native minimap substitute: a fixed
+  44px right-edge strip (`kOverviewRulerWidth`) mapping the WHOLE document
+  pixel space `[0, 2*padding + lineCount*lineHeight)` linearly onto the
+  strip height — one ratio drives the click gesture, the viewport frame
+  and the paint, so the three can never drift apart. Public API:
+  `setOverviewRulerEnabled`/`overviewRulerEnabled` (default ON, Monaco
+  minimap parity; the binding maps qtmonaco's `set_minimap_enabled` here,
+  never onto a Chromium token minimap), `overviewRulerWidth`,
+  `overviewRulerGeometry`, `rulerLineAt(y)` and
+  `overviewRulerViewportRect` (pure mapping math, the geometry-state
+  test surface), plus the `verticalScrollOffset()` viewport getter.
+  Gestures: left/middle click or drag inside the strip scrolls
+  (clicked line centered, Monaco click-to-center semantics) and never
+  moves the caret; middle click never pastes there; the vertical
+  scrollbar overlays the strip's right edge, VS Code-style.
+  Cost is O(strip height), never O(document): line stripes step by
+  `ceil(1/pxPerLine)` (bounded by strip rows), each line read is a
+  capped `textRange` window (a 1M-unit line costs one small slice), and
+  huge marker sets (breakpoints/diagnostics/find matches) are
+  stride-subsampled. Marker layers reuse the M5/M6 inks; ruler chrome
+  is deliberately cool-ink (R==G==B) so the warm/red numeric pixel probes
+  keep exact-zero negative controls. Painted as the LAST pass over the
+  text's right edge. Tests: mapping-vs-duplicated-formula equality per
+  strip row, viewport-rect formula across wheel scrolls, disabled-state
+  empties, click/drag scroll state assertions, strip-window pixel probes
+  (breakpoint red / highlight cool-blue / find warm bands light exactly
+  one predicate each).
 
 ### Changed
 - The x anchor of all text geometry (caret, selection, painting, hit

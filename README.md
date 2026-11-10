@@ -109,7 +109,8 @@ Gate 1 — Code Editor v1:
 - [x] M5 decoration layers + line-number gutter + markers
 - [x] M6 find/replace (QRegularExpression): Ctrl+F bar, per-line engine,
       match highlights, F3/Shift+F3, replace + one-action replace-all
-- [ ] M7 overview ruler (replaces minimap)
+- [x] M7 overview ruler (replaces minimap): 44px right-edge strip, whole-doc
+      linear mapping, click/drag scroll, O(strip) marker stripes + viewport frame
 - [ ] M9 horizontal scrolling (soft wrap deferred to Gate 2)
 - [ ] M13 code folding (tree-sitter `@fold` ranges + indent fallback; gutter toggles)
 - [ ] M11 accessibility (QAccessible), final polish (non-gating)
