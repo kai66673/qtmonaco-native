@@ -143,6 +143,14 @@ private slots:
     void coloredPaintKeepsGlyphGeometry();
     void largeDocViewportPolicyKeepsSpansExact();
 
+    // Decorations + gutter (M5, Phase D3).
+    void gutterDefaultAndOffCollapsesGeometry();
+    void gutterWidthGrowsAtLineCountCrossover();
+    void gutterLineNumbersModeMath();
+    void decorationsRoundTripUpdateRemove();
+    void gutterShiftsTextGeometryAndHitTest();
+    void diagnosticUnderlinePaintsSeverityInk();
+
 private:
     CodeEditor* editor = nullptr;
 };
@@ -237,7 +245,7 @@ void TestCodeEditor::mousePlacesCaret()
     const int lh = editor->lineHeight();
 
     QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier,
-                      QPoint(pad + int(3 * cw + cw / 2), pad + lh / 2));
+                      QPoint(editor->contentLeft() + int(3 * cw + cw / 2), pad + lh / 2));
     QCOMPARE(editor->position().line, 0);
     QCOMPARE(editor->position().col, 3);
 
@@ -245,7 +253,8 @@ void TestCodeEditor::mousePlacesCaret()
     QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, QPoint(pad, pad + 100 * lh));
     QCOMPARE(editor->position().line, 1);
     // far right clamps to line length
-    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, QPoint(pad + int(90 * cw), pad + lh / 2));
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(editor->contentLeft() + int(90 * cw), pad + lh / 2));
     QCOMPARE(editor->position().line, 0);
     QCOMPARE(editor->position().col, 6);
 }
@@ -277,11 +286,12 @@ void TestCodeEditor::caretXFollowsClusterAdvances()
     const int pad = editor->padding();
     QFontMetricsF fm(editor->font());
 
-    // ASCII line: identical to the grid model down to the last epsilon.
+    // ASCII line: identical to the grid model down to the last epsilon
+    // (contentLeft: M5 puts the gutter left of the text area).
     for (int c = 0; c <= 10; ++c)
-        QVERIFY2(qAbs(editor->xForCol(1, c) - (pad + c * cw)) < 1e-9,
+        QVERIFY2(qAbs(editor->xForCol(1, c) - (editor->contentLeft() + c * cw)) < 1e-9,
                  qPrintable(QStringLiteral("col %1: %2 vs %3")
-                                .arg(c).arg(editor->xForCol(1, c)).arg(pad + c * cw)));
+                                .arg(c).arg(editor->xForCol(1, c)).arg(editor->contentLeft() + c * cw)));
 
     // The family spans units 1..9 but occupies the advance of ONE cluster:
     // ~1.8 cells on the measured font, never the 8 cells the grid claimed.
@@ -376,7 +386,7 @@ void TestCodeEditor::caretPixelTracksLayoutNotGrid()
     editor->setPosition({0, 10}); // EOL: no glyph overlaps the caret block
     const int lh = editor->lineHeight();
     const int pad = editor->padding();
-    const double gridX = pad + 10 * editor->cellWidth(); // the BUGGY position
+    const double gridX = editor->contentLeft() + 10 * editor->cellWidth(); // the BUGGY position
     const int layoutX = qRound(editor->xForCol(0, 10)); // what we draw with
 
     QImage img = editor->grab().toImage();
@@ -420,13 +430,13 @@ void TestCodeEditor::emptyLineGeometry()
     const int lh = editor->lineHeight();
     const double cw = editor->cellWidth();
 
-    QVERIFY(qAbs(editor->xForCol(1, 0) - pad) < 1e-12);
+    QVERIFY(qAbs(editor->xForCol(1, 0) - editor->contentLeft()) < 1e-12);
     QCOMPARE(editor->xForCol(1, 5), editor->xForCol(1, 0)); // clamped to EOL
     QCOMPARE(editor->xForCol(99, 3), editor->xForCol(0, 0)); // bad line -> line start x
 
     // A click anywhere on an empty line lands at its start.
     QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier,
-                      QPoint(pad + int(30 * cw), pad + lh + lh / 2));
+                      QPoint(editor->contentLeft() + int(30 * cw), pad + lh + lh / 2));
     QCOMPARE(editor->position().line, 1);
     QCOMPARE(editor->position().col, 0);
 }
@@ -446,14 +456,15 @@ void TestCodeEditor::textGlyphsShareCaretBands()
     editor->setPosition({4, 1});
     const int pad = editor->padding();
     const int lh = editor->lineHeight();
+    const int x0 = editor->contentLeft(); // M5: scan the TEXT area only;
+    const int x1 = x0 + int(editor->cellWidth()) - 1; // exclude caret cols
     const QImage img = editor->grab().toImage();
     const QColor base = editor->palette().color(QPalette::Base);
-    const int x1 = pad + int(editor->cellWidth()) - 1; // exclude caret cols
 
     for (int i = 0; i < 5; ++i) {
         const int yTop = pad + i * lh;
         int inBand = 0, below = 0;
-        for (int x = 0; x <= x1 && x < img.width(); ++x) {
+        for (int x = x0; x <= x1 && x < img.width(); ++x) {
             for (int y = yTop; y < yTop + lh && y < img.height(); ++y)
                 if (img.pixelColor(x, y) != base) { ++inBand; break; }
             // First two rows of the NEXT band: fixed geometry cannot have
@@ -574,13 +585,14 @@ void TestCodeEditor::shiftClickExtendsSelection()
     const int lh = editor->lineHeight();
 
     QTest::mousePress(editor, Qt::LeftButton, Qt::ShiftModifier,
-                      QPoint(pad + int(5 * cw + cw / 2), pad + lh / 2));
+                      QPoint(editor->contentLeft() + int(5 * cw + cw / 2), pad + lh / 2));
     QCOMPARE(editor->position().line, 0);
     QCOMPARE(editor->position().col, 5);
     QCOMPARE(editor->selectedText(), QStringLiteral("cde"));
 
     // Plain click collapses at the new position.
-    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, QPoint(pad, pad + lh));
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(editor->contentLeft(), pad + lh));
     QVERIFY(!editor->hasSelection());
     QCOMPARE(editor->position().line, 1);
 }
@@ -626,15 +638,15 @@ void TestCodeEditor::mouseDragSelects()
     const double cw = editor->cellWidth();
     const int lh = editor->lineHeight();
 
-    dragSelect(editor, QPoint(pad + 1, pad + lh / 2),
-               QPoint(pad + qRound(3 * cw + cw / 2), pad + lh / 2));
+    dragSelect(editor, QPoint(editor->contentLeft() + 1, pad + lh / 2),
+               QPoint(editor->contentLeft() + qRound(3 * cw + cw / 2), pad + lh / 2));
     QVERIFY(editor->hasSelection());
     QCOMPARE(editor->selectedText(), QStringLiteral("abc"));
     QCOMPARE(editor->position().col, 3); // caret at the drag end (active)
 
     // Drag across lines: press at col 4, release at col 1 of line 1.
-    dragSelect(editor, QPoint(pad + qRound(4 * cw) + 1, pad + lh / 2),
-               QPoint(pad + qRound(1.5 * cw), pad + lh + lh / 2));
+    dragSelect(editor, QPoint(editor->contentLeft() + qRound(4 * cw) + 1, pad + lh / 2),
+               QPoint(editor->contentLeft() + qRound(1.5 * cw), pad + lh + lh / 2));
     QCOMPARE(editor->selectedText(), QStringLiteral("ef\nx"));
     QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 1}));
 }
@@ -646,8 +658,8 @@ void TestCodeEditor::mouseDragSelectsBackwards()
     const double cw = editor->cellWidth();
     const int lh = editor->lineHeight();
 
-    dragSelect(editor, QPoint(pad + qRound(4 * cw) + 1, pad + lh / 2),
-               QPoint(pad + qRound(1.5 * cw), pad + lh / 2));
+    dragSelect(editor, QPoint(editor->contentLeft() + qRound(4 * cw) + 1, pad + lh / 2),
+               QPoint(editor->contentLeft() + qRound(1.5 * cw), pad + lh / 2));
     QCOMPARE(editor->position().col, 1); // caret at the drag end
     QCOMPARE(editor->selectedText(), QStringLiteral("bcd"));
 }
@@ -964,7 +976,7 @@ void TestCodeEditor::imeQueriesTrackCaretAndPreedit()
     QInputMethodQueryEvent q1(Qt::ImCursorRectangle);
     QVERIFY(QApplication::sendEvent(editor, &q1));
     const QRect anchor = q1.value(Qt::ImCursorRectangle).toRect();
-    QCOMPARE(anchor.left(), editor->padding() + qRound(2 * editor->cellWidth()));
+    QCOMPARE(anchor.left(), editor->contentLeft() + qRound(2 * editor->cellWidth()));
     QCOMPARE(anchor.top(), editor->padding()); // line 0, unscrolled
     QCOMPARE(anchor.height(), editor->lineHeight());
 
@@ -974,7 +986,7 @@ void TestCodeEditor::imeQueriesTrackCaretAndPreedit()
     QInputMethodQueryEvent q2(Qt::ImCursorRectangle);
     QVERIFY(QApplication::sendEvent(editor, &q2));
     QCOMPARE(q2.value(Qt::ImCursorRectangle).toRect().left(),
-             editor->padding() + qRound(4 * editor->cellWidth()));
+             editor->contentLeft() + qRound(4 * editor->cellWidth()));
 
     // The IM may want the current selection to operate on.
     editor->setPosition({0, 0});
@@ -1185,8 +1197,8 @@ void TestCodeEditor::primarySelectionMirrorsAndClears()
     const double cw = editor->cellWidth();
     const int lh = editor->lineHeight();
 
-    dragSelect(editor, QPoint(pad + 1, pad + lh / 2),
-               QPoint(pad + qRound(3 * cw + cw / 2), pad + lh / 2));
+    dragSelect(editor, QPoint(editor->contentLeft() + 1, pad + lh / 2),
+               QPoint(editor->contentLeft() + qRound(3 * cw + cw / 2), pad + lh / 2));
     QTRY_COMPARE(cb->text(QClipboard::Selection), QStringLiteral("abc"));
 
     QTest::keyClick(editor, Qt::Key_Escape); // selection gone: primary released
@@ -1210,7 +1222,7 @@ void TestCodeEditor::middleClickPastesPrimarySelection()
     const double cw = editor->cellWidth();
     const int lh = editor->lineHeight();
     QTest::mousePress(editor, Qt::MiddleButton, Qt::NoModifier,
-                      QPoint(pad + int(2 * cw + cw / 2), pad + lh / 2));
+                      QPoint(editor->contentLeft() + int(2 * cw + cw / 2), pad + lh / 2));
     QCOMPARE(editor->toPlainText(), QStringLiteral("abPRcdef"));
     QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4}));
 }
@@ -1229,7 +1241,7 @@ void TestCodeEditor::middleClickFallsBackToClipboard()
     const double cw = editor->cellWidth();
     const int lh = editor->lineHeight();
     QTest::mousePress(editor, Qt::MiddleButton, Qt::NoModifier,
-                      QPoint(pad + int(2 * cw + cw / 2), pad + lh / 2));
+                      QPoint(editor->contentLeft() + int(2 * cw + cw / 2), pad + lh / 2));
     QCOMPARE(editor->toPlainText(), QStringLiteral("abZZcdef"));
     QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4}));
 }
@@ -1291,7 +1303,7 @@ void TestCodeEditor::undoCaretMoveBreaksChain()
     const double cw = editor->cellWidth();
     const int lh = editor->lineHeight();
     QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier,
-                      QPoint(pad + int(cw + cw / 2), pad + lh / 2)); // col 1
+                      QPoint(editor->contentLeft() + int(cw + cw / 2), pad + lh / 2)); // col 1
     QTest::keyClicks(editor, "W");
     QCOMPARE(editor->toPlainText(), QStringLiteral("XWabc"));
     QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
@@ -1464,7 +1476,7 @@ QPoint caretPixel(CodeEditor* e, int line, int col, double xNudge = 0.4)
     const int pad = e->padding();
     const double cw = e->cellWidth();
     const int lh = e->lineHeight();
-    return QPoint(pad + int(col * cw + cw / 2 + xNudge), pad + line * lh + lh / 2);
+    return QPoint(e->contentLeft() + int(col * cw + cw / 2 + xNudge), pad + line * lh + lh / 2);
 }
 
 void altClick(CodeEditor* e, int line, int col)
@@ -2376,6 +2388,218 @@ void TestCodeEditor::largeDocViewportPolicyKeepsSpansExact()
     // any window tree, so spansFor pays one synchronous full pass; the
     // result must equal the full-tree reference element-for-element.
     QVERIFY(allSpans(editor) == reference);
+}
+
+// --- decorations + gutter (M5, Phase D3) ---------------------------------
+
+void TestCodeEditor::gutterDefaultAndOffCollapsesGeometry()
+{
+    // Monaco parity: gutter is On by default, and contentLeft() is the x
+    // anchor all text geometry converges on.
+    QCOMPARE(editor->lineNumbersMode(), CodeEditor::LineNumbersMode::On);
+    editor->setPlainText(QStringLiteral("abc"));
+    QVERIFY(editor->gutterWidth() > 0);
+    QVERIFY(editor->contentLeft() > editor->padding());
+
+    // Off mode collapses the pre-M5 geometry bit-for-bit: the gutter
+    // leaves no width and xForCol lands exactly on the old padding edge.
+    editor->setLineNumbersMode(CodeEditor::LineNumbersMode::Off);
+    QCOMPARE(editor->gutterWidth(), 0);
+    QCOMPARE(editor->contentLeft(), editor->padding());
+    QCOMPARE(editor->xForCol(0, 0), double(editor->padding()));
+    QCOMPARE(editor->lineNumberText(0), QString());
+}
+
+void TestCodeEditor::gutterWidthGrowsAtLineCountCrossover()
+{
+    const double cw = editor->cellWidth();
+    editor->setPlainText(QStringLiteral("1\n2\n3\n4\n5\n6\n7\n8\n9")); // 9 lines: 1 digit
+    const int w9 = editor->gutterWidth();
+    QVERIFY(w9 > 0); // default On
+    editor->setPlainText(QStringLiteral("1\n2\n3\n4\n5\n6\n7\n8\n9\n10")); // 10: 2 digits
+    const int w10 = editor->gutterWidth();
+    // DoD: the digit column is qRound(digits * cw), so the 9->10 line
+    // crossover (1 digit -> 2 digits) grows the gutter by one digit step.
+    QCOMPARE(w10 - w9, qRound(2 * cw) - qRound(cw));
+
+    // Same digit width in every numbering mode (relative distances and
+    // interval absolutes never exceed lineCount digits).
+    editor->setLineNumbersMode(CodeEditor::LineNumbersMode::Relative);
+    QCOMPARE(editor->gutterWidth(), w10);
+    editor->setLineNumbersMode(CodeEditor::LineNumbersMode::Interval);
+    QCOMPARE(editor->gutterWidth(), w10);
+    editor->setLineNumbersMode(CodeEditor::LineNumbersMode::On);
+
+    // A reserved breakpoint slot appears while ANY breakpoint exists and
+    // then stays constant: adding/moving a dot must not shift the digits.
+    editor->setBreakpointLines({3});
+    const int wBp = editor->gutterWidth();
+    QVERIFY(wBp > w10);
+    editor->setBreakpointLines({5});
+    QCOMPARE(editor->gutterWidth(), wBp);
+    editor->setBreakpointLines({});
+    QCOMPARE(editor->gutterWidth(), w10);
+}
+
+void TestCodeEditor::gutterLineNumbersModeMath()
+{
+    QStringList rows;
+    for (int i = 1; i <= 30; ++i)
+        rows << QString::number(i);
+    editor->setPlainText(rows.join(QLatin1Char('\n'))); // exactly 30 lines
+
+    // On: 1-based display of the absolute number (the widget stays 0-based).
+    editor->grab(); // smoke: On-mode number painting
+    QCOMPARE(editor->lineNumberText(0), QStringLiteral("1"));
+    QCOMPARE(editor->lineNumberText(29), QStringLiteral("30"));
+    QCOMPARE(editor->lineNumberText(30), QString()); // out of range: nothing drawn
+
+    // Relative: distance to the caret line; the caret line itself shows
+    // its absolute number (Monaco's relative-mode behavior).
+    editor->setLineNumbersMode(CodeEditor::LineNumbersMode::Relative);
+    editor->setPosition({15, 0});
+    QCOMPARE(editor->lineNumberText(15), QStringLiteral("16")); // the caret line
+    QCOMPARE(editor->lineNumberText(13), QStringLiteral("2"));
+    QCOMPARE(editor->lineNumberText(20), QStringLiteral("5"));
+    // The math follows the caret (the gutter repaints with it).
+    editor->setPosition({29, 0});
+    QCOMPARE(editor->lineNumberText(28), QStringLiteral("1"));
+    QCOMPARE(editor->lineNumberText(29), QStringLiteral("30"));
+
+    // Interval: the absolute number only on 1-based multiples of 10
+    // (Monaco's interval behavior); elsewhere nothing is drawn.
+    editor->setLineNumbersMode(CodeEditor::LineNumbersMode::Interval);
+    editor->grab(); // smoke: sparse interval numbers + blank rows paint
+    QCOMPARE(editor->lineNumberText(9), QStringLiteral("10"));
+    QCOMPARE(editor->lineNumberText(19), QStringLiteral("20"));
+    QCOMPARE(editor->lineNumberText(0), QString());
+    QCOMPARE(editor->lineNumberText(5), QString());
+}
+
+void TestCodeEditor::decorationsRoundTripUpdateRemove()
+{
+    editor->setPlainText(QStringLiteral("aaa\nbbb\nccc\nddd"));
+    using Diag = CodeEditor::Diagnostic;
+    // add = set: the getter returns the items sorted by start position.
+    const Diag d1{2, 1, 2, 4, CodeEditor::Severity::Warning, QStringLiteral("w")};
+    const Diag d0{0, 0, 0, 3, CodeEditor::Severity::Error, QStringLiteral("e")};
+    editor->setDiagnostics({d1, d0});
+    QVERIFY2(editor->diagnostics() == (QVector<Diag>{d0, d1}), "diagnostics not sorted round-trip");
+    // update = set again with changed values (message survives round-trip).
+    Diag d1b = d1;
+    d1b.severity = CodeEditor::Severity::Hint;
+    d1b.message = QStringLiteral("later");
+    editor->setDiagnostics({d1b});
+    QVERIFY(editor->diagnostics() == (QVector<Diag>{d1b}));
+    // remove = set without the item.
+    editor->setDiagnostics({});
+    QVERIFY(editor->diagnostics().isEmpty());
+    // Out-of-document items are stored verbatim (lineCount moves under
+    // edits without losing consumer state); they just never paint.
+    const Diag far{99, 0, 99, 2, CodeEditor::Severity::Information, {}};
+    editor->setDiagnostics({far});
+    QVERIFY(editor->diagnostics() == (QVector<Diag>{far}));
+
+    // Breakpoints: stored sorted + deduplicated, cleared by empty set.
+    editor->setBreakpointLines({5, 1, 3, 1});
+    QCOMPARE(editor->breakpointLines(), (QVector<int>{1, 3, 5}));
+    editor->setBreakpointLines({});
+    QVERIFY(editor->breakpointLines().isEmpty());
+
+    // Inlay hints sort by (line, col) and round-trip with their text.
+    using Hint = CodeEditor::InlayHint;
+    const Hint h1{1, 3, QStringLiteral(": int")};
+    const Hint h0{0, 8, QStringLiteral(" // x")};
+    editor->setInlayHints({h1, h0});
+    QVERIFY(editor->inlayHints() == (QVector<Hint>{h0, h1}));
+    editor->setInlayHints({});
+    QVERIFY(editor->inlayHints().isEmpty());
+
+    // Whole-line bands: swapped args are tolerated; clear reports -1.
+    editor->setHighlightedLines(3, 1);
+    QCOMPARE(editor->highlightedLinesStart(), 1);
+    QCOMPARE(editor->highlightedLinesEnd(), 3);
+    editor->clearHighlightedLines();
+    QCOMPARE(editor->highlightedLinesStart(), -1);
+    QCOMPARE(editor->highlightedLinesEnd(), -1);
+
+    // Current-line band defaults off (the set_theme pass picks the
+    // shipped default, D3 theme row).
+    QVERIFY(!editor->currentLineHighlight());
+    editor->setCurrentLineHighlight(true);
+    QVERIFY(editor->currentLineHighlight());
+
+    // Paint smoke: every layer live in one frame (the state checks above
+    // stay pixel-free; this only proves the composite paint path runs -
+    // bands, gutter glyphs, wavy underlines and hints together).
+    editor->setBreakpointLines({0, 2});
+    editor->setInlayHints({h1});
+    editor->setHighlightedLines(1, 2);
+    editor->setDiagnostics({d0, d1});
+    editor->setLineNumbersMode(CodeEditor::LineNumbersMode::Relative);
+    QVERIFY(!editor->grab().toImage().isNull());
+}
+
+void TestCodeEditor::gutterShiftsTextGeometryAndHitTest()
+{
+    editor->setPlainText(QStringLiteral("abcdef\nxyz"));
+    const int lh = editor->lineHeight();
+    const double cw = editor->cellWidth();
+    const int x0 = editor->contentLeft();
+    QVERIFY(x0 > editor->padding()); // default On: text sits right of the gutter
+
+    // xForCol anchors on contentLeft and keeps the ASCII grid cell-per-col.
+    QCOMPARE(editor->xForCol(0, 0), double(x0));
+    QVERIFY(qAbs(editor->xForCol(0, 3) - (x0 + 3 * cw)) < 1e-9);
+
+    // A click inside the gutter clamps to col 0 of that line.
+    const auto gp = editor->positionAt(QPoint(editor->padding() + 1, editor->padding() + lh + lh / 2));
+    QCOMPARE(gp.line, 1);
+    QCOMPARE(gp.col, 0);
+
+    // A cell-center click (the editor's hit convention) round-trips
+    // through the shifted coordinate frame.
+    const auto cp = editor->positionAt(
+        QPoint(qRound(editor->xForCol(0, 3) + cw / 2), editor->padding() + lh / 2));
+    QCOMPARE(cp.line, 0);
+    QCOMPARE(cp.col, 3);
+}
+
+void TestCodeEditor::diagnosticUnderlinePaintsSeverityInk()
+{
+    // Numeric pixel probe (no vision): red-dominant ink must appear in
+    // the bottom band of line 1 only after an Error diagnostic arrives,
+    // and the severity switch must move the ink off the red band.
+    // Warning ink (255,204,0) stays below the red-dominant threshold
+    // even when antialiased toward the dark Base (#323232).
+    editor->setPlainText(QStringLiteral("plain\nmarked up\n"));
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const int yTop = pad + lh; // line 1 band
+    const int x0 = editor->contentLeft();
+    const int x1 = x0 + int(9 * editor->cellWidth());
+    const auto reddish = [](const QColor& c) {
+        return c.red() > c.green() + 60 && c.red() > c.blue() + 60;
+    };
+    auto redInk = [&] {
+        const QImage img = editor->grab().toImage();
+        int n = 0;
+        for (int x = x0; x < x1 && x < img.width(); ++x)
+            for (int y = yTop; y < yTop + lh && y < img.height(); ++y)
+                if (reddish(img.pixelColor(x, y)))
+                    ++n;
+        return n;
+    };
+
+    QCOMPARE(redInk(), 0); // plain text rows: zero red-dominant ink
+
+    using Diag = CodeEditor::Diagnostic;
+    editor->setDiagnostics({Diag{1, 0, 1, 9, CodeEditor::Severity::Error, QStringLiteral("boom")}});
+    const int n = redInk();
+    QVERIFY2(n >= 10, qPrintable(QStringLiteral("wavy underline drew only %1 red pixels").arg(n)));
+
+    editor->setDiagnostics({Diag{1, 0, 1, 9, CodeEditor::Severity::Warning, QStringLiteral("hmm")}});
+    QCOMPARE(redInk(), 0); // Warning is yellow-dominant: out of the red band
 }
 
 QTEST_MAIN(TestCodeEditor)

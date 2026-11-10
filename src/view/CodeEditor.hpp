@@ -55,7 +55,10 @@ struct TextPosition {
 // clipboard copy/cut/paste (whole-line when no selection, Monaco-style),
 // X11 primary selection mirroring + middle-click paste, IME composition
 // (preedit rendered at the caret, only committed text reaches the model),
-// vertical scrolling, per-keystroke latency instrumentation, and
+// vertical scrolling, per-keystroke latency instrumentation, a
+// line-number gutter (off/on/relative/interval) with breakpoint and
+// diagnostic glyphs, whole-line highlight bands, diagnostic wavy
+// underlines and inlay hints (M5), and
 // tree-sitter-backed syntax highlighting with a grammar-less fallback
 // (M4: python/json/javascript, colors painted through the same cached
 // QTextLine layout as the plain path).
@@ -177,9 +180,99 @@ public:
     };
     QVector<HighlightSpan> highlightSpans(int startOffset, int endOffset);
 
+    // Decorations + gutter (M5, Phase D3). Three layers, matching the
+    // Gate-2 consumers that must be expressible WITHOUT new view primitives
+    // (PLAN.md): (1) gutter glyph layer - breakpoint dots, diagnostic
+    // severity icons (fold triangles join in M13), (2) whole-line layer -
+    // highlighted-line bands, current-line band, (3) inline text layer -
+    // diagnostic wavy underlines, inlay hints. All APIs are batch
+    // replace-all: add = set, update = set again, remove = set without the
+    // item - which keeps the state round-trip trivial and LSP/DAP glue a
+    // thin consumer. Positions are the same 0-based UTF-16 (line, col) as
+    // everywhere; stored decorations are NOT clamped to the document
+    // (edits move lineCount - out-of-range items simply never paint).
+    //
+    // qtmonaco parity (binding converts 1-based): set_line_numbers_mode <->
+    // setLineNumbersMode, set_highlighted_lines/clear_highlighted_lines <->
+    // setHighlightedLines/clearHighlightedLines.
+
+    // (1) Gutter line numbers. Default On (Monaco parity).
+    enum class LineNumbersMode { Off, On, Relative, Interval };
+    Q_ENUM(LineNumbersMode)
+    void setLineNumbersMode(LineNumbersMode mode);
+    LineNumbersMode lineNumbersMode() const { return lineNumbersMode_; }
+
+    // What the gutter displays for a 0-based line: On = line+1; Relative =
+    // distance to the caret line (the caret line itself shows its absolute
+    // number); Interval = the absolute number only on 1-based multiples of
+    // 10, empty string elsewhere (Monaco's interval behavior). Empty
+    // string also means "draw nothing here" (Off mode, invalid line).
+    QString lineNumberText(int line) const;
+
+    // Gutter geometry. gutterWidth() = 0 in Off mode; otherwise digit
+    // width + padding, plus one extra reserved slot while any breakpoint
+    // exists (adding a breakpoint must not shift already-drawn numbers).
+    // contentLeft() = widget x where text begins: padding_ + gutterWidth().
+    // xForCol()/positionAt()/painting all use it, so callers composing
+    // widget x read contentLeft(), not padding().
+    int gutterWidth() const;
+    int contentLeft() const { return padding_ + gutterWidth(); }
+
+    // (1) Breakpoint glyphs: one filled dot per line, in the reserved
+    // slot. Getter returns the sorted, deduplicated lines.
+    void setBreakpointLines(const QVector<int>& lines);
+    QVector<int> breakpointLines() const { return breakpointLines_; }
+
+    // (3) Diagnostics: wavy underline over [start..end] (clamped to the
+    // line when painting) + a severity icon in the gutter anchored at
+    // startLine. Stored sorted by start. Message is carried for consumers
+    // (hover UI is Gate-2 glue); it is not rendered by the view in v1.
+    enum class Severity { Error, Warning, Information, Hint };
+    Q_ENUM(Severity)
+    struct Diagnostic {
+        int startLine = 0;
+        int startCol = 0;
+        int endLine = 0;
+        int endCol = 0;
+        Severity severity = Severity::Error;
+        QString message;
+
+        bool operator==(const Diagnostic&) const = default; // test round-trips
+    };
+    void setDiagnostics(const QVector<Diagnostic>& diagnostics);
+    QVector<Diagnostic> diagnostics() const { return diagnostics_; }
+
+    // (3) Inlay hints: `text` painted in hint color at (line, col) WITHOUT
+    // re-flowing the following text - the caller (e.g. a DAP consumer)
+    // anchors hints into existing whitespace. v1 renders inline after the
+    // text pass; adding real re-flow later is a rendering refinement, NOT
+    // an API change. Getter returns the sorted hints.
+    struct InlayHint {
+        int line = 0;
+        int col = 0;
+        QString text;
+
+        bool operator==(const InlayHint&) const = default;
+    };
+    void setInlayHints(const QVector<InlayHint>& hints);
+    QVector<InlayHint> inlayHints() const { return inlayHints_; }
+
+    // (2) Whole-line bands, drawn UNDER selections. Inclusive 0-based
+    // range (the binding subtracts 1 from qtmonaco's 1-based pair; end<
+    // start is swapped). Getters report -1 when unset.
+    void setHighlightedLines(int startLine, int endLine);
+    void clearHighlightedLines();
+    int highlightedLinesStart() const { return highlightStart_; }
+    int highlightedLinesEnd() const { return highlightEnd_; }
+
+    // (2) Current-line band (Monaco's renderLineHighlight). Default off;
+    // the theme pass (set_theme row, D3) picks the shipped default.
+    void setCurrentLineHighlight(bool enabled);
+    bool currentLineHighlight() const { return currentLineHl_; }
+
     int lineHeight() const { return lineHeight_; }
     double cellWidth() const { return cellWidth_; }
-    int padding() const { return padding_; }
+    int padding() const { return padding_; } // vertical/top-edge padding
 
     // Viewport state read-out (the same window paintEvent and the
     // highlight policy consume). Read-only: scrolling itself happens via
@@ -188,7 +281,8 @@ public:
     int visibleLineCount() const;
 
     // Widget-space x of the caret position at (line, col), following the
-    // glyph engine's cluster advances (not a col * cellWidth grid). A col
+    // glyph engine's cluster advances (not a col * cellWidth grid), gutter
+    // included (so xForCol(line, 0) == contentLeft()). A col
     // inside a grapheme cluster is snapped to a cluster edge by the engine;
     // the text position itself is untouched. Out-of-range line/col clamp.
     // Public because decorations (M5: diagnostics, inlay hints) need the
@@ -375,6 +469,16 @@ private:
 
     int vScroll_ = 0; // pixels
     int padding_ = 4;
+
+    // --- M5 decoration + gutter state (semantics: public API comments) ---
+    LineNumbersMode lineNumbersMode_ = LineNumbersMode::On;
+    QVector<int> breakpointLines_; // sorted + deduped (binary_search on paint)
+    QVector<Diagnostic> diagnostics_; // sorted by (startLine, startCol)
+    QVector<InlayHint> inlayHints_; // sorted by (line, col)
+    int highlightStart_ = -1; // inclusive whole-line range; -1 = unset
+    int highlightEnd_ = -1;
+    bool currentLineHl_ = false;
+    int gutterInnerPad() const; // gutter digit/glyph padding (M5)
 
     QTimer blinkTimer_;
     bool caretOn_ = true;

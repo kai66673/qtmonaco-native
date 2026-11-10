@@ -317,9 +317,11 @@ const CodeEditor::GeoSlot* CodeEditor::hitLine(int line) const
     return victim;
 }
 
-// Line-space x (before padding_) of caret position `col`, clamped to a
-// phantom-cell extrapolation beyond the laid-out prefix (monster-line guard
-// and the selected-newline cell both land there; the region is off-screen).
+// Line-space x (left of the content area) of caret position `col`, clamped
+// to a phantom-cell extrapolation beyond the laid-out prefix (monster-line
+// guard and the selected-newline cell both land there; the region is
+// off-screen). Callers add contentLeft() for widget x (M5: that area now
+// includes the gutter; it is padding_ + gutterWidth()).
 double CodeEditor::xInLine(const GeoSlot* s, int col) const
 {
     if (!s)
@@ -341,7 +343,7 @@ double CodeEditor::xInLine(const GeoSlot* s, int col) const
 double CodeEditor::xForCol(int line, int col) const
 {
     const int c = std::clamp(col, 0, lineLength(line));
-    return padding_ + xInLine(hitLine(line), c);
+    return contentLeft() + xInLine(hitLine(line), c);
 }
 
 TextPosition CodeEditor::positionAt(const QPoint& widgetPos) const
@@ -356,7 +358,7 @@ TextPosition CodeEditor::positionAt(const QPoint& widgetPos) const
         // xToCursor misbehaves far outside the laid-out extent (measured:
         // 1e9 maps back to 0), so clamp into the extent first: clicks past
         // the line end resolve to EOL, as they used to via the grid clamp.
-        const double x = std::clamp(widgetPos.x() - static_cast<double>(padding_),
+        const double x = std::clamp(widgetPos.x() - static_cast<double>(contentLeft()),
                                     0.0, s->line.naturalTextWidth());
         // xToCursor picks the NEAREST cursor edge; the old grid used floor
         // (click at col*cell + cw/2 -> col), and every editor does the same.
@@ -1453,6 +1455,47 @@ void CodeEditor::deleteForward()
     reconcileUndoMarks(pre);
 }
 
+namespace {
+
+// M5 decoration ink: hardcoded VS Code dark-leaning constants. The
+// set_theme pass (D3 theme row of the PLAN parity table) is where these
+// move behind a palette; until then they must stay distinguishable on the
+// default dark Base (#323232), which the numeric decoration tests rely on.
+QRgb severityInk(CodeEditor::Severity s)
+{
+    switch (s) {
+    case CodeEditor::Severity::Error:
+        return QColor(241, 76, 76).rgb(); // red-dominant
+    case CodeEditor::Severity::Warning:
+        return QColor(255, 204, 0).rgb(); // yellow-dominant
+    case CodeEditor::Severity::Information:
+        return QColor(117, 190, 255).rgb(); // blue-dominant
+    case CodeEditor::Severity::Hint:
+        return QColor(127, 127, 127).rgb(); // muted gray
+    }
+    return QColor(241, 76, 76).rgb();
+}
+
+// Zigzag underline: 3px half-period, 2px amplitude sitting just above
+// `yWave`. Point parity (even = baseline, odd = raised) is derived from
+// the point index, so the run always alternates consistently. Short runs
+// (a single cell) degenerate to a straight run so a zero-width diagnostic
+// is still visible.
+void drawWavyUnderline(QPainter& p, qreal x0, qreal x1, qreal yWave, QRgb ink)
+{
+    if (x1 <= x0)
+        return;
+    p.setPen(QPen(QColor::fromRgb(ink), 1.0));
+    QVector<QPointF> pts;
+    pts.reserve(int((x1 - x0) / 3) + 3);
+    for (qreal x = x0; x < x1; x += 3.0)
+        pts.append(QPointF(x, pts.size() % 2 ? yWave - 2.0 : yWave));
+    pts.append(QPointF(x1, pts.size() % 2 ? yWave - 2.0 : yWave));
+    p.drawPolyline(pts.data(), int(pts.size()));
+}
+
+} // namespace
+
 void CodeEditor::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
@@ -1464,6 +1507,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
     const int first = firstVisibleLine();
     const int last = std::min(buffer_.lineCount() - 1, first + visibleLineCount());
     const QFontMetricsF fmF(font_); // preedit advance measurement
+    const int textLeft = contentLeft(); // M5: padding_ + gutter width
 
     // M4: bring the highlight engine current here, not on the key path
     // (the typing perf harness measures keyPressEvent logic; the reparse
@@ -1480,7 +1524,22 @@ void CodeEditor::paintEvent(QPaintEvent*)
     }
     highlight_->refreshIfNeeded();
 
-    // Selection pass first: paint the background under the glyphs.
+    // M5 layer 2: whole-line bands under selections and text (qtmonaco
+    // highlighted lines + optional current-line band). Full width on
+    // purpose: the band rides under the gutter too, Monaco-style.
+    QColor band = palette().color(QPalette::Highlight);
+    band.setAlpha(45);
+    if (highlightEnd_ >= 0) {
+        for (int line = std::max(first, highlightStart_); line <= std::min(last, highlightEnd_); ++line)
+            p.fillRect(QRect(0, padding_ + line * lh - vScroll_, width(), lh), band);
+    }
+    if (currentLineHl_ && caret_.line >= first && caret_.line <= last) {
+        QColor cur = palette().color(QPalette::Text);
+        cur.setAlpha(16); // subtle wash: lighter on dark, darker on light
+        p.fillRect(QRect(0, padding_ + caret_.line * lh - vScroll_, width(), lh), cur);
+    }
+
+    // Selection pass after the bands: paint the background under the glyphs.
     // Semi-transparent highlight so text stays legible on light and dark
     // palettes alike (Monaco uses the same trick with ~40% opacity).
     // D1: every caret slot's selection is painted, not just the primary.
@@ -1500,13 +1559,62 @@ void CodeEditor::paintEvent(QPaintEvent*)
             const int textLen = lineLength(line);
             const int endCol = (line == e.line) ? e.col : std::max(textLen, 1);
             const GeoSlot* gs = hitLine(line);
-            const int x0 = padding_ + qRound(xInLine(gs, startCol));
-            const int x1 = padding_ + qRound(xInLine(gs, endCol));
+            const int x0 = textLeft + qRound(xInLine(gs, startCol));
+            const int x1 = textLeft + qRound(xInLine(gs, endCol));
             if (x1 > x0) {
                 const int yTop = padding_ + line * lh - vScroll_;
                 p.fillRect(QRect(x0, yTop, x1 - x0, lh), selColor);
             }
         }
+    }
+
+    // M5 layer 1: the gutter - line numbers, breakpoint dots (in their
+    // reserved slot) and diagnostic severity icons (in the digit's right
+    // padding, so LSP diagnostics never change the gutter layout). Painted
+    // after the bands (numbers ride on top of them) and before the text
+    // loop; text starts at textLeft, so nothing overlaps the numbers.
+    if (const int gw = textLeft - padding_; gw > 0) {
+        const int pad = gutterInnerPad();
+        const int numRight = textLeft - pad; // right edge of the number column
+        const int bpCx = padding_ + pad;     // breakpoint slot center
+        const int iconCx = numRight + pad / 2;
+        // Column edge separator: a hairline against Base (VS Code style).
+        QColor div = palette().color(QPalette::Text);
+        div.setAlpha(45);
+        p.setPen(QPen(div, 1.0));
+        p.drawLine(textLeft - 1, 0, textLeft - 1, height());
+        const QColor dim = palette().color(QPalette::PlaceholderText);
+        const QColor bright = palette().color(QPalette::Text);
+        auto dit = diagnostics_.begin(); // sorted by startLine: one forward walk
+        for (int line = first; line <= last; ++line) {
+            const int yTop = padding_ + line * lh - vScroll_;
+            const GeoSlot* gs = hitLine(line);
+            const double baseline = yTop + (gs->valid ? gs->line.ascent() : ascent_);
+            if (const QString num = lineNumberText(line); !num.isEmpty()) {
+                p.setPen(line == caret_.line ? bright : dim);
+                // Right-align: monospace digit advances are exactly
+                // cellWidth_ (the fact the grid tests assert), so the
+                // column width needs no text measurement.
+                p.drawText(QPointF(numRight - num.size() * cellWidth_, baseline), num);
+            }
+            if (std::binary_search(breakpointLines_.begin(), breakpointLines_.end(), line)) {
+                p.setPen(Qt::NoPen);
+                p.setBrush(QColor(220, 61, 66)); // fixed red: set_theme pass routes it
+                const double r = std::max(3.0, cellWidth_ * 0.45);
+                p.drawEllipse(QPointF(qreal(bpCx), yTop + lh / 2.0), r, r);
+            }
+            while (dit != diagnostics_.end() && dit->startLine < line)
+                ++dit;
+            int worst = int(CodeEditor::Severity::Hint) + 1; // Error sorts first
+            for (auto j = dit; j != diagnostics_.end() && j->startLine == line; ++j)
+                worst = std::min(worst, int(j->severity));
+            if (worst <= int(CodeEditor::Severity::Hint)) {
+                p.setPen(Qt::NoPen);
+                p.setBrush(QColor::fromRgb(severityInk(CodeEditor::Severity(worst))));
+                p.drawEllipse(QPointF(qreal(iconCx), yTop + lh / 2.0), 2.5, 2.5);
+            }
+        }
+        p.setPen(palette().color(QPalette::Text));
     }
 
     for (int line = first; line <= last; ++line) {
@@ -1518,7 +1626,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
             // drawn with (same QTextLine), so emoji ZWJ sequences no longer
             // push the caret away from the glyphs. During composition the
             // visual caret trails the preedit (which is not in the buffer).
-            double cx = padding_ + xInLine(gs, caret_.col);
+            double cx = textLeft + xInLine(gs, caret_.col);
             if (!preedit_.isEmpty())
                 cx += fmF.horizontalAdvance(preedit_);
             p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
@@ -1528,7 +1636,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
         for (const CaretSlot& slot : extraCarets_) {
             if (slot.caret.line != line || !caretOn_)
                 continue;
-            const double cx = padding_ + xInLine(gs, slot.caret.col);
+            const double cx = textLeft + xInLine(gs, slot.caret.col);
             p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
         }
         if (gs->valid) {
@@ -1541,7 +1649,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
             // y()==0). Passing baseline=yTop+ascent_ here drew every line
             // ~one line-height too low, an empty band at the top and a
             // caret visibly a line above its text.
-            const QPointF origin(padding_, yTop);
+            const QPointF origin(textLeft, yTop);
             const auto fmts = formatRangesForLine(line, gs);
             if (fmts.isEmpty()) {
                 gs->line.draw(&p, origin);
@@ -1559,7 +1667,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
             // own line-edit convention) to show it is not committed yet.
             // drawText below IS baseline-anchored, so align it with the
             // layout engine's own baseline for the line above.
-            const double px = padding_ + xInLine(gs, caret_.col);
+            const double px = textLeft + xInLine(gs, caret_.col);
             const double textBaseline = yTop + (gs->valid ? gs->line.ascent() : ascent_);
             p.drawText(QPointF(px, textBaseline), preedit_);
             p.setPen(QPen(palette().color(QPalette::Text), 0, Qt::DotLine));
@@ -1567,6 +1675,52 @@ void CodeEditor::paintEvent(QPaintEvent*)
             p.drawLine(QPointF(px, yTop + lh - 2), QPointF(px + pw, yTop + lh - 2));
             p.setPen(palette().color(QPalette::Text));
         }
+    }
+
+    // M5 layer 3 on top of the text: diagnostic wavy underlines. The list
+    // is sorted by startLine, so multi-line ranges clip per line and the
+    // startLine>last break is safe. Counts are consumer-bounded (LSP
+    // batches); M6 match highlights will need indexing if they ride here.
+    for (const Diagnostic& d : diagnostics_) {
+        if (d.startLine > last)
+            break;
+        if (d.endLine < first)
+            continue;
+        const QRgb ink = severityInk(d.severity);
+        for (int line = std::max(first, d.startLine); line <= std::min(last, d.endLine); ++line) {
+            const int len = lineLength(line);
+            int c0 = std::clamp(line == d.startLine ? d.startCol : 0, 0, len);
+            int c1 = std::clamp(line == d.endLine ? d.endCol : len, 0, len);
+            if (c1 <= c0) {
+                // Zero-width marker (position-only diagnostic, LSP
+                // style): paint one phantom cell so it stays visible.
+                c1 = c0 + 1;
+            }
+            const GeoSlot* gs = hitLine(line);
+            const double x0 = textLeft + xInLine(gs, c0);
+            const double x1 = textLeft + xInLine(gs, c1);
+            const int yTop = padding_ + line * lh - vScroll_;
+            drawWavyUnderline(p, x0, x1, yTop + lh - 2.5, ink);
+        }
+    }
+
+    // M5 layer 3: inlay hints on top, without re-flowing the text (the
+    // caller anchors them into existing whitespace; re-flow later is a
+    // rendering refinement, not an API change).
+    if (!inlayHints_.isEmpty()) {
+        p.setPen(palette().color(QPalette::PlaceholderText));
+        for (const InlayHint& h : inlayHints_) {
+            if (h.line < first)
+                continue;
+            if (h.line > last)
+                break; // sorted by line
+            const GeoSlot* gs = hitLine(h.line);
+            const double x = textLeft + xInLine(gs, std::max(h.col, 0));
+            const int hTop = padding_ + h.line * lh - vScroll_;
+            const double baseline = hTop + (gs->valid ? gs->line.ascent() : ascent_);
+            p.drawText(QPointF(x, baseline), h.text);
+        }
+        p.setPen(palette().color(QPalette::Text));
     }
 }
 
@@ -1648,6 +1802,130 @@ QVector<CodeEditor::HighlightSpan> CodeEditor::highlightSpans(int startOffset, i
                                     std::min(s.end, endOffset), s.kind});
     }
     return out;
+}
+
+// --- M5 decorations + gutter (public API section) ------------------------
+
+int CodeEditor::gutterInnerPad() const
+{
+    return std::max(3, qRound(cellWidth_));
+}
+
+int CodeEditor::gutterWidth() const
+{
+    if (lineNumbersMode_ == LineNumbersMode::Off)
+        return 0;
+    // The widest displayed number decides the digit column: every mode
+    // shows either the absolute line number or a distance smaller than
+    // lineCount. Digits are exactly cellWidth_ wide (monospace), so the
+    // column is digit-count * cellWidth; 9 -> 10 lines grows it one cell.
+    int digits = 1;
+    for (int n = buffer_.lineCount(); n >= 10; n /= 10)
+        ++digits;
+    const int pad = gutterInnerPad();
+    int w = qRound(digits * cellWidth_) + 2 * pad;
+    // One reserved glyph slot while any breakpoint exists: toggling a
+    // breakpoint must not shift the already-drawn numbers. Diagnostic
+    // icons fit into the right digit padding instead (Gate-2 LSP
+    // diagnostics never change the layout).
+    if (!breakpointLines_.isEmpty())
+        w += 2 * pad;
+    return w;
+}
+
+QString CodeEditor::lineNumberText(int line) const
+{
+    if (lineNumbersMode_ == LineNumbersMode::Off)
+        return {};
+    if (line < 0 || line >= buffer_.lineCount())
+        return {};
+    switch (lineNumbersMode_) {
+    case LineNumbersMode::On:
+        return QString::number(line + 1);
+    case LineNumbersMode::Interval:
+        // Monaco's interval behavior: the absolute number only on every
+        // 10th (1-based) line; the rest of the column stays blank.
+        return (line + 1) % 10 == 0 ? QString::number(line + 1) : QString();
+    case LineNumbersMode::Relative:
+        // Distance to the caret line; the caret line itself shows its
+        // absolute number (Monaco's relative mode behavior).
+        if (line == caret_.line)
+            return QString::number(line + 1);
+        return QString::number(std::abs(line - caret_.line));
+    case LineNumbersMode::Off:
+        break;
+    }
+    return {};
+}
+
+void CodeEditor::setLineNumbersMode(LineNumbersMode mode)
+{
+    if (mode == lineNumbersMode_)
+        return;
+    lineNumbersMode_ = mode;
+    update(); // contentLeft() shifts everything drawn at x
+}
+
+void CodeEditor::setBreakpointLines(const QVector<int>& lines)
+{
+    auto v = lines;
+    std::sort(v.begin(), v.end());
+    v.erase(std::unique(v.begin(), v.end()), v.end());
+    if (v == breakpointLines_)
+        return;
+    breakpointLines_ = std::move(v);
+    update(); // the reserved slot may appear/disappear + the dots
+}
+
+void CodeEditor::setDiagnostics(const QVector<Diagnostic>& diagnostics)
+{
+    auto v = diagnostics;
+    std::sort(v.begin(), v.end(), [](const Diagnostic& a, const Diagnostic& b) {
+        if (a.startLine != b.startLine)
+            return a.startLine < b.startLine;
+        if (a.startCol != b.startCol)
+            return a.startCol < b.startCol;
+        if (a.endLine != b.endLine)
+            return a.endLine < b.endLine;
+        return a.endCol < b.endCol;
+    });
+    diagnostics_ = std::move(v);
+    update();
+}
+
+void CodeEditor::setInlayHints(const QVector<InlayHint>& hints)
+{
+    auto v = hints;
+    std::sort(v.begin(), v.end(), [](const InlayHint& a, const InlayHint& b) {
+        return a.line != b.line ? a.line < b.line : a.col < b.col;
+    });
+    inlayHints_ = std::move(v);
+    update();
+}
+
+void CodeEditor::setHighlightedLines(int startLine, int endLine)
+{
+    if (endLine < startLine)
+        std::swap(startLine, endLine); // tolerant arg order
+    highlightStart_ = startLine;
+    highlightEnd_ = endLine;
+    update();
+}
+
+void CodeEditor::clearHighlightedLines()
+{
+    if (highlightStart_ < 0)
+        return;
+    highlightStart_ = highlightEnd_ = -1;
+    update();
+}
+
+void CodeEditor::setCurrentLineHighlight(bool enabled)
+{
+    if (enabled == currentLineHl_)
+        return;
+    currentLineHl_ = enabled;
+    update();
 }
 
 void CodeEditor::keyPressEvent(QKeyEvent* event)
@@ -2078,7 +2356,7 @@ QVariant CodeEditor::inputMethodQuery(Qt::InputMethodQuery query) const
     case Qt::ImCursorRectangle: {
         // Candidate-window anchor: the visual caret, which during
         // composition trails the preedit instead of the buffer caret.
-        double x = padding_ + xInLine(hitLine(caret_.line), caret_.col);
+        double x = contentLeft() + xInLine(hitLine(caret_.line), caret_.col);
         if (!preedit_.isEmpty())
             x += QFontMetricsF(font_).horizontalAdvance(preedit_);
         const int y = padding_ + caret_.line * lineHeight_ - vScroll_;

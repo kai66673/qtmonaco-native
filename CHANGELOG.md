@@ -103,6 +103,46 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `qmn-spike` now picks the grammar from the file suffix
   (`.py`/`.json`/`.js`/`.mjs`/`.cjs`) and accepts `--language
   python|json|javascript` to override.
+- M5 decorations + line-number gutter (Phase D3), the design-forward
+  Gate-2 bridge: three layers that must express diagnostics, breakpoints
+  and inlay hints without new view primitives. Gutter glyph layer
+  (breakpoint dots + diagnostic severity icons; fold triangles join at
+  M13), whole-line bands under selections (qtmonaco's highlighted-lines
+  pair + an opt-in current-line band), inline layer (severity wavy
+  underlines, inlay hints painted WITHOUT re-flow — adding re-flow later
+  is a rendering refinement, not an API change). All APIs are batch
+  replace-all (add = set, update = set again, remove = set without the
+  item), so M8/LSP and DAP glue stay thin consumers.
+- `setLineNumbersMode(LineNumbersMode::{Off,On,Relative,Interval})`,
+  default On (Monaco parity, qtmonaco's `set_line_numbers_mode` row);
+  `lineNumberText(line)` exposes the displayed string (Relative =
+  distance to the caret line, caret line itself absolute; Interval =
+  only 1-based multiples of 10; Monaco behaviors). The digit column is
+  `qRound(digits * cellWidth)` and grows at the 9→10-line crossover;
+  one breakpoint slot is reserved while ANY breakpoint exists (dots
+  never shift the digits), while diagnostic icons ride in the digit's
+  right padding — LSP state never re-lays-out the gutter. New x anchor
+  `contentLeft()` (= padding + gutterWidth, 0-width when Off) drives
+  caret/selection/paint/hit-test, `xForCol`, `positionAt` and the IM
+  cursor anchor alike; clicks inside the gutter resolve to col 0.
+- Public decoration state: `setDiagnostics(QVector<Diagnostic>)`
+  (range + `Severity::{Error,Warning,Information,Hint}` + message held
+  for consumer hover, zero-width ranges paint one phantom cell, stored
+  sorted), `setBreakpointLines()` (sorted + deduped), `setInlayHints()`
+  (sorted by line,col), `setHighlightedLines(start,end)` /
+  `clearHighlightedLines()` (inclusive 0-based pair, swapped args
+  tolerated; binding converts qtmonaco's 1-based pair),
+  `setCurrentLineHighlight(bool)` (off until the set_theme pass picks
+  the default). Decoration ink (severity colors, breakpoint red) is a
+  fixed VS Code dark constant until `set_theme` routes it through the
+  palette.
+
+### Changed
+- The x anchor of all text geometry (caret, selection, painting, hit
+  testing, IM anchor) moved from `padding()` to `contentLeft()` =
+  padding + gutter width. With the gutter Off the geometry is
+  bit-for-bit the pre-M5 position; `padding()` now means the vertical
+  chrome only. Widget tests migrated to the new anchor.
 
 ### Fixed
 - Editing a vendored `highlights.scm` did not re-run CMake configure, so
