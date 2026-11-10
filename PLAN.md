@@ -252,11 +252,12 @@ safety); replace-all is one undoable D1 action.
 
 ## Phase E — viewport mapping (one deliberate effort, two steps)
 
-### E1 — M7 overview ruler + M9 horizontal scroll
+### E1 — M7 overview ruler + M9 horizontal scroll (**done**, 2026-11-10)
 
-**First: study the failed attempt** — the h-scroll try was committed as
-`2809945` and dropped from `main` (risk #3); review the reflog while present
-instead of re-deriving it. Deliverables: h-scrollbar + caret-keep-visible on
+Both halves shipped (M7 ruler in `7d4b656`, M9 h-scroll right after).
+NOTE: the planned "study the failed `2809945` attempt" step was explicitly
+overridden by the owner — M9 was implemented **clean-slate** instead and
+landed green in one pass (123-slot suite, zero regressions). Deliverables: h-scrollbar + caret-keep-visible on
 long lines, `set_scroll_beyond_last_line_enabled` flag, M7 overview ruler
 (`set_minimap_enabled` maps onto it — decided) showing the full-document
 minimap of lines/markers/folds.

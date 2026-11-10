@@ -111,7 +111,8 @@ Gate 1 — Code Editor v1:
       match highlights, F3/Shift+F3, replace + one-action replace-all
 - [x] M7 overview ruler (replaces minimap): 44px right-edge strip, whole-doc
       linear mapping, click/drag scroll, O(strip) marker stripes + viewport frame
-- [ ] M9 horizontal scrolling (soft wrap deferred to Gate 2)
+- [x] M9 horizontal scrolling (h-bar + ambient doc-width extent, caret-keep-visible,
+      Shift/trackpad wheel, scroll-past-end flag; soft wrap deferred to Gate 2)
 - [ ] M13 code folding (tree-sitter `@fold` ranges + indent fallback; gutter toggles)
 - [ ] M11 accessibility (QAccessible), final polish (non-gating)
 - [ ] M12 PySide6 binding + wheel: expose `CodeEditor` via Shiboken6

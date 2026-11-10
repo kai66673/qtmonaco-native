@@ -21,6 +21,7 @@
 #include "view/CodeEditor.hpp"
 
 #include <algorithm> // std::min in the ruler mapping contract
+#include <cmath> // std::ceil in the h-scroll exact-offset arithmetic
 #include <functional> // std::function for the probe predicates
 
 using qmn::view::CodeEditor;
@@ -181,6 +182,18 @@ private slots:
     void overviewRulerGeometryAndMapping();
     void overviewRulerScrollGesture();
     void overviewRulerMarkerPaintProbe();
+
+    // Horizontal scroll (M9, Phase E1). DoD: numeric viewport assertions —
+    // the ambient extent/clamp contract, caret scroll-into-view on long
+    // lines, wheel/click mapping through the offset, the
+    // set_scroll_beyond_last_line_enabled parity flag (ruler total rides
+    // it), and a pixel-band probe proving painted ink lands at the shifted
+    // widget x (windowed paint, no off-screen glyph cost).
+    void horizontalScrollExtentAndClamps();
+    void caretKeptVisibleHorizontallyOnLongLines();
+    void shiftWheelAndClickMapThroughOffset();
+    void scrollBeyondLastLineFlagAndRulerTotal();
+    void paintClusterWindowXOffsetProbe();
 
 private:
     CodeEditor* editor = nullptr;
@@ -3380,6 +3393,348 @@ void TestCodeEditor::overviewRulerMarkerPaintProbe()
     QCOMPARE(countIf(coolBlue), 0);
     editor->setOverviewRulerEnabled(true);
     QVERIFY(countIf(warmish) >= 20); // and the band is back, live state intact
+}
+
+// --- Horizontal scroll (M9, Phase E1) ---
+
+void TestCodeEditor::horizontalScrollExtentAndClamps()
+{
+    // The clamp contract in one line: max = docWidth + padding - window,
+    // and the doc width is AMBIENT (public docs on maxHorizontalScroll):
+    // it only exists once a line visit (paint/caret/hit-test) has measured
+    // it. Before the first visit the bar must not budge even though the
+    // document holds thousands of units.
+    const double cw = editor->cellWidth();
+    const int pad = editor->padding();
+    editor->setPlainText(QStringLiteral("Z") + QString(3000, QLatin1Char('0')));
+    QCOMPARE(editor->lineCount(), 1);
+    QCOMPARE(editor->maxHorizontalScroll(), 0);
+    QCOMPARE(editor->horizontalScrollOffset(), 0);
+
+    const int win = editor->horizontalViewportWidth();
+    QCOMPARE(win, editor->width() - editor->contentLeft() - editor->overviewRulerWidth());
+    QVERIFY(win > 0);
+
+    // Any caret visit re-seeds the extent: the visit measures the WHOLE
+    // line (phantom-aware xInLine past the layout budget - ASCII monospace
+    // is exactly col*cw), not just the caret column.
+    QTest::keyClick(editor, Qt::Key_Right);
+    const int docWidth = int(std::ceil(3001.0 * cw));
+    QCOMPARE(editor->maxHorizontalScroll(), docWidth + pad - win);
+
+    // setHorizontalScrollOffset is the one clamping writer (arrows, wheel,
+    // the bar and the caret all ride it): overshoot lands EXACTLY on the
+    // contract, negatives clamp to 0, an in-range value round-trips.
+    editor->setHorizontalScrollOffset(999999);
+    QCOMPARE(editor->horizontalScrollOffset(), docWidth + pad - win);
+    editor->setHorizontalScrollOffset(-50);
+    QCOMPARE(editor->horizontalScrollOffset(), 0);
+    editor->setHorizontalScrollOffset(12345);
+    QCOMPARE(editor->horizontalScrollOffset(), 12345);
+
+    // xForCol is the widget-space (as-seen) x: it shifts left with the
+    // offset by exactly col*cw on monospace (the M3 grid invariant).
+    const double xe = editor->contentLeft() + 50 * cw - 12345;
+    const double got = editor->xForCol(0, 50);
+    QVERIFY2(std::abs(got - xe) < 0.01, qPrintable(QStringLiteral("xForCol %1 vs %2")
+                                                      .arg(got).arg(xe)));
+
+    // A document replace resets BOTH sides of the contract (offset and the
+    // ambient extent), so a fresh doc starts its own bar growth.
+    editor->setPlainText(QStringLiteral("one"));
+    QCOMPARE(editor->horizontalScrollOffset(), 0);
+    QCOMPARE(editor->maxHorizontalScroll(), 0);
+}
+
+void TestCodeEditor::caretKeptVisibleHorizontallyOnLongLines()
+{
+    // Monospace invariant: caret px is EXACTLY col*cw (the M3 grid test's
+    // own finding), so the DoD "caret scroll-into-view" is assertable as a
+    // closed form: the right-edge condition fires only at
+    // ceil(caretX - win + 1) > hScroll, and Right is monotone.
+    const double cw = editor->cellWidth();
+    editor->setPlainText(QString(400, QLatin1Char('0')));
+    const int win = editor->horizontalViewportWidth();
+    const double lineEnd = 400.0 * cw;
+    QVERIFY(lineEnd > win + 40 * cw); // far enough that the bar MUST move
+
+    for (int k = 1; k <= 120; ++k) {
+        QTest::keyClick(editor, Qt::Key_Right);
+        const int expected = std::max(0, int(std::ceil(k * cw - win + 1.0)));
+        QVERIFY2(editor->horizontalScrollOffset() == expected,
+                 qPrintable(QStringLiteral("k=%1: h=%2 expected=%3")
+                                .arg(editor->horizontalScrollOffset())
+                                .arg(expected).arg(k)));
+        // The caret is inside the window at every single step (that IS the
+        // DoD): never past the right edge, never behind the left one.
+        const double cx = editor->xForCol(0, k);
+        QVERIFY(cx >= editor->contentLeft() - 0.01
+                && cx < editor->contentLeft() + win + 0.01);
+    }
+
+    // End: flush right - and the 3px tail slack is exactly the padding_
+    // term of the clamp formula (caret flushes at win-1 while maxScroll
+    // keeps padding more px past the line end).
+    QTest::keyClick(editor, Qt::Key_End);
+    QCOMPARE(editor->position().col, 400);
+    QCOMPARE(editor->horizontalScrollOffset(),
+             editor->maxHorizontalScroll() - editor->padding() + 1);
+
+    // Home walks the offset straight back to 0 (left-edge flush).
+    QTest::keyClick(editor, Qt::Key_Home);
+    QCOMPARE(editor->horizontalScrollOffset(), 0);
+
+    // Scroll the caret into the middle, then Left near the start must NOT
+    // shift the bar back (the caret is still inside the window).
+    QTest::keyClick(editor, Qt::Key_End);
+    editor->setHorizontalScrollOffset(editor->maxHorizontalScroll());
+    for (int k = 0; k < 10; ++k)
+        QTest::keyClick(editor, Qt::Key_Left);
+    QVERIFY(editor->horizontalScrollOffset() > 0); // caret far from the bar
+
+    // Backspace on the scrolled monster line: one char gone, the extent
+    // reseeds on the edit visit and the clamp pulls the offset back with
+    // it (never stranded past the new max) — flush at the new end.
+    const int before = editor->horizontalScrollOffset();
+    QTest::keyClick(editor, Qt::Key_Backspace);
+    QCOMPARE(editor->toPlainText().size(), 399); // one char gone (single line)
+    QVERIFY(editor->horizontalScrollOffset() <= before);
+    QCOMPARE(editor->horizontalScrollOffset(), editor->maxHorizontalScroll());
+}
+
+void TestCodeEditor::shiftWheelAndClickMapThroughOffset()
+{
+    const double cw = editor->cellWidth();
+    const int cellPx = int(std::ceil(cw)); // setHScroll steps in ceil(cw) px
+    QStringList doc;
+    doc << QString(400, QLatin1Char('0')); // long line 0 (h-extent source)
+    for (int i = 0; i < 60; ++i)
+        doc << QStringLiteral("line %1").arg(i); // vertical bar is real too
+    editor->setPlainText(doc.join(QLatin1Char('\n')));
+    QTest::keyClick(editor, Qt::Key_Right); // seeds the ambient extent
+    QVERIFY(editor->maxHorizontalScroll() > 0);
+
+    const auto wheel = [&](QPoint angle, Qt::KeyboardModifiers mods) {
+        QWheelEvent ev(QPointF(300, 200), QPointF(300, 200), QPoint(0, 0), angle,
+                       Qt::NoButton, mods, Qt::NoScrollPhase, false);
+        QVERIFY(QApplication::sendEvent(editor, &ev));
+    };
+
+    // Shift + one notch down = 3 cells right (mirrors the hBar singleStep),
+    // and vertical must NOT also move under Shift (the axis swaps, it does
+    // not stack).
+    wheel(QPoint(0, -120), Qt::ShiftModifier);
+    QCOMPARE(editor->horizontalScrollOffset(), 3 * cellPx);
+    QCOMPARE(editor->firstVisibleLine(), 0);
+
+    // A trackpad's native horizontal axis needs no modifier at all: one
+    // notch right rolls the offset back (angle.x > 0 scrolls content left).
+    wheel(QPoint(120, 0), Qt::NoModifier);
+    QCOMPARE(editor->horizontalScrollOffset(), 0);
+
+    // Plain vertical is vertical ONLY (no accidental h-shift).
+    wheel(QPoint(0, -120), Qt::NoModifier);
+    QCOMPARE(editor->horizontalScrollOffset(), 0);
+    QVERIFY(editor->firstVisibleLine() > 0);
+    wheel(QPoint(0, 120), Qt::NoModifier);
+    QCOMPARE(editor->firstVisibleLine(), 0);
+
+    // The click hit-test maps THROUGH the offset: with h = 100 the visible
+    // position of model col 25 is contentLeft + 25cw - 100 (+half a cell so
+    // the monospace floor picks col 25, the established grid semantics).
+    editor->setHorizontalScrollOffset(100);
+    const QPoint click(editor->contentLeft() + int(25 * cw + cw / 2.0) - 100,
+                       editor->padding() + editor->lineHeight() / 2);
+    const qmn::view::TextPosition p = editor->positionAt(click);
+    QCOMPARE(p.line, 0);
+    QCOMPARE(p.col, 25);
+
+    // A real press+release goes through the same mapping.
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, click);
+    QCOMPARE(editor->position().line, 0);
+    QCOMPARE(editor->position().col, 25);
+}
+
+void TestCodeEditor::scrollBeyondLastLineFlagAndRulerTotal()
+{
+    // Parity hook (qtmonaco set_scroll_beyond_last_line_enabled): on, the
+    // doc pixel space gains height()-lineHeight_ so the LAST line can sit
+    // at the viewport TOP. Everything (vBar clamp, firstVisibleLine, the
+    // ruler mapping) rides the same totalHeight() formula.
+    QStringList doc;
+    for (int i = 0; i < 30; ++i)
+        doc << QStringLiteral("line %1").arg(i);
+    editor->setPlainText(doc.join(QLatin1Char('\n')));
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const int h = editor->height();
+    const int n = editor->lineCount();
+    QCOMPARE(n, 30);
+    QVERIFY(!editor->scrollBeyondLastLineEnabled()); // deliberate default
+
+    const int max0 = 2 * pad + n * lh - h; // flag-off max (positive here)
+    QVERIFY(max0 > 0);
+    const auto deepWheel = [&]() {
+        QWheelEvent ev(QPointF(300, 200), QPointF(300, 200), QPoint(0, 0),
+                       QPoint(0, -120 * 1000), Qt::NoButton, Qt::NoModifier,
+                       Qt::NoScrollPhase, false);
+        QVERIFY(QApplication::sendEvent(editor, &ev));
+    };
+    deepWheel();
+    QCOMPARE(editor->firstVisibleLine(), (max0 - pad) / lh);
+
+    editor->setScrollBeyondLastLineEnabled(true);
+    const int max1 = max0 + (h - lh); // bonus = height - lineHeight
+    deepWheel(); // clamp lands on the new max
+    // The whole point of the flag: the LAST line flushes at the top.
+    QCOMPARE(editor->firstVisibleLine(), n - 1);
+
+    // Ruler viewport rect = the same linear rulerY mapping over the bonus
+    // total (re-derived here — the DoD is ONE doc-space ratio everywhere).
+    const int total = 2 * pad + n * lh + (h - lh);
+    const int vs = max1;
+    const QRect r = editor->overviewRulerViewportRect();
+    QCOMPARE(r.y(), int(qint64(vs) * h / total));
+    const int y1 = int(qint64(std::min(total, vs + h)) * h / total);
+    QCOMPARE(r.height(), std::max(1, y1 - int(qint64(vs) * h / total)));
+
+    // Flag OFF again: the clamp pulls vScroll back to the exact flag-off
+    // max (one setScrollBeyond… call, no stale deep state).
+    editor->setScrollBeyondLastLineEnabled(false);
+    QCOMPARE(editor->firstVisibleLine(), (max0 - pad) / lh);
+    deepWheel();
+    QCOMPARE(editor->firstVisibleLine(), (max0 - pad) / lh);
+
+    // H-scroll sanity across the toggle: horizontal offsets are untouched
+    // by the vertical bonus.
+    editor->setPlainText(doc.join(QLatin1Char('\n')) + QLatin1Char('\n')
+                        + QString(500, QLatin1Char('7')));
+    QTest::keyClick(editor, Qt::Key_End, Qt::ControlModifier); // last line =
+    // the monster: the caret visit seeds the h-extent
+    QVERIFY(editor->maxHorizontalScroll() > 0);
+    editor->setHorizontalScrollOffset(100);
+    editor->setScrollBeyondLastLineEnabled(true);
+    QCOMPARE(editor->horizontalScrollOffset(), 100);
+    editor->setScrollBeyondLastLineEnabled(false);
+    QCOMPARE(editor->horizontalScrollOffset(), 100);
+}
+
+void TestCodeEditor::paintClusterWindowXOffsetProbe()
+{
+    // No-vision band probe (the DoD "caret scroll-into-view" and "no
+    // off-screen paint cost" verified at the pixel level). Doc line 1 is
+    // 200 spaces + "QQ" + 200 spaces: the Q cluster sits at 200*cw px,
+    // OUTSIDE the text window at h=0 but inside the geoMaxUnits layout
+    // budget - so the positive step below proves its glyphs exist and only
+    // the windowed paint kept them unlit. The caret parks on line 0 so
+    // line 1's band is caret-free for the zero-ink control.
+    const double cw = editor->cellWidth();
+    editor->setPlainText(QStringLiteral("ab\n") + QString(200, QLatin1Char(' '))
+                        + QStringLiteral("QQ") + QString(200, QLatin1Char(' ')));
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_Right); // caretOn_ = true, deterministic
+    editor->grab(); // paint pass visits both lines -> seeds the extent
+
+    const int win = editor->horizontalViewportWidth();
+    const int textLeft = editor->contentLeft();
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const QColor base = editor->palette().color(QPalette::Base);
+    const QColor textColor = editor->palette().color(QPalette::Text);
+    QVERIFY(std::abs(textColor.redF() - base.redF()) + std::abs(textColor.blueF() - base.blueF()) > 0.3);
+    const int winRight = textLeft + win;
+    QCOMPARE(editor->maxHorizontalScroll(), int(std::ceil(402 * cw)) + pad - win);
+
+    const auto inkCount = [&](const QImage& img, int x0, int x1, int yTop, int rows) {
+        int n = 0;
+        for (int x = x0; x < x1; ++x)
+            for (int y = yTop; y < yTop + rows; ++y)
+                if (img.pixelColor(x, y) != base)
+                    ++n;
+        return n;
+    };
+    auto countWhere = [&](const QImage& img, int x0, int x1, int yTop, int rows,
+                          const std::function<bool(const QColor&)>& pred) {
+        int n = 0;
+        for (int x = x0; x < x1; ++x)
+            for (int y = yTop; y < yTop + rows; ++y)
+                if (pred(img.pixelColor(x, y)))
+                    ++n;
+        return n;
+    };
+
+    const QImage img0 = editor->grab().toImage();
+    const int y1 = pad + lh; // band top of line 1
+    QCOMPARE(inkCount(img0, textLeft, winRight, y1, lh), 0);
+
+    // Bring the Q cluster 100px inside the window's left edge.
+    const int H = int(std::floor(200 * cw)) - 100;
+    editor->setHorizontalScrollOffset(H);
+    const QImage imgH = editor->grab().toImage();
+    const double qX = textLeft + 200 * cw - H; // predicted widget x of col 200
+
+    // Leading spaces keep EXACT base up to the predicted Q edge (the
+    // offset landed on an integer px; only the fractional cell residual
+    // gets a 1px tolerance).
+    QCOMPARE(inkCount(imgH, textLeft, int(std::floor(qX)) - 1, y1, lh), 0);
+    // ...and the Q glyph lights exactly the 2-cell band at that predicted
+    // x - the painted ink now lands at shifted widget x (the DoD).
+    QVERIFY2(inkCount(imgH, int(std::floor(qX)) - 1, int(std::ceil(qX + 2 * cw)) + 1, y1, lh) >= 20,
+             QStringLiteral("no Q ink at predicted shifted band (%1..%2)")
+                 .arg(qX).arg(qX + 2 * cw).toUtf8().constData());
+    QCOMPARE(inkCount(imgH, int(std::ceil(qX + 2 * cw)) + 3, winRight, y1, lh), 0);
+
+    // Selection ink rides the same shift: park the caret at the Q start
+    // (col 200 - caret-keep scrolls here, setHScroll(H) puts the window
+    // back where the predictions below were made), then Shift+Right x7:
+    // range 200..207 keeps the caret inside the window, so the offset
+    // stays put while the selection paints. The deep right half of the
+    // range is plain spaces after the Qs: an exact alpha-blend over Base,
+    // no glyph AA inside.
+    editor->setPosition({1, 200});
+    editor->setHorizontalScrollOffset(H);
+    for (int i = 0; i < 7; ++i) // one-by-one: reliable through QTest's queue
+        QTest::keyClick(editor, Qt::Key_Right, Qt::ShiftModifier);
+    QCOMPARE(editor->horizontalScrollOffset(), H);
+    QCOMPARE(editor->position().col, 207);
+    const QColor selColor = editor->palette().color(QPalette::Highlight);
+    auto selBlend = [&](const QColor& c) {
+        const qreal a = 90.0 / 255.0;
+        const QColor want(static_cast<int>(qRound(base.red() + a * (selColor.red() - base.red()))),
+                          static_cast<int>(qRound(base.green() + a * (selColor.green() - base.green()))),
+                          static_cast<int>(qRound(base.blue() + a * (selColor.blue() - base.blue()))),
+                          base.alpha());
+        const QColor got = c.rgb(); // strip any alpha channel of the store
+        return qAbs(got.red() - want.red()) <= 4 && qAbs(got.green() - want.green()) <= 4
+            && qAbs(got.blue() - want.blue()) <= 4;
+    };
+    const int selCx = textLeft + int(204.5 * cw - H); // deep cell, fully inside
+    const QImage imgS = editor->grab().toImage();
+    QVERIFY(countWhere(imgS, selCx - 2, selCx + 3, y1, lh, selBlend) >= 10);
+
+    // The caret bar (deterministic caretOn_ right after the key press) at
+    // the model position follows the same shift: exact Text ink in its 2
+    // columns, exact Base right next to them.
+    const double cX = textLeft + 207 * cw - H; // predicted caret widget x
+    const int cxi = qRound(cX);
+    int caretInk = 0;
+    for (int y = y1; y < y1 + lh; ++y) {
+        if (imgS.pixelColor(cxi, y) == textColor)
+            ++caretInk;
+        if (imgS.pixelColor(cxi + 1, y) == textColor)
+            ++caretInk;
+    }
+    QCOMPARE(caretInk, 2 * lh);
+    QCOMPARE(countWhere(imgS, cxi + 3, cxi + 6, y1, lh,
+                        [&](const QColor& c) {
+                            return c.red() == base.red() && c.green() == base.green()
+                                && c.blue() == base.blue();
+                        }), 3 * lh);
+    // And the very same model x was invisible in the h=0 control grab (it
+    // existed off-window then too - culling is what kept it dark, not the
+    // absence of the geometry): no Text ink anywhere in line 1's window.
+    QCOMPARE(countWhere(img0, textLeft, winRight, y1, lh,
+                        [&](const QColor& c) { return c == textColor; }), 0);
 }
 
 QTEST_MAIN(TestCodeEditor)

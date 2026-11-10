@@ -386,6 +386,32 @@ public:
     // disabled). The DoD "ruler geometry state" entry point.
     QRect overviewRulerViewportRect() const;
 
+    // Horizontal scrolling (M9, Phase E1) — the h-scroll half of the Gate-1
+    // viewport story (soft wrap stays deferred to Gate 2). The text window
+    // runs from contentLeft() to the overview-ruler chrome, and the offset
+    // is in pixels, the same integer space vScroll lives in (the monospace
+    // grid tests assert exact offsets against cellWidth arithmetic).
+    void setHorizontalScrollOffset(int pixels); // clamped (see max…)
+    int horizontalScrollOffset() const { return hScroll_; }
+    int horizontalViewportWidth() const; // visible text px, ruler excluded
+    // The clamp contract: max offset = docWidth + padding - window. The
+    // doc width is AMBIENT: a line's measured px width joins the extent
+    // when painting/caret/hit-testing visits it, and the extent is the max
+    // over visited lines — the view never walks the whole document to find
+    // the widest line (same no-O(document) rule as the ruler, so the bar
+    // grows while the doc is being visited; stale widths after edits
+    // decay the same ambient way). Reset on setPlainText.
+    int maxHorizontalScroll() const;
+    // Parity hook: qtmonaco's set_scroll_beyond_last_line_enabled
+    // (Monaco's scrollBeyondLastLine option). On, the doc pixel space
+    // grows by height() - lineHeight_, letting the LAST line scroll up to
+    // the viewport top (and the ruler mapping spans that taller space).
+    // Default OFF — a deliberate divergence from Monaco's ON default that
+    // keeps every existing end-of-scroll contract (ruler mapping
+    // included) bit-stable; revisit the default before the API freeze.
+    void setScrollBeyondLastLineEnabled(bool enabled);
+    bool scrollBeyondLastLineEnabled() const { return scrollBeyondLastLine_; }
+
     int lineHeight() const { return lineHeight_; }
     double cellWidth() const { return cellWidth_; }
     int padding() const { return padding_; } // vertical/top-edge padding
@@ -399,7 +425,10 @@ public:
 
     // Widget-space x of the caret position at (line, col), following the
     // glyph engine's cluster advances (not a col * cellWidth grid), gutter
-    // included (so xForCol(line, 0) == contentLeft()). A col
+    // included (so xForCol(line, 0) == contentLeft() while hScroll is 0).
+    // Shifted LEFT by the current horizontalScrollOffset() — it is the
+    // widget x the user would see (off-screen positions go negative or past
+    // the right edge, exactly like the painted glyph). A col
     // inside a grapheme cluster is snapped to a cluster edge by the engine;
     // the text position itself is untouched. Out-of-range line/col clamp.
     // Public because decorations (M5: diagnostics, inlay hints) need the
@@ -627,6 +656,14 @@ private:
     void paintOverviewRuler(QPainter& p) const; // last pass: it OVERPAINTS
                                                 // the text's right edge
     void rulerScrollTo(int y); // center the strip point's line in the view
+
+    // --- M9 horizontal scroll state (semantics: public API comments) ---
+    int hScroll_ = 0;                    // px, clamped like vScroll_
+    bool scrollBeyondLastLine_ = false;  // Monaco-parity hook, see public docs
+    mutable int docWidthPx_ = 0;         // ambient extent of visited lines
+    bool hScrollbarSync_ = false;        // setHScroll <-> hBar_ reentry guard
+    QScrollBar* hBar_ = nullptr;
+    void setHScroll(int pixels); // the one clamping writer of hScroll_
 
     QTimer blinkTimer_;
     bool caretOn_ = true;

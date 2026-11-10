@@ -203,6 +203,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   (breakpoint red / highlight cool-blue / find warm bands light exactly
   one predicate each).
 
+- M9 horizontal scrolling (Phase E1): the horizontal half of the viewport
+  story (soft wrap stays deferred to Gate 2). The text window runs from
+  `contentLeft()` to the overview-ruler chrome; the pixel offset lives in
+  the same integer space as vScroll and shifts every text-space x (match
+  quads, selections, carets, preedit, squiggles, inlay hints — the gutter
+  and ruler are chrome and never ride it). Public API:
+  `setHorizontalScrollOffset`/`horizontalScrollOffset`,
+  `horizontalViewportWidth()` and `maxHorizontalScroll()` (the clamp
+  contract: max = docWidth + padding - window), plus the qtmonaco-parity
+  hook `setScrollBeyondLastLineEnabled`/`scrollBeyondLastLineEnabled`
+  (Monaco's scrollBeyondLastLine; on, totalHeight gains
+  `height()-lineHeight_` so the LAST line reaches the viewport top — and
+  one formula keeps the vBar clamp, firstVisibleLine and the ruler
+  mapping consistent). The doc width is AMBIENT: a visited line's
+  phantom-aware px width (same xInLine math as the hit test, exact
+  `col*cellWidth` on monospace) joins the extent — the view NEVER walks
+  the whole document for the widest line (same no-O(document) rule as the
+  ruler); stale widths decay the same ambient way, and `setPlainText`
+  resets offset and extent together. `scrollBeyondLastLine` defaults OFF
+  — a deliberate divergence from Monaco's ON default that keeps every
+  existing end-of-scroll/ruler contract bit-stable; revisit before the
+  API freeze. Input: trackpad `angle.x` and Shift+wheel (3 cells per
+  notch, mirrors the hBar singleStep; under Shift the vertical axis swaps
+  to horizontal, it does not stack), caret-keep-visible flush-to-edge on
+  arrows/End/Home (monospace-exact: `ceil(caretX - win + 1)`), horizontal
+  drag auto-scroll at the window edges, and an h QScrollBar that stops at
+  the ruler chrome (the vBar lives inside the strip's right edge,
+  VS Code-style). Paint is windowed: each line pass is clipped to the
+  text window and lines fully scrolled past are skipped in O(1) (the
+  hitLine visit keeps feeding the ambient extent even for skipped lines).
+  Documented v1 trade: per-line glyph tessellation is bounded by the
+  `geoMaxUnits` layout budget (~4 viewports wide); past it the far-right
+  region of monster lines carries caret/selection/hit-test geometry only
+  (phantom cellWidth extrapolation), no painted glyphs. Tests:
+  ambient-extent seeding + exact clamp contract, per-arrow-key closed-form
+  caret-keep offsets (120 steps), wheel/Shift-wheel axis semantics,
+  click mapping through the offset, scroll-past-end flag + ruler-total
+  ride-along, and a pixel-band probe (zero-ink control at h=0, then Q
+  glyph / selection blend / 2px caret bar ink exactly at predicted
+  shifted widget x).
+
 ### Changed
 - The x anchor of all text geometry (caret, selection, painting, hit
   testing, IM anchor) moved from `padding()` to `contentLeft()` =

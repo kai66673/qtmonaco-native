@@ -197,6 +197,15 @@ CodeEditor::CodeEditor(QWidget* parent)
             setVScroll(value);
     });
 
+    // M9: the horizontal bar is bottom chrome; its range follows the
+    // ambient doc-width extent (public docs on maxHorizontalScroll).
+    hBar_ = new QScrollBar(Qt::Horizontal, this);
+    hBar_->hide();
+    connect(hBar_, &QScrollBar::valueChanged, this, [this](int value) {
+        if (!hScrollbarSync_)
+            setHScroll(value);
+    });
+
     const int flash = qApp ? qApp->cursorFlashTime() : 1000;
     blinkTimer_.setInterval(flash > 0 ? flash / 2 : 500);
     connect(&blinkTimer_, &QTimer::timeout, this, [this] {
@@ -233,6 +242,8 @@ void CodeEditor::setPlainText(const QString& text)
     altDragSlot_ = -1;
     altDragPrimary_ = false;
     setVScroll(0);
+    hScroll_ = 0;       // M9: new doc, new ambient extent (hitLine reseeds it)
+    docWidthPx_ = 0;
     updateScrollBarRange();
     emit selectionChanged();
     update();
@@ -270,8 +281,11 @@ int CodeEditor::geoMaxUnits() const
 {
     // Layout budget for monster lines. 4x the visible cell count covers even
     // lines where clusters are far narrower than their code-unit count
-    // (combining marks); the truncation edge always lands off-screen, so the
-    // caret/hit-test math never notices it (horizontal scrolling is M7).
+    // (combining marks). Past the budget the xInLine/xToCursor math keeps
+    // working on the phantom cellWidth extrapolation (exact on monospace —
+    // M9 h-scroll relies on it), but NO glyphs are laid out or painted
+    // there: on monster lines the far-right region carries caret/selection
+    // geometry only (v1 trade, recorded in the CHANGELOG).
     return std::max(64, 4 * (static_cast<int>(width() / cellWidth_) + 2));
 }
 
@@ -283,9 +297,20 @@ const CodeEditor::GeoSlot* CodeEditor::hitLine(int line) const
     const int maxUnits = geoMaxUnits();
     const QString text = full.size() > maxUnits ? full.left(maxUnits) : full;
 
+    // M9 ambient horizontal extent: whichever way a line enters the glyph
+    // cache (paint, caret geometry, hit test) its phantom-aware px width
+    // is now known and joins the doc extent — an O(1) read, never a
+    // document-wide scan (public docs on maxHorizontalScroll).
+    const auto noteWidth = [this](const GeoSlot* s, int fullLen) {
+        const double w = xInLine(s, fullLen);
+        if (w > docWidthPx_)
+            docWidthPx_ = int(std::ceil(w));
+    };
+
     for (GeoSlot& s : geo_) // geo_ is mutable: this is a const-by-API cache
         if (s.keyLine == line && s.text == text) {
             s.stamp = ++geoClock_;
+            noteWidth(&s, full.size());
             return &s;
         }
 
@@ -323,6 +348,7 @@ const CodeEditor::GeoSlot* CodeEditor::hitLine(int line) const
     victim->layout.endLayout();
     victim->valid = victim->line.isValid();
     victim->stamp = ++geoClock_;
+    noteWidth(victim, full.size());
     return victim;
 }
 
@@ -352,7 +378,10 @@ double CodeEditor::xInLine(const GeoSlot* s, int col) const
 double CodeEditor::xForCol(int line, int col) const
 {
     const int c = std::clamp(col, 0, lineLength(line));
-    return contentLeft() + xInLine(hitLine(line), c);
+    // M9: widget space rides the current horizontal scroll offset (this is
+    // the x the user sees; off-screen targets go negative/past the edge,
+    // matching the painted glyph — see public docs).
+    return contentLeft() + xInLine(hitLine(line), c) - hScroll_;
 }
 
 TextPosition CodeEditor::positionAt(const QPoint& widgetPos) const
@@ -367,8 +396,20 @@ TextPosition CodeEditor::positionAt(const QPoint& widgetPos) const
         // xToCursor misbehaves far outside the laid-out extent (measured:
         // 1e9 maps back to 0), so clamp into the extent first: clicks past
         // the line end resolve to EOL, as they used to via the grid clamp.
-        const double x = std::clamp(widgetPos.x() - static_cast<double>(contentLeft()),
-                                    0.0, s->line.naturalTextWidth());
+        // M9: the click rides the h-scroll offset, and the clamp target is
+        // the phantom-aware full-line width (xInLine), so clicks past the
+        // layout budget keep mapping to EOL (monospace cell math up there).
+        const int len = lineLength(pos.line);
+        const double lineEndX = xInLine(s, len);
+        const double x = std::clamp(widgetPos.x() - static_cast<double>(contentLeft())
+                                        + hScroll_,
+                                    0.0, lineEndX);
+        if (x > s->line.naturalTextWidth()) {
+            // Phantom region (past the layout budget): cellWidth cell math.
+            pos.col = std::min(len, static_cast<int>(s->text.size())
+                                      + int((x - s->line.naturalTextWidth()) / cellWidth_));
+            return pos;
+        }
         // xToCursor picks the NEAREST cursor edge; the old grid used floor
         // (click at col*cell + cw/2 -> col), and every editor does the same.
         // Walk back until the position's left edge is at or left of x - the
@@ -385,7 +426,7 @@ TextPosition CodeEditor::positionAt(const QPoint& widgetPos) const
             }
             c = s->layout.previousCursorPosition(snapped);
         }
-        pos.col = std::clamp(c, 0, lineLength(pos.line));
+        pos.col = std::clamp(c, 0, len);
     }
     return pos;
 }
@@ -1261,11 +1302,31 @@ void CodeEditor::ensureCaretVisible()
     else if (caretBottom + padding_ > vScroll_ + height())
         target = caretBottom + padding_ - height();
     setVScroll(target);
+
+    // M9 horizontal half: the caret rides cluster advances (monospace:
+    // col*cellWidth EXACTLY, which is what the exact-offset tests assert).
+    // Flush-to-edge shifts only - the minimal scroll, no margin math.
+    const double caretX = xInLine(hitLine(caret_.line), caret_.col); // line space
+    const double win = horizontalViewportWidth();
+    if (win > 0.0) {
+        if (caretX < hScroll_) {
+            setHScroll(int(std::floor(caretX))); // caret flush at the left edge
+        } else if (caretX > hScroll_ + win - 1.0) {
+            // the 2px caret cell fits at the right edge (past the ruler)
+            setHScroll(int(std::ceil(caretX - win + 1.0)));
+        }
+    }
 }
 
 int CodeEditor::totalHeight() const
 {
-    return 2 * padding_ + buffer_.lineCount() * lineHeight_;
+    int total = 2 * padding_ + buffer_.lineCount() * lineHeight_;
+    // M9 scroll-past-end (Monaco's scrollBeyondLastLine): the bonus lets
+    // the LAST line reach the viewport top. One formula, so the vertical
+    // bar, the clamp math and the ruler mapping all stay consistent.
+    if (scrollBeyondLastLine_)
+        total += std::max(0, height() - lineHeight_);
+    return total;
 }
 
 int CodeEditor::firstVisibleLine() const
@@ -1291,6 +1352,54 @@ void CodeEditor::setVScroll(int pixels)
     update();
 }
 
+// --- M9 horizontal scroll plumbing (one clamping writer, one contract
+// formula; the public API docs carry the ambient-extent semantics) ---
+
+void CodeEditor::setHorizontalScrollOffset(int pixels)
+{
+    setHScroll(pixels);
+}
+
+int CodeEditor::horizontalViewportWidth() const
+{
+    // The text window ends where the ruler chrome begins (the ruler is
+    // painted last and overpaints the text's right edge, so text under it
+    // is not "visible" in any sense that matters).
+    return std::max(0, width() - contentLeft() - overviewRulerWidth());
+}
+
+int CodeEditor::maxHorizontalScroll() const
+{
+    return std::max(0, docWidthPx_ + padding_ - horizontalViewportWidth());
+}
+
+void CodeEditor::setHScroll(int pixels)
+{
+    const int maxScroll = maxHorizontalScroll();
+    hScroll_ = std::clamp(pixels, 0, maxScroll);
+    hScrollbarSync_ = true;
+    if (hBar_) {
+        // Sync the range here too: the ambient extent may have grown since
+        // the last updateScrollBarRange (this is where the bar wakes up).
+        hBar_->setRange(0, maxScroll);
+        hBar_->setValue(hScroll_);
+        hBar_->setVisible(maxScroll > 0);
+    }
+    hScrollbarSync_ = false;
+    update();
+}
+
+void CodeEditor::setScrollBeyondLastLineEnabled(bool enabled)
+{
+    if (enabled == scrollBeyondLastLine_)
+        return;
+    scrollBeyondLastLine_ = enabled;
+    updateScrollBarRange(); // totalHeight moved; the vBar range and the
+                            // clamp below re-tune vScroll_ (ruler mapping
+                            // follows the same total, by contract)
+    update();
+}
+
 void CodeEditor::updateScrollBarRange()
 {
     if (!vBar_)
@@ -1304,6 +1413,21 @@ void CodeEditor::updateScrollBarRange()
     vBar_->setGeometry(width() - barWidth, 0, barWidth, height());
     if (vScroll_ > maxScroll)
         setVScroll(maxScroll);
+
+    if (hBar_) {
+        const int maxH = maxHorizontalScroll();
+        hBar_->setRange(0, maxH);
+        hBar_->setPageStep(std::max(1, horizontalViewportWidth()));
+        hBar_->setSingleStep(3 * std::max(1, int(std::ceil(cellWidth_))));
+        hBar_->setVisible(maxH > 0);
+        const int hBarH = hBar_->isVisible() ? hBar_->sizeHint().height() : 0;
+        // The bar stops at the ruler chrome (the ruler spans full height and
+        // the vBar lives inside its right edge, VS Code-style).
+        const int rightExcl = std::max(overviewRulerWidth(), vBar_->isVisible() ? barWidth : 0);
+        hBar_->setGeometry(0, height() - hBarH, std::max(0, width() - rightExcl), hBarH);
+        if (hScroll_ > maxH)
+            setHScroll(maxH);
+    }
 }
 
 // --- M7 overview ruler: pure viewport-strip mapping (numeric contract,
@@ -1317,6 +1441,9 @@ void CodeEditor::setOverviewRulerEnabled(bool enabled)
     if (enabled == rulerEnabled_)
         return;
     rulerEnabled_ = enabled;
+    // M9 cross-link: the ruler width IS the h-window's right boundary, so
+    // toggling it changes both the clamp contract and the hBar geometry.
+    updateScrollBarRange();
     update();
 }
 
@@ -1599,6 +1726,17 @@ void CodeEditor::paintEvent(QPaintEvent*)
     const QFontMetricsF fmF(font_); // preedit advance measurement
     const int textLeft = contentLeft(); // M5: padding_ + gutter width
 
+    // M9: the horizontal offset shifts every x in the text space (match
+    // quads, selections, carets, preedit, squiggles, inlay hints — the
+    // gutter and the ruler are chrome and never ride it). Line-space ->
+    // widget-space conversion goes through xw() only; quads cull against
+    // the text window [textLeft, winRight) and clamp their left edge, so
+    // a scrolled-past band never bleeds into the gutter.
+    const double hShift = hScroll_;
+    const double win = std::max(1, horizontalViewportWidth());
+    const double winRight = textLeft + win; // ruler chrome boundary
+    const auto xw = [&](double lineSpaceX) { return textLeft + lineSpaceX - hShift; };
+
     // M4: bring the highlight engine current here, not on the key path
     // (the typing perf harness measures keyPressEvent logic; the reparse
     // rides the next paint, so one key press reparses at most once).
@@ -1651,10 +1789,13 @@ void CodeEditor::paintEvent(QPaintEvent*)
             const MatchRange& m = *it;
             const bool isCur = cur == &m;
             const GeoSlot* gs = hitLine(m.startLine);
-            const double x0 = textLeft + xInLine(gs, m.startCol);
+            const double raw0 = xw(xInLine(gs, m.startCol));
             const double x1 = m.endCol > m.startCol
-                ? textLeft + xInLine(gs, m.endCol)
-                : x0 + cellWidth_; // zero-width match: one phantom cell
+                ? xw(xInLine(gs, m.endCol))
+                : raw0 + cellWidth_; // zero-width match: one phantom cell
+            const double x0 = std::max(raw0, double(textLeft));
+            if (x1 <= x0 || x0 >= winRight)
+                continue; // M9 cull: quad fully outside the text window
             QColor ink = QColor::fromRgb(findMatchInk(isCur));
             ink.setAlpha(isCur ? 130 : 80);
             p.fillRect(QRectF(QPointF(x0, padding_ + m.startLine * lh - vScroll_),
@@ -1683,11 +1824,12 @@ void CodeEditor::paintEvent(QPaintEvent*)
             const int textLen = lineLength(line);
             const int endCol = (line == e.line) ? e.col : std::max(textLen, 1);
             const GeoSlot* gs = hitLine(line);
-            const int x0 = textLeft + qRound(xInLine(gs, startCol));
-            const int x1 = textLeft + qRound(xInLine(gs, endCol));
-            if (x1 > x0) {
+            const int x0 = qRound(xw(xInLine(gs, startCol)));
+            const int x1 = qRound(xw(xInLine(gs, endCol)));
+            const int cx0 = std::max(x0, textLeft); // M9: clamp into the window
+            if (x1 > cx0 && cx0 < width()) {
                 const int yTop = padding_ + line * lh - vScroll_;
-                p.fillRect(QRect(x0, yTop, x1 - x0, lh), selColor);
+                p.fillRect(QRect(cx0, yTop, x1 - cx0, lh), selColor);
             }
         }
     }
@@ -1745,25 +1887,42 @@ void CodeEditor::paintEvent(QPaintEvent*)
         const int yTop = padding_ + line * lh - vScroll_;
         const GeoSlot* gs = hitLine(line);
 
-        if (line == caret_.line && caretOn_) {
+        // M9 whole-line fast path: once the line's right edge (the same
+        // phantom-aware xInLine math the hit-test uses) has scrolled past
+        // the window's left edge, NOTHING on the line can be visible — skip
+        // carets, preedit and text in O(1). An invalid (empty) slot keeps
+        // drawing: its xInLine fallback is 0, i.e. inside the window. The
+        // hitLine visit feeds the ambient doc-width extent (noteWidth) even
+        // for skipped lines, so the h-bar keeps growing while the user
+        // visits the line.
+        const bool scrolledPast = gs->valid && xInLine(gs, lineLength(line)) <= hShift;
+
+        if (line == caret_.line && caretOn_ && !scrolledPast) {
             // The caret follows the very cluster advances the line below is
             // drawn with (same QTextLine), so emoji ZWJ sequences no longer
             // push the caret away from the glyphs. During composition the
             // visual caret trails the preedit (which is not in the buffer).
-            double cx = textLeft + xInLine(gs, caret_.col);
+            double cx = xw(xInLine(gs, caret_.col));
             if (!preedit_.isEmpty())
                 cx += fmF.horizontalAdvance(preedit_);
-            p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
+            // M9: the caret is text-space ink — cull it against the window
+            // so a scrolled-past caret never paints a bar over the gutter
+            // and never bleeds under the ruler chrome.
+            if (cx + 2.0 > textLeft && cx < winRight)
+                p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
         }
         // D1: additional carets blink in sync with the primary (one shared
         // blink timer), drawn with the same 2px rule off the same layout.
-        for (const CaretSlot& slot : extraCarets_) {
-            if (slot.caret.line != line || !caretOn_)
-                continue;
-            const double cx = textLeft + xInLine(gs, slot.caret.col);
-            p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
+        if (!scrolledPast) {
+            for (const CaretSlot& slot : extraCarets_) {
+                if (slot.caret.line != line || !caretOn_)
+                    continue;
+                const double cx = xw(xInLine(gs, slot.caret.col));
+                if (cx + 2.0 > textLeft && cx < winRight)
+                    p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
+            }
         }
-        if (gs->valid) {
+        if (gs->valid && !scrolledPast) {
             // Draw with the cached QTextLine itself, not a fresh drawText:
             // glyphs, caret and hit-testing then share one layout.
             // MEASURED (numeric band scan, raster backing store = the only
@@ -1773,8 +1932,17 @@ void CodeEditor::paintEvent(QPaintEvent*)
             // y()==0). Passing baseline=yTop+ascent_ here drew every line
             // ~one line-height too low, an empty band at the top and a
             // caret visibly a line above its text.
-            const QPointF origin(textLeft, yTop);
+            // M9: the origin rides the horizontal offset, and the painter
+            // clip bounds the pass to the text window — glyphs tessellated
+            // past the window's right edge (the layout budget is ~4
+            // viewports wide, see geoMaxUnits) stay unlit, and neither the
+            // gutter nor the ruler chrome can be bled into from the text
+            // side. Both branches share origin+clip, so the one-layout
+            // fmts/no-fmts bit-parity invariant holds.
+            const QPointF origin(textLeft - hShift, yTop);
             const auto fmts = formatRangesForLine(line, gs);
+            p.save();
+            p.setClipRect(QRectF(textLeft, yTop, win, lh));
             if (fmts.isEmpty()) {
                 gs->line.draw(&p, origin);
             } else {
@@ -1785,13 +1953,14 @@ void CodeEditor::paintEvent(QPaintEvent*)
                 // one-layout invariant.
                 gs->layout.draw(&p, origin, fmts);
             }
+            p.restore();
         }
-        if (line == caret_.line && !preedit_.isEmpty()) {
+        if (line == caret_.line && !preedit_.isEmpty() && !scrolledPast) {
             // Composition text at the caret with a dotted underline (Qt's
             // own line-edit convention) to show it is not committed yet.
             // drawText below IS baseline-anchored, so align it with the
             // layout engine's own baseline for the line above.
-            const double px = textLeft + xInLine(gs, caret_.col);
+            const double px = xw(xInLine(gs, caret_.col));
             const double textBaseline = yTop + (gs->valid ? gs->line.ascent() : ascent_);
             p.drawText(QPointF(px, textBaseline), preedit_);
             p.setPen(QPen(palette().color(QPalette::Text), 0, Qt::DotLine));
@@ -1821,8 +1990,11 @@ void CodeEditor::paintEvent(QPaintEvent*)
                 c1 = c0 + 1;
             }
             const GeoSlot* gs = hitLine(line);
-            const double x0 = textLeft + xInLine(gs, c0);
-            const double x1 = textLeft + xInLine(gs, c1);
+            const double raw0 = xw(xInLine(gs, c0));
+            const double x1 = std::min(xw(xInLine(gs, c1)), winRight);
+            const double x0 = std::max(raw0, double(textLeft)); // M9 clamp+cull
+            if (x1 <= x0)
+                continue;
             const int yTop = padding_ + line * lh - vScroll_;
             drawWavyUnderline(p, x0, x1, yTop + lh - 2.5, ink);
         }
@@ -1839,7 +2011,9 @@ void CodeEditor::paintEvent(QPaintEvent*)
             if (h.line > last)
                 break; // sorted by line
             const GeoSlot* gs = hitLine(h.line);
-            const double x = textLeft + xInLine(gs, std::max(h.col, 0));
+            const double x = xw(xInLine(gs, std::max(h.col, 0)));
+            if (x < textLeft || x >= winRight)
+                continue; // M9: hint anchored outside the text window
             const int hTop = padding_ + h.line * lh - vScroll_;
             const double baseline = hTop + (gs->valid ? gs->line.ascent() : ascent_);
             p.drawText(QPointF(x, baseline), h.text);
@@ -2065,6 +2239,8 @@ void CodeEditor::setLineNumbersMode(LineNumbersMode mode)
     if (mode == lineNumbersMode_)
         return;
     lineNumbersMode_ = mode;
+    updateScrollBarRange(); // contentLeft moved: the h-window width (and the
+                            // hBar geometry riding it) changed with the gutter
     update(); // contentLeft() shifts everything drawn at x
 }
 
@@ -3293,6 +3469,18 @@ void CodeEditor::mouseMoveEvent(QMouseEvent* event)
         setVScroll(vScroll_ + lineHeight_);
         pos.setY(height() - margin - 1);
     }
+    // M9 horizontal twin: past the text window's left/right edges, 3 cells
+    // per event (the hBar singleStep). The right edge is the ruler chrome
+    // boundary; positions are mapped back into the shifted window so the
+    // caret target keeps following the pointer (positionAt rides hScroll_).
+    const int rightEdge = width() - overviewRulerWidth();
+    if (pos.x() < contentLeft()) {
+        setHScroll(hScroll_ - 3 * int(std::ceil(cellWidth_)));
+        pos.setX(contentLeft());
+    } else if (pos.x() > rightEdge) {
+        setHScroll(hScroll_ + 3 * int(std::ceil(cellWidth_)));
+        pos.setX(rightEdge);
+    }
     const TextPosition target = positionAt(pos);
     if (altDragPrimary_) {
         // Alt+Drag on the primary caret: resize its selection, the anchor
@@ -3355,9 +3543,17 @@ void CodeEditor::mouseReleaseEvent(QMouseEvent* event)
 
 void CodeEditor::wheelEvent(QWheelEvent* event)
 {
-    const int lines = event->angleDelta().y() / 120 * 3;
-    if (lines != 0)
-        setVScroll(vScroll_ - lines * lineHeight_);
+    const int vLines = event->angleDelta().y() / 120 * 3;
+    // M9: trackpads deliver a real angle.x; Shift+vertical wheel is the
+    // classic mouse-only h-scroll gesture (3 notches*3 lines == 3 cells
+    // per notch matches the hBar singleStep). Vertical motion goes to the
+    // horizontal axis only under Shift (then it does NOT also scroll v).
+    const int hCols = event->angleDelta().x() / 120 * 3
+                      + (event->modifiers() & Qt::ShiftModifier ? vLines : 0);
+    if (hCols != 0)
+        setHScroll(hScroll_ - hCols * int(std::ceil(cellWidth_)));
+    if (!(event->modifiers() & Qt::ShiftModifier) && vLines != 0)
+        setVScroll(vScroll_ - vLines * lineHeight_);
     event->accept();
 }
 
