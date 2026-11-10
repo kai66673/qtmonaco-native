@@ -8,15 +8,22 @@
 #include <QFontDatabase>
 #include <QFontMetricsF>
 #include <QGuiApplication>
+#include <QHBoxLayout>
 #include <QInputMethodEvent>
 #include <QKeyEvent>
 #include <QKeySequence>
+#include <QLabel>
+#include <QLineEdit>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPushButton>
+#include <QRegularExpression>
 #include <QResizeEvent>
 #include <QScrollBar>
+#include <QSignalBlocker>
 #include <QStringList>
 #include <QTextBoundaryFinder>
+#include <QVBoxLayout>
 #include <QWheelEvent>
 #include <QtMath>
 
@@ -159,6 +166,8 @@ CodeEditor::CodeEditor(QWidget* parent)
     highlight_->attach(&buffer_);
     buffer_.setEditObserver([this](const qmn::core::TextBuffer::EditEvent& ev) {
         highlight_->onEdit(ev);
+        findDirty_ = true; // M6: typing invalidates the match set lazily;
+                           // the next paint (or find action) refreshes it
     });
 
     font_ = QFontDatabase::systemFont(QFontDatabase::FixedFont);
@@ -1494,6 +1503,15 @@ void drawWavyUnderline(QPainter& p, qreal x0, qreal x1, qreal yWave, QRgb ink)
     p.drawPolyline(pts.data(), int(pts.size()));
 }
 
+// M6 match-quad ink (VS Code Dark+ findMatch family, fixed until
+// set_theme): all matches muted orange, the current one bright orange.
+// Both are red-dominant over the dark Base - the numeric paint test
+// separates that band from the blue selection and the red diagnostic ink.
+QRgb findMatchInk(bool current)
+{
+    return current ? QColor(246, 169, 0).rgb() : QColor(196, 136, 30).rgb();
+}
+
 } // namespace
 
 void CodeEditor::paintEvent(QPaintEvent*)
@@ -1537,6 +1555,40 @@ void CodeEditor::paintEvent(QPaintEvent*)
         QColor cur = palette().color(QPalette::Text);
         cur.setAlpha(16); // subtle wash: lighter on dark, darker on light
         p.fillRect(QRect(0, padding_ + caret_.line * lh - vScroll_, width(), lh), cur);
+    }
+
+    // M6: match quads - all matches muted, current bright (they ride
+    // decoration layer (3) conceptually; here the engine's own list).
+    // matches_ is sorted: binary-search the first visible candidate and
+    // walk only the window - thousands of matches cost the viewport only.
+    // Quads sit above the bands and under the selection pass, so the
+    // selected current match reads as match AND selection at once.
+    findRepainting_ = true; // recompute skips its own update() inside a paint
+    refreshFindMatches();
+    findRepainting_ = false;
+    if (!matches_.isEmpty()) {
+        auto it = std::lower_bound(matches_.begin(), matches_.end(), first,
+                                   [](const MatchRange& m, int line) {
+                                       return m.startLine < line;
+                                   });
+        const MatchRange* cur = currentMatch_ >= 0
+                && currentMatch_ < static_cast<int>(matches_.size())
+            ? &matches_[currentMatch_]
+            : nullptr;
+        for (; it != matches_.end() && it->startLine <= last; ++it) {
+            const MatchRange& m = *it;
+            const bool isCur = cur == &m;
+            const GeoSlot* gs = hitLine(m.startLine);
+            const double x0 = textLeft + xInLine(gs, m.startCol);
+            const double x1 = m.endCol > m.startCol
+                ? textLeft + xInLine(gs, m.endCol)
+                : x0 + cellWidth_; // zero-width match: one phantom cell
+            QColor ink = QColor::fromRgb(findMatchInk(isCur));
+            ink.setAlpha(isCur ? 130 : 80);
+            p.fillRect(QRectF(QPointF(x0, padding_ + m.startLine * lh - vScroll_),
+                              QSizeF(x1 - x0, lh)),
+                       ink);
+        }
     }
 
     // Selection pass after the bands: paint the background under the glyphs.
@@ -1928,6 +1980,590 @@ void CodeEditor::setCurrentLineHighlight(bool enabled)
     update();
 }
 
+// --- M6 find/replace (public API section) --------------------------------
+
+namespace {
+
+// The per-line match engine (the DoD math; verified through the public
+// API). Literal queries are escaped into the same regex path. PCRE2 runs
+// in UTF-16 code-unit mode (Qt never enables UTF mode): "." steps through
+// a surrogate pair half-pair at a time, and an empty match would advance
+// forever without a manual anchor walk. So per raw match:
+//  - non-empty: a boundary that splits a pair snaps OUTWARD (the whole
+//    pair enters or stays out: neither highlight nor replace ever splits
+//    or orphans half a pair);
+//  - empty: snaps only at a pair split, and then takes the WHOLE pair
+//    (a lone half-cell would orphan a half on replace);
+//  - a snapped range equal to the previous match dedups (a pair's two
+//    "." raws collapse into one range);
+//  - the scan anchor advances by the raw width, minimum 1 (an empty
+//    match would otherwise loop).
+// WholeWord wraps \b around the (escaped when literal) pattern: a lookaround
+// start still sees the word context (\w(?=x) keeps the leading \b), and a
+// trailing lookaround yields the \b{ws} zero-width match that snaps onto
+// the word - the whole-word editor behavior.
+QVector<CodeEditor::MatchRange> findMatchInLine(const QString& line, int lineIdx,
+                                                const QRegularExpression& re)
+{
+    QVector<CodeEditor::MatchRange> out;
+    int from = 0;
+    while (from <= line.size()) {
+        // Unanchored from an offset is equivalent here (and free of the
+        // deprecated match options): PCRE2 reports the EARLIEST match at
+        // or after the offset, which is exactly the global-scan step.
+        const QRegularExpressionMatch m = re.match(line, from);
+        if (!m.hasMatch())
+            break;
+        const int rawStart = m.capturedStart(0);
+        const int rawEnd = m.capturedEnd(0);
+        int start = rawStart, end = rawEnd;
+        const auto splitsAt = [&](int at) {
+            return at > 0 && at < line.size() && line.at(at - 1).isHighSurrogate()
+                && line.at(at).isLowSurrogate();
+        };
+        if (rawStart == rawEnd) {
+            if (splitsAt(rawStart)) {
+                start = rawStart - 1;
+                end = rawEnd + 1;
+            }
+        } else {
+            if (splitsAt(start))
+                --start;
+            if (splitsAt(end))
+                ++end;
+        }
+        if (out.isEmpty() || out.back().startCol != start || out.back().endCol != end)
+            out.append(CodeEditor::MatchRange{lineIdx, start, lineIdx, end});
+        // Scan advance: past the RAW match (never the snapped one: the
+        // pair's second "." raw must still be seen to dedup), minimum
+        // one unit per step. The outer max keeps progress even for the
+        // exotic \K pattern, whose reported start can precede the offset.
+        from = std::max(rawEnd > rawStart ? rawEnd : rawStart + 1, from + 1);
+    }
+    return out;
+}
+
+// The built-in find/replace bar. It talks to the editor purely through
+// the public find API (the editor holds it as a plain QWidget*), so this
+// class never crosses the public/Shiboken boundary. Two rows: toggles,
+// query, count, prev/next, close; then the replace row. Enter in the
+// query = next, Shift+Enter = previous, Enter in the replace field =
+// replace current + advance. Replace All is button-ONLY - that is the
+// D4 "confirm step": no key chord ever fires a whole-document mutation
+// by accident, and the batch lands as one undoable D1 action.
+class FindBar : public QWidget {
+public:
+    explicit FindBar(CodeEditor* editor)
+        : QWidget(editor), editor_(editor)
+    {
+        // Named so tests (and later, consumers embedding their own chrome)
+        // can locate the bar via findChild without exposing the class.
+        setObjectName(QStringLiteral("qmn-find-bar"));
+        setAutoFillBackground(true);
+        QPalette pal = palette();
+        pal.setColor(QPalette::Window, pal.color(QPalette::Window).lighter(108));
+        setPalette(pal);
+
+        auto toggle = [this](const QString& text, const QString& tip) {
+            auto* b = new QPushButton(text, this);
+            b->setCheckable(true);
+            b->setToolTip(tip);
+            return b;
+        };
+        caseToggle_ = toggle(QStringLiteral("Aa"), tr("Match case"));
+        wordToggle_ = toggle(QStringLiteral("ab|"), tr("Whole word"));
+        regexToggle_ = toggle(QStringLiteral(".*"), tr("Regular expression"));
+
+        queryEdit_ = new QLineEdit(this);
+        queryEdit_->setClearButtonEnabled(true);
+        queryEdit_->setMinimumWidth(120); // keeps the bar's natural width
+                                          // inside a 600px editor: the
+                                          // right-edge anchor is exact
+        queryEdit_->setPlaceholderText(tr("Find"));
+        replaceEdit_ = new QLineEdit(this);
+        replaceEdit_->setPlaceholderText(tr("Replace"));
+        countLabel_ = new QLabel(this);
+        countLabel_->setTextFormat(Qt::PlainText);
+        // Reserve the widest count so typing never reflows the bar.
+        countLabel_->setText(QStringLiteral("9999/99999"));
+        countLabel_->setMinimumWidth(countLabel_->sizeHint().width());
+        countLabel_->setText(QString());
+
+        // \u escapes, NOT UTF-8 byte hex escapes: QStringLiteral prefixes the
+        // literal with u"", so \xE2... sign-extends into the wrong code
+        // points (measured: the arrows and the X rendered as mojibake).
+        prevButton_ = new QPushButton(QStringLiteral("\u25B2"), this); // ▲
+        nextButton_ = new QPushButton(QStringLiteral("\u25BC"), this); // ▼
+        replaceButton_ = new QPushButton(tr("Replace"), this);
+        allButton_ = new QPushButton(tr("All"), this);
+        close_ = new QPushButton(QStringLiteral("\u00D7"), this); // ×
+
+        auto* row1 = new QHBoxLayout;
+        row1->setContentsMargins(0, 0, 0, 0);
+        row1->addWidget(caseToggle_);
+        row1->addWidget(wordToggle_);
+        row1->addWidget(regexToggle_);
+        row1->addWidget(queryEdit_, 1);
+        row1->addWidget(countLabel_);
+        row1->addWidget(prevButton_);
+        row1->addWidget(nextButton_);
+        row1->addWidget(close_);
+        auto* row2 = new QHBoxLayout;
+        row2->setContentsMargins(0, 0, 0, 0);
+        row2->addWidget(replaceEdit_, 1);
+        row2->addWidget(replaceButton_);
+        row2->addWidget(allButton_);
+        auto* lay = new QVBoxLayout(this);
+        lay->setContentsMargins(6, 4, 6, 4);
+        lay->addLayout(row1);
+        lay->addLayout(row2);
+        // A hard 300px floor on the BAR widget (the layout has no
+        // setMinimumWidth): below the natural width the bar COMPRESSES
+        // (documented v1 compromise, VS Code truncates too) instead of
+        // having its resize refused by the widgets' own minimums - that
+        // keeps the right-edge anchor exact at every editor width.
+        setMinimumWidth(300);
+
+        connect(queryEdit_, &QLineEdit::textChanged, this,
+                [this](const QString& t) { editor_->setFindText(t); });
+        for (QPushButton* t : {caseToggle_, wordToggle_, regexToggle_})
+            connect(t, &QPushButton::toggled, this, [this] { pushFlags(); });
+        connect(prevButton_, &QPushButton::clicked, this, [this] {
+            editor_->findPrevious();
+            updateCount();
+        });
+        connect(nextButton_, &QPushButton::clicked, this, [this] {
+            editor_->findNext();
+            updateCount();
+        });
+        connect(replaceButton_, &QPushButton::clicked, this, [this] {
+            editor_->replaceNext(replaceEdit_->text());
+            updateCount();
+        });
+        connect(allButton_, &QPushButton::clicked, this, [this] {
+            editor_->replaceAll(replaceEdit_->text());
+            updateCount();
+        });
+        connect(close_, &QPushButton::clicked, this, [this] { editor_->hideFindBar(); });
+
+        // Esc closes from anywhere in the bar; Enter/Shift+Enter get their
+        // find semantics BEFORE the line edits eat them (returnPressed
+        // cannot tell Shift apart, hence the filter).
+        queryEdit_->installEventFilter(this);
+        replaceEdit_->installEventFilter(this);
+    }
+
+    void open(bool replaceField)
+    {
+        syncFromEditor();
+        show();
+        place();
+        raise();
+        QLineEdit* le = replaceField ? replaceEdit_ : queryEdit_;
+        le->setFocus();
+        le->selectAll(); // Monaco-style: the remembered query is selected,
+                         // so the first typed character replaces it
+    }
+
+    // Position at the top-right of the editor, clamped to its width.
+    void place()
+    {
+        QWidget* e = parentWidget();
+        if (!e)
+            return;
+        // effective minimum hint (the 300px widget floor, see the ctor):
+        // resize below it would be refused, breaking the right-edge math
+        const int minW = qMax(minimumWidth(), 300);
+        QSize s = sizeHint();
+        s.rwidth() = qMax(minW, qMin(s.width(), e->width() - 8));
+        resize(s);
+        move(e->width() - 4 - s.width(), 4);
+    }
+
+    // Reflect the editor's query/flags without echoing back into setters.
+    void syncFromEditor()
+    {
+        const QSignalBlocker bq(queryEdit_);
+        queryEdit_->setText(editor_->findText());
+        const QSignalBlocker bc(caseToggle_), bw(wordToggle_), br(regexToggle_);
+        caseToggle_->setChecked(editor_->findFlags().testFlag(CodeEditor::FindFlag::MatchCase));
+        wordToggle_->setChecked(editor_->findFlags().testFlag(CodeEditor::FindFlag::WholeWord));
+        regexToggle_->setChecked(editor_->findFlags().testFlag(CodeEditor::FindFlag::UseRegex));
+        updateCount();
+    }
+
+    // The count read goes through matchCount(), which refreshes a set the
+    // editor's typing may have invalidated - so the label is never stale.
+    void updateCount()
+    {
+        if (!editor_->findPatternValid()) {
+            countLabel_->setText(tr("bad re"));
+            for (QPushButton* b : {prevButton_, nextButton_, replaceButton_, allButton_})
+                b->setEnabled(false);
+            return;
+        }
+        const int n = editor_->matchCount();
+        const int cur = editor_->currentMatch();
+        countLabel_->setText(cur >= 0 ? QStringLiteral("%1/%2").arg(cur + 1).arg(n)
+                                      : QString::number(n));
+        const bool any = n > 0;
+        prevButton_->setEnabled(any);
+        nextButton_->setEnabled(any);
+        replaceButton_->setEnabled(any);
+        allButton_->setEnabled(any);
+        allButton_->setText(n > 0 ? tr("All (%L1)").arg(n) : tr("All"));
+    }
+
+protected:
+    bool eventFilter(QObject* watched, QEvent* ev) override
+    {
+        if (ev->type() == QEvent::KeyPress) {
+            auto* ke = static_cast<QKeyEvent*>(ev);
+            const bool isEnter = ke->key() == Qt::Key_Return || ke->key() == Qt::Key_Enter;
+            if (ke->key() == Qt::Key_Escape) {
+                editor_->hideFindBar();
+                return true;
+            }
+            if (isEnter && watched == queryEdit_) {
+                if (ke->modifiers() & Qt::ShiftModifier)
+                    editor_->findPrevious();
+                else
+                    editor_->findNext();
+                updateCount();
+                return true;
+            }
+            if (isEnter && watched == replaceEdit_) {
+                editor_->replaceNext(replaceEdit_->text());
+                updateCount();
+                return true;
+            }
+        }
+        return QWidget::eventFilter(watched, ev);
+    }
+
+    void keyPressEvent(QKeyEvent* ke) override
+    {
+        if (ke->key() == Qt::Key_Escape) // focus sitting on a button
+            editor_->hideFindBar();
+        else
+            QWidget::keyPressEvent(ke);
+    }
+
+private:
+    void pushFlags()
+    {
+        CodeEditor::FindFlags f;
+        if (caseToggle_->isChecked())
+            f |= CodeEditor::FindFlag::MatchCase;
+        if (wordToggle_->isChecked())
+            f |= CodeEditor::FindFlag::WholeWord;
+        if (regexToggle_->isChecked())
+            f |= CodeEditor::FindFlag::UseRegex;
+        editor_->setFindFlags(f); // recomputes, which re-syncs the label
+    }
+
+    CodeEditor* editor_;
+    QPushButton* caseToggle_;
+    QPushButton* wordToggle_;
+    QPushButton* regexToggle_;
+    QLineEdit* queryEdit_;
+    QLineEdit* replaceEdit_;
+    QLabel* countLabel_;
+    QPushButton* prevButton_;
+    QPushButton* nextButton_;
+    QPushButton* replaceButton_;
+    QPushButton* allButton_;
+    QPushButton* close_;
+};
+
+} // namespace
+
+void CodeEditor::recomputeFindMatches()
+{
+    findDirty_ = false;
+    currentMatch_ = -1;
+    matches_.clear();
+    findPatternValid_ = true;
+    if (findText_.isEmpty()) // an empty query never searches (Monaco too)
+        return;
+
+    const QString pattern = findFlags_.testFlag(FindFlag::UseRegex)
+        ? findText_
+        : QRegularExpression::escape(findText_);
+    const QString wrapped = findFlags_.testFlag(FindFlag::WholeWord)
+        ? QStringLiteral("\\b(?:%1)\\b").arg(pattern)
+        : pattern;
+    QRegularExpression::PatternOptions opts = QRegularExpression::UseUnicodePropertiesOption;
+    if (!findFlags_.testFlag(FindFlag::MatchCase))
+        opts |= QRegularExpression::CaseInsensitiveOption;
+    const QRegularExpression re(wrapped, opts);
+    if (!re.isValid()) { // "invalid" must be tellable from "no matches"
+        findPatternValid_ = false;
+        if (!findRepainting_)
+            update();
+        syncFindBarLabel();
+        return;
+    }
+
+    const int lines = buffer_.lineCount();
+    for (int l = 0; l < lines; ++l) {
+        const auto lineMatches = findMatchInLine(buffer_.lineText(l), l, re);
+        matches_.reserve(matches_.size() + lineMatches.size());
+        matches_.append(lineMatches); // findMatchInLine keeps line order
+    }
+    if (!findRepainting_)
+        update(); // highlights ride the repaint (entries outside a paint)
+    syncFindBarLabel();
+}
+
+void CodeEditor::refreshFindMatches()
+{
+    if (findDirty_)
+        recomputeFindMatches();
+}
+
+void CodeEditor::syncFindBarLabel() const
+{
+    if (findBar_)
+        static_cast<FindBar*>(findBar_)->updateCount();
+}
+
+void CodeEditor::setFindText(const QString& text)
+{
+    if (text == findText_)
+        return;
+    findText_ = text;
+    recomputeFindMatches();
+}
+
+void CodeEditor::setFindFlags(FindFlags flags)
+{
+    if (flags == findFlags_)
+        return;
+    findFlags_ = flags;
+    recomputeFindMatches();
+}
+
+namespace {
+
+// Document-order comparison for the match walk: matches_ is sorted by
+// (startLine, startCol), so std::lower_bound over a (line, col) pair gives
+// the first candidate at/after a position.
+bool matchStartsBefore(const CodeEditor::MatchRange& m, const std::pair<int, int>& p)
+{
+    return m.startLine < p.first || (m.startLine == p.first && m.startCol < p.second);
+}
+
+// The current match counts as "current" only while the selection covers
+// it exactly - a click elsewhere quietly drops the position, and the next
+// F3 resumes from the caret (Monaco behavior), never from a stale index.
+bool selectionOnMatch(const QVector<CodeEditor::MatchRange>& ms, int cur,
+                      TextPosition selStart, TextPosition selEnd)
+{
+    if (cur < 0 || cur >= static_cast<int>(ms.size()))
+        return false;
+    const CodeEditor::MatchRange& m = ms[cur];
+    return m.startLine == selStart.line && m.startCol == selStart.col
+        && m.endLine == selEnd.line && m.endCol == selEnd.col;
+}
+
+} // namespace
+
+int CodeEditor::matchCount()
+{
+    refreshFindMatches();
+    return static_cast<int>(matches_.size());
+}
+
+// The EFFECTIVE current match: the stored index only answers while the
+// selection still covers it (see selectionOnMatch). Read-only - the walk
+// state itself is only moved by the actions, never by a paint or a label
+// refresh reading through here.
+int CodeEditor::currentMatch()
+{
+    refreshFindMatches();
+    return selectionOnMatch(matches_, currentMatch_, selStart(), selEnd()) ? currentMatch_ : -1;
+}
+
+bool CodeEditor::gotoMatch(int index)
+{
+    refreshFindMatches();
+    if (index < 0 || index >= static_cast<int>(matches_.size()))
+        return false;
+    const MatchRange& m = matches_[index];
+    setSelection({m.startLine, m.startCol}, {m.endLine, m.endCol});
+    currentMatch_ = index;
+    ensureCaretVisible(); // a match far down must scroll into view
+    update();
+    syncFindBarLabel();
+    return true;
+}
+
+bool CodeEditor::findNext()
+{
+    refreshFindMatches();
+    if (matches_.isEmpty())
+        return false;
+    const int n = static_cast<int>(matches_.size());
+    int idx;
+    if (selectionOnMatch(matches_, currentMatch_, selStart(), selEnd())) {
+        idx = currentMatch_ + 1 >= n ? 0 : currentMatch_ + 1; // cycle; the
+                                                              // wrap
+                                                              // re-selects
+                                                              // the first
+                                                              // match
+    } else {
+        const auto it = std::lower_bound(matches_.begin(), matches_.end(),
+                                         std::pair(caret_.line, caret_.col),
+                                         matchStartsBefore);
+        idx = it == matches_.end() ? 0 : int(it - matches_.begin());
+    }
+    return gotoMatch(idx);
+}
+
+bool CodeEditor::findPrevious()
+{
+    refreshFindMatches();
+    if (matches_.isEmpty())
+        return false;
+    const int n = static_cast<int>(matches_.size());
+    int idx;
+    if (selectionOnMatch(matches_, currentMatch_, selStart(), selEnd())) {
+        idx = currentMatch_ == 0 ? n - 1 : currentMatch_ - 1;
+    } else {
+        const auto it = std::lower_bound(matches_.begin(), matches_.end(),
+                                         std::pair(caret_.line, caret_.col),
+                                         matchStartsBefore);
+        idx = it == matches_.begin() ? n - 1 : int(it - matches_.begin()) - 1;
+    }
+    return gotoMatch(idx);
+}
+
+bool CodeEditor::replaceRange(const MatchRange& m, const QString& replacement)
+{
+    const UndoMark pre = captureEditMark();
+    buffer_.beginEditGroup(); // bracketed: its own undo step, never coalesced
+    const int start = buffer_.offsetOf(m.startLine, m.startCol);
+    buffer_.removeRange(start, buffer_.offsetOf(m.endLine, m.endCol));
+    if (!replacement.isEmpty())
+        buffer_.insertAtOffset(start, replacement);
+    buffer_.endEditGroup();
+    // Single-caret operation (find semantics; D1 extras collapse), caret
+    // at the replacement end. A multiline replacement spans lines, so the
+    // caret position goes through the model.
+    const auto atLc = buffer_.lineColAt(start + replacement.size());
+    const TextPosition at{atLc.line, atLc.col};
+    setSelection(at, at);
+    reconcileUndoMarks(pre);
+    return true;
+}
+
+bool CodeEditor::replaceNext(const QString& replacement)
+{
+    refreshFindMatches();
+    if (matches_.isEmpty())
+        return false;
+    int idx;
+    if (selectionOnMatch(matches_, currentMatch_, selStart(), selEnd())) {
+        idx = currentMatch_;
+    } else { // no current: the next at/after the caret, no wrap
+             // (Monaco's Replace only acts on the selection or the
+             // next occurrence ahead)
+        const auto it = std::lower_bound(matches_.begin(), matches_.end(),
+                                         std::pair(caret_.line, caret_.col),
+                                         matchStartsBefore);
+        if (it == matches_.end())
+            return false;
+        idx = int(it - matches_.begin());
+    }
+    const MatchRange target = matches_[idx]; // copy: replaceRange may shift
+    if (!replaceRange(target, replacement))
+        return false;
+    recomputeFindMatches();
+    // Position the walk for the next F3/replace: the first match strictly
+    // after the replaced range (offsets are the post-edit ones now).
+    const auto it = std::upper_bound(matches_.begin(), matches_.end(),
+                                     std::pair(target.startLine, target.startCol),
+                                     [](const std::pair<int, int>& p, const MatchRange& m) {
+                                         return p.first < m.startLine
+                                             || (p.first == m.startLine && p.second < m.startCol);
+                                     });
+    if (it != matches_.end())
+        currentMatch_ = int(it - matches_.begin()); // NOT reselected: the
+                                                    // caret stays at the
+                                                    // replacement end
+    return true;
+}
+
+int CodeEditor::replaceAll(const QString& replacement)
+{
+    refreshFindMatches();
+    const int n = static_cast<int>(matches_.size());
+    if (n == 0)
+        return 0;
+    const MatchRange first = matches_.front(); // its line/col survive: the
+                                               // walk below runs bottom-up
+    const UndoMark pre = captureEditMark();
+    buffer_.beginEditGroup(); // ONE undo group for the whole batch (D1 DoD)
+    for (int i = n - 1; i >= 0; --i) {
+        const MatchRange& m = matches_[i];
+        const int start = buffer_.offsetOf(m.startLine, m.startCol);
+        buffer_.removeRange(start, buffer_.offsetOf(m.endLine, m.endCol));
+        if (!replacement.isEmpty())
+            buffer_.insertAtOffset(start, replacement);
+    }
+    buffer_.endEditGroup();
+    const auto atLc = buffer_.lineColAt(
+        buffer_.offsetOf(first.startLine, first.startCol) + replacement.size());
+    const TextPosition at{atLc.line, atLc.col};
+    setSelection(at, at);
+    reconcileUndoMarks(pre);
+    recomputeFindMatches();
+    return n;
+}
+
+void CodeEditor::showFindBar()
+{
+    if (!findBar_)
+        findBar_ = new FindBar(this);
+    static_cast<FindBar*>(findBar_)->open(false);
+}
+
+void CodeEditor::showReplaceBar()
+{
+    if (!findBar_)
+        findBar_ = new FindBar(this);
+    static_cast<FindBar*>(findBar_)->open(true);
+}
+
+void CodeEditor::hideFindBar()
+{
+    if (!findBar_)
+        return;
+    findBar_->hide();
+    setFocus(Qt::OtherFocusReason); // the query and highlights persist
+}
+
+bool CodeEditor::findBarVisible() const
+{
+    return findBar_ && findBar_->isVisible();
+}
+
+void CodeEditor::clearFind()
+{
+    findText_.clear();
+    findFlags_ = FindFlag::MatchCase; // back to the documented default
+                                       // (the same value a fresh editor
+                                       // carries); the bar's toggles re-sync
+    matches_.clear();
+    currentMatch_ = -1;
+    findDirty_ = false;
+    findPatternValid_ = true;
+    if (findBar_)
+        static_cast<FindBar*>(findBar_)->syncFromEditor(); // empties fields
+    update();
+}
+
 void CodeEditor::keyPressEvent(QKeyEvent* event)
 {
     perfTimer_.start();
@@ -1985,6 +2621,33 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
     if (event->matches(QKeySequence::Redo) ||
         (key == Qt::Key_Y && ctrl == Qt::ControlModifier)) {
         redo();
+        finish();
+        return;
+    }
+
+    // M6 find/replace shortcuts via standard-key matching: Find (Ctrl+F),
+    // Replace (Ctrl+H), FindNext (F3), FindPrevious (Shift+F3). They act
+    // with the bar closed too (the query persists, Monaco parity); when
+    // focus sits in the bar these keys are consumed by its own widgets
+    // and never reach this switch. Ctrl+F must stay ahead of the Ctrl
+    // catch-all below, which swallows every other Control combo.
+    if (event->matches(QKeySequence::Find)) {
+        showFindBar();
+        finish();
+        return;
+    }
+    if (event->matches(QKeySequence::Replace)) {
+        showReplaceBar();
+        finish();
+        return;
+    }
+    if (event->matches(QKeySequence::FindNext)) {
+        findNext();
+        finish();
+        return;
+    }
+    if (event->matches(QKeySequence::FindPrevious)) {
+        findPrevious();
         finish();
         return;
     }
@@ -2528,6 +3191,8 @@ void CodeEditor::wheelEvent(QWheelEvent* event)
 void CodeEditor::resizeEvent(QResizeEvent*)
 {
     updateScrollBarRange();
+    if (findBar_) // the bar hugs the top-right corner (Monaco placement)
+        static_cast<FindBar*>(findBar_)->place();
 }
 
 void CodeEditor::changeEvent(QEvent* event)

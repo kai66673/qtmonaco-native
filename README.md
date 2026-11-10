@@ -43,7 +43,7 @@ insert/delete operations with a naive `QString` reference and a full
 treap-invariant check after **every** operation (`tests/tst_textbuffer.cpp`).
 
 Deliberately **not implemented yet** (see roadmap): soft wrap, horizontal
-scrolling, find/replace, column memory, full
+scrolling, column memory, full
 grapheme segmentation (`col` still counts UTF-16 code units even though
 arrow keys and edits snap to cluster boundaries), diff view, LSP, scrolling
 past the end.
@@ -107,7 +107,8 @@ Gate 1 — Code Editor v1:
 - [x] M4 syntax highlighting (vendored tree-sitter runtime + generated
       grammars; incremental, viewport-scoped — see PLAN.md D2)
 - [x] M5 decoration layers + line-number gutter + markers
-- [ ] M6 find/replace (QRegularExpression)
+- [x] M6 find/replace (QRegularExpression): Ctrl+F bar, per-line engine,
+      match highlights, F3/Shift+F3, replace + one-action replace-all
 - [ ] M7 overview ruler (replaces minimap)
 - [ ] M9 horizontal scrolling (soft wrap deferred to Gate 2)
 - [ ] M13 code folding (tree-sitter `@fold` ranges + indent fallback; gutter toggles)

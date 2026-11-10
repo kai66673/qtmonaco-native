@@ -14,6 +14,8 @@
 #include <QImage>
 #include <QInputMethodEvent>
 #include <QInputMethodQueryEvent>
+#include <QLineEdit>
+#include <QPushButton>
 #include <QWheelEvent>
 
 #include "view/CodeEditor.hpp"
@@ -150,6 +152,24 @@ private slots:
     void decorationsRoundTripUpdateRemove();
     void gutterShiftsTextGeometryAndHitTest();
     void diagnosticUnderlinePaintsSeverityInk();
+
+    // Find & replace (M6, Phase D4). DoD: match ranges as model ranges
+    // (numeric assertions incl. surrogate safety); replace-all is ONE
+    // undoable D1 action with a confirm step; match highlights ride the
+    // decoration-style paint pass (viewport-only scans).
+    void findLiteralRangesCaseFlagAndEscapedMeta();
+    void findWholeWordFlag();
+    void findRegexFlagInvalidPatternAndPerLineEngine();
+    void findMatchesSnapOverSurrogatePairs();
+    void findNextPreviousCycleWrapAndCurrentMatch();
+    void replaceNextOwnUndoStepAndCaretLanding();
+    void replaceAllIsOneUndoableAction();
+    void findSetRefreshesLiveThroughTyping();
+    void findBarOpenClosePersistsAndDrivesEngine();
+    void replaceAllConfirmStepIsButtonOnly();
+    void findBarStaysTopRightOnResize();
+    void paintMatchQuadsNumericProbe();
+    void paintZeroWidthMatchPhantomCell();
 
 private:
     CodeEditor* editor = nullptr;
@@ -2600,6 +2620,519 @@ void TestCodeEditor::diagnosticUnderlinePaintsSeverityInk()
 
     editor->setDiagnostics({Diag{1, 0, 1, 9, CodeEditor::Severity::Warning, QStringLiteral("hmm")}});
     QCOMPARE(redInk(), 0); // Warning is yellow-dominant: out of the red band
+}
+
+// ---- M6 find & replace (Phase D4) ---------------------------------------
+//
+// M6 pixel facts (measured, this environment): the match-family ink is a
+// fixed VS Code-dark constant (the renderer's findMatchInk): all matches
+// (196,136,30) at alpha 80, the current one (246,169,0) at alpha 130.
+// Premultiplied over the dark Base #323232 they land near (96,77,44) and
+// (150,111,25): red-dominant AND warm (G clearly above B). Diagnostic
+// error ink (241,76,76) over Base is (110,58,58) - G == B, cool. So the
+// warm probe below never counts the M5 diagnostic band, and the M5 probe
+// (red > green+60) never counts quads (their red-minus-green stays <= 40).
+// Neutral gray text/gutter ink and blue selection fail the warm test
+// outright - both probes stay exclusive on the same rows by construction.
+
+namespace qmn::view {
+// Streamed for QCOMPARE failure output: ADL must see it, so it lives in
+// the type's namespace (a global operator would be invisible to QtTest's
+// toString). The defaulted operator== is what the DoD assertions compare.
+QDebug operator<<(QDebug d, const CodeEditor::MatchRange& m)
+{
+    return d << "MatchRange(" << m.startLine << ", " << m.startCol << ", "
+             << m.endLine << ", " << m.endCol << ')';
+}
+} // namespace qmn::view
+
+namespace {
+
+using MR = CodeEditor::MatchRange;
+
+QLineEdit* barField(CodeEditor* e, const QString& placeholder)
+{
+    for (QLineEdit* le : e->findChildren<QLineEdit*>())
+        if (le->placeholderText() == placeholder)
+            return le;
+    return nullptr;
+}
+
+QPushButton* barButton(CodeEditor* e, const QString& text, bool prefix = false)
+{
+    for (QPushButton* b : e->findChildren<QPushButton*>())
+        if (prefix ? b->text().startsWith(text) : b->text() == text)
+            return b;
+    return nullptr;
+}
+
+QWidget* findBarOf(CodeEditor* e)
+{
+    return e->findChild<QWidget*>(QStringLiteral("qmn-find-bar"));
+}
+
+// Count warm match-quad ink in a row window, right of the gutter. The
+// negative control (no matches -> exactly 0) makes every other pixel on
+// those rows provably non-warm, so no per-case exclusion is needed.
+int warmQuadPixels(const QImage& img, int xFrom, int yFrom, int yTo)
+{
+    int n = 0;
+    for (int y = yFrom; y < yTo && y < img.height(); ++y)
+        for (int x = xFrom; x < img.width(); ++x) {
+            const QRgb px = img.pixel(x, y);
+            if (qRed(px) >= qGreen(px) + 10 && qGreen(px) >= qBlue(px) + 10
+                && qRed(px) <= 200 && qGreen(px) >= 55)
+                ++n;
+        }
+    return n;
+}
+
+} // namespace
+
+void TestCodeEditor::findLiteralRangesCaseFlagAndEscapedMeta()
+{
+    editor->setPlainText(QStringLiteral("foo Foo FOO xfoox"));
+    QVERIFY(editor->findText().isEmpty());
+    QCOMPARE(editor->matchCount(), 0); // an empty query never searches
+    QVERIFY(editor->findPatternValid());
+    QVERIFY(editor->findFlags() == CodeEditor::FindFlag::MatchCase); // default
+
+    editor->setFindText(QStringLiteral("foo"));
+    QCOMPARE(editor->matchCount(), 2); // substring hits, but case-sensitive
+    QCOMPARE(editor->matches(),
+             (QVector<MR>{MR{0, 0, 0, 3}, MR{0, 13, 0, 16}}));
+
+    editor->setFindFlags(CodeEditor::FindFlags()); // MatchCase off
+    QCOMPARE(editor->matchCount(), 4);
+    editor->setFindFlags(CodeEditor::FindFlag::MatchCase);
+    QCOMPARE(editor->matchCount(), 2);
+
+    // Literal mode escapes regex metacharacters into the same engine.
+    editor->setFindText(QStringLiteral("o.o")); // would hit "ooo" as regex
+    QCOMPARE(editor->matchCount(), 0);
+    editor->setFindText(QStringLiteral("FOO xfoo")); // a space is literal too
+    QCOMPARE(editor->matchCount(), 1);
+
+    editor->setFindText(QString()); // empty clears the set
+    QCOMPARE(editor->matchCount(), 0);
+    QVERIFY(editor->findPatternValid());
+}
+
+void TestCodeEditor::findWholeWordFlag()
+{
+    editor->setPlainText(QStringLiteral("foobar foo barfoo foo_bar foo-bar"));
+    editor->setFindText(QStringLiteral("foo"));
+    // The word boundary is regex-CLASS based (\w: underscore included):
+    // the documented v1 approximation of VS Code's Unicode-aware \b.
+    editor->setFindFlags(CodeEditor::FindFlag::MatchCase | CodeEditor::FindFlag::WholeWord);
+    QCOMPARE(editor->matchCount(), 2);
+    QCOMPARE(editor->matches(),
+             (QVector<MR>{MR{0, 7, 0, 10}, MR{0, 26, 0, 29}}));
+
+    editor->setFindFlags(CodeEditor::FindFlag::MatchCase);
+    QCOMPARE(editor->matchCount(), 5); // foobar/barfoo/foo_bar hits come back
+}
+
+void TestCodeEditor::findRegexFlagInvalidPatternAndPerLineEngine()
+{
+    editor->setPlainText(QStringLiteral("a12 bb x9"));
+    editor->setFindFlags(CodeEditor::FindFlag::MatchCase | CodeEditor::FindFlag::UseRegex);
+    editor->setFindText(QStringLiteral("\\d+|x+|b+"));
+    QCOMPARE(editor->matchCount(), 4);
+    QCOMPARE(editor->matches(),
+             (QVector<MR>{MR{0, 1, 0, 3}, MR{0, 4, 0, 6},
+                          MR{0, 7, 0, 8}, MR{0, 8, 0, 9}}));
+
+    // Capture groups: the reported range is the FULL match (group 0),
+    // not the groups (which only refine what counts as a match).
+    editor->setFindText(QStringLiteral("(\\d)(\\d)"));
+    QCOMPARE(editor->matchCount(), 1);
+    QCOMPARE(editor->matches().at(0), (MR{0, 1, 0, 3}));
+
+    // An invalid pattern must be tellable from "no matches".
+    editor->setFindText(QStringLiteral("(unclosed"));
+    QCOMPARE(editor->matchCount(), 0);
+    QVERIFY(!editor->findPatternValid());
+    editor->setFindText(QStringLiteral("x"));
+    QCOMPARE(editor->matchCount(), 1);
+    QVERIFY(editor->findPatternValid());
+
+    // The engine is PER-LINE (UseRegex stays on here): alternation
+    // enumerates across lines, but a match (and a pattern mentioning a
+    // literal newline) never crosses a line break.
+    editor->setPlainText(QStringLiteral("a\nb"));
+    editor->setFindText(QStringLiteral("a.b"));
+    QCOMPARE(editor->matchCount(), 0);
+    editor->setFindText(QStringLiteral("a\nb")); // literal, escaped, still 0
+    QCOMPARE(editor->matchCount(), 0);
+    editor->setFindText(QStringLiteral("a|b"));
+    QCOMPARE(editor->matchCount(), 2);
+    QCOMPARE(editor->matches(), (QVector<MR>{MR{0, 0, 0, 1}, MR{1, 0, 1, 1}}));
+}
+
+void TestCodeEditor::findMatchesSnapOverSurrogatePairs()
+{
+    editor->setPlainText(QStringLiteral("a\U0001F600" "b")); // a H L b (4 units)
+    QVERIFY(QChar(editor->toPlainText()[1]).isHighSurrogate()); // pair guard
+    QVERIFY(QChar(editor->toPlainText()[2]).isLowSurrogate());
+
+    editor->setFindFlags(CodeEditor::FindFlag::MatchCase | CodeEditor::FindFlag::UseRegex);
+    editor->setFindText(QStringLiteral("."));
+    // PCRE2 in code-unit mode would report FOUR half-cell dots on this
+    // 4-unit line; the engine snaps every boundary outward and dedups the
+    // snapped pair matches: exactly the three code points, whole.
+    QCOMPARE(editor->matchCount(), 3);
+    QCOMPARE(editor->matches(),
+             (QVector<MR>{MR{0, 0, 0, 1}, MR{0, 1, 0, 3}, MR{0, 3, 0, 4}}));
+
+    editor->replaceAll(QStringLiteral("X"));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("XXX"));
+    const QString after = editor->toPlainText();
+    for (int i = 0; i < after.size(); ++i) { // no orphan halves anywhere
+        QVERIFY(!QChar(after[i]).isHighSurrogate());
+        QVERIFY(!QChar(after[i]).isLowSurrogate());
+    }
+
+    // A literal query holding the pair matches the pair whole (and only
+    // the pair): the DoD replacement-safety case.
+    editor->setPlainText(QStringLiteral("x\U0001F600\U0001F600y\U0001F600"));
+    editor->setFindFlags(CodeEditor::FindFlag::MatchCase);
+    editor->setFindText(QStringLiteral("\U0001F600"));
+    QCOMPARE(editor->matchCount(), 3);
+    QCOMPARE(editor->matches(),
+             (QVector<MR>{MR{0, 1, 0, 3}, MR{0, 3, 0, 5}, MR{0, 6, 0, 8}}));
+    QCOMPARE(editor->replaceAll(QStringLiteral("p")), 3);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("xppyp"));
+}
+
+void TestCodeEditor::findNextPreviousCycleWrapAndCurrentMatch()
+{
+    editor->setPlainText(QStringLiteral("a\naa\naaa"));
+    editor->setFindText(QStringLiteral("a"));
+    QCOMPARE(editor->matchCount(), 6);
+    QCOMPARE(editor->currentMatch(), -1); // a fresh set has no current match
+
+    QVERIFY(editor->findNext()); // no current: first match at/after the caret
+    QCOMPARE(editor->currentMatch(), 0);
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("a"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1})); // caret = end
+
+    editor->findNext();
+    editor->findNext();
+    QCOMPARE(editor->currentMatch(), 2); // (1,1..2)
+
+    // A click elsewhere drops the current match (the selection no longer
+    // covers it); the next F3 resumes from the caret, Monaco-style.
+    editor->setPosition({1, 0});
+    QCOMPARE(editor->currentMatch(), -1);
+    QVERIFY(editor->findNext());
+    QCOMPARE(editor->currentMatch(), 1); // (1,0..1) at the caret
+
+    QVERIFY(editor->findPrevious());
+    QCOMPARE(editor->currentMatch(), 0);
+    QVERIFY(editor->findPrevious()); // cycle wraps to the last match
+    QCOMPARE(editor->currentMatch(), 5); // (2,2..3)
+    QCOMPARE(editor->selectedText(), QStringLiteral("a"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 3}));
+    QVERIFY(editor->findNext()); // wraps back to the first
+    QCOMPARE(editor->currentMatch(), 0);
+
+    QVERIFY(!editor->gotoMatch(-1));
+    QVERIFY(!editor->gotoMatch(6));
+    QVERIFY(editor->gotoMatch(5));
+    QCOMPARE(editor->currentMatch(), 5);
+
+    editor->setFindText(QStringLiteral("nope"));
+    QCOMPARE(editor->currentMatch(), -1);
+    QVERIFY(!editor->findNext());
+    QVERIFY(!editor->findPrevious());
+}
+
+void TestCodeEditor::replaceAllIsOneUndoableAction()
+{
+    editor->setPlainText(QStringLiteral("foo foo foo\nfoo"));
+    editor->setFindText(QStringLiteral("foo"));
+    QCOMPARE(editor->matchCount(), 4);
+    QVERIFY(!editor->canUndo()); // setPlainText reset the history
+
+    QCOMPARE(editor->replaceAll(QStringLiteral("X")), 4); // D4 DoD core
+    QCOMPARE(editor->toPlainText(), QStringLiteral("X X X\nX"));
+    QCOMPARE(editor->matchCount(), 0); // recompute after the batch
+    QVERIFY(editor->canUndo()); // the batch pushed...
+    QVERIFY(!editor->canRedo()); // ...exactly ONE group (no redo branch yet)
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1})); // first end
+
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier); // one Ctrl+Z
+    QCOMPARE(editor->toPlainText(), QStringLiteral("foo foo foo\nfoo"));
+    QVERIFY(!editor->canUndo()); // the WHOLE batch was one action
+    QVERIFY(editor->canRedo());
+    QCOMPARE(editor->matchCount(), 4); // the set followed the undo
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("X X X\nX")); // one redo
+
+    // An empty replacement deletes every match (still one action).
+    editor->setFindText(QStringLiteral("X"));
+    QCOMPARE(editor->replaceAll(QString()), 4);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("  \n")); // the two separators survive
+    QVERIFY(editor->canUndo()); // still ONE group for the empty batch too
+    QVERIFY(!editor->canRedo());
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("X X X\nX"));
+}
+
+void TestCodeEditor::replaceAllConfirmStepIsButtonOnly()
+{
+    // D4 "confirm step": no key chord fires the whole-document mutation -
+    // Enter-family keys only navigate; the All button is the only trigger.
+    editor->setPlainText(QStringLiteral("foo foo foo"));
+    editor->showFindBar();
+    QLineEdit* q = barField(editor, QStringLiteral("Find"));
+    QLineEdit* r = barField(editor, QStringLiteral("Replace"));
+    QVERIFY(q && r);
+    q->setText(QStringLiteral("foo")); // the bar drives the engine directly
+    r->setText(QStringLiteral("X"));
+    QCOMPARE(editor->matchCount(), 3);
+    QVERIFY(!editor->canUndo());
+
+    QTest::keyClick(q, Qt::Key_Return); // Enter = findNext
+    QTest::keyClick(q, Qt::Key_Return, Qt::ShiftModifier); // = findPrevious
+    QTest::keyClick(q, Qt::Key_Return, Qt::ControlModifier); // still find
+    QCOMPARE(editor->currentMatch(), 0);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("foo foo foo"));
+    QVERIFY(!editor->canUndo()); // no key replaced ANYTHING
+
+    QPushButton* all = barButton(editor, QStringLiteral("All"), true);
+    QVERIFY(all);
+    QVERIFY(all->isEnabled());
+    QVERIFY(all->text().startsWith(QStringLiteral("All"))); // "All (3)"
+    QTest::mouseClick(all, Qt::LeftButton, Qt::NoModifier, all->rect().center());
+    QCOMPARE(editor->toPlainText(), QStringLiteral("X X X")); // button-only
+    QVERIFY(editor->canUndo()); // one D1 action for the whole batch
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("foo foo foo"));
+    QCOMPARE(editor->matchCount(), 3);
+}
+
+void TestCodeEditor::findSetRefreshesLiveThroughTyping()
+{
+    editor->setPlainText(QStringLiteral("foo bar\n"));
+    editor->setFindText(QStringLiteral("bar"));
+    QCOMPARE(editor->matchCount(), 1);
+
+    // Typing marks the set stale (the single edit observer); the next
+    // refresh-on-read recomputes it. Crucially: NO paint runs between
+    // the edits (QTest delivers synchronously, no event loop runs), so
+    // a stale-set failure here reads 1, not 2.
+    editor->setPosition({0, 0});
+    QTest::keyClicks(editor, "bar");
+    QCOMPARE(editor->toPlainText(), QStringLiteral("barfoo bar\n"));
+    QCOMPARE(editor->matchCount(), 2);
+    QCOMPARE(editor->matches().last(), (MR{0, 7, 0, 10}));
+
+    // Deleting INSIDE a match shifts its end (nothing "was the match"),
+    // so the shifted ranges themselves are the proof of a live recompute.
+    QTest::keyClick(editor, Qt::Key_Delete, Qt::ControlModifier); // "foo" tail
+    QCOMPARE(editor->toPlainText(), QStringLiteral("bar bar\n"));
+    QCOMPARE(editor->matchCount(), 2);
+    QCOMPARE(editor->matches(), (QVector<MR>{MR{0, 0, 0, 3}, MR{0, 4, 0, 7}}));
+}
+
+void TestCodeEditor::replaceNextOwnUndoStepAndCaretLanding()
+{
+    editor->setPlainText(QStringLiteral("foo foo bar"));
+    editor->setFindText(QStringLiteral("foo"));
+    editor->setPosition({0, 0});
+    QVERIFY(!editor->canUndo());
+
+    // No current match: the next one at/after the caret is replaced
+    // (never a wrap-around — Replace never mutates behind your back).
+    QVERIFY(editor->replaceNext(QStringLiteral("X")));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("X foo bar"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1})); // repl end
+    QVERIFY(editor->canUndo()); // its own bracketed D1 step
+
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("foo foo bar"));
+    QVERIFY(!editor->canUndo());
+    QVERIFY(editor->canRedo()); // exactly one group was on the stack
+    QCOMPARE(editor->matchCount(), 2); // the set followed the undo
+
+    QVERIFY(editor->replaceNext(QStringLiteral("Y")));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Y foo bar"));
+
+    // Nothing at/after the caret: false, no mutation.
+    editor->setPosition({0, 99}); // clamps to the line end
+    QVERIFY(!editor->replaceNext(QStringLiteral("Z")));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Y foo bar"));
+}
+
+void TestCodeEditor::findBarOpenClosePersistsAndDrivesEngine()
+{
+    // findBarVisible() reads QWidget::isVisible(), which is false while any
+    // ancestor is hidden - so this test needs the editor shown (the engine
+    // tests above deliberately never show it).
+    editor->show();
+    editor->setPlainText(QStringLiteral("foo bar foo baz foo"));
+    editor->setFindText(QStringLiteral("foo"));
+    QCOMPARE(editor->matchCount(), 3);
+    QVERIFY(!editor->findBarVisible());
+
+    // Ctrl+F opens the bar with the remembered query (drop-in users keep
+    // their muscle memory). The find row must be reachable: locate it by
+    // its field/button identities instead of painting it.
+    QTest::keyClick(editor, Qt::Key_F, Qt::ControlModifier);
+    QVERIFY(editor->findBarVisible());
+    QLineEdit* q = barField(editor, QStringLiteral("Find"));
+    QVERIFY(q);
+    QCOMPARE(q->text(), QStringLiteral("foo"));
+
+    // The X button hides the bar; the query and the match set persist.
+    // (The glyph texts also lock the \u-escape form of the bar's unicode
+    // buttons: UTF-8 byte escapes in QStringLiteral would read as mojibake.)
+    QVERIFY(barButton(editor, QStringLiteral("\u25B2"))); // ▲ prev
+    QVERIFY(barButton(editor, QStringLiteral("\u25BC"))); // ▼ next
+    QPushButton* x = barButton(editor, QStringLiteral("\u00D7"));
+    QVERIFY(x);
+    QTest::mouseClick(x, Qt::LeftButton, Qt::NoModifier, x->rect().center());
+    QVERIFY(!editor->findBarVisible());
+    QCOMPARE(editor->findText(), QStringLiteral("foo"));
+    QCOMPARE(editor->matchCount(), 3);
+
+    // F3/Shift+F3 work with the bar CLOSED (the query persists, Monaco).
+    QTest::keyClick(editor, Qt::Key_F3);
+    QCOMPARE(editor->currentMatch(), 0);
+    QCOMPARE(editor->selectedText(), QStringLiteral("foo"));
+    QTest::keyClick(editor, Qt::Key_F3, Qt::ShiftModifier);
+    QCOMPARE(editor->currentMatch(), 2); // wraps to the last match
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 19})); // caret = match end
+
+    // Ctrl+H reopens (single bar, replace row included). Esc in the
+    // field closes from inside; again the query persists.
+    QTest::keyClick(editor, Qt::Key_H, Qt::ControlModifier);
+    QVERIFY(editor->findBarVisible());
+    QVERIFY(barField(editor, QStringLiteral("Replace")));
+    QTest::keyClick(q, Qt::Key_Escape);
+    QVERIFY(!editor->findBarVisible());
+    QCOMPARE(editor->findText(), QStringLiteral("foo"));
+
+    // Typing into the field drives the engine through textChanged (works
+    // with the bar hidden too, but reopen it to assert clearFind's
+    // "does not hide" half of the contract).
+    editor->showFindBar();
+    QVERIFY(editor->findBarVisible());
+    q->setText(QStringLiteral("bar"));
+    QCOMPARE(editor->findText(), QStringLiteral("bar"));
+    QCOMPARE(editor->matchCount(), 1);
+
+    // clearFind: query + flags + matches + the field, bar untouched.
+    editor->setFindFlags(CodeEditor::FindFlag::MatchCase | CodeEditor::FindFlag::UseRegex);
+    editor->clearFind();
+    QCOMPARE(editor->findText(), QString());
+    QVERIFY(editor->findFlags() == CodeEditor::FindFlag::MatchCase); // the default state
+    QCOMPARE(editor->matchCount(), 0);
+    QVERIFY(editor->findPatternValid());
+    QCOMPARE(q->text(), QString());
+    QVERIFY(editor->findBarVisible()); // clearFind does not hide
+}
+
+void TestCodeEditor::findBarStaysTopRightOnResize()
+{
+    // The bar anchors to the editor's top-right with a 4px margin and
+    // CLAMPS (never clips) at narrow widths: place() runs from open() and
+    // from resizeEvent, so the invariant must hold after every resize.
+    editor->show(); // a shown editor gives isVisible() its real semantics
+    editor->showFindBar();
+    QWidget* bar = findBarOf(editor);
+    QVERIFY(bar);
+    QVERIFY(bar->isVisible());
+    QCOMPARE(bar->y(), 4);
+    const int wideRight = bar->geometry().right();
+    QCOMPARE(wideRight, editor->width() - 5); // flush at the 4px margin
+    QVERIFY(bar->width() <= editor->width() - 8);
+    QVERIFY(bar->x() >= 4);
+
+    editor->resize(340, 400);
+    QCoreApplication::processEvents(); // the resize event places the bar
+    QCOMPARE(bar->geometry().right(), 340 - 5); // tracks the right edge
+    QVERIFY2(bar->x() >= 0, "bar clipped at the left edge when narrow");
+
+    editor->resize(316, 400); // below the 300px floor: clamp, no overflow
+    QCoreApplication::processEvents();
+    QCOMPARE(bar->geometry().right(), 316 - 5);
+    QVERIFY(bar->width() >= 300); // controls compress, the bar never vanishes
+    QVERIFY(bar->x() >= 0);
+
+    editor->resize(600, 400);
+    QCoreApplication::processEvents();
+    QCOMPARE(bar->y(), 4);
+    QCOMPARE(bar->geometry().right(), 600 - 5);
+    QVERIFY(bar->width() > 300); // back above the floor at the wide size
+}
+
+void TestCodeEditor::paintMatchQuadsNumericProbe()
+{
+    // Numeric pixel probe (no vision): match quads must paint warm ink on
+    // the matching lines ONLY, and the current match (bright family ink +
+    // the blue selection over it) must leave the warm band — the quads
+    // are distinguishable state, not decoration noise.
+    editor->setPlainText(QStringLiteral("foo bar foo baz\nzzz foo qux\nbar"));
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const int x0 = editor->contentLeft();
+    auto warm = [&](int yFrom, int yTo) {
+        return warmQuadPixels(editor->grab().toImage(), x0, yFrom, yTo);
+    };
+
+    QCOMPARE(warm(pad, pad + 3 * lh), 0); // negative control: no query set
+
+    editor->setFindText(QStringLiteral("foo"));
+    QCOMPARE(editor->matchCount(), 3);
+    QCOMPARE(editor->currentMatch(), -1);
+    const int allInk = warm(pad, pad + 3 * lh);
+    QVERIFY2(allInk >= 300,
+             qPrintable(QStringLiteral("match quads drew only %1 warm pixels").arg(allInk)));
+
+    // The per-line window walk must not bleed ink into non-matching rows
+    // (line 1 has ONE match at cols 4..7; the whole row is still mostly
+    // cold - the exact per-line, viewport-only invariant).
+    editor->setFindText(QStringLiteral("qux"));
+    QCOMPARE(warm(pad, pad + lh), 0); // line 0: no match, no ink
+    const int oneQuad = warm(pad + lh, pad + 2 * lh);
+    QVERIFY2(oneQuad >= 100, qPrintable(QStringLiteral("single quad drew only %1").arg(oneQuad)));
+
+    // Selecting the current match overlays the selection (blue) on that
+    // quad: warm pixels strictly decrease while the OTHER quads keep the
+    // band alive - current vs all is a distinct rendered state.
+    editor->setFindText(QStringLiteral("foo"));
+    QVERIFY(editor->findNext());
+    const int withCurrent = warm(pad, pad + 3 * lh);
+    QVERIFY2(allInk - withCurrent >= 60,
+             qPrintable(QStringLiteral("current+selection did not part the warm band: %1 -> %2")
+                            .arg(allInk).arg(withCurrent)));
+    QVERIFY2(withCurrent >= 150, "the non-current quads vanished");
+}
+
+void TestCodeEditor::paintZeroWidthMatchPhantomCell()
+{
+    // A zero-width match (regex "b*" on "ab" hits twice around the b)
+    // still owns one phantom cell of ink: empty highlights must not
+    // vanish from the viewport paint pass.
+    editor->setPlainText(QStringLiteral("ab"));
+    editor->setFindFlags(CodeEditor::FindFlag::MatchCase | CodeEditor::FindFlag::UseRegex);
+    editor->setFindText(QStringLiteral("b*"));
+    QCOMPARE(editor->matchCount(), 3);
+    QCOMPARE(editor->matches(),
+             (QVector<MR>{MR{0, 0, 0, 0}, MR{0, 1, 0, 2}, MR{0, 2, 0, 2}}));
+
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const int x0 = editor->contentLeft();
+    QVERIFY2(warmQuadPixels(editor->grab().toImage(), x0, pad, pad + lh) >= 60,
+             "zero-width quads did not paint phantom cells");
+
+    editor->setFindText(QString()); // control: every quad gone
+    QCOMPARE(warmQuadPixels(editor->grab().toImage(), x0, pad, pad + lh), 0);
 }
 
 QTEST_MAIN(TestCodeEditor)

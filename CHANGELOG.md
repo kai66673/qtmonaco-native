@@ -136,6 +136,45 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the default). Decoration ink (severity colors, breakpoint red) is a
   fixed VS Code dark constant until `set_theme` routes it through the
   palette.
+- M6 find/replace (Phase D4). Public API: `setFindText`/`findText`,
+  `setFindFlags`/`findFlags` (`FindFlag::{MatchCase,WholeWord,UseRegex}`,
+  Q_FLAG trio, default MatchCase), `findPatternValid()`, `matches()`
+  (full sorted `MatchRange` list as model ranges — D4 DoD), `matchCount()`,
+  `currentMatch()` (the EFFECTIVE index: counts only while the selection
+  covers the match, -1 after any caret move — read-only, never mutated by
+  paint/label refreshes), `gotoMatch(index)`, `findNext()`/`findPrevious()`
+  (wrap, F3/Shift+F3), `replaceNext(replacement)` (own undo step, caret
+  lands at the replacement end, never wraps behind your back),
+  `replaceAll(replacement)` (the whole batch is ONE bracketed D1 action;
+  returns the count), `showFindBar`/`hideFindBar`/`toggleFindBar`/
+  `findBarVisible`/`clearFind`. Shortcuts via standard-key matching:
+  Ctrl+F, Ctrl+H, F3, Shift+F3 — they work with the bar closed too (the
+  query persists, Monaco parity). The bar is a file-local `FindBar` child
+  widget (anon namespace, objectName `qmn-find-bar`) talking only through
+  the public API: query + replace rows, Match Case / Whole Word / .*
+  toggles, prev/next ▲▼, Replace / All, × close, and a `n/m` count label;
+  Esc closes it, the state persists for reopen; top-right anchored
+  (4px margin, clamps to a 300px floor at narrow widths — controls
+  compress, the bar never vanishes). The D4 confirm step: **Replace All
+  is button-only** — Enter/Shift+Enter navigate, Enter in the replace
+  row replaces the current match, no key combination ever fires the batch.
+- Engine semantics (documented v1 contract): PER-LINE search — matches
+  never cross a line break (a pattern mentioning one matches nothing);
+  literal queries escape into the same `QRegularExpression` path;
+  WholeWord wraps `\b(?:…)\b` (regex-class `\w`, the documented v1
+  approximation of Unicode-aware boundaries); an invalid pattern clears
+  the match set and `findPatternValid()` tells "invalid" from "no
+  matches". Surrogate safety: match bounds snap OUTWARD over split
+  surrogate pairs, snapped-equal duplicates merge (PCRE2 steps through a
+  pair one unit at a time), and the scan advance is
+  `max(rawWidth, 1, from + 1)` — so replacing a match never orphans half
+  a pair (surrogate replaceAll pinned by test). Matches recompute
+  lazily: any edit marks the set stale and the next paint or find action
+  refreshes it (the same at-most-once-per-keypress cadence as the M4
+  highlight engine; the set follows Ctrl+Z/Ctrl+Y through the M3 edit
+  observer). Painting rides the decoration pass: the match list is
+  sorted and the paint binary-searches the viewport window
+  (viewport-only renderer preserved).
 
 ### Changed
 - The x anchor of all text geometry (caret, selection, painting, hit
@@ -160,6 +199,13 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Qt 6.12 generic-defaults probe: `QKeySequence::Redo` contains only
   Ctrl+Shift+Z (Ctrl+Y does NOT match), so Ctrl+Y is wired as an explicit
   fallback after the standard-key matches.
+- M6 measured traps (both bit hard during development): Qt6 `QFlags(Enum)`
+  stores the enumerator VALUE as the mask as-is (no automatic `1<<n`
+  shift), so a flag enum with implicit values makes its first enumerator
+  (0) an empty mask and `testFlag` on it means "no flags at all" —
+  `FindFlag` uses explicit powers of two. And `QStringLiteral` prefixes
+  `u""`, so UTF-8 byte hex escapes (`"\xE2\x96\xB2"`) sign-extend into
+  mojibake; non-ASCII glyphs there must be `\uXXXX` escapes.
 
 ## [0.5.0] — 2026-11-09
 

@@ -58,7 +58,8 @@ struct TextPosition {
 // vertical scrolling, per-keystroke latency instrumentation, a
 // line-number gutter (off/on/relative/interval) with breakpoint and
 // diagnostic glyphs, whole-line highlight bands, diagnostic wavy
-// underlines and inlay hints (M5), and
+// underlines and inlay hints (M5), find/replace with a built-in Ctrl+F
+// bar plus match highlights (M6), and
 // tree-sitter-backed syntax highlighting with a grammar-less fallback
 // (M4: python/json/javascript, colors painted through the same cached
 // QTextLine layout as the plain path).
@@ -270,6 +271,93 @@ public:
     void setCurrentLineHighlight(bool enabled);
     bool currentLineHighlight() const { return currentLineHl_; }
 
+    // Find & replace (M6, Phase D4). The engine lives in the widget (a
+    // drop-in of Chromium-Monaco must not lose its find UX); the built-in
+    // Ctrl+F / Ctrl+H bar is the primary UI, every action below is also
+    // public so consumers can drive their own find surface. Ctrl+F opens
+    // the find row, Ctrl+H the replace row, F3/Shift+F3 cycle matches even
+    // while the bar is closed (the query persists); Enter in the find row
+    // = next, Shift+Enter = previous, Enter in the replace row replaces
+    // the current match then advances. The confirm step for replace-all
+    // is the button itself: Enter never fires it, and the whole batch
+    // lands as ONE undoable D1 action (undo once restores everything).
+    //
+    // Engine semantics (v1): the search is PER-LINE - matches never cross
+    // a line boundary (a pattern containing a newline matches nothing).
+    // Literal queries are escaped into the same QRegularExpression path.
+    // Match bounds snap outward over split surrogate pairs and duplicate
+    // matches merge (PCRE2 in code-unit mode steps through a surrogate
+    // pair one unit at a time), so replacing a match never orphans half a
+    // pair. An invalid pattern clears the match set (findPatternValid()
+    // tells "invalid" from "no matches"). Matches recompute lazily: an
+    // edit marks the set stale and the next paint (or find action)
+    // refreshes it - the same at-most-once-per-keypress cadence as the
+    // M4 highlight engine; highlights and the match count stay live
+    // through edits. Painting is viewport-only: the match list is sorted
+    // and the paint pass binary-searches the window.
+    struct MatchRange {
+        int startLine = 0;
+        int startCol = 0;
+        int endLine = 0; // == startLine while the engine is per-line
+        int endCol = 0;  // [start, end) half-open, UTF-16 code units
+
+        bool operator==(const MatchRange&) const = default; // test round-trips
+    };
+
+    // Flags mirror the bar's toggles. Default: MatchCase (Monaco parity).
+    // The Q_DECLARE_FLAGS/Q_FLAG trio is the same modern Qt6 flags pattern
+    // PySide6 itself wraps, so the binding gets a natural Python flag set.
+    // The enumerators must be EXPLICIT bit masks: Qt6 QFlags stores the
+    // enumerator value as the mask as-is (no auto 1<<n shift), so an
+    // implicit first entry (value 0) would make MatchCase an empty mask and
+    // testFlag(MatchCase) mean "no flags at all" - measured in this Qt
+    // 6.12's qflags.h. Powers of two are also what PySide6 exposes.
+    enum class FindFlag { MatchCase = 1 << 0, WholeWord = 1 << 1, UseRegex = 1 << 2 };
+    Q_DECLARE_FLAGS(FindFlags, FindFlag)
+    Q_FLAG(FindFlags)
+
+    void setFindText(const QString& text); // recomputes matches
+    QString findText() const { return findText_; }
+    void setFindFlags(FindFlags flags); // recomputes matches
+    FindFlags findFlags() const { return findFlags_; }
+    bool findPatternValid() const { return findPatternValid_; }
+
+    // Match set state. matches() is the full sorted list (model ranges);
+    // note it can be stale after an edit until the next paint/action -
+    // matchCount()/currentMatch() are the refresh-on-read entry points.
+    // currentMatch() reports the EFFECTIVE current match: the index in the
+    // list only while the selection covers it, -1 otherwise (a click or
+    // typing moves on, Monaco-style). A fresh set has none until a find
+    // action selects one.
+    QVector<MatchRange> matches() const { return matches_; }
+    int matchCount(); // refreshes a stale set (paint is viewport-only)
+    int currentMatch();
+    // Select + reveal the match at index (no wrap checks outside range);
+    // false when the index is stale (e.g. after a refresh emptied the set).
+    bool gotoMatch(int index);
+    bool findNext();     // first match after the selection end, wrapping
+    bool findPrevious(); // first match before the selection start, wrapping
+
+    // Replacements. replaceNext(): current match, or next at/after the
+    // caret when none; one bracketed edit (own undo step), caret lands at
+    // the replacement end and the set refreshes. replaceAll(): whole
+    // document, replacements applied back-to-front so offsets stay valid,
+    // ONE undo group restores the batch; returns the replaced count.
+    bool replaceNext(const QString& replacement);
+    int replaceAll(const QString& replacement);
+
+    // Built-in bar (lazy child widgets). showFindBar()/showReplaceBar()
+    // open it and focus the respective field, selectively selecting the
+    // remembered query; Esc or the X button hides it and returns focus
+    // (the query and highlights persist until clearFind()).
+    void showFindBar();
+    void showReplaceBar();
+    void hideFindBar();
+    bool findBarVisible() const;
+    // Clears query + flags + matches (the bar text fields included);
+    // does not hide the bar.
+    void clearFind();
+
     int lineHeight() const { return lineHeight_; }
     double cellWidth() const { return cellWidth_; }
     int padding() const { return padding_; } // vertical/top-edge padding
@@ -480,12 +568,42 @@ private:
     bool currentLineHl_ = false;
     int gutterInnerPad() const; // gutter digit/glyph padding (M5)
 
+    // --- M6 find/replace state (semantics: public API comments) ---
+    // The bar is a QWidget* only here: its class (FindBar) is defined
+    // later in CodeEditor.cpp and talks to the editor purely through the
+    // public API - internal linkage never crosses the Shiboken boundary.
+    QWidget* findBar_ = nullptr; // lazy child; show/hide via findBar_*()
+    QString findText_;
+    FindFlags findFlags_ = FindFlag::MatchCase;
+    // Lazy engine cache: an edit only marks it stale (the paint and every
+    // entry point refresh on demand), so the mutable mirrors the M4
+    // highlight engine's at-most-once-per-keypress reparse cadence.
+    mutable QVector<MatchRange> matches_; // sorted by (startLine, startCol)
+    mutable int currentMatch_ = -1;
+    mutable bool findDirty_ = false; // edits mark stale; paint/entry refresh
+    mutable bool findPatternValid_ = true;
+    mutable bool findRepainting_ = false; // set only around the refresh in
+                                          // paintEvent: a recompute there
+                                          // must not schedule another paint
+    void refreshFindMatches(); // no-op unless findDirty_ (not const: a
+                               // refresh schedules a repaint via update())
+    void recomputeFindMatches(); // full per-line scan (the DoD math)
+    void syncFindBarLabel() const; // bar count label after state moves
+    bool replaceRange(const MatchRange& m, const QString& replacement);
+
     QTimer blinkTimer_;
     bool caretOn_ = true;
 
     QElapsedTimer perfTimer_;
     PerfStats perf_;
 };
+
+// moc rejects the generated binary operators inside a class body, and Qt's
+// own in-class flag types (QFont::StyleStrategy &co.) pair Q_DECLARE_FLAGS
+// in-class with this macro at namespace scope - same here, so
+// FindFlag::MatchCase | FindFlag::UseRegex composes naturally for C++
+// consumers (Shiboken exposes the Q_FLAG(FindFlags) meta-flag regardless).
+Q_DECLARE_OPERATORS_FOR_FLAGS(CodeEditor::FindFlags)
 
 } // namespace qmn::view
 
