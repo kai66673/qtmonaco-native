@@ -51,8 +51,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - M4 syntax highlighting (Phase D2), vendored tree-sitter. `third_party/
   tree-sitter/` vendors runtime v0.27.2 (single amalgamation TU) plus
   generated parsers python v0.25.0, json v0.24.8, javascript v0.25.0 with
-  their upstream `highlights.scm` (unmodified, embedded into the build as
-  raw strings; pins + sha256 in `VENDORED.md`). The engine, `qmn::view::
+  their upstream `highlights.scm` (embedded into the build as raw strings;
+  pins + sha256 in `VENDORED.md`; only json's copy is locally reordered —
+  the pair-key capture moved last — to fit the engine's merge convention).
+  The engine, `qmn::view::
   HighlightEngine` (`qmn_ts` stays PRIVATE to `qmn_view`; `src/core/` stays
   QtCore-only), feeds the parser zero-copy from the piece table via
   `TSInputEncodingUTF16LE` — tree-sitter byte offsets are exactly 2× model
@@ -78,19 +80,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   grammars' capture names; the view assigns roles, themes own the colors). Painted colored runs keep the single-layout invariant
   (`QTextLayout::draw` with `FormatRange`s, run edges snapped to grapheme
   cluster boundaries). Captures merge paint-over: later-starting (inner)
-  captures win; identical spans resolve to the earlier query pattern.
+  captures win; identical spans resolve to the LATER query pattern —
+  tree-sitter master's conflict convention, the one the current upstream
+  py/js queries are written for (catch-all `(identifier) @variable`
+  first). The v0.27.2 runtime does not evaluate query predicates (its
+  cursor emits every syntactically matching capture, probe-verified), so
+  the engine applies `#eq?` (exact text equality) and `#match?`
+  (unanchored regex search) itself; directives like `#is-not? local`
+  pass as satisfied. Pinned by `queryPredicatesFilterRefinedRoles` and
+  `jsonKeyQueryPatternWinsOverPlainString`. A/B against the pre-flip
+  engine (`tools/bench_highlight`, 100 KB python doc): per-keystroke
+  `edit+refresh` mean 9.4 ms vs 7.7 ms, i.e. engine predicate filtering
+  costs ≈ +1.7 ms/keystroke there — accepted for correct role resolution.
   Also public: read-only viewport accessors `firstVisibleLine()` and
   `visibleLineCount()`.
 - `examples/` highlighting gallery: one demo document per pinned grammar
   (`demo.py`, `demo.json`, `demo.js`), dense in exactly the token roles
   their vendored `highlights.scm` emits — `examples/README.md` carries the
-  measured per-grammar role tables and documents why some upstream roles
-  (js/py `@function`/`@constructor`, json punctuation) never appear.
+  measured per-grammar role tables and documents which upstream roles
+  never fire for structural query reasons (json punctuation, python
+  parameter names and `class` header names, js formal parameters).
   `qmn-spike` now picks the grammar from the file suffix
   (`.py`/`.json`/`.js`/`.mjs`/`.cjs`) and accepts `--language
   python|json|javascript` to override.
 
 ### Fixed
+- Editing a vendored `highlights.scm` did not re-run CMake configure, so
+  incremental builds silently kept the OLD embedded query text
+  (`configure_file` is configure-time only). Now the three .scm files are
+  `CMAKE_CONFIGURE_DEPENDS` of the `third_party/tree-sitter` directory.
 - `TextBuffer`'s constructor never created the add buffer: a document fed
   without a leading `setText()` wrote its pieces into the empty placeholder
   buffer (`buf = 0`), tripping the "piece out of buffer" invariant check.

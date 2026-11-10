@@ -119,6 +119,25 @@ Include headers relative to `src/` (CMake adds `src/` as a PUBLIC include dir):
   A tree-sitter byte offset (and `TSPoint.column`, which is byte-based too) is
   **exactly 2×** our UTF-16-code-unit offset; the `get_column()` scanner
   callback counts code points instead, but that never crosses our boundary.
+- **Highlight merge convention (M4.1, user decision): tree-sitter master's
+  LATER pattern wins** for identical spans (sort tie-break pattern_index
+  ascending in `rebuildSpans`). The pinned py/js queries rely on it
+  (catch-all `(identifier) @variable` first). Consequences: the runtime does
+  NOT evaluate query predicates — its cursor emits every syntactically
+  matching capture (probe-proven) — so the engine evaluates `#eq?`/`#match?`
+  itself (`buildQueryPredicates`; predicate capture ids are GLOBAL
+  name-table ids, shared across patterns in v0.27.2, same namespace as
+  cursor indices — no remapping; directives/#is-not? pass as satisfied;
+  a QRegularExpression compile failure drops the PREDICATE, fail-open,
+  so the role survives unfiltered rather than being lost). And vendored
+  json highlights.scm is LOCALLY REORDERED (pair-key capture last —
+  recorded in VENDORED.md); py/js scm stay byte-upstream. Tripwire tests:
+  `jsonKeyQueryPatternWinsOverPlainString`, `queryPredicatesFilterRefinedRoles`.
+- **`.scm` queries are embedded at CMake CONFIGURE time** (`configure_file`
+  in `third_party/tree-sitter/CMakeLists.txt`); the three query files are
+  `CMAKE_CONFIGURE_DEPENDS` of that dir, so a query edit re-runs configure
+  on the next `ninja` automatically (before that fix, incremental builds
+  silently kept the OLD embedded query).
 
 ## Build & test
 

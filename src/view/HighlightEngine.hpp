@@ -26,9 +26,22 @@
 //  - Query captures merge into ONE sorted, non-overlapping span list per
 //    tree generation ("paint-over": captures applied in ascending start
 //    give correct nesting - an inner escape repainted over the enclosing
-//    string wins inside; for identical spans the EARLIER pattern in the
-//    query file wins, matching tree-sitter's own conflict convention, so
-//    those are applied LAST with pattern_index descending).
+//    string wins inside; for identical spans the LATER pattern in the
+//    query file wins, matching tree-sitter master's conflict convention
+//    (and the written assumption of the current upstream py/js queries),
+//    so those are applied LAST with pattern_index ascending).
+//  - The v0.27.2 runtime does NOT evaluate query predicates: the cursor
+//    emits EVERY syntactically matching capture (measured, #match?/@eq?
+//    included). Under later-wins that makes the most general catch-all
+//    patterns ((identifier) @variable first in py/js) stomp every
+//    refined role, so the engine evaluates #eq?/#match? itself in
+//    rebuildSpans and drops the capture when a predicate fails. Policy:
+//    #eq? is exact text equality, #match? is an unanchored search (both
+//    match tree-sitter's Oniguruma semantics); directives (#is-not?),
+//    set-props (#set!) and #is? are environment facts we cannot compute
+//    per capture yet, so they pass as satisfied - the pinned queries use
+//    #is-not? only as a shadowing refinement with no visible effect on
+//    our demo corpus.
 
 #include "core/TextBuffer.hpp"
 #include "view/CodeEditor.hpp"
@@ -36,6 +49,7 @@
 #include <tree_sitter/api.h>
 
 #include <QColor>
+#include <QRegularExpression>
 #include <QString>
 #include <QStringList>
 
@@ -118,6 +132,28 @@ private:
         uint32_t seq;     // emission order, final tie-break
     };
 
+    // One evaluated predicate step of a pattern, flattened at setLanguage
+    // time from ts_query_predicates_for_pattern() (the runtime never
+    // applies them itself). captureId is the GLOBAL capture id the @name
+    // refers to - v0.27.2 keys captures by NAME (symbol table): a name
+    // used by several patterns has one id, and the cursor emits exactly
+    // that id in match.captures[].index (runtime query.c pushes
+    // step->capture_ids verbatim; its own analysis cross-checks predicate
+    // ids against step ids in the same namespace). So predicate targets
+    // match captureKind_ / cursor indices directly, no remapping.
+    // value holds the raw regex text for match (re compiled once per
+    // language); value is unused for pass-through kinds.
+    enum class PredicateOp { Eq, Match, Pass };
+    struct Predicate {
+        uint32_t captureId; // global capture id the @name refers to
+        PredicateOp op;
+        QString value;            // #eq? literal or #match? regex source
+        QRegularExpression regex; // compiled for Match, null on compile failure
+    };
+    // Per-pattern predicate lists, indexed by pattern id; patterns
+    // without predicates hold an empty vector.
+    using PatternPredicates = std::vector<Predicate>;
+
     void clearState();
     void rebuildLineIndex(); // full scan through pieceAt() chunks
     void updateLineIndex(const qmn::core::TextBuffer::EditEvent& ev);
@@ -128,8 +164,15 @@ private:
     int anchorLineFor(int topLine) const; // nearest col-0 non-blank line at/above
     // Merged-span rebuild. qStart < 0 queries the WHOLE tree; otherwise
     // only captures intersecting [qStart, qEnd) (ts_query_cursor_set_-
-    // byte_range, settable after exec - v0.27.2 measured).
+    // byte_range, settable after exec - v0.27.2 measured). Each emitted
+    // capture must also pass its pattern's predicates (see Predicate).
     void rebuildSpans(int qStart, int qEnd);
+    // Node text as UTF-16 units via the buffer's piece view (the tree and
+    // buffer are always current inside rebuildSpans).
+    QString nodeText(const TSNode& node) const;
+    // Flatten ts_query_predicates_for_pattern() steps into
+    // queryPredicates_; runs once per setLanguage with a live query_.
+    void buildQueryPredicates();
 
     // Adaptive parse mode (D2 threading sub-decision, bench-decided):
     // no threads for editor v1; instead measure the full incremental
@@ -174,6 +217,7 @@ private:
     TSTree* tree_ = nullptr;
     TSQuery* query_ = nullptr;
     std::vector<int> captureKind_; // capture id -> TokenKind int, -1 = skip
+    std::vector<PatternPredicates> queryPredicates_; // indexed by pattern id
     std::vector<int> lineStarts_;  // ascending; [0] == 0; empty = inactive
     bool dirty_ = true;            // tree_ lags behind buffer_
     bool spansDirty_ = true;

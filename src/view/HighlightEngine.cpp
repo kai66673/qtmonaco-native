@@ -36,9 +36,10 @@ const LangEntry kRegistry[] = {
 };
 
 // Capture name -> TokenKind: the union of the capture names used by the
-// three vendored highlights.scm files (VENDORED.md keeps them unmodified
-// upstream copies; filtering unknown names is this table's job). Names
-// outside the table map to -1 and their captures are dropped.
+// three vendored highlights.scm files (VENDORED.md: upstream copies, the
+// one json local adaptation is pattern ORDER only; filtering unknown
+// names is this table's job). Names outside the table map to -1 and
+// their captures are dropped.
 int kindForCapture(const char* name, uint32_t len)
 {
     struct Entry {
@@ -140,6 +141,7 @@ void HighlightEngine::clearState()
     ts_query_delete(query_);
     query_ = nullptr;
     captureKind_.clear();
+    queryPredicates_.clear();
     lineStarts_.clear();
     spans_.clear();
     lang_ = nullptr;
@@ -190,10 +192,112 @@ void HighlightEngine::setLanguage(const QString& id)
             const char* name = ts_query_capture_name_for_id(query_, i, &len);
             captureKind_[i] = kindForCapture(name, len);
         }
+        buildQueryPredicates();
     }
     rebuildLineIndex();
     dirty_ = true; // first parse is a full parse (old tree is null)
     spansDirty_ = true;
+}
+
+// Flatten each pattern's predicate steps once per language. Step layout
+// (v0.27.2, verified against runtime query.c): a property/predicate is a
+// name string, optional value steps, then a Done sentinel; capture steps
+// carry the GLOBAL name-table id, identical to what the cursor reports
+// in match.captures[].index and to captureKind_'s keys. "?"-suffixed
+// names (#eq?, #match?, #is-not?) are treated like their bare forms: the
+// pinned queries' role patterns are meaningless unless the suffixed ones
+// fire as hard filters, which is the conservative reading. Names outside
+// {eq, match} (#is?, #set!, #is-not? and the any-family) become Pass:
+// they are environment facts (shadowing, settings) we cannot compute per
+// capture, or unused by the pinned queries.
+void HighlightEngine::buildQueryPredicates()
+{
+    const uint32_t patterns = ts_query_pattern_count(query_);
+    const uint32_t captureCount = ts_query_capture_count(query_);
+    queryPredicates_.resize(patterns);
+    for (uint32_t p = 0; p < patterns; ++p) {
+        uint32_t stepsCount = 0;
+        const TSQueryPredicateStep* steps =
+            ts_query_predicates_for_pattern(query_, p, &stepsCount);
+        PatternPredicates preds;
+        enum class Slot { Empty, HaveName, HaveValue } state = Slot::Empty;
+        QString name;
+        QString value;
+        uint32_t target = 0; // capture id this predicate's @name refers to
+        bool hasTarget = false;
+        for (uint32_t i = 0; i < stepsCount; ++i) {
+            const TSQueryPredicateStep& st = steps[i];
+            if (st.type == TSQueryPredicateStepTypeDone) {
+                if (!name.isEmpty() && hasTarget && target < captureCount) {
+                    Predicate pr;
+                    pr.captureId = target;
+                    if (name == QLatin1String("eq?") || name == QLatin1String("eq"))
+                        pr.op = PredicateOp::Eq;
+                    else if (name == QLatin1String("match?") || name == QLatin1String("match"))
+                        pr.op = PredicateOp::Match;
+                    else
+                        pr.op = PredicateOp::Pass;
+                    pr.value = value;
+                    if (pr.op == PredicateOp::Match) {
+                        pr.regex = QRegularExpression(value);
+                        // A regex Qt cannot compile (Oniguruma-only syntax)
+                        // drops the PREDICATE rather than the capture:
+                        // fail-open, so a role can only be lost, never
+                        // silently mis-painted via a failed Match. The
+                        // pinned queries' patterns are all PCRE-simple.
+                        if (!pr.regex.isValid())
+                            pr.op = PredicateOp::Pass;
+                    }
+                    preds.push_back(std::move(pr));
+                }
+                name.clear();
+                value.clear();
+                hasTarget = false;
+                state = Slot::Empty;
+                continue;
+            }
+            if (st.type == TSQueryPredicateStepTypeCapture) {
+                if (!hasTarget) {
+                    target = st.value_id; // the predicate's subject @name
+                    hasTarget = true;
+                }
+                continue; // a second capture (cross-compare) is unused
+            }
+            // String step: first is the property name, later ones values.
+            uint32_t len = 0;
+            const char* s = ts_query_string_value_for_id(query_, st.value_id, &len);
+            const QString text = QString::fromLatin1(s, int(len));
+            if (state == Slot::Empty) {
+                name = text;
+                state = Slot::HaveName;
+            } else {
+                value = text; // last string value wins (queries have one)
+                state = Slot::HaveValue;
+            }
+        }
+        queryPredicates_[p] = std::move(preds);
+    }
+}
+
+// Capture text for predicate evaluation: walk the buffer's piece view
+// across the node's [startByte/2, endByte/2) unit range. Captures fed to
+// predicates are identifiers and other short leaves, so the walk is a
+// couple of pieces at most; correctness (crossing piece boundaries) is
+// worth more than a micro-optimization here.
+QString HighlightEngine::nodeText(const TSNode& node) const
+{
+    QString out;
+    int off = int(ts_node_start_byte(node)) / 2;
+    const int end = int(ts_node_end_byte(node)) / 2;
+    while (off < end) {
+        const auto pv = buffer_->pieceAt(off);
+        if (!pv.data || pv.len <= 0)
+            break; // defensive: never spin on a broken view
+        const int take = qMin(pv.len, end - off);
+        out.append(reinterpret_cast<const QChar*>(pv.data), take);
+        off += take;
+    }
+    return out;
 }
 
 void HighlightEngine::rebuildLineIndex()
@@ -482,7 +586,8 @@ void HighlightEngine::rebuildSpans(int qStart, int qEnd)
     uint32_t capIdx = 0;
     uint32_t seq = 0;
     while (ts_query_cursor_next_capture(cursor_, &match, &capIdx)) {
-        const int kind = captureKind_[match.captures[capIdx].index];
+        const uint32_t capId = match.captures[capIdx].index;
+        const int kind = captureKind_[capId];
         if (kind < 0)
             continue; // capture name outside our table: drop it
         const TSNode n = match.captures[capIdx].node;
@@ -490,23 +595,55 @@ void HighlightEngine::rebuildSpans(int qStart, int qEnd)
         const int e = int(ts_node_end_byte(n)) / 2;
         if (s >= e)
             continue; // zero-width captures carry nothing to paint
+        // The runtime does not evaluate predicates (measured: the cursor
+        // emits every syntactically matching capture regardless of the
+        // pattern's #match?/#eq?). Under later-wins merging the general
+        // catch-alls come FIRST in the pinned py/js queries, so an
+        // unfiltered refined-role capture would stomp everything; we
+        // filter with the EMITTING pattern's predicates against the
+        // capture's global name id. Text is materialized lazily: only
+        // live eq/match predicates pay for the pieceAt() walk.
+        bool keep = true;
+        if (match.pattern_index < queryPredicates_.size()) {
+            for (const Predicate& pr : queryPredicates_[match.pattern_index]) {
+                if (pr.captureId != capId || pr.op == PredicateOp::Pass)
+                    continue;
+                const QString text = nodeText(n);
+                if (pr.op == PredicateOp::Eq) {
+                    keep = text == pr.value;
+                } else { // Match: unanchored search, tree-sitter semantics.
+                    // match() scans from position 0 without anchoring, and
+                    // ^-anchored patterns still only need a match starting
+                    // AT index 0 - same answer as Oniguruma's onig_search
+                    // over the whole (line-free) capture text.
+                    QRegularExpression re = pr.regex; // match() is non-const
+                    keep = re.match(text).hasMatch();
+                }
+                if (!keep)
+                    break;
+            }
+        }
+        if (!keep)
+            continue;
         caps.push_back(Capture{s, e, TokenKind(kind), match.pattern_index, seq++});
     }
 
     // Deterministic paint-over order, independent of cursor emission
     // order: ascending start (inner/later captures land on top of their
     // enclosing ones), then ascending end (longer beats shorter at equal
-    // start), then DESCENDING pattern index so that among identical spans
-    // the earlier query pattern is applied last and wins - tree-sitter's
-    // own conflict convention (json's pair-key capture beating the plain
-    // (string) capture over the same node depends on this).
+    // start), then ASCENDING pattern index so that among identical spans
+    // the later query pattern is applied last and wins - tree-sitter
+    // master's conflict convention, the one the current upstream py/js
+    // queries are written for (catch-all (identifier) @variable first,
+    // refined role patterns later). The json pair-key capture sits after
+    // the plain (string) capture for the same reason.
     std::stable_sort(caps.begin(), caps.end(), [](const Capture& a, const Capture& b) {
         if (a.start != b.start)
             return a.start < b.start;
         if (a.end != b.end)
             return a.end < b.end;
         if (a.pattern != b.pattern)
-            return a.pattern > b.pattern;
+            return a.pattern < b.pattern;
         return a.seq < b.seq;
     });
 

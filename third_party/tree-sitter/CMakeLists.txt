@@ -22,6 +22,12 @@ foreach(scm QMN_SCM_PYTHON QMN_SCM_JSON QMN_SCM_JAVASCRIPT)
         message(FATAL_ERROR "query contains the raw-string delimiter )QMN\"")
     endif()
 endforeach()
+# configure_file runs at configure time only: without this, editing a .scm
+# would silently keep the OLD embedded query in an incremental build.
+set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
+    ${CMAKE_CURRENT_LIST_DIR}/grammars/python/queries/highlights.scm
+    ${CMAKE_CURRENT_LIST_DIR}/grammars/json/queries/highlights.scm
+    ${CMAKE_CURRENT_LIST_DIR}/grammars/javascript/queries/highlights.scm)
 configure_file(query_data.cpp.in ${CMAKE_CURRENT_BINARY_DIR}/query_data.cpp @ONLY)
 
 add_library(qmn_ts STATIC

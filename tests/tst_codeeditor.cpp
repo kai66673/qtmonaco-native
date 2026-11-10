@@ -135,6 +135,7 @@ private slots:
     void jsonSpansMapToModelOffsets();
     void javascriptSpansMapToModelOffsets();
     void jsonKeyQueryPatternWinsOverPlainString();
+    void queryPredicatesFilterRefinedRoles();
     void spansClipToRequestedWindow();
     void stringSpanCoversSurrogatePairWhole();
     void typedQuotesCloseStringIncrementally();
@@ -1982,13 +1983,17 @@ void TestCodeEditor::pythonSpansMapToModelOffsets()
     editor->setLanguage(QStringLiteral("python"));
 
     // UTF-16 code-unit offsets, [start, end), the model's coordinate space.
-    // NOTE the `def`/call NAMES come out Variable (not Function): that is
-    // what the PINNED upstream python highlights.scm captures. The engine
-    // is verified against the committed queries, not an idealized theme;
-    // customizing .scm files is a later milestone (see VENDORED.md).
+    // `f` is Function: the query's function_definition pattern refines the
+    // (identifier) @variable catch-all, and under our later-pattern-wins
+    // merge (tree-sitter master's convention) the refined role wins over
+    // the identical-span catch-all. `x` stays Variable: the pinned python
+    // query has no parameter-role capture, so only the catch-all matches
+    // it. The engine is verified against the committed queries, not an
+    // idealized theme; customizing .scm files is a later milestone (see
+    // VENDORED.md).
     const QVector<Span> expected = {
         {0, 3, TK::Keyword},            // def
-        {4, 5, TK::Variable},           // f
+        {4, 5, TK::Function},           // f
         {6, 7, TK::Variable},           // x
         {14, 20, TK::Keyword},          // return
         {21, 22, TK::Number},           // 1
@@ -2026,10 +2031,10 @@ void TestCodeEditor::javascriptSpansMapToModelOffsets()
 
     const QVector<Span> expected = {
         {0, 8, TK::Keyword},                  // function
-        {9, 10, TK::Variable},                // f (upstream query colors the
-        {10, 11, TK::PunctuationBracket},     // declaration name as Variable;
-        {11, 12, TK::Variable},               // same caveat as the python
-        {12, 13, TK::PunctuationBracket},     // test above
+        {9, 10, TK::Function},                // f: the query's function_
+        {10, 11, TK::PunctuationBracket},     // declaration pattern refines
+        {11, 12, TK::Variable},               // the (identifier) @variable
+        {12, 13, TK::PunctuationBracket},     // catch-all (later-wins merge)
         {14, 15, TK::PunctuationBracket},     // {
         {16, 22, TK::Keyword},                // return
         {23, 24, TK::Variable},               // x
@@ -2044,12 +2049,14 @@ void TestCodeEditor::javascriptSpansMapToModelOffsets()
 
 void TestCodeEditor::jsonKeyQueryPatternWinsOverPlainString()
 {
-    // The json query captures the pair-key node TWICE: (_) @string.special.key
-    // (pattern 0) and (string) (pattern 1) - identical [start, end) nodes, a
-    // genuine query conflict. The merge resolves it tree-sitter-style: the
-    // EARLIER pattern must win. Flip the merge's pattern tie-break and the
-    // keys degrade to plain String while everything else stays green -
-    // this is that tripwire, the expectations are not arbitrary theme picks.
+    // The json query captures the pair-key node TWICE: (string) and, with
+    // a LATER pattern, (_) @string.special.key - identical [start, end)
+    // nodes, a genuine query conflict. The merge resolves it tree-sitter
+    // master's way: the LATER pattern wins, which is why the locally
+    // reordered json highlights.scm (VENDORED.md) puts the key capture
+    // after (string). Flip the merge's pattern tie-break and the keys
+    // degrade to plain String while everything else stays green - this is
+    // that tripwire, the expectations are not arbitrary theme picks.
     const QString text = QStringLiteral("{\"k\": \"v\"}");
     editor->setPlainText(text);
     editor->setLanguage(QStringLiteral("json"));
@@ -2058,6 +2065,47 @@ void TestCodeEditor::jsonKeyQueryPatternWinsOverPlainString()
         {6, 9, TK::String},            // plain value string (offsets: the
     };                                 // colon+space sit at 4..6, NOT 7..9)
     QVERIFY(allSpans(editor) == expected);
+}
+
+void TestCodeEditor::queryPredicatesFilterRefinedRoles()
+{
+    // The tree-sitter runtime does NOT evaluate query predicates - the
+    // cursor emits every syntactically matching capture (probe-verified
+    // against the v0.27.2 pinned runtime). The engine applies #eq?/#match?
+    // itself; this test is that tripwire. Without filtering, the js #eq?
+    // "require" pattern would fire on EVERY call-function identifier
+    // (log -> FunctionBuiltin) and the #match? role patterns would fire
+    // on every capitalized name everywhere, stompable only by even later
+    // patterns - i.e. colors would collapse exactly the way the pre-M4.1
+    // first-wins merge hid them.
+    editor->setPlainText(QStringLiteral("const TokenCounter = 1;\nclass Stock {}\nconsole.log(1);\nrequire(\"x\");\n"));
+    editor->setLanguage(QStringLiteral("javascript"));
+    const QVector<Span> js = allSpans(editor);
+    // Selected roles only; punctuation/strings are asserted elsewhere.
+    QVERIFY(js.contains(Span{6, 18, TK::Constructor}));  // #match? "^[A-Z]"
+    QVERIFY(js.contains(Span{30, 35, TK::Constructor})); // class name
+    QVERIFY(js.contains(Span{39, 46, TK::VariableBuiltin})); // #match? console
+    QVERIFY(js.contains(Span{47, 50, TK::FunctionMethod}));  // plain method
+    QVERIFY(js.contains(Span{55, 62, TK::FunctionBuiltin})); // #eq? require
+    QVERIFY(!js.contains(Span{47, 50, TK::FunctionBuiltin})); // log != require
+
+    editor->setPlainText(QStringLiteral("len(x)\nprint(y)\nZED = 1\n"));
+    editor->setLanguage(QStringLiteral("python"));
+    const QVector<Span> py = allSpans(editor);
+    // py #match? builtin list: len/print pass it; ZED hits the constant
+    // "^[A-Z][A-Z_]*$" pattern. Predicates IGNORED, EVERY py/js call name
+    // would come out FunctionBuiltin and every capitalized identifier
+    // Constructor - so these exact full tables pin the filtering itself.
+    const QVector<Span> pyExpected = {
+        {0, 3, TK::FunctionBuiltin},    // len (#match? builtin list)
+        {4, 5, TK::Variable},           // x
+        {7, 12, TK::FunctionBuiltin},   // print
+        {13, 14, TK::Variable},         // y
+        {16, 19, TK::Constant},         // ZED (#match? "^[A-Z][A-Z_]*$")
+        {20, 21, TK::Operator},         // =
+        {22, 23, TK::Number},           // 1
+    };
+    QVERIFY(py == pyExpected);
 }
 
 void TestCodeEditor::spansClipToRequestedWindow()

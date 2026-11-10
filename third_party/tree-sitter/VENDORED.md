@@ -26,7 +26,13 @@ The grammars' generated `parser.c` declare ABI 14/15; the v0.27.2 runtime
   the unused query files (tags/locals/injections, and javascript's
   `highlights-jsx.scm` / `highlights-params.scm` — not loaded by
   `HighlightEngine` in v1) were dropped. `highlights.scm` files are
-  unmodified upstream copies; capture-name filtering happens in the engine.
+  unmodified upstream copies except for ONE local adaptation: json's
+  `key: (_) @string.special.key` block was moved to the END of the file
+  (the upstream v0.24.8-era file placed it first, for tree-sitter's old
+  first-wins conflict convention; our merge follows master's later-wins
+  convention, see the sort comment in `src/view/HighlightEngine.cpp`).
+  Capture-name and predicate filtering happens in the engine, never by
+  editing the query files.
 
 ## Regenerating a parser (not needed to build)
 
