@@ -48,6 +48,39 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   Alt+click does not remove a caret (no toggle); a reverse selection
   extended past its own anchor collapses to zero-length instead of
   re-orienting.
+- M4 syntax highlighting (Phase D2), vendored tree-sitter. `third_party/
+  tree-sitter/` vendors runtime v0.27.2 (single amalgamation TU) plus
+  generated parsers python v0.25.0, json v0.24.8, javascript v0.25.0 with
+  their upstream `highlights.scm` (unmodified, embedded into the build as
+  raw strings; pins + sha256 in `VENDORED.md`). The engine, `qmn::view::
+  HighlightEngine` (`qmn_ts` stays PRIVATE to `qmn_view`; `src/core/` stays
+  QtCore-only), feeds the parser zero-copy from the piece table via
+  `TSInputEncodingUTF16LE` — tree-sitter byte offsets are exactly 2× model
+  offsets, no transcoding. Every primitive core edit becomes one
+  `ts_tree_edit` immediately (new QtCore-only core hooks:
+  `setEditObserver` firing one `EditEvent` per piece-table mutation,
+  `pieceAt`/`PieceView` zero-copy reader); the reparse itself rides the
+  next `paintEvent`. Bench-settled adaptive policy (no threads for editor
+  v1 — threading deferred to M13; `tools/bench_ts_split.cpp` measured
+  python's incremental full reparse at ~23 ms/keystroke vs ≤0.7 ms for
+  viewport-range parses): full-incremental until the measured parse
+  exceeds an 8 ms budget, then viewport-range parses anchored at the
+  nearest col-0 non-blank line; capture queries are window-scoped
+  (`ts_query_cursor_set_byte_range`) on any document ≥ 16k UTF-16 units.
+  The policy is invisible through the public API: `highlightSpans()`
+  always returns exact spans for the requested window, escalating with at
+  most one synchronous full-document pass (`HighlightEngine::spansFor`)
+  — pinned by `largeDocViewportPolicyKeepsSpansExact`. Public view API:
+  `setLanguage(id)`/`language()`/`availableLanguages()` (python, json,
+  javascript; unknown ids fall back to plain text), `highlightSpans(
+  start, end)` returning `HighlightSpan{start, end, kind}` in model
+  offsets, and `TokenKind` (24-value Q_ENUM: the union of the vendored
+  grammars' capture names; the view assigns roles, themes own the colors). Painted colored runs keep the single-layout invariant
+  (`QTextLayout::draw` with `FormatRange`s, run edges snapped to grapheme
+  cluster boundaries). Captures merge paint-over: later-starting (inner)
+  captures win; identical spans resolve to the earlier query pattern.
+  Also public: read-only viewport accessors `firstVisibleLine()` and
+  `visibleLineCount()`.
 
 ### Fixed
 - `TextBuffer`'s constructor never created the add buffer: a document fed

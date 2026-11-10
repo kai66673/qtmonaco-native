@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <functional>
 #include <vector>
 
 namespace qmn::core {
@@ -58,6 +59,35 @@ public:
     // and clears the history.
     void insertAtOffset(int offset, const QString& text);
     void removeRange(int startOffset, int endOffset);
+
+    // --- edit observation + zero-copy piece reads (M4, view seam) --------
+    // Every primitive piece-table mutation (insertAtOffset/removeRange,
+    // undo/redo op applications, and setText as ONE whole-document op)
+    // fires exactly one EditEvent AFTER the mutation. Offsets are in the
+    // PRE-op frame; inserted is empty for a pure delete and end == start
+    // for a pure insert. The stream replays the document's whole edit
+    // history, so an observer can track incremental state (e.g. a
+    // tree-sitter tree via ts_tree_edit) without ever re-reading the
+    // document. Single observer — the view's highlight engine.
+    struct EditEvent {
+        int start = 0;
+        int end = 0;
+        QString inserted;
+    };
+    void setEditObserver(std::function<void(const EditEvent&)> observer);
+
+    // Zero-copy window for pull-model readers (the tree-sitter input
+    // callback). pieceAt(offset) locates the piece containing `offset`
+    // (O(log pieces)) and returns the data from there to the piece's end.
+    // data is nullptr when the offset is not inside the document. The
+    // pointer is borrowed: valid only until the next mutation — readers
+    // must not interleave with edits (same-thread discipline).
+    struct PieceView {
+        const char16_t* data = nullptr;
+        int start = 0; // document offset of data[0]
+        int len = 0;   // UTF-16 units from `offset` to the piece end
+    };
+    PieceView pieceAt(int offset) const;
 
     // --- undo/redo (M3) -----------------------------------------------
     // Op log with inverses. One undo step = one group: a group of ops is
@@ -193,6 +223,7 @@ private:
     int freeHead_ = kNull;
     int root_ = kNull;
     quint32 rng_ = 0x9e3779b9u;
+    std::function<void(const EditEvent&)> editObserver_; // single observer (M4)
 
     quint32 nextRand();
 };

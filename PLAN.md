@@ -168,9 +168,12 @@ sources (released 2026-11-07):
   pull-model `read` callback hands out piece-table chunks (QString data *is*
   UTF-16LE on LE) zero-copy. Incremental built-in: `ts_tree_edit` +
   reparse-with-old-tree, `ts_parser_set_included_ranges` for
-  viewport-scoped parses, `TSParseOptions.progress_callback` for
-  time-sliced parses. ABI 15 runtime accepts grammars ≥ 13; pin the vendored
-  copy, commit generated parsers (CLI only needed to regenerate).
+  viewport-scoped parses. (`TSParseOptions.progress_callback` was on this
+  list as a time-slicing mechanism; measured later it is cancel-only —
+  cancelling returns NULL and throws the parse away, no resumable state —
+  so it buys nothing for our latency story.) ABI 15 runtime accepts
+  grammars ≥ 13; pin the vendored copy, commit generated parsers (CLI only
+  needed to regenerate).
 
 **Decided: C** — pin v0.27.2, with a thin engine seam so grammar-less modes
 (plain text, …) keep a trivial fallback. A and B stay as the recorded
@@ -179,14 +182,50 @@ rationale.
 First steps: vendor `third_party/tree-sitter` (v0.27.2, verified archive);
 grammars python + json + javascript first (c later), generated `parser.c`
 committed; `HighlightEngine` seam in `src/view/` (core stays untouched —
-tree-sitter never enters `src/core/`). Open sub-decision at D2 start:
-threading model — time-sliced parsing via `progress_callback` on the GUI
-thread keeps it lock-free; a concurrent parser would need read-only
-piece-table views — decide with a bench, not by taste.
+tree-sitter never enters `src/core/`). The open threading sub-decision was
+settled by bench, not taste — numbers and verdict in the DONE block below.
 **DoD:** capture ranges from `.scm` queries map to model offsets under
 numeric assertions (feed edits, compare token spans to a reference on
 `QString`); incremental reparse stays O(edit neighborhood), proven by the
 bench tool on a big file.
+
+**Status: M4 DONE (2026-11-10)** — vendored tree (see
+`third_party/tree-sitter/VENDORED.md` for pins + measured API gotchas:
+inconsistent point/byte pairs in `TSInputEdit`/`TSRange` poison the parser;
+`TSPoint.column` is byte-based = 2× our units). Engine per plan; core got
+QtCore-only hooks only (`setEditObserver` fires exactly one `EditEvent`
+per primitive piece-table mutation, `pieceAt`/`PieceView` zero-copy
+reader). DoD met by 12 M4 slots in `tst_codeeditor.cpp` (exact span
+tables for all three grammars, pattern tie-breaks, window clipping,
+surrogate pairs, incremental quotes+undo, ink/geometry pixel scans, and
+`largeDocViewportPolicyKeepsSpansExact` pinning the policy contract).
+
+Threading/perf sub-decision, **bench-settled** (4k-line synthetic docs,
+dev machine, `tools/bench_ts_split.cpp` + `tools/bench_highlight.cpp`):
+
+| grammar    | cold full parse | incremental reparse / keystroke | full-doc query        | viewport parse+query |
+|------------|-----------------|----------------------------------|-----------------------|----------------------|
+| python     | ~24 ms          | 22.9 ms (subtree reuse ~nil — indent external scanner) | 6.2 ms (37k captures) | ≤0.7 ms |
+| json       | 17.3 ms         | 1.08 ms                          | 11.2 ms (36k capt.)   | ≤0.6 ms |
+| javascript | 32.2 ms         | 3.3 ms (7.2 ms when edits hit keywords) | 22–24 ms (196k captures!) | ≤1 ms |
+
+Verdict: **no threads for editor v1** (deferred to M13 — folding needs
+full trees anyway, and the snapshot-copy handoff cost measured trivial;
+a concurrent parser would also need read-only piece-table views). Full
+incremental reparse fits the 16 ms frame for json/js but not python, so
+`HighlightEngine` is adaptive instead: full-incremental until the
+*measured* parse exceeds the 8 ms budget, then viewport-range parses
+anchored at the nearest col-0 non-blank line above the viewport
+restores top-level context for column-sensitive grammars (python);
+capture scoping via `ts_query_cursor_set_byte_range` is always-on once
+the document ≥ 16k UTF-16 units and a viewport has been painted.
+Scroll re-parses the window in 0.04–0.5 ms. Correctness: the window
+tree's captures inside the window are **identical** to the full tree's
+(bench, all three grammars) and the public-API contract is pinned by
+`largeDocViewportPolicyKeepsSpansExact` — spans served from the window,
+by re-query on the current tree, or by exactly one synchronous
+full-document escalation when a programmatic request reaches past the
+window (then the next paint flips back to Viewport).
 
 ### D3 — M5 decoration layers + line-number gutter + markers
 

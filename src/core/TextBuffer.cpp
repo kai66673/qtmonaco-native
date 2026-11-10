@@ -182,6 +182,7 @@ TextBuffer::Piece TextBuffer::appendToAddBuffer(const QString& text)
 
 void TextBuffer::setText(const QString& text)
 {
+    const int oldChars = charCount(); // observer sees the pre-op frame
     clearUndoHistory();
     recycleTree(root_);
     root_ = kNull;
@@ -193,6 +194,10 @@ void TextBuffer::setText(const QString& text)
         const Piece p = appendToAddBuffer(text);
         root_ = newNode(p);
     }
+    // Whole-document replace event (one op covers the swap); skipped when
+    // nothing changed, like the no-op guards on insertAtOffset/removeRange.
+    if (editObserver_ && (oldChars > 0 || !text.isEmpty()))
+        editObserver_(EditEvent{0, oldChars, text});
 }
 
 void TextBuffer::insertAtOffset(int offset, const QString& text)
@@ -230,7 +235,10 @@ void TextBuffer::applyInsert(int offset, const QString& text)
     const Piece p = appendToAddBuffer(text);
     const int mid = newNode(p);
     root_ = mergeTrees(mergeTrees(a, mid), b);
-}
+    if (editObserver_) // every mutation path funnels through here (and
+        editObserver_(EditEvent{offset, offset, text}); // applyRemove below),
+}                                                  // so undo/redo replay is
+                                                   // observable too (M4)
 
 void TextBuffer::applyRemove(int startOffset, int endOffset)
 {
@@ -244,6 +252,45 @@ void TextBuffer::applyRemove(int startOffset, int endOffset)
     splitChars(mid, startOffset, a, doomed);
     recycleTree(doomed);
     root_ = mergeTrees(a, c);
+    if (editObserver_)
+        editObserver_(EditEvent{startOffset, endOffset, QString()});
+}
+
+void TextBuffer::setEditObserver(std::function<void(const EditEvent&)> observer)
+{
+    editObserver_ = std::move(observer);
+}
+
+TextBuffer::PieceView TextBuffer::pieceAt(int offset) const
+{
+    // Descend the treap by char aggregates to the node owning `offset`.
+    if (offset < 0 || root_ == kNull)
+        return {};
+    int cur = root_;
+    int base = 0; // doc offset of the current subtree's first unit
+    while (cur != kNull) {
+        const Node& n = nodes_[static_cast<std::size_t>(cur)];
+        const int leftChars = subChars(n.left);
+        if (offset < base + leftChars) {
+            cur = n.left;
+            continue;
+        }
+        const int ownStart = base + leftChars;
+        if (offset < ownStart + n.chars) {
+            const int skip = offset - ownStart;
+            const QString& buf = buffers_[static_cast<std::size_t>(n.piece.buf)];
+            PieceView v;
+            // QChar is a char16_t newtype; piece-table consumers speak
+            // UTF-16 code units (QString data *is* UTF-16LE on LE hosts).
+            v.data = reinterpret_cast<const char16_t*>(buf.constData()) + n.piece.start + skip;
+            v.start = offset;
+            v.len = n.chars - skip;
+            return v;
+        }
+        base = ownStart + n.chars;
+        cur = n.right;
+    }
+    return {}; // offset == charCount() and beyond: no piece covers it
 }
 
 // --- undo/redo (M3) ------------------------------------------------------

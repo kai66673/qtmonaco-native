@@ -1,0 +1,26 @@
+// Generated at configure time by third_party/tree-sitter/CMakeLists.txt
+// from the vendored grammars' queries/highlights.scm. Do not edit.
+
+#include "view/QueryData.hpp"
+
+namespace qmn::view::queries {
+
+const char* pythonHighlights()
+{
+    static const char kSource[] = R"QMN(@QMN_SCM_PYTHON@)QMN";
+    return kSource;
+}
+
+const char* jsonHighlights()
+{
+    static const char kSource[] = R"QMN(@QMN_SCM_JSON@)QMN";
+    return kSource;
+}
+
+const char* javascriptHighlights()
+{
+    static const char kSource[] = R"QMN(@QMN_SCM_JAVASCRIPT@)QMN";
+    return kSource;
+}
+
+} // namespace qmn::view::queries

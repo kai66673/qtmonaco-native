@@ -1,5 +1,7 @@
 #include "CodeEditor.hpp"
 
+#include "view/HighlightEngine.hpp"
+
 #include <QApplication>
 #include <QClipboard>
 #include <QFocusEvent>
@@ -62,6 +64,22 @@ bool isGraphemeBoundary(const QString& text, int col)
     QTextBoundaryFinder f(QTextBoundaryFinder::Grapheme, text);
     f.setPosition(col);
     return f.isAtBoundary();
+}
+
+// M4: shared snap used by BOTH edges of a colored-run boundary. Adjacent
+// spans snap the same interior boundary identically, so the colored
+// fragments stay an exact partition (no gap, no double paint), and an
+// edge never lands inside a surrogate pair or a combining sequence
+// (QTextLine fragment painting splits clusters at the given indices,
+// measured: a mid-cluster cut drops or double-draws the cluster's glyphs).
+int snapToGraphemeForward(const QString& text, int col)
+{
+    const int n = static_cast<int>(text.size());
+    if (col <= 0 || col >= n)
+        return std::clamp(col, 0, n);
+    if (isGraphemeBoundary(text, col))
+        return col;
+    return nextGraphemeCol(text, col);
 }
 
 // Editor-style word motion (VS Code semantics), deliberately not the ICU
@@ -132,6 +150,16 @@ CodeEditor::CodeEditor(QWidget* parent)
 {
     setFocusPolicy(Qt::StrongFocus);
     setAccessibleName(QStringLiteral("code editor"));
+
+    // M4: one core EditEvent per primitive mutation keeps the highlight
+    // tree current (ts_tree_edit happens inside the engine; the reparse
+    // itself waits for refreshIfNeeded() in paint, so a whole key press -
+    // multi-caret fan-out included - reparses at most once).
+    highlight_ = std::make_unique<HighlightEngine>();
+    highlight_->attach(&buffer_);
+    buffer_.setEditObserver([this](const qmn::core::TextBuffer::EditEvent& ev) {
+        highlight_->onEdit(ev);
+    });
 
     font_ = QFontDatabase::systemFont(QFontDatabase::FixedFont);
     font_.setPixelSize(14);
@@ -1437,6 +1465,21 @@ void CodeEditor::paintEvent(QPaintEvent*)
     const int last = std::min(buffer_.lineCount() - 1, first + visibleLineCount());
     const QFontMetricsF fmF(font_); // preedit advance measurement
 
+    // M4: bring the highlight engine current here, not on the key path
+    // (the typing perf harness measures keyPressEvent logic; the reparse
+    // rides the next paint, so one key press reparses at most once).
+    // The visible window (model offsets) lets the engine's adaptive
+    // policy scope parse+query to what is on screen on big documents.
+    if (highlight_->active()) {
+        const std::vector<int>& ls = highlight_->lineStarts();
+        if (!ls.empty() && size_t(first) < ls.size()) {
+            const int vpEnd =
+                size_t(last) + 1 < ls.size() ? ls[size_t(last) + 1] : buffer_.charCount();
+            highlight_->setViewport(ls[size_t(first)], vpEnd);
+        }
+    }
+    highlight_->refreshIfNeeded();
+
     // Selection pass first: paint the background under the glyphs.
     // Semi-transparent highlight so text stays legible on light and dark
     // palettes alike (Monaco uses the same trick with ~40% opacity).
@@ -1498,7 +1541,18 @@ void CodeEditor::paintEvent(QPaintEvent*)
             // y()==0). Passing baseline=yTop+ascent_ here drew every line
             // ~one line-height too low, an empty band at the top and a
             // caret visibly a line above its text.
-            gs->line.draw(&p, QPointF(padding_, yTop));
+            const QPointF origin(padding_, yTop);
+            const auto fmts = formatRangesForLine(line, gs);
+            if (fmts.isEmpty()) {
+                gs->line.draw(&p, origin);
+            } else {
+                // Colored path: the SAME layout, painted through
+                // QTextLayout::draw's FormatRange selections (foreground
+                // overrides per range, everything else keeps the pen) -
+                // introducing per-color grid math would break the
+                // one-layout invariant.
+                gs->layout.draw(&p, origin, fmts);
+            }
         }
         if (line == caret_.line && !preedit_.isEmpty()) {
             // Composition text at the caret with a dotted underline (Qt's
@@ -1514,6 +1568,86 @@ void CodeEditor::paintEvent(QPaintEvent*)
             p.setPen(palette().color(QPalette::Text));
         }
     }
+}
+
+QVector<QTextLayout::FormatRange> CodeEditor::formatRangesForLine(int line, const GeoSlot* gs) const
+{
+    QVector<QTextLayout::FormatRange> out;
+    if (!highlight_->active() || !gs->valid)
+        return out;
+    // The engine's line index + span list are the same tree generation
+    // (paintEvent calls refreshIfNeeded() before this runs).
+    const std::vector<int>& ls = highlight_->lineStarts();
+    if (line < 0 || size_t(line) >= ls.size())
+        return out;
+    const int lineStart = ls[size_t(line)];
+    const int lineEnd = size_t(line) + 1 < ls.size()
+        ? ls[size_t(line) + 1] - 1 // the '\n' terminating this line
+        : buffer_.charCount();     // last line: no terminator past it
+    const auto& hs = highlight_->spans();
+    auto it = std::upper_bound(hs.begin(), hs.end(), lineStart,
+                               [](int v, const HighlightEngine::Span& s) { return v < s.end; });
+    const int laidOut = static_cast<int>(gs->text.size()); // truncation-aware
+    for (; it != hs.end() && it->start < lineEnd; ++it) {
+        const QColor color = HighlightEngine::colorFor(it->kind);
+        if (!color.isValid())
+            continue;
+        int a = std::max(it->start, lineStart) - lineStart;
+        int b = std::min(it->end, lineEnd) - lineStart;
+        b = std::min(b, laidOut);
+        if (a >= b)
+            continue; // span lies in the never-laid-out tail of a monster line
+        a = snapToGraphemeForward(gs->text, a);
+        b = snapToGraphemeForward(gs->text, b);
+        if (a >= b)
+            continue;
+        QTextCharFormat fmt; // font untouched: monospace stays monospace
+        fmt.setForeground(color);
+        out.append(QTextLayout::FormatRange{a, b - a, fmt});
+    }
+    return out;
+}
+
+// --- M4 syntax highlighting public API ----------------------------------
+
+void CodeEditor::setLanguage(const QString& language)
+{
+    highlight_->setLanguage(language);
+    update(); // colors appear on the next paint (parse+query deferred there)
+}
+
+QString CodeEditor::language() const
+{
+    return highlight_->language();
+}
+
+QStringList CodeEditor::availableLanguages()
+{
+    return HighlightEngine::languageIds();
+}
+
+QVector<CodeEditor::HighlightSpan> CodeEditor::highlightSpans(int startOffset, int endOffset)
+{
+    QVector<HighlightSpan> out;
+    const int n = buffer_.charCount();
+    startOffset = std::clamp(startOffset, 0, n);
+    endOffset = std::clamp(endOffset, 0, n);
+    if (startOffset >= endOffset)
+        return out;
+    // Exactness contract: the returned spans cover the requested window
+    // even when paint-driven refreshes only parsed the viewport (M4
+    // adaptive policy) - spansFor may pay a synchronous re-query or, in
+    // the rare programmatic whole-document dump, one full parse.
+    const auto& hs = highlight_->spansFor(startOffset, endOffset);
+    for (const auto& s : hs) {
+        if (s.end <= startOffset)
+            continue;
+        if (s.start >= endOffset)
+            break; // spans are sorted; nothing later can intersect
+        out.push_back(HighlightSpan{std::max(s.start, startOffset),
+                                    std::min(s.end, endOffset), s.kind});
+    }
+    return out;
 }
 
 void CodeEditor::keyPressEvent(QKeyEvent* event)

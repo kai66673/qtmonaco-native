@@ -6,6 +6,7 @@
 #include <QPoint>
 #include <QScrollBar>
 #include <QString>
+#include <QStringList>
 #include <QTextLayout>
 #include <QTextLine>
 #include <QTimer>
@@ -16,11 +17,14 @@
 
 #include <array>
 #include <functional>
+#include <memory>
 #include <utility>
 
 class QInputMethodEvent;
 
 namespace qmn::view {
+
+class HighlightEngine; // M4 private seam; defined in view/HighlightEngine.hpp
 
 // 0-based text position. col is counted in UTF-16 code units.
 struct TextPosition {
@@ -51,7 +55,10 @@ struct TextPosition {
 // clipboard copy/cut/paste (whole-line when no selection, Monaco-style),
 // X11 primary selection mirroring + middle-click paste, IME composition
 // (preedit rendered at the caret, only committed text reaches the model),
-// vertical scrolling, per-keystroke latency instrumentation.
+// vertical scrolling, per-keystroke latency instrumentation, and
+// tree-sitter-backed syntax highlighting with a grammar-less fallback
+// (M4: python/json/javascript, colors painted through the same cached
+// QTextLine layout as the plain path).
 //
 // `col` stays UTF-16 code units everywhere (LSP semantics); the
 // caret may sit inside a cluster only via setPlainText/setPosition/mouse
@@ -130,9 +137,55 @@ public:
     QVector<TextPosition> additionalCarets() const; // caret positions, doc order
     void clearAdditionalCarets(); // collapse to the primary caret
 
+    // Syntax highlighting (M4, Phase D2). Backed by the vendored
+    // tree-sitter engine behind a private seam (view/HighlightEngine.hpp):
+    // the public surface here stays plain-Qt so it remains
+    // Shiboken-wrappable and tree-sitter never leaks through headers.
+    // setLanguage("") or an unknown id disables highlighting; the widget
+    // then paints everything in the default text color (same look as
+    // before M4 - this is the grammar-less fallback path).
+    // availableLanguages() = ids with a parser + highlights query.
+    // qtmonaco parity note: the Python binding exposes this as
+    // set_language()/get_language() with the same id strings.
+    enum class TokenKind : quint16 {
+        // Semantic roles mapped 1:1 from tree-sitter capture names (the
+        // union of the vendored grammars' highlights.scm). Color mapping
+        // is the caller's/theme's job; the view only assigns roles.
+        Text = 0, // explicit: "default text color"; never emitted as a span
+        Comment, Keyword, Number, String, StringSpecial, StringSpecialKey,
+        Escape, Embedded, Constant, ConstantBuiltin, Constructor, Function,
+        FunctionBuiltin, FunctionMethod, Type, Variable, VariableBuiltin,
+        Property, Operator, Punctuation, PunctuationBracket,
+        PunctuationDelimiter, PunctuationSpecial,
+    };
+    Q_ENUM(TokenKind)
+
+    void setLanguage(const QString& language);
+    QString language() const;
+    static QStringList availableLanguages();
+
+    // Merged, non-overlapping token spans intersecting [startOffset,
+    // endOffset) (clamped), sorted by start - document UTF-16 offsets.
+    // Forces a reparse+query if dirty. Primary consumer: tests (numeric
+    // mapping assertions); the widget paints from the same engine state.
+    struct HighlightSpan {
+        int start = 0;
+        int end = 0;
+        TokenKind kind = TokenKind::Text;
+
+        bool operator==(const HighlightSpan&) const = default; // test comparisons
+    };
+    QVector<HighlightSpan> highlightSpans(int startOffset, int endOffset);
+
     int lineHeight() const { return lineHeight_; }
     double cellWidth() const { return cellWidth_; }
     int padding() const { return padding_; }
+
+    // Viewport state read-out (the same window paintEvent and the
+    // highlight policy consume). Read-only: scrolling itself happens via
+    // wheel/scrollbar. Public for consumers, bindings and the policy test.
+    int firstVisibleLine() const;
+    int visibleLineCount() const;
 
     // Widget-space x of the caret position at (line, col), following the
     // glyph engine's cluster advances (not a col * cellWidth grid). A col
@@ -234,8 +287,6 @@ private:
     // when the slot has none) — the offset view the normalization rules use.
     static std::pair<int, int> selRangeOf(const qmn::core::TextBuffer& buf, const CaretSlot& s);
 
-    int firstVisibleLine() const;
-    int visibleLineCount() const;
     int totalHeight() const;
     void setVScroll(int pixels);
     void updateScrollBarRange();
@@ -286,10 +337,19 @@ private:
     int geoMaxUnits() const;
     double xInLine(const GeoSlot* s, int col) const; // line-space x (no padding)
 
+    // M4: per-line QTextCharFormat ranges for the highlight engine's
+    // merged spans, in line-local laid-out coordinates, snapped so a
+    // range edge never splits a grapheme cluster (shared boundaries of
+    // adjacent spans snap identically, keeping the partition exact).
+    // Empty vector = "no colors for this line, plain path".
+    QVector<QTextLayout::FormatRange> formatRangesForLine(int line, const GeoSlot* gs) const;
+
     mutable std::array<GeoSlot, kGeoSlots> geo_{};
     mutable quint64 geoClock_ = 0;
 
     qmn::core::TextBuffer buffer_;
+    // M4 highlight engine (declared right after the model it observes).
+    std::unique_ptr<HighlightEngine> highlight_;
     QVector<UndoMark> undoMarks_; // aligned with buffer_ undo groups
     QVector<UndoMark> redoMarks_; // aligned with buffer_ redo groups
     qint64 lastPushSerial_ = 0;   // last seen buffer_.undoPushSerial()

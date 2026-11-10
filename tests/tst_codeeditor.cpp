@@ -1,6 +1,12 @@
-// Smoke tests for the widget: keyboard edits and selection semantics must
-// reach the model. Rendering itself is not asserted here (screenshot tests
-// come later).
+// CodeEditor widget tests: keyboard edits, selection, clipboard, undo,
+// multiple carets and syntax highlighting must reach the model. Rendering
+// is asserted ONLY through numeric pixel-band scans (the raster engine is
+// the only platform here, and no vision is available) - never screenshots.
+//
+// M4 pixel facts (measured, this environment): offscreen Base palette is
+// dark (#323232); green-dominant INK on the fixture line comes ONLY from
+// the Comment (#6A9955) and Number (#B5CEA8) colors - Keyword (#569CD6)
+// is blue-dominant and the rest neutral.
 
 #include <QtTest>
 
@@ -8,6 +14,7 @@
 #include <QImage>
 #include <QInputMethodEvent>
 #include <QInputMethodQueryEvent>
+#include <QWheelEvent>
 
 #include "view/CodeEditor.hpp"
 
@@ -120,6 +127,20 @@ private slots:
     void cutLinesAtCaretsJoinsClipboard();
     void pasteFansOutToAllCarets();
     void undoRestoresAllCaretsOneStepPerPress();
+
+    // Syntax highlighting (M4, Phase D2).
+    void setLanguageUnknownFallsBackToPlain();
+    void availableLanguagesShipsPinnedGrammars();
+    void pythonSpansMapToModelOffsets();
+    void jsonSpansMapToModelOffsets();
+    void javascriptSpansMapToModelOffsets();
+    void jsonKeyQueryPatternWinsOverPlainString();
+    void spansClipToRequestedWindow();
+    void stringSpanCoversSurrogatePairWhole();
+    void typedQuotesCloseStringIncrementally();
+    void coloredPaintChangesCommentInk();
+    void coloredPaintKeepsGlyphGeometry();
+    void largeDocViewportPolicyKeepsSpansExact();
 
 private:
     CodeEditor* editor = nullptr;
@@ -1900,6 +1921,413 @@ void TestCodeEditor::undoRestoresAllCaretsOneStepPerPress()
     QCOMPARE(editor->additionalCarets(),
              (QVector<qmn::view::TextPosition>{{0, 0}}));
     QVERIFY(!editor->canUndo()); // exactly ONE step per multi-caret press
+}
+
+// --- M4 syntax highlighting (Phase D2) -------------------------------------
+
+namespace {
+
+using TK = CodeEditor::TokenKind;
+using Span = CodeEditor::HighlightSpan;
+
+QVector<Span> allSpans(CodeEditor* ed)
+{
+    return ed->highlightSpans(0, 1 << 20); // window clamps to the document
+}
+
+int countKind(const QVector<Span>& spans, TK kind)
+{
+    int n = 0;
+    for (const Span& s : spans)
+        if (s.kind == kind)
+            ++n;
+    return n;
+}
+
+} // namespace
+
+void TestCodeEditor::setLanguageUnknownFallsBackToPlain()
+{
+    editor->setPlainText(QStringLiteral("def f(x):\n    return 1  # add\n"));
+    QVERIFY(editor->language().isEmpty()); // default: no grammar attached
+    QVERIFY(allSpans(editor).isEmpty());
+
+    editor->setLanguage(QStringLiteral("python"));
+    QCOMPARE(editor->language(), QStringLiteral("python"));
+    QVERIFY(!allSpans(editor).isEmpty());
+
+    // Unknown ids (with case/whitespace noise) return the widget to the
+    // pre-M4 plain rendering path and clear previous spans.
+    editor->setLanguage(QStringLiteral("  COBOL  "));
+    QVERIFY(editor->language().isEmpty());
+    QVERIFY(allSpans(editor).isEmpty());
+
+    editor->setLanguage(QString());
+    QVERIFY(editor->language().isEmpty());
+}
+
+void TestCodeEditor::availableLanguagesShipsPinnedGrammars()
+{
+    // Registry order = HighlightEngine::languageIds() order; new pinned
+    // grammars must be appended here (VENDORED.md lists the upstream pins).
+    QCOMPARE(CodeEditor::availableLanguages(),
+             QStringList({QStringLiteral("python"), QStringLiteral("json"),
+                          QStringLiteral("javascript")}));
+}
+
+void TestCodeEditor::pythonSpansMapToModelOffsets()
+{
+    const QString text = QStringLiteral("def f(x):\n    return 1  # add\n");
+    editor->setPlainText(text);
+    editor->setLanguage(QStringLiteral("python"));
+
+    // UTF-16 code-unit offsets, [start, end), the model's coordinate space.
+    // NOTE the `def`/call NAMES come out Variable (not Function): that is
+    // what the PINNED upstream python highlights.scm captures. The engine
+    // is verified against the committed queries, not an idealized theme;
+    // customizing .scm files is a later milestone (see VENDORED.md).
+    const QVector<Span> expected = {
+        {0, 3, TK::Keyword},            // def
+        {4, 5, TK::Variable},           // f
+        {6, 7, TK::Variable},           // x
+        {14, 20, TK::Keyword},          // return
+        {21, 22, TK::Number},           // 1
+        {24, 29, TK::Comment},          // # add
+    };
+    QVERIFY(allSpans(editor) == expected);
+
+    // Sorted and non-overlapping is the engine's merge invariant; the
+    // paint path consumes it as-is.
+    const auto spans = allSpans(editor);
+    for (int i = 1; i < spans.size(); ++i)
+        QVERIFY(spans[i - 1].end <= spans[i].start);
+}
+
+void TestCodeEditor::jsonSpansMapToModelOffsets()
+{
+    const QString text = QStringLiteral("{\"a\": 1, \"b\": null}");
+    editor->setPlainText(text);
+    editor->setLanguage(QStringLiteral("json"));
+
+    const QVector<Span> expected = {
+        {1, 4, TK::StringSpecialKey},   // "a" (pair key)
+        {6, 7, TK::Number},             // 1
+        {9, 12, TK::StringSpecialKey},  // "b"
+        {14, 18, TK::ConstantBuiltin},  // null
+    };
+    QVERIFY(allSpans(editor) == expected);
+}
+
+void TestCodeEditor::javascriptSpansMapToModelOffsets()
+{
+    const QString text = QStringLiteral("function f(x) { return x + 1; } // c\n");
+    editor->setPlainText(text);
+    editor->setLanguage(QStringLiteral("javascript"));
+
+    const QVector<Span> expected = {
+        {0, 8, TK::Keyword},                  // function
+        {9, 10, TK::Variable},                // f (upstream query colors the
+        {10, 11, TK::PunctuationBracket},     // declaration name as Variable;
+        {11, 12, TK::Variable},               // same caveat as the python
+        {12, 13, TK::PunctuationBracket},     // test above
+        {14, 15, TK::PunctuationBracket},     // {
+        {16, 22, TK::Keyword},                // return
+        {23, 24, TK::Variable},               // x
+        {25, 26, TK::Operator},               // +
+        {27, 28, TK::Number},                 // 1
+        {28, 29, TK::PunctuationDelimiter},   // ;
+        {30, 31, TK::PunctuationBracket},     // }
+        {32, 36, TK::Comment},                // // c
+    };
+    QVERIFY(allSpans(editor) == expected);
+}
+
+void TestCodeEditor::jsonKeyQueryPatternWinsOverPlainString()
+{
+    // The json query captures the pair-key node TWICE: (_) @string.special.key
+    // (pattern 0) and (string) (pattern 1) - identical [start, end) nodes, a
+    // genuine query conflict. The merge resolves it tree-sitter-style: the
+    // EARLIER pattern must win. Flip the merge's pattern tie-break and the
+    // keys degrade to plain String while everything else stays green -
+    // this is that tripwire, the expectations are not arbitrary theme picks.
+    const QString text = QStringLiteral("{\"k\": \"v\"}");
+    editor->setPlainText(text);
+    editor->setLanguage(QStringLiteral("json"));
+    const QVector<Span> expected = {
+        {1, 4, TK::StringSpecialKey},  // key wins the conflict
+        {6, 9, TK::String},            // plain value string (offsets: the
+    };                                 // colon+space sit at 4..6, NOT 7..9)
+    QVERIFY(allSpans(editor) == expected);
+}
+
+void TestCodeEditor::spansClipToRequestedWindow()
+{
+    const QString text = QStringLiteral("def f(x):\n    return 1  # add\n");
+    editor->setPlainText(text);
+    editor->setLanguage(QStringLiteral("python"));
+
+    // Window [18, 22): intersects `return` (14..20) and `1` (21..22) only.
+    const QVector<Span> expected = {
+        {18, 20, TK::Keyword},
+        {21, 22, TK::Number},
+    };
+    QVERIFY(editor->highlightSpans(18, 22) == expected);
+
+    // Out-of-range windows clamp; degenerate ranges are empty, not the
+    // spans shifted into the window.
+    QVERIFY(editor->highlightSpans(-5, 1 << 20) == allSpans(editor));
+    QVERIFY(editor->highlightSpans(1000, 2000).isEmpty());
+    QVERIFY(editor->highlightSpans(5, 5).isEmpty());
+    QVERIFY(editor->highlightSpans(7, 3).isEmpty());
+}
+
+void TestCodeEditor::stringSpanCoversSurrogatePairWhole()
+{
+    const QString text = QStringLiteral("x = \"\U0001F600\"\n");
+    editor->setPlainText(text);
+    editor->setLanguage(QStringLiteral("python"));
+    QVERIFY(QChar(text[5]).isHighSurrogate()); // the pair really is 2 units
+    QVERIFY(QChar(text[6]).isLowSurrogate());
+
+    const auto spans = allSpans(editor);
+    bool stringFound = false;
+    for (const Span& s : spans) {
+        if (s.kind == TK::String) {
+            stringFound = true;
+            QVERIFY(s.start <= 5 && s.end >= 7); // covers BOTH surrogates
+        }
+        // No token edge may cut INSIDE the pair at offset 6: tree-sitter
+        // scans UTF-16LE and emits the string as one node. (Painting snaps
+        // run edges to grapheme boundaries on top of this; the model must
+        // not split it in the first place.)
+        QVERIFY(s.start != 6);
+        QVERIFY(s.end != 6);
+    }
+    QVERIFY(stringFound);
+}
+
+void TestCodeEditor::typedQuotesCloseStringIncrementally()
+{
+    // The ts_tree_edit-per-event + deferred-reparse pipeline must keep the
+    // tree current across edits AND undos: a String span exists exactly
+    // while the text contains a closed string.
+    editor->setPlainText(QStringLiteral("s = abc"));
+    editor->setLanguage(QStringLiteral("python"));
+    const QVector<Span> baseline = allSpans(editor);
+    QCOMPARE(baseline.size(), 3); // s, =, abc - no string yet
+    QCOMPARE(countKind(baseline, TK::String), 0);
+
+    // setPosition() deliberately breaks the undo chain (proven by
+    // undoCaretMoveBreaksChain), so each keyClicks segment below is one
+    // undo step. Typing an OPEN quote must not produce a String span...
+    editor->setPosition({0, 7});
+    QTest::keyClicks(editor, "\"");
+    // Unterminated string: no String node (the other spans stay as-is).
+    QCOMPARE(countKind(allSpans(editor), TK::String), 0);
+    editor->setPosition({0, 8});
+    QTest::keyClicks(editor, "abc");
+    QCOMPARE(countKind(allSpans(editor), TK::String), 0); // still open
+    editor->setPosition({0, 11});
+    QTest::keyClicks(editor, "\""); // closes it
+    QCOMPARE(editor->toPlainText(), QStringLiteral("s = abc\"abc\""));
+    const auto closed = allSpans(editor);
+    QVERIFY(countKind(closed, TK::String) == 1);
+    for (const Span& s : closed)
+        if (s.kind == TK::String) {
+            QCOMPARE(s.start, 7); // the "abc" run incl. both quotes
+            QCOMPARE(s.end, 12);
+        }
+
+    editor->undo(); // closing-quote chunk
+    QCOMPARE(editor->toPlainText(), QStringLiteral("s = abc\"abc"));
+    QCOMPARE(countKind(allSpans(editor), TK::String), 0);
+    editor->undo(); // "abc" chunk
+    QCOMPARE(editor->toPlainText(), QStringLiteral("s = abc\""));
+    QCOMPARE(countKind(allSpans(editor), TK::String), 0);
+    editor->undo(); // opening-quote chunk
+    QCOMPARE(editor->toPlainText(), QStringLiteral("s = abc"));
+    QVERIFY(allSpans(editor) == baseline);
+}
+
+void TestCodeEditor::coloredPaintChangesCommentInk()
+{
+    // Numeric pixel tripwire for the colored paint path (the only probe
+    // available - no vision): green-dominant ink on the `return 1  # add`
+    // line comes ONLY from Comment (#6A9955) and Number (#B5CEA8); the
+    // Keyword blue and neutral inks are never green-dominant. Plain path
+    // must draw ZERO green-dominant pixels there, colored path some
+    // (measured 185 here; threshold stays far below to survive CI fonts).
+    editor->setPlainText(QStringLiteral("def f(x):\n    return 1  # add\n"));
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const int yTop = pad + lh; // line 1 band
+    auto greenInLine1 = [&]() {
+        const QImage img = editor->grab().toImage();
+        int n = 0;
+        for (int x = 0; x < img.width(); ++x)
+            for (int y = yTop; y < yTop + lh && y < img.height(); ++y) {
+                const QRgb px = img.pixel(x, y);
+                if (qGreen(px) > qRed(px) + 10 && qGreen(px) > qBlue(px) + 10)
+                    ++n;
+            }
+        return n;
+    };
+    QCOMPARE(greenInLine1(), 0);
+    editor->setLanguage(QStringLiteral("python"));
+    QVERIFY(greenInLine1() >= 20);
+}
+
+void TestCodeEditor::coloredPaintKeepsGlyphGeometry()
+{
+    // The colored path paints the SAME cached layout through
+    // QTextLayout::draw(FormatRanges) instead of gs->line.draw - it must
+    // change COLORS only, never glyph placement. Comparing whole bands
+    // pixel-for-pixel cannot work (every non-empty python line receives
+    // some capture, measured: even a lone `plain` becomes Variable), so
+    // compare INK PROFILES instead: the set of columns containing ink
+    // and the rows the ink spans must be identical before/after enabling
+    // the grammar. Caret is parked past the text end and scanned out of
+    // the window (grab() paints it; blink state could differ per grab).
+    editor->setPlainText(QStringLiteral("def f(x):\n"));
+    editor->setPosition({0, 12}); // caret past the text end (text is 10 wide)
+    const QImage before = editor->grab().toImage();
+    editor->setLanguage(QStringLiteral("python"));
+    const QImage after = editor->grab().toImage();
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const int caretX = pad + int(editor->cellWidth() * 12);
+
+    const QRgb base = before.pixel(0, 0); // padding corner = Base fill
+    QVector<bool> colB(caretX, false), colA(caretX, false);
+    QVector<bool> rowB(lh, false), rowA(lh, false);
+    int changed = 0;
+    for (int y = 0; y < lh; ++y) {
+        const int yy = pad + y;
+        QVERIFY2(yy < before.height() && yy < after.height(), "band outside grab");
+        for (int x = 0; x < caretX; ++x) {
+            const QRgb pb = before.pixel(x, yy);
+            const QRgb pa = after.pixel(x, yy);
+            if (pb != base)
+                colB[x] = rowB[y] = true;
+            if (pa != base)
+                colA[x] = rowA[y] = true;
+            if (pb != pa)
+                ++changed;
+        }
+    }
+    QVERIFY(colB == colA); // same ink columns
+    QVERIFY(rowB == rowA); // same vertical ink extent
+    QVERIFY(changed > 0);  // colors really changed (not a vacuous pass)
+}
+
+void TestCodeEditor::largeDocViewportPolicyKeepsSpansExact()
+{
+    // The D2 adaptive policy (engine constants in HighlightEngine, bench
+    // in tools/bench_ts_split.cpp) scopes parse+query to the visible
+    // window once a document is big (>= 16k units) and a viewport has
+    // been painted. This test pins the CONTRACT: the policy must be
+    // invisible to the public highlightSpans() API. Every request window
+    // - inside the viewport, inside the parsed tree, or beyond both -
+    // returns exactly the spans the never-painted (full-tree) reference
+    // editor produces.
+    auto buildDoc = [] {
+        QString text;
+        for (int b = 0; b < 400; ++b)
+            text += QStringLiteral("def func%1(arg_a, arg_b):\n"
+                                   "    total = arg_a + arg_b  # accumulate func%1\n"
+                                   "    if total > 100:\n"
+                                   "        return \"value-%1\" % total\n"
+                                   "    return [x for x in range(arg_a, arg_b)]\n\n")
+                        .arg(b);
+        return text;
+    };
+    const QString text = buildDoc();
+    QVERIFY2(text.size() >= 16 * 1024, "fixture below the policy size floor (kViewportMinUnits)");
+
+    // Reference through the SAME public API but the full-tree path: a
+    // never-painted editor never feeds a viewport, so the engine stays
+    // unscoped for it.
+    CodeEditor ref;
+    ref.setPlainText(text);
+    ref.setLanguage(QStringLiteral("python"));
+    const QVector<Span> reference = allSpans(&ref);
+    QVERIFY(reference.size() > 1000); // sanity: the doc really produces lots of ink
+
+    editor->setPlainText(text);
+    editor->setLanguage(QStringLiteral("python"));
+
+    // Block b occupies lines 6b..6b+4 plus a blank line at 6b+5; its
+    // comment marker sits on line 6b+1.
+    auto commentAt = [&](int b) {
+        const QString marker = QStringLiteral("# accumulate func%1\n").arg(b);
+        const int p = text.indexOf(marker);
+        Q_ASSERT(p >= 0);
+        return Span{p, p + int(marker.size()) - 1, TK::Comment}; // span ends before '\n'
+    };
+    auto hasSpan = [](const QVector<Span>& spans, const Span& want) {
+        return spans.contains(want);
+    };
+
+    // 1) Cold first paint: one full parse (tree covers the whole doc),
+    // but the capture walk is already window-scoped (the policy's query
+    // half needs only a viewport, not the parse-mode flip).
+    editor->grab(); // synchronous paint feeds the viewport [line0 .. line ~23]
+
+    const Span top = commentAt(0); // first block: inside the first window
+    QVERIFY(hasSpan(editor->highlightSpans(top.start, top.end + 5), top));
+
+    const Span tail = commentAt(399); // far outside: served by a re-query
+    // on the still-current full tree (coverage, not escalation).
+    QVERIFY(hasSpan(editor->highlightSpans(tail.start, tail.end + 5), tail));
+
+    // 2) One wheel throw + repaint: the engine (in Viewport parse mode by
+    // now - python's incremental full reparse busts the budget at this
+    // size) re-parses ONLY the new window anchored at the nearest col-0
+    // line above. Block 200 (comment line 1201) must come out of that
+    // window-parsed tree byte-exact vs the reference.
+    QWheelEvent wheel(QPointF(300, 200), QPointF(300, 200), QPoint(0, 0),
+                      QPoint(0, -120 * 400), Qt::NoButton, Qt::NoModifier,
+                      Qt::NoScrollPhase, false); // one throw down 1200 lines
+    QVERIFY(QApplication::sendEvent(editor, &wheel));
+    QVERIFY(editor->firstVisibleLine() > 1000); // the throw landed deep in the doc
+    editor->grab();
+
+    const Span mid = commentAt(200);
+    QVERIFY(editor->firstVisibleLine() <= 6 * 200 + 1);
+    QVERIFY(editor->firstVisibleLine() + editor->visibleLineCount() >= 6 * 200 + 1);
+    QVERIFY(hasSpan(editor->highlightSpans(mid.start, mid.end + 5), mid));
+
+    // Strongest window check: EVERY span of block 200 equals the
+    // reference's spans over the same byte-exact block bounds.
+    const int blockStart = text.indexOf(QStringLiteral("def func200("));
+    const int blockEnd = text.indexOf(QStringLiteral("def func201("));
+    QVector<Span> refBlock;
+    for (const Span& s : reference)
+        if (s.start >= blockStart && s.end <= blockEnd)
+            refBlock.push_back(s);
+    QVERIFY(editor->highlightSpans(blockStart, blockEnd) == refBlock);
+
+    // 3) Typing inside the window: the ts_tree_edit pipeline plus the
+    // viewport reparse must keep the comment's geometry exact. setPosition
+    // breaks the undo chain (undoCaretMoveBreaksChain), so one Ctrl+Z
+    // reverts the whole "# hi" burst.
+    const int markerLine = 6 * 200 + 1;
+    const int markerCol = mid.start - (text.lastIndexOf('\n', mid.start - 1) + 1);
+    editor->setPosition({markerLine, markerCol + 1}); // just after the '#'
+    QTest::keyClicks(editor, "# hi");
+    editor->grab(); // paints the dirty window: incremental viewport reparse
+    const Span grown{mid.start, mid.end + 4, TK::Comment};
+    QVERIFY(hasSpan(editor->highlightSpans(grown.start, grown.end + 5), grown));
+
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), text); // burst is ONE undo step
+    editor->grab();
+    QVERIFY(hasSpan(editor->highlightSpans(mid.start, mid.end + 5), mid));
+
+    // 4) Escalation exactness: a whole-document dump can't be served by
+    // any window tree, so spansFor pays one synchronous full pass; the
+    // result must equal the full-tree reference element-for-element.
+    QVERIFY(allSpans(editor) == reference);
 }
 
 QTEST_MAIN(TestCodeEditor)

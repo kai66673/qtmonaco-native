@@ -56,6 +56,10 @@ src/core/   TextBuffer — pure Qt-based C++ (QtCore ONLY), headless, testable
 src/view/   CodeEditor — the raw QWidget canvas (QPainter), depends on core
 src/app/    qmn-spike  — demo/bench harness, depends on view
 tests/      property tests (core) + keyboard smoke tests (view)
+tools/      standalone micro-benches (model, highlight latency tree split)
+third_party/ vendored tree-sitter runtime + generated grammars (M4; the
+            qmn_ts static lib links PRIVATE into qmn_view — tree-sitter
+            never crosses src/core/ or the public view API)
 ```
 
 Layering rules are contractual: `core` must never include QtGui/QtWidgets.
@@ -98,7 +102,7 @@ Gate 1 — Code Editor v1:
 - [x] multiple carets: Alt+Click/Alt+Drag add and select per slot, typing,
       deletion, clipboard and navigation fan out per caret; one undo step
       per multi-caret user action (see CHANGELOG for v1 divergences)
-- [ ] M4 syntax highlighting (vendored tree-sitter runtime + generated
+- [x] M4 syntax highlighting (vendored tree-sitter runtime + generated
       grammars; incremental, viewport-scoped — see PLAN.md D2)
 - [ ] M5 decoration layers + line-number gutter + markers
 - [ ] M6 find/replace (QRegularExpression)

@@ -21,8 +21,9 @@ qt_standard_project_setup()
 
 # Layering rules (see README):
 #   core  -> QtCore only (headless, fully unit-testable)
-#   view  -> core + QtWidgets (the raw QWidget canvas)
+#   view  -> core + QtWidgets + (PRIVATE) vendored tree-sitter
 #   app   -> view only (demo/spike harness)
+add_subdirectory(third_party/tree-sitter)
 add_subdirectory(src)
 
 # Needs qmn_view, so it must come after src/.
