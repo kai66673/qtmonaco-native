@@ -27,6 +27,19 @@ QString loadTextFile(const QString& path, QTextStream& err)
     return text;
 }
 
+// M4 demo convenience (examples/): guess the grammar from the suffix.
+// Keep the ids in sync with CodeEditor::availableLanguages().
+QString languageForSuffix(const QString& suffix)
+{
+    if (suffix == u"py")
+        return QStringLiteral("python");
+    if (suffix == u"json")
+        return QStringLiteral("json");
+    if (suffix == u"js" || suffix == u"mjs" || suffix == u"cjs")
+        return QStringLiteral("javascript");
+    return {};
+}
+
 } // namespace
 
 int main(int argc, char* argv[])
@@ -44,6 +57,10 @@ int main(int argc, char* argv[])
     parser.addOption({QStringLiteral("exit-after-ms"),
                       QStringLiteral("Quit automatically after the given delay (smoke/bench)"),
                       QStringLiteral("ms")});
+    parser.addOption({QStringLiteral("language"),
+                      QStringLiteral("Highlight grammar (python|json|javascript); "
+                                     "default: guessed from the file suffix"),
+                      QStringLiteral("id")});
     parser.process(app);
 
     qmn::view::CodeEditor editor;
@@ -66,6 +83,23 @@ int main(int argc, char* argv[])
                     static_cast<long long>(editor.lineCount()));
             fflush(stderr);
         }
+    }
+
+    // M4 demo convenience: --language wins over the suffix guess (examples/
+    // README). An unknown/empty id leaves the editor plain text - that is
+    // setLanguage's documented fallback, so this block can never break the
+    // harness.
+    QString language = parser.value(QStringLiteral("language")).trimmed().toLower();
+    if (language.isEmpty() && !args.isEmpty())
+        language = languageForSuffix(QFileInfo(args.first()).suffix().toLower());
+    if (!language.isEmpty()) {
+        editor.setLanguage(language);
+        fprintf(stderr, "highlight: %s\n",
+                editor.language().isEmpty()
+                    ? qPrintable(QStringLiteral("none ('%1' not in %2)")
+                                     .arg(language, qmn::view::CodeEditor::availableLanguages().join(QLatin1Char(','))))
+                    : qPrintable(editor.language()));
+        fflush(stderr);
     }
 
     // Live status in the title bar: cursor position and selection size.

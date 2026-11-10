@@ -1,0 +1,31 @@
+{
+  "_about": "qtmonaco-native json highlighting demo",
+  "_open_with": "./build/src/app/qmn-spike examples/demo.json",
+  "config": {
+    "editor": {
+      "fontSize": 13.5,
+      "tabSize": 4,
+      "wordWrap": false,
+      "theme": "dark",
+      "tokens": ["monaco", "tree-sitter", "utf-e\u0301"],
+      "keybindings": {
+        "ctrl+z": "undo",
+        "ctrl+shift+z": "redo"
+      }
+    },
+    "policy": {
+      "parseBudgetMs": 8.0,
+      "viewportMinUnits": 16384,
+      "viewportMinUnitsE16": 1.6e4,
+      "tickSeconds": 2e-9,
+      "maxSafeInt": 9007199254740991,
+      "unbounded": null,
+      "enabled": true
+    },
+    "languages": [
+      { "id": "python", "ext": [".py"], "comments": true },
+      { "id": "json", "ext": [".json"], "comments": false },
+      { "id": "javascript", "ext": [".js", ".mjs", ".cjs"], "comments": true }
+    ]
+  }
+}

@@ -81,6 +81,14 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   captures win; identical spans resolve to the earlier query pattern.
   Also public: read-only viewport accessors `firstVisibleLine()` and
   `visibleLineCount()`.
+- `examples/` highlighting gallery: one demo document per pinned grammar
+  (`demo.py`, `demo.json`, `demo.js`), dense in exactly the token roles
+  their vendored `highlights.scm` emits — `examples/README.md` carries the
+  measured per-grammar role tables and documents why some upstream roles
+  (js/py `@function`/`@constructor`, json punctuation) never appear.
+  `qmn-spike` now picks the grammar from the file suffix
+  (`.py`/`.json`/`.js`/`.mjs`/`.cjs`) and accepts `--language
+  python|json|javascript` to override.
 
 ### Fixed
 - `TextBuffer`'s constructor never created the add buffer: a document fed

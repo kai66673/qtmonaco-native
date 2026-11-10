@@ -82,6 +82,9 @@ Headless smoke/bench run:
 QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-spike --exit-after-ms 2000 bigfile.py
 ```
 
+Highlighting demos, one per grammar (`.py`/`.json`/`.js` suffixes pick the
+grammar automatically; `--language` overrides): see `examples/README.md`.
+
 ## Roadmap (hobby-scale, see estimates in the qtmonaco discussion)
 
 Milestones, in build order. **Gate 1** (editor v1: M1b…M13 + M12 completion)
