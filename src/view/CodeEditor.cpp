@@ -16,6 +16,7 @@
 #include <QLineEdit>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPolygonF> // M13 fold triangles
 #include <QPushButton>
 #include <QRegularExpression>
 #include <QResizeEvent>
@@ -168,6 +169,9 @@ CodeEditor::CodeEditor(QWidget* parent)
         highlight_->onEdit(ev);
         findDirty_ = true; // M6: typing invalidates the match set lazily;
                            // the next paint (or find action) refreshes it
+        // M13: keep collapsed-fold indices aligned with the model (a
+        // best-effort line-index sweep; fold STATE is not undoable in v1).
+        shiftFoldStateForEdit(ev);
     });
 
     font_ = QFontDatabase::systemFont(QFontDatabase::FixedFont);
@@ -212,6 +216,11 @@ CodeEditor::CodeEditor(QWidget* parent)
         caretOn_ = !caretOn_;
         update();
     });
+
+    // M13: seed the fold-map caches before the first paint/edit (empty
+    // runs: slot == model line, visibleLineTotal() == lineCount()).
+    foldDocLines_ = buffer_.lineCount();
+    rebuildHiddenRuns();
 }
 
 CodeEditor::~CodeEditor()
@@ -244,6 +253,11 @@ void CodeEditor::setPlainText(const QString& text)
     setVScroll(0);
     hScroll_ = 0;       // M9: new doc, new ambient extent (hitLine reseeds it)
     docWidthPx_ = 0;
+    collapsed_.clear(); // M13: fold state is per-document; a document
+    foldables_.clear(); // replace drops every fold (the whole-document
+    hiddenRuns_.clear(); // EditEvent the core emits would otherwise shift
+    foldVisibleTotal_ = buffer_.lineCount(); // stale folds across the replace)
+    foldDocLines_ = buffer_.lineCount();
     updateScrollBarRange();
     emit selectionChanged();
     update();
@@ -387,8 +401,13 @@ double CodeEditor::xForCol(int line, int col) const
 TextPosition CodeEditor::positionAt(const QPoint& widgetPos) const
 {
     TextPosition pos;
-    pos.line = (widgetPos.y() - padding_ + vScroll_) / lineHeight_;
-    pos.line = std::clamp(pos.line, 0, buffer_.lineCount() - 1);
+    // M13: rows are SLOTS now — the slot under the point maps to its model
+    // line through the view-line map, so clicks never land on a hidden
+    // line and clicks past the last visible row clamp to the last VISIBLE
+    // line (fold-aware identity with the no-fold case: runs empty ⇒ slot ==
+    // model line, formula bit-for-bit the old one).
+    const int row = (widgetPos.y() - padding_ + vScroll_) / lineHeight_;
+    pos.line = modelLineForVisibleIndex(row); // clamps to the visible range
     const GeoSlot* s = hitLine(pos.line);
     if (!s || !s->valid) {
         pos.col = 0; // empty line: every x is the line start
@@ -1294,7 +1313,14 @@ void CodeEditor::updatePrimarySelection()
 
 void CodeEditor::ensureCaretVisible()
 {
-    const int caretTop = caret_.line * lineHeight_;
+    // M13: a caret that ended up hidden (an edit merged its line into a
+    // collapsed fold's body) opens its fold first — the reveal choke-point
+    // rule: the caret is NEVER addressed through a hidden line. Slot space
+    // then carries the caret row (with no folds: slot == model line, the
+    // pre-M13 formula exactly).
+    if (visibleIndexOfModelLine(caret_.line) < 0)
+        revealLine(caret_.line);
+    const int caretTop = slotOfModelLine(caret_.line) * lineHeight_;
     const int caretBottom = caretTop + lineHeight_;
     int target = vScroll_;
     if (caretTop - padding_ < vScroll_)
@@ -1320,7 +1346,10 @@ void CodeEditor::ensureCaretVisible()
 
 int CodeEditor::totalHeight() const
 {
-    int total = 2 * padding_ + buffer_.lineCount() * lineHeight_;
+    // M13: the slot space — visibleLineTotal() already discounts every
+    // hidden run, so the vBar range, the setVScroll clamp, the ruler
+    // mapping and the paint window all shrink with a fold for free.
+    int total = 2 * padding_ + visibleLineTotal() * lineHeight_;
     // M9 scroll-past-end (Monaco's scrollBeyondLastLine): the bonus lets
     // the LAST line reach the viewport top. One formula, so the vertical
     // bar, the clamp math and the ruler mapping all stay consistent.
@@ -1331,7 +1360,9 @@ int CodeEditor::totalHeight() const
 
 int CodeEditor::firstVisibleLine() const
 {
-    return std::clamp((vScroll_ - padding_) / lineHeight_, 0, buffer_.lineCount() - 1);
+    // M13: the top SLOT's model line (no folds: identity with the old
+    // clamp — hiddenRuns_ empty, visibleLineTotal() == lineCount()).
+    return modelLineForVisibleIndex((vScroll_ - padding_) / lineHeight_);
 }
 
 int CodeEditor::visibleLineCount() const
@@ -1461,7 +1492,10 @@ int CodeEditor::rulerLineAt(int y) const
     const int total = std::max(1, totalHeight());
     const int h = std::max(1, height());
     const int docPx = int(qint64(std::clamp(y, 0, h - 1)) * total / h);
-    return std::clamp((docPx - padding_) / lineHeight_, 0, buffer_.lineCount() - 1);
+    // M13: totalHeight IS the slot space, so this pixel row is a slot row;
+    // the map turns it into a model line (hidden runs are simply not
+    // addressable from the strip — same rule as the click gesture).
+    return modelLineForVisibleIndex((docPx - padding_) / lineHeight_);
 }
 
 QRect CodeEditor::overviewRulerViewportRect() const
@@ -1482,7 +1516,507 @@ void CodeEditor::rulerScrollTo(int y)
     const int line = rulerLineAt(y);
     if (line < 0)
         return;
-    setVScroll(padding_ + line * lineHeight_ + lineHeight_ / 2 - height() / 2);
+    // M13: a fold click in the strip lands on a VISIBLE line by map
+    // construction; centering addresses it in slot space (its own scroll
+    // never lands a needed caret on a hidden row).
+    setVScroll(padding_ + slotOfModelLine(line) * lineHeight_ + lineHeight_ / 2
+               - height() / 2);
+}
+
+// --- M13 folding (Phase E2) -----------------------------------------------
+// One view-line map (slots) is the single source of truth for vertical
+// geometry: paint, caret navigation, hit-testing, scroll clamps, the ruler
+// and the gutter all route through hiddenRuns_, so model and screen space
+// cannot drift apart across a fold boundary. Semantics: a collapsed fold
+// {start, end} hides (start, end] — the header never disappears — and
+// rebuildHiddenRuns() MERGES touching/overlapping runs, which makes
+// "slot+1" a guaranteed-visible walk (the caret jumps over a whole fold
+// with zero extra logic in the nav code).
+
+int CodeEditor::visibleLineTotal() const
+{
+    return foldVisibleTotal_;
+}
+
+int CodeEditor::visibleIndexOfModelLine(int line) const
+{
+    const int docLines = buffer_.lineCount();
+    if (line < 0 || line >= docLines)
+        return -1;
+    // Last run starting at or before `line`: if it also ends at/after it,
+    // the line is hidden; otherwise hiddenBefore + (len past that run) is
+    // the number of hidden lines strictly before it (runs are disjoint and
+    // sorted, and each caches its own hiddenBefore prefix).
+    auto it = std::upper_bound(hiddenRuns_.begin(), hiddenRuns_.end(), line,
+                               [](int l, const HiddenRun& r) { return l < r.first; });
+    if (it != hiddenRuns_.begin()) {
+        --it;
+        if (line <= it->last)
+            return -1; // inside a hidden run
+        return line - (it->hiddenBefore + (it->last - it->first + 1));
+    }
+    return line; // before the first run: no hidden lines above
+}
+
+int CodeEditor::modelLineForVisibleIndex(int visibleIndex) const
+{
+    const int vt = visibleLineTotal();
+    if (vt <= 0)
+        return 0; // only reachable on an inconsistent cache; keep it total
+    visibleIndex = std::clamp(visibleIndex, 0, vt - 1);
+    // gapBefore(run) = the visible index the run's first line WOULD have
+    // had unhidden; the last run with gapBefore <= index is the (merged)
+    // run the index jumps over, and adding its full hidden-through count
+    // lands on a visible line (or the walk never needed a jump at all).
+    auto it = std::upper_bound(hiddenRuns_.begin(), hiddenRuns_.end(), visibleIndex,
+                               [](int v, const HiddenRun& r) {
+                                   return v < r.first - r.hiddenBefore;
+                               });
+    if (it != hiddenRuns_.begin()) {
+        --it;
+        visibleIndex += it->hiddenBefore + (it->last - it->first + 1);
+    }
+    return std::clamp(visibleIndex, 0, buffer_.lineCount() - 1);
+}
+
+void CodeEditor::rebuildHiddenRuns()
+{
+    const int docLines = std::max(1, buffer_.lineCount());
+    std::sort(collapsed_.begin(), collapsed_.end(), [](const FoldState& a, const FoldState& b) {
+        if (a.start != b.start)
+            return a.start < b.start;
+        return a.end > b.end;
+    });
+    hiddenRuns_.clear();
+    int hidden = 0;
+    for (const FoldState& f : collapsed_) {
+        const int first = f.start + 1;
+        if (first >= docLines)
+            continue; // empty body after edits/clamping: drop the run
+        const int last = std::min(f.end, docLines - 1);
+        if (last < first)
+            continue;
+        if (!hiddenRuns_.isEmpty() && first <= hiddenRuns_.back().last + 1) {
+            // touching or overlapping: merge, so runs stay disjoint AND
+            // non-adjacent — the invariant that makes nextVisible land on
+            // a visible line (or past the document) by construction
+            HiddenRun& r = hiddenRuns_.last();
+            if (last > r.last) {
+                hidden += last - r.last;
+                r.last = last;
+            }
+            continue;
+        }
+        hiddenRuns_.push_back(HiddenRun{first, last, hidden});
+        hidden += last - first + 1;
+    }
+    foldVisibleTotal_ = docLines - hidden; // runs never cover line 0, so >= 1
+}
+
+void CodeEditor::shiftFoldStateForEdit(const qmn::core::TextBuffer::EditEvent& ev)
+{
+    // The observer fires POST-mutation, but EditEvent offsets are in the
+    // PRE-op frame: ev.start itself survives every edit path (inserts land
+    // AT it, deletes remove what follows it), so its post-op line IS its
+    // pre-op line — the one anchor both frames agree on. EditEvent carries
+    // no deleted text, so the line delta of this single op comes from the
+    // cached doc lineCount: delta = newlines added (net).
+    const int docLines = buffer_.lineCount();
+    if (collapsed_.isEmpty()) {
+        foldDocLines_ = docLines;
+        return;
+    }
+    const int delta = docLines - foldDocLines_;
+    foldDocLines_ = docLines;
+    const int anchorLine = buffer_.lineColAt(ev.start).line;
+    QVector<FoldState> kept;
+    kept.reserve(collapsed_.size());
+    bool dirty = false;
+    for (FoldState& f : collapsed_) {
+        if (f.start > anchorLine) {
+            f.start += delta; // entirely below the edit: whole fold shifts
+            f.end += delta;
+        } else if (f.end > anchorLine) {
+            f.end += delta; // contains (or ends below) the edit line
+        }
+        if (f.end <= f.start || f.start < 0 || f.start >= docLines)
+            dirty = true; // body deleted / fold slid off the end: it dies
+        else
+            kept.push_back(f);
+    }
+    if (dirty || kept.size() != collapsed_.size() || delta != 0) {
+        collapsed_ = std::move(kept);
+        rebuildHiddenRuns(); // clamp ends into the new doc shape too
+    }
+}
+
+int CodeEditor::indentOfModelLine(int line) const
+{
+    if (line < 0 || line >= buffer_.lineCount())
+        return -1;
+    // Read only a leading window: paint calls this per VISIBLE line, and a
+    // 1M-unit line must not pay a full materialization (same O(view) rule
+    // as the geo cache). A leading whitespace run deeper than the window
+    // (pathological code) clamps at the window size — an accepted v1
+    // approximation for the indent fold fallback.
+    const int off = buffer_.offsetOfLine(line);
+    const int winEnd = std::min(off + kIndentWindow, buffer_.charCount());
+    const QString s = buffer_.textRange(off, winEnd);
+    int i = 0;
+    while (i < s.size()
+           && (s.at(i) == QLatin1Char(' ') || s.at(i) == QLatin1Char('\t')))
+        ++i;
+    if (i < s.size()) {
+        if (s.at(i) == QLatin1Char('\n'))
+            return -1; // blank (whitespace-only) line: no indent at all
+        return i;      // the line's content starts here: indent = i
+    }
+    // The whole window is whitespace: blank line if the '\n' (or EOF) sits
+    // right behind it, else an absurdly deep indent — report the window
+    // size, which behaves as "very deep" in every > / <= comparison.
+    if (winEnd >= buffer_.charCount())
+        return -1; // EOF inside a whitespace-only window: blank at EOF
+    return buffer_.textRange(winEnd, winEnd + 1) == QLatin1String("\n")
+               ? -1
+               : kIndentWindow;
+}
+
+int CodeEditor::foldEndForLine(int line)
+{
+    if (line < 0 || line >= buffer_.lineCount())
+        return -1;
+    // Grammar source first (exact ends from the CURRENT tree; a whole-doc
+    // fold query at an explicit user action may pay one O(tree) walk —
+    // paint never comes through here). One start line can carry several
+    // captures (python: decorated_definition vs function_definition): the
+    // TIGHTEST end is the fold the user means at that very line.
+    const auto& ff = highlight_->foldsFull();
+    int best = -1;
+    for (size_t i = 0; i < ff.size(); ++i) {
+        if (ff[i].startLine < line)
+            continue;
+        if (ff[i].startLine > line)
+            break;
+        if (ff[i].endLine > line && (best < 0 || ff[i].endLine < best))
+            best = ff[i].endLine;
+    }
+    if (best > line)
+        return std::min(best, buffer_.lineCount() - 1);
+    // Indent source (always available, grammar modes included — the
+    // foldable set is the UNION of both sources): forward scan from the
+    // start line. Blank lines are skipped (they neither end nor extend a
+    // fold); the fold ends at the LAST line deeper than the header. This
+    // is an explicit user action, so an O(body) scan is acceptable here —
+    // paint resolves only start lines (see recomputeFoldables).
+    const int base = indentOfModelLine(line);
+    if (base < 0)
+        return -1;
+    int last = line;
+    for (int L = line + 1; L < buffer_.lineCount(); ++L) {
+        const int ind = indentOfModelLine(L);
+        if (ind < 0)
+            continue;
+        if (ind <= base)
+            break;
+        last = L;
+    }
+    return last > line ? last : -1;
+}
+
+// Paint-window foldable starts: engine @fold captures (exact ends, from
+// the refresh that produced THIS paint's spans — and, after an explicit
+// foldsFull() call, possibly a whole-document superset: filtering by the
+// window here is what keeps that harmless) union the local indent rule.
+// Indent ends stay UNRESOLVED at paint time (end = start: the triangle
+// only needs the start line; foldEndForLine resolves the end on the
+// actual fold request) — paint stays O(viewport), even on a 5k-line
+// block. Blanks read as "no indent", so a fold never starts on a blank
+// line and blank runs between blocks keep separate folds separate.
+void CodeEditor::recomputeFoldables(int firstModel, int lastModel)
+{
+    foldables_.clear();
+    const auto& ef = highlight_->folds(); // (start asc, end desc)
+    size_t i = 0;
+    while (i < ef.size() && ef[i].startLine < firstModel)
+        ++i;
+    for (; i < ef.size() && ef[i].startLine <= lastModel; ++i) {
+        if (!foldables_.isEmpty() && foldables_.back().start == ef[i].startLine)
+            continue; // same start: the engine's widest capture (outermost)
+                      // leads; VS Code folds outermost on the header line
+        if (visibleIndexOfModelLine(ef[i].startLine) < 0)
+            continue; // start hidden inside a collapsed run: no row to mark
+        foldables_.push_back(FoldState{ef[i].startLine, ef[i].endLine});
+    }
+    const int docLines = buffer_.lineCount();
+    // first/last are VISIBLE lines (map outputs), so the walk starts at
+    // first's own slot; the vt guard matters because modelLineForVisibleIndex
+    // CLAMPS: past the last slot it keeps returning the last line, which
+    // for a window ending at the document end would never satisfy line >
+    // lastModel (measured: that spin hangs the first paint).
+    for (int slot = std::max(0, visibleIndexOfModelLine(firstModel));; ++slot) {
+        if (slot >= visibleLineTotal())
+            break;
+        const int line = modelLineForVisibleIndex(slot);
+        if (line > lastModel)
+            break;
+        if (line < firstModel)
+            continue; // above the window: skip WITHOUT laying out the geo
+                      // cache on off-screen lines (visit order stays painted)
+        // The indent rule only fires between two ADJACENT model lines: if
+        // line+1 is hidden (inside a collapsed run), `line` is that run's
+        // fold start and needs no second opinion. A FOLDED start always
+        // stays in the cache (the ▸ marker must keep its row even though
+        // the indent pair no longer sits adjacent).
+        if (isFolded(line)) {
+            if (!isFoldable(line))
+                foldables_.push_back(FoldState{line, line}); // end lazy
+            continue;
+        }
+        const int ind = indentOfModelLine(line);
+        if (ind >= 0 && line + 1 < docLines && visibleIndexOfModelLine(line + 1) >= 0) {
+            const int nextInd = indentOfModelLine(line + 1);
+            if (nextInd > ind
+                && !isFoldable(line)) { // lower_bound walk over the sorted cache
+                foldables_.push_back(FoldState{line, line}); // end lazy
+            }
+        }
+    }
+    // The indent loop above searched a cache that was only PARTIALLY sorted
+    // (engine entries first, indent entries appended in a second ascending
+    // run), so a duplicate could slip past. One stable sort + unique on
+    // start restores the strict invariant every consumer (isFoldable, the
+    // gutter lower_bound, foldLine) relies on; stability keeps engine
+    // entries ahead of same-start indent entries, so the exact end wins.
+    std::stable_sort(foldables_.begin(), foldables_.end(),
+                     [](const FoldState& a, const FoldState& b) { return a.start < b.start; });
+    foldables_.erase(std::unique(foldables_.begin(), foldables_.end(),
+                                 [](const FoldState& a, const FoldState& b) {
+                                     return a.start == b.start;
+                                 }),
+                     foldables_.end());
+}
+
+// Open every collapsed fold strictly containing `line` (start visible, so
+// a simple containment sweep; one pass suffices — unfolding an outer run
+// can only REVEAL inner starts, never hide one). Choke points only:
+// setPosition/setSelection/moveCaret/ensureCaretVisible — never paint.
+bool CodeEditor::revealLine(int line)
+{
+    if (collapsed_.isEmpty() || line < 0 || line >= buffer_.lineCount())
+        return false;
+    if (visibleIndexOfModelLine(line) >= 0)
+        return false;
+    bool changed = false;
+    for (int i = 0; i < collapsed_.size();) {
+        const FoldState& f = collapsed_[i];
+        if (f.start < line && line <= f.end) {
+            collapsed_.removeAt(i);
+            changed = true;
+        } else {
+            ++i;
+        }
+    }
+    if (changed) {
+        rebuildHiddenRuns();
+        updateScrollBarRange(); // the slot space grew back: bar follows
+    }
+    return changed;
+}
+
+int CodeEditor::nextVisibleModelLine(int line) const
+{
+    const int docLines = buffer_.lineCount();
+    if (line >= docLines - 1)
+        return line; // at (or past) the document end: caller clamps
+    const int s = visibleIndexOfModelLine(line);
+    if (s >= 0) {
+        // visible: the next slot, which the run merge guarantees lands on
+        // a visible line (or the walk is over)
+        if (s + 1 < visibleLineTotal())
+            return modelLineForVisibleIndex(s + 1);
+        return line;
+    }
+    // hidden: jump out of the run (merged runs make last+1 visible or gone)
+    auto it = std::upper_bound(hiddenRuns_.begin(), hiddenRuns_.end(), line,
+                               [](int l, const HiddenRun& r) { return l < r.first; });
+    if (it != hiddenRuns_.begin()) {
+        --it;
+        if (line <= it->last)
+            return std::min(it->last + 1, docLines - 1);
+    }
+    return std::min(line + 1, docLines - 1); // unreached by construction
+}
+
+int CodeEditor::prevVisibleModelLine(int line) const
+{
+    if (line <= 0)
+        return line; // at the document start: caller clamps
+    const int s = visibleIndexOfModelLine(line);
+    if (s >= 0) {
+        if (s > 0)
+            return modelLineForVisibleIndex(s - 1);
+        return line;
+    }
+    auto it = std::upper_bound(hiddenRuns_.begin(), hiddenRuns_.end(), line,
+                               [](int l, const HiddenRun& r) { return l < r.first; });
+    if (it != hiddenRuns_.begin()) {
+        --it;
+        if (line <= it->last)
+            return it->first - 1; // run.first - 1 is the fold's own start
+    }
+    return line - 1; // unreached by construction
+}
+
+int CodeEditor::slotOfModelLine(int line) const
+{
+    const int s = visibleIndexOfModelLine(line);
+    return s < 0 ? 0 : s;
+}
+
+int CodeEditor::modelLineForY(int y) const
+{
+    if (y < padding_)
+        return -1;
+    return modelLineForVisibleIndex((y - padding_ + vScroll_) / lineHeight_);
+}
+
+int CodeEditor::foldZoneWidth() const
+{
+    if (lineNumbersMode_ == LineNumbersMode::Off)
+        return 0; // no gutter chrome to host the zone (deliberately: the
+                  // gutter Off switch IS the folding chrome's switch in v1)
+    return std::max(10, qRound(2.2 * cellWidth_));
+}
+
+QVector<CodeEditor::FoldRange> CodeEditor::foldableRanges()
+{
+    // Exact public view of the paint cache: entries whose end the paint
+    // left lazy (indent-rule starts) get their real end resolved here —
+    // explicit callers (tests, bindings) pay that, the paint path never
+    // comes through this function.
+    QVector<FoldRange> out;
+    out.reserve(foldables_.size());
+    for (const FoldState& f : foldables_) {
+        const int end = f.end > f.start ? f.end : foldEndForLine(f.start);
+        if (end > f.start)
+            out.push_back(FoldRange{f.start, end});
+    }
+    return out;
+}
+
+bool CodeEditor::isFoldable(int line) const
+{
+    // lower_bound (element-first comparator: the one order libstdc++ gets
+    // right everywhere) + equality: the foldables cache is sorted by start.
+    auto it = std::lower_bound(foldables_.begin(), foldables_.end(), line,
+                               [](const FoldState& f, int l) { return f.start < l; });
+    return it != foldables_.end() && it->start == line;
+}
+
+bool CodeEditor::isFolded(int line) const
+{
+    auto it = std::lower_bound(collapsed_.begin(), collapsed_.end(), line,
+                               [](const FoldState& f, int l) { return f.start < l; });
+    return it != collapsed_.end() && it->start == line;
+}
+
+bool CodeEditor::foldLine(int line)
+{
+    if (line < 0 || line >= buffer_.lineCount() || isFolded(line))
+        return false;
+    if (visibleIndexOfModelLine(line) < 0)
+        return false; // hidden start: unfold the outer fold first (public
+                      // contract; the mouse can never reach this state)
+    const int end = foldEndForLine(line);
+    if (end <= line || end >= buffer_.lineCount())
+        return false;
+    // Drop everything this fold subsumes (same-start residue included),
+    // then insert at sort position and re-derive the map. Partially
+    // overlapping residue (stale-edit leftovers) keeps its own headroom:
+    // the run merge normalizes the visible result either way.
+    for (int i = collapsed_.size() - 1; i >= 0; --i) {
+        const FoldState& f = collapsed_[i];
+        if (f.start == line || (f.start > line && f.end <= end))
+            collapsed_.removeAt(i);
+    }
+    auto at = std::lower_bound(collapsed_.begin(), collapsed_.end(), FoldState{line, end},
+                               [](const FoldState& a, const FoldState& b) {
+                                   if (a.start != b.start)
+                                       return a.start < b.start;
+                                   return a.end > b.end;
+                               });
+    collapsed_.insert(at, FoldState{line, end});
+    rebuildHiddenRuns();
+    updateScrollBarRange(); // the slot space shrank: vBar + clamp follow
+    update();
+    return true;
+}
+
+bool CodeEditor::unfoldLine(int line)
+{
+    bool changed = false;
+    for (int i = collapsed_.size() - 1; i >= 0; --i)
+        if (collapsed_[i].start == line) {
+            collapsed_.removeAt(i);
+            changed = true;
+        }
+    if (!changed)
+        return false;
+    rebuildHiddenRuns();
+    updateScrollBarRange();
+    update();
+    return true;
+}
+
+bool CodeEditor::toggleFold(int line)
+{
+    return isFolded(line) ? unfoldLine(line) : foldLine(line);
+}
+
+void CodeEditor::collapseAll()
+{
+    // Explicit whole-document pass (O(document) allowed here): engine
+    // folds first (whole tree), then indent starts the engine does not
+    // cover. Outer-first order (start asc, end desc) means every already
+    // collapsed inner start is hidden when its turn comes — foldLine's
+    // hidden-start rule then skips it, so nesting folds for free.
+    QVector<FoldState> all;
+    for (const auto& fr : highlight_->foldsFull())
+        if (fr.endLine > fr.startLine)
+            all.push_back(FoldState{fr.startLine, fr.endLine});
+    const int docLines = buffer_.lineCount();
+    for (int L = 0; L + 1 < docLines; ++L) {
+        const int ind = indentOfModelLine(L);
+        if (ind < 0)
+            continue;
+        const int next = indentOfModelLine(L + 1);
+        if (next > ind
+            && !std::any_of(all.begin(), all.end(),
+                            [L](const FoldState& f) { return f.start == L; })) {
+            all.push_back(FoldState{L, L}); // end resolved by foldLine below
+        }
+    }
+    std::sort(all.begin(), all.end(), [](const FoldState& a, const FoldState& b) {
+        if (a.start != b.start)
+            return a.start < b.start;
+        return a.end > b.end;
+    });
+    bool changed = false;
+    for (const FoldState& f : all)
+        if (foldLine(f.start)) // foldLine re-resolves the exact end and
+            changed = true;    // enforces every invariant (incl. dedupe)
+    if (changed)
+        update();
+}
+
+void CodeEditor::expandAll()
+{
+    if (collapsed_.isEmpty())
+        return;
+    collapsed_.clear();
+    rebuildHiddenRuns();
+    updateScrollBarRange();
+    update();
 }
 
 void CodeEditor::insertTextAtCaret(const QString& text)
@@ -1711,6 +2245,14 @@ QColor rulerStripe()
     return QColor(140, 140, 140, 110); // muted cool gray over the dark bg
 }
 
+// M13 fold-triangle ink: a FIXED cool gray (R==G==B by construction) so
+// the warm/red pixel predicates of the decoration probes stay green even
+// when the fold zone is inside their scan window.
+QRgb foldInk()
+{
+    return qRgb(150, 150, 150);
+}
+
 } // namespace
 
 void CodeEditor::paintEvent(QPaintEvent*)
@@ -1721,8 +2263,17 @@ void CodeEditor::paintEvent(QPaintEvent*)
     p.setFont(font_);
 
     const int lh = lineHeight_;
-    const int first = firstVisibleLine();
-    const int last = std::min(buffer_.lineCount() - 1, first + visibleLineCount());
+    // M13: paint walks VISIBLE SLOTS (the view-line map). first/last stay
+    // MODEL lines — the engine's highlight window and every decoration
+    // pass (bands, selections, matches, diagnostics, hints) keep their
+    // model-contiguous semantics and simply skip hidden rows (their
+    // visible index is -1). No folds: runs empty, slot == model line, and
+    // every expression below reduces to its pre-M13 form.
+    const int vt = std::max(1, visibleLineTotal()); // scroll-past-end can push
+    const int firstSlot = std::clamp((vScroll_ - padding_) / lh, 0, vt - 1); // the slot past
+    const int lastSlot = std::min(vt - 1, firstSlot + visibleLineCount());   // the last line
+    const int first = modelLineForVisibleIndex(firstSlot);
+    const int last = modelLineForVisibleIndex(lastSlot);
     const QFontMetricsF fmF(font_); // preedit advance measurement
     const int textLeft = contentLeft(); // M5: padding_ + gutter width
 
@@ -1751,6 +2302,11 @@ void CodeEditor::paintEvent(QPaintEvent*)
         }
     }
     highlight_->refreshIfNeeded();
+    // M13: foldable starts for this paint's window, from the tree+spans
+    // generation the line above just produced (same cadence, same window
+    // — a fold query beyond the viewport is never paid here; see
+    // recomputeFoldables for the union + lazy-end rules).
+    recomputeFoldables(first, last);
 
     // M5 layer 2: whole-line bands under selections and text (qtmonaco
     // highlighted lines + optional current-line band). Full width on
@@ -1759,12 +2315,15 @@ void CodeEditor::paintEvent(QPaintEvent*)
     band.setAlpha(45);
     if (highlightEnd_ >= 0) {
         for (int line = std::max(first, highlightStart_); line <= std::min(last, highlightEnd_); ++line)
-            p.fillRect(QRect(0, padding_ + line * lh - vScroll_, width(), lh), band);
+            if (const int slot = visibleIndexOfModelLine(line); slot >= 0) // M13: hidden rows
+                p.fillRect(QRect(0, padding_ + slot * lh - vScroll_, width(), lh), band);
     }
-    if (currentLineHl_ && caret_.line >= first && caret_.line <= last) {
+    if (currentLineHl_ && caret_.line >= first && caret_.line <= last
+        && visibleIndexOfModelLine(caret_.line) >= 0) {
         QColor cur = palette().color(QPalette::Text);
         cur.setAlpha(16); // subtle wash: lighter on dark, darker on light
-        p.fillRect(QRect(0, padding_ + caret_.line * lh - vScroll_, width(), lh), cur);
+        p.fillRect(QRect(0, padding_ + slotOfModelLine(caret_.line) * lh - vScroll_, width(), lh),
+                   cur);
     }
 
     // M6: match quads - all matches muted, current bright (they ride
@@ -1787,6 +2346,9 @@ void CodeEditor::paintEvent(QPaintEvent*)
             : nullptr;
         for (; it != matches_.end() && it->startLine <= last; ++it) {
             const MatchRange& m = *it;
+            const int slot = visibleIndexOfModelLine(m.startLine); // M13 cull
+            if (slot < 0)
+                continue; // hidden match row: no pixels to paint
             const bool isCur = cur == &m;
             const GeoSlot* gs = hitLine(m.startLine);
             const double raw0 = xw(xInLine(gs, m.startCol));
@@ -1798,7 +2360,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
                 continue; // M9 cull: quad fully outside the text window
             QColor ink = QColor::fromRgb(findMatchInk(isCur));
             ink.setAlpha(isCur ? 130 : 80);
-            p.fillRect(QRectF(QPointF(x0, padding_ + m.startLine * lh - vScroll_),
+            p.fillRect(QRectF(QPointF(x0, padding_ + slot * lh - vScroll_),
                               QSizeF(x1 - x0, lh)),
                        ink);
         }
@@ -1817,6 +2379,9 @@ void CodeEditor::paintEvent(QPaintEvent*)
         const TextPosition s = anchorFirst ? slot.anchor : slot.caret;
         const TextPosition e = anchorFirst ? slot.caret : slot.anchor;
         for (int line = std::max(first, s.line); line <= std::min(last, e.line); ++line) {
+            const int slot = visibleIndexOfModelLine(line); // M13: a selection
+            if (slot < 0)                                    // may span a fold:
+                continue;                                    // paint the visible rows only
             const int startCol = (line == s.line) ? s.col : 0;
             // On fully covered lines the selection extends one phantom cell
             // past the text to visualize the selected newline; on the end
@@ -1828,7 +2393,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
             const int x1 = qRound(xw(xInLine(gs, endCol)));
             const int cx0 = std::max(x0, textLeft); // M9: clamp into the window
             if (x1 > cx0 && cx0 < width()) {
-                const int yTop = padding_ + line * lh - vScroll_;
+                const int yTop = padding_ + slot * lh - vScroll_;
                 p.fillRect(QRect(cx0, yTop, x1 - cx0, lh), selColor);
             }
         }
@@ -1841,9 +2406,14 @@ void CodeEditor::paintEvent(QPaintEvent*)
     // loop; text starts at textLeft, so nothing overlaps the numbers.
     if (const int gw = textLeft - padding_; gw > 0) {
         const int pad = gutterInnerPad();
-        const int numRight = textLeft - pad; // right edge of the number column
-        const int bpCx = padding_ + pad;     // breakpoint slot center
+        const int fz = foldZoneWidth();   // M13 strip at the gutter's right edge
+        const int numRight = textLeft - pad - fz; // right edge of the number column
+        const int bpCx = padding_ + pad; // breakpoint slot center
         const int iconCx = numRight + pad / 2;
+        // M13 fold-triangle geometry (fixed for the frame: the zone never
+        // shifts, so neither does the icon, the numbers or the triangles):
+        const int foldCx = textLeft - fz / 2; // zone center x
+        const double fr = std::max(2.5, cellWidth_ * 0.38); // triangle half-extent
         // Column edge separator: a hairline against Base (VS Code style).
         QColor div = palette().color(QPalette::Text);
         div.setAlpha(45);
@@ -1852,8 +2422,9 @@ void CodeEditor::paintEvent(QPaintEvent*)
         const QColor dim = palette().color(QPalette::PlaceholderText);
         const QColor bright = palette().color(QPalette::Text);
         auto dit = diagnostics_.begin(); // sorted by startLine: one forward walk
-        for (int line = first; line <= last; ++line) {
-            const int yTop = padding_ + line * lh - vScroll_;
+        for (int slot = firstSlot; slot <= lastSlot; ++slot) { // M13: SLOTS
+            const int line = modelLineForVisibleIndex(slot);
+            const int yTop = padding_ + slot * lh - vScroll_;
             const GeoSlot* gs = hitLine(line);
             const double baseline = yTop + (gs->valid ? gs->line.ascent() : ascent_);
             if (const QString num = lineNumberText(line); !num.isEmpty()) {
@@ -1869,6 +2440,28 @@ void CodeEditor::paintEvent(QPaintEvent*)
                 const double r = std::max(3.0, cellWidth_ * 0.45);
                 p.drawEllipse(QPointF(qreal(bpCx), yTop + lh / 2.0), r, r);
             }
+            // M13: fold triangle in the zone — ▾ (points DOWN) when the
+            // fold is open, ▸ (points RIGHT) once collapsed. Fixed cool
+            // gray (foldInk): R==G==B, so warm/red decoration probes are
+            // unaffected by zone ink.
+            if (fz > 0) {
+                const auto fit = std::lower_bound(
+                    foldables_.begin(), foldables_.end(), line,
+                    [](const FoldState& f, int l) { return f.start < l; });
+                if (fit != foldables_.end() && fit->start == line) {
+                    const double cy = yTop + lh / 2.0;
+                    QPolygonF tri;
+                    if (isFolded(line))
+                        tri << QPointF(foldCx - fr, cy - fr) << QPointF(foldCx - fr, cy + fr)
+                            << QPointF(foldCx + fr, cy); // ▸
+                    else
+                        tri << QPointF(foldCx - fr, cy - fr) << QPointF(foldCx + fr, cy - fr)
+                            << QPointF(foldCx, cy + fr); // ▾
+                    p.setPen(Qt::NoPen);
+                    p.setBrush(QColor::fromRgb(foldInk()));
+                    p.drawPolygon(tri);
+                }
+            }
             while (dit != diagnostics_.end() && dit->startLine < line)
                 ++dit;
             int worst = int(CodeEditor::Severity::Hint) + 1; // Error sorts first
@@ -1883,8 +2476,13 @@ void CodeEditor::paintEvent(QPaintEvent*)
         p.setPen(palette().color(QPalette::Text));
     }
 
-    for (int line = first; line <= last; ++line) {
-        const int yTop = padding_ + line * lh - vScroll_;
+    // M13: the text loop walks VISIBLE SLOTS too — a collapsed fold's
+    // lines have no row, so they are never visited, never laid out and
+    // never painted (hidden lines cost nothing; that IS the fold's
+    // performance story on top of the slot-shrunk scroll space).
+    for (int slot = firstSlot; slot <= lastSlot; ++slot) {
+        const int line = modelLineForVisibleIndex(slot);
+        const int yTop = padding_ + slot * lh - vScroll_;
         const GeoSlot* gs = hitLine(line);
 
         // M9 whole-line fast path: once the line's right edge (the same
@@ -1981,6 +2579,9 @@ void CodeEditor::paintEvent(QPaintEvent*)
             continue;
         const QRgb ink = severityInk(d.severity);
         for (int line = std::max(first, d.startLine); line <= std::min(last, d.endLine); ++line) {
+            const int slot = visibleIndexOfModelLine(line); // M13: multi-line diag
+            if (slot < 0)                                   // spans a fold: the
+                continue;                                   // hidden rows are skipped
             const int len = lineLength(line);
             int c0 = std::clamp(line == d.startLine ? d.startCol : 0, 0, len);
             int c1 = std::clamp(line == d.endLine ? d.endCol : len, 0, len);
@@ -1995,7 +2596,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
             const double x0 = std::max(raw0, double(textLeft)); // M9 clamp+cull
             if (x1 <= x0)
                 continue;
-            const int yTop = padding_ + line * lh - vScroll_;
+            const int yTop = padding_ + slot * lh - vScroll_;
             drawWavyUnderline(p, x0, x1, yTop + lh - 2.5, ink);
         }
     }
@@ -2010,11 +2611,14 @@ void CodeEditor::paintEvent(QPaintEvent*)
                 continue;
             if (h.line > last)
                 break; // sorted by line
+            const int slot = visibleIndexOfModelLine(h.line); // M13: hint inside
+            if (slot < 0)                                     // a collapsed fold
+                continue;                                     // has no row
             const GeoSlot* gs = hitLine(h.line);
             const double x = xw(xInLine(gs, std::max(h.col, 0)));
             if (x < textLeft || x >= winRight)
                 continue; // M9: hint anchored outside the text window
-            const int hTop = padding_ + h.line * lh - vScroll_;
+            const int hTop = padding_ + slot * lh - vScroll_;
             const double baseline = hTop + (gs->valid ? gs->line.ascent() : ascent_);
             p.drawText(QPointF(x, baseline), h.text);
         }
@@ -2043,21 +2647,29 @@ void CodeEditor::paintOverviewRuler(QPainter& p) const
     const int total = std::max(1, totalHeight());
     const int h = std::max(1, height());
     const auto rulerY = [&](int docPx) { return int(qint64(docPx) * h / total); };
-    // one-line marker band, thickened so it survives the squashing
+    // one-line marker band, thickened so it survives the squashing.
+    // M13: docPx rides the SLOT space (same totalHeight ratio every other
+    // mapping uses); a marker on a hidden line has no row in that space —
+    // the band is simply not drawn (the fold hides its stripes too,
+    // VS Code-style).
     const auto band = [&](int line, const QColor& c, int minThick = 2) {
-        const int y0 = rulerY(padding_ + line * lineHeight_);
-        const int y1 = rulerY(padding_ + (line + 1) * lineHeight_);
+        const int slot = visibleIndexOfModelLine(line);
+        if (slot < 0)
+            return;
+        const int y0 = rulerY(padding_ + slot * lineHeight_);
+        const int y1 = rulerY(padding_ + (slot + 1) * lineHeight_);
         p.fillRect(QRect(g.left() + 3, y0, kOverviewRulerWidth - 6, qMax(minThick, y1 - y0)), c);
     };
 
-    const int lineCount = buffer_.lineCount();
-    const double pxPerLine = double(h) * lineHeight_ / total;
-    const int step = pxPerLine >= 1.0 ? 1 : int(std::ceil(1.0 / pxPerLine));
+    const int vt = std::max(1, visibleLineTotal()); // M13: sample SLOTS: a
+    const double pxPerLine = double(h) * lineHeight_ / total; // collapsed run costs
+    const int step = pxPerLine >= 1.0 ? 1 : int(std::ceil(1.0 / pxPerLine)); // zero stripes
     const int cap = kOverviewRulerWidth - 6; // stripe-precision budget in units
 
     p.setPen(Qt::NoPen);
     p.setBrush(rulerStripe());
-    for (int line = 0; line < lineCount; line += step) {
+    for (int slot = 0; slot < vt; slot += step) {
+        const int line = modelLineForVisibleIndex(slot);
         const int off = buffer_.offsetOfLine(line);
         const QString chunk = buffer_.textRange(off, qMin(off + cap + 1, buffer_.charCount()));
         const int nl = chunk.indexOf(QLatin1Char('\n'));
@@ -2069,8 +2681,8 @@ void CodeEditor::paintOverviewRuler(QPainter& p) const
             ++indent; // tabs count as 1 unit: v1 approximation
         const int x0 = g.left() + 3 + qMin(indent, cap - 1);
         const int w = qMax(1, qMin(len, cap) - qMin(indent, cap - 1));
-        const int y0 = rulerY(padding_ + line * lineHeight_);
-        const int y1 = rulerY(padding_ + (line + 1) * lineHeight_);
+        const int y0 = rulerY(padding_ + slot * lineHeight_);
+        const int y1 = rulerY(padding_ + (slot + 1) * lineHeight_);
         p.fillRect(QRect(x0, y0, w, qMax(1, y1 - y0)), rulerStripe());
     }
 
@@ -2200,6 +2812,10 @@ int CodeEditor::gutterWidth() const
         ++digits;
     const int pad = gutterInnerPad();
     int w = qRound(digits * cellWidth_) + 2 * pad;
+    // M13: the fold zone rides the gutter's right edge ALWAYS (when the
+    // gutter exists): constant width, so folding/unfolding never shifts a
+    // single glyph and the M5 crossover/delta tests keep their exact math.
+    w += foldZoneWidth();
     // One reserved glyph slot while any breakpoint exists: toggling a
     // breakpoint must not shift the already-drawn numbers. Diagnostic
     // icons fit into the right digit padding instead (Gate-2 LSP
@@ -2987,6 +3603,40 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         moveCaret(target, extend);
     };
 
+    // M13 fold commands, VS Code's chord table. NOTE: `ctrl` masks Alt/Ctrl/
+    // Meta only — Shift is a SEPARATE bool here — so Ctrl+Shift+[ arrives as
+    // ctrl==ControlModifier && shift==true, while Ctrl+Alt+[ is
+    // ctrl==(Control|Alt) && !shift. Real X11 keyboards sprinkle Meta onto
+    // Ctrl/Alt chords (NumLock, AltGr), so the tests below mask Meta out;
+    // both bracket key spellings are accepted (Key_BraceLeft shows up on
+    // layouts that shift the bracket, and Shift+[ IS [ on US keyboards
+    // before Qt maps it — depending on the platform either key can arrive).
+    const bool foldKey = key == Qt::Key_BracketLeft || key == Qt::Key_BraceLeft;
+    const bool unfoldKey = key == Qt::Key_BracketRight || key == Qt::Key_BraceRight;
+    const bool ctrlOnly = (ctrl & Qt::ControlModifier) && !(ctrl & Qt::AltModifier);
+    const bool ctrlAlt = (ctrl & (Qt::ControlModifier | Qt::AltModifier))
+                         == (Qt::ControlModifier | Qt::AltModifier);
+    if (foldKey && ctrlOnly && shift) {
+        foldLine(caret_.line); // no-op when not foldable; caret untouched
+        finish();
+        return;
+    }
+    if (unfoldKey && ctrlOnly && shift) {
+        unfoldLine(caret_.line); // reveals this fold; inner folds stay as-is
+        finish();
+        return;
+    }
+    if (foldKey && ctrlAlt && !shift) {
+        collapseAll();
+        finish();
+        return;
+    }
+    if (unfoldKey && ctrlAlt && !shift) {
+        expandAll();
+        finish();
+        return;
+    }
+
     if (ctrl != Qt::NoModifier) {
         switch (key) {
         case Qt::Key_Home:
@@ -3202,19 +3852,25 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         // Column is re-clamped to the target line; visual column memory
         // arrives with M9 (soft wrap work). On the first/last line the
         // motion collapses to the line start/end like real editors do.
+        // M13: the step walks VISIBILITY slots, not model lines — at a
+        // collapsed fold's header Down lands on the line after the hidden
+        // run (the caret jumps the whole fold for free; the merged-run
+        // invariant guarantees the target is visible).
         if (!extraCarets_.isEmpty()) {
             const bool up = key == Qt::Key_Up;
             moveCarets(
                 [this, up](const CaretSlot& s) {
                     TextPosition p = s.caret;
                     if (up) {
-                        if (p.line > 0)
-                            --p.line;
+                        const int t = prevVisibleModelLine(p.line);
+                        if (t < p.line)
+                            p.line = t;
                         else
                             p.col = 0;
                     } else {
-                        if (p.line + 1 < buffer_.lineCount())
-                            ++p.line;
+                        const int t = nextVisibleModelLine(p.line);
+                        if (t > p.line)
+                            p.line = t;
                         else
                             p.col = lineLength(p.line);
                     }
@@ -3226,13 +3882,15 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         }
         TextPosition pos = caret_;
         if (key == Qt::Key_Up) {
-            if (pos.line > 0)
-                --pos.line;
+            const int t = prevVisibleModelLine(pos.line);
+            if (t < pos.line)
+                pos.line = t;
             else
                 pos.col = 0;
         } else {
-            if (pos.line + 1 < buffer_.lineCount())
-                ++pos.line;
+            const int t = nextVisibleModelLine(pos.line);
+            if (t > pos.line)
+                pos.line = t;
             else
                 pos.col = lineLength(pos.line);
         }
@@ -3266,13 +3924,21 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         return;
     case Qt::Key_PageUp:
     case Qt::Key_PageDown: {
+        // M13: the page jump is slot arithmetic (page = viewport rows), so
+        // a PageDown inside the viewport of a collapsed fold leaps over
+        // the hidden run — the walk only ever lands on visible lines.
+        auto pageStep = [this](int line, int delta) {
+            const int slot = std::clamp(slotOfModelLine(line) + delta, 0,
+                                        std::max(0, visibleLineTotal() - 1));
+            return modelLineForVisibleIndex(slot);
+        };
         if (!extraCarets_.isEmpty()) {
             const int page = std::max(1, visibleLineCount() - 2);
             const int delta = key == Qt::Key_PageUp ? -page : page;
             moveCarets(
-                [this, delta](const CaretSlot& s) {
+                [this, delta, pageStep](const CaretSlot& s) {
                     TextPosition p = s.caret;
-                    p.line += delta;
+                    p.line = pageStep(p.line, delta);
                     return p; // clampPos inside moveCarets pins the edges
                 },
                 shift);
@@ -3281,7 +3947,7 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         }
         TextPosition pos = caret_;
         const int page = std::max(1, visibleLineCount() - 2);
-        pos.line += (key == Qt::Key_PageUp) ? -page : page;
+        pos.line = pageStep(pos.line, (key == Qt::Key_PageUp) ? -page : page);
         nav(pos, shift);
         finish();
         return;
@@ -3348,7 +4014,8 @@ QVariant CodeEditor::inputMethodQuery(Qt::InputMethodQuery query) const
         double x = contentLeft() + xInLine(hitLine(caret_.line), caret_.col);
         if (!preedit_.isEmpty())
             x += QFontMetricsF(font_).horizontalAdvance(preedit_);
-        const int y = padding_ + caret_.line * lineHeight_ - vScroll_;
+        // M13: the caret row lives in slot space (hidden runs shift the y).
+        const int y = padding_ + slotOfModelLine(caret_.line) * lineHeight_ - vScroll_;
         return QRect(qRound(x), y, 2, lineHeight_);
     }
     case Qt::ImCurrentSelection:
@@ -3369,6 +4036,22 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
         rulerScrollTo(int(event->position().y()));
         event->accept();
         return;
+    }
+    // M13 fold-zone hit, BEFORE any caret placement: a left click inside
+    // the strip at the gutter's right edge toggles that row's fold and
+    // NEVER moves the caret (VS Code behavior). Alt+click keeps its
+    // multi-caret meaning everywhere, so it skips this handler; rows with
+    // no fold marker (or left-gutter clicks) fall through to the regular
+    // caret placement unchanged.
+    if (event->button() == Qt::LeftButton && !(event->modifiers() & Qt::AltModifier)) {
+        const int fz = foldZoneWidth();
+        const QPoint pt = event->position().toPoint();
+        if (fz > 0 && pt.x() >= contentLeft() - fz && pt.x() < contentLeft()) {
+            if (const int line = modelLineForY(pt.y()); line >= 0 && toggleFold(line)) {
+                event->accept();
+                return;
+            }
+        }
     }
     if (event->button() == Qt::MiddleButton) {
         // X11 paste gesture: place the caret at the click, then insert the

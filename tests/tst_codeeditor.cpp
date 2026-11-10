@@ -195,6 +195,24 @@ private slots:
     void scrollBeyondLastLineFlagAndRulerTotal();
     void paintClusterWindowXOffsetProbe();
 
+    // Code folding (M13, Phase E2). DoD: visible-line counts after a fold,
+    // map lookups across fold boundaries, the caret jumping over a fold,
+    // unfolded content unchanged after expandAll, the ruler reflecting the
+    // fold, and fold chrome (gutter triangles, keyboard chords, edit
+    // bookkeeping) — all through state/numeric assertions plus one
+    // triangle-shape pixel probe (no vision).
+    void foldMapBasicsIndentMode();
+    void caretJumpsOverFold();
+    void keyboardFoldUnfoldChords();
+    void revealOnProgrammaticMove();
+    void mouseClickFoldZoneToggles();
+    void foldTriangleInkProbe();
+    void rulerReflectsFoldRanges();
+    void foldEditBookkeepingAndReset();
+    void pythonGrammarFoldsAndCollapseAll();
+    void jsonFoldHidesClosingBrace();
+    void foldZoneGutterConstant();
+
 private:
     CodeEditor* editor = nullptr;
 };
@@ -3735,6 +3753,658 @@ void TestCodeEditor::paintClusterWindowXOffsetProbe()
     // absence of the geometry): no Text ink anywhere in line 1's window.
     QCOMPARE(countWhere(img0, textLeft, winRight, y1, lh,
                         [&](const QColor& c) { return c == textColor; }), 0);
+}
+
+// --- M13 folding (Phase E2) ------------------------------------------------
+// Fixture for the view-side indent rule (no grammar loaded): line 0 heads a
+// depth-2 indent block spanning lines 1..3; "next"/"last" sit back at col 0.
+static QString foldDoc()
+{
+    return QStringLiteral("root\n  child1\n  child2\n  child3\nnext\nlast");
+}
+
+void TestCodeEditor::foldMapBasicsIndentMode()
+{
+    editor->setPlainText(foldDoc());
+    editor->grab(); // paint pass warms the viewport foldable cache
+    QVERIFY(editor->isFoldable(0));
+    QVERIFY(!editor->isFoldable(1)); // child1/child2 share the indent
+    QVERIFY(!editor->isFolded(0));
+    const auto ranges = editor->foldableRanges();
+    QCOMPARE(ranges.size(), 1);
+    QCOMPARE(ranges[0].startLine, 0);
+    QCOMPARE(ranges[0].endLine, 3); // the indent scan stops at "next"
+
+    QVERIFY(editor->foldLine(0));
+    QVERIFY(editor->isFolded(0));
+    QCOMPARE(editor->lineCount(), 6); // the model never learns about folds
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    // map lookups across the fold boundary
+    QCOMPARE(editor->visibleIndexOfModelLine(0), 0);
+    QCOMPARE(editor->visibleIndexOfModelLine(1), -1);
+    QCOMPARE(editor->visibleIndexOfModelLine(3), -1);
+    QCOMPARE(editor->visibleIndexOfModelLine(4), 1);
+    QCOMPARE(editor->visibleIndexOfModelLine(5), 2);
+    QCOMPARE(editor->visibleIndexOfModelLine(6), -1); // out of document
+    QCOMPARE(editor->modelLineForVisibleIndex(0), 0);
+    QCOMPARE(editor->modelLineForVisibleIndex(1), 4);
+    QCOMPARE(editor->modelLineForVisibleIndex(2), 5);
+    QCOMPARE(editor->modelLineForVisibleIndex(9), 5); // clamped both ways
+    QCOMPARE(editor->modelLineForVisibleIndex(-2), 0);
+    // positionAt rides the map: a click on the second row gets line 4, never
+    // a hidden line (DoD: map lookups across fold boundaries).
+    const int lh = editor->lineHeight();
+    QCOMPARE(editor->positionAt(QPoint(editor->contentLeft() + 2,
+                                       editor->padding() + lh + lh / 2)).line,
+             4);
+
+    QVERIFY(!editor->foldLine(1)); // not a fold start: no state change
+    QCOMPARE(editor->visibleLineTotal(), 3);
+
+    QVERIFY(editor->unfoldLine(0));
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 6);
+    for (int i = 0; i < 6; ++i) // identity map restored
+        QCOMPARE(editor->visibleIndexOfModelLine(i), i);
+    QCOMPARE(editor->toPlainText(), foldDoc()); // DoD: unfolded content unchanged
+    // toggle round trip
+    QVERIFY(editor->toggleFold(0));
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    QVERIFY(editor->toggleFold(0));
+    QCOMPARE(editor->visibleLineTotal(), 6);
+
+    // collapseAll/expandAll over the whole document
+    editor->setPlainText(QStringLiteral("root\n  a\n  b\nroot2\n  c"));
+    editor->grab();
+    editor->collapseAll();
+    QCOMPARE(editor->visibleLineTotal(), 2);
+    QVERIFY(editor->isFolded(0));
+    QVERIFY(editor->isFolded(3));
+    editor->expandAll();
+    QCOMPARE(editor->visibleLineTotal(), 5);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("root\n  a\n  b\nroot2\n  c"));
+
+    // The scrollbar space rides the map: on a tall doc the vBar clamp uses
+    // SLOT count, not model lines (asserted through the public offset
+    // getter + the public totalHeight formula recomputed from
+    // visibleLineTotal()), and every hit test lands on a VISIBLE line.
+    QStringList doc;
+    doc << QStringLiteral("root") << QStringLiteral("  a") << QStringLiteral("  b")
+        << QStringLiteral("  c");
+    for (int i = 0; i < 200; ++i)
+        doc << QStringLiteral("tail%1").arg(i);
+    editor->setPlainText(doc.join(QLatin1Char('\n')));
+    editor->grab();
+    QVERIFY(editor->foldLine(0));
+    const int pad = editor->padding();
+    const int maxScroll = 2 * pad + editor->visibleLineTotal() * lh - editor->height();
+    QVERIFY(maxScroll > 0); // tall enough to actually scroll
+    QWheelEvent wheel(QPointF(300, 200), QPointF(300, 200), QPoint(0, 0),
+                      QPoint(0, -120 * 1000), Qt::NoButton, Qt::NoModifier,
+                      Qt::NoScrollPhase, false);
+    QVERIFY(QApplication::sendEvent(editor, &wheel)); // deep wheel: clamps to max
+    QCOMPARE(editor->verticalScrollOffset(), maxScroll); // slot-space max, exactly
+    for (int y = 0; y < editor->height(); y += 5) { // no hit ever addresses a hidden line
+        const int l = editor->positionAt(QPoint(editor->contentLeft() + 2, y)).line;
+        QVERIFY2(editor->visibleIndexOfModelLine(l) >= 0,
+                 qPrintable(QStringLiteral("hit y=%1 landed on hidden line %2")
+                                .arg(y).arg(l)));
+    }
+}
+
+void TestCodeEditor::caretJumpsOverFold()
+{
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    QVERIFY(editor->foldLine(0));
+
+    editor->setPosition({0, 2});
+    QTest::keyClick(editor, Qt::Key_Down); // slot-space step: lands on line 4
+    QCOMPARE(editor->position().line, 4);
+    QTest::keyClick(editor, Qt::Key_Down); // 5
+    QCOMPARE(editor->position().line, 5);
+    QTest::keyClick(editor, Qt::Key_Down); // last line: clamps to EOL
+    QCOMPARE(editor->position().line, 5);
+    QCOMPARE(editor->position().col, 4);
+    QTest::keyClick(editor, Qt::Key_Up); // back to 4, col re-clamped to len("next")
+    QCOMPARE(editor->position().line, 4);
+    QCOMPARE(editor->position().col, 4);
+    QTest::keyClick(editor, Qt::Key_Up); // fold header 0 (col 4 survives the walk,
+    QCOMPARE(editor->position().line, 0); //   len("root") == 4 keeps it exact)
+    QCOMPARE(editor->position().col, 4);
+    QTest::keyClick(editor, Qt::Key_Up); // already first: col 0
+    QCOMPARE(editor->position().col, 0);
+
+    // Shift+Down extends the selection across the hidden run in ONE step
+    // (the fan-out target is the map's next visible line).
+    editor->setPosition({0, 2});
+    QTest::keyClick(editor, Qt::Key_Down, Qt::ShiftModifier);
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(),
+             QStringLiteral("ot\n  child1\n  child2\n  child3\nne"));
+
+    // PageDown is slot arithmetic too: a page walk NEVER lands on a hidden
+    // line (the DoD property; the exact stride semantics predate M13).
+    editor->setPosition({0, 0});
+    for (int i = 0; i < 12; ++i) {
+        QTest::keyClick(editor, Qt::Key_PageDown);
+        QVERIFY2(editor->visibleIndexOfModelLine(editor->position().line) >= 0,
+                 qPrintable(QStringLiteral("PageDown landed on hidden line %1")
+                                .arg(editor->position().line)));
+    }
+    QCOMPARE(editor->position().line, 5); // saturated at the last visible slot
+    for (int i = 0; i < 12; ++i) {
+        QTest::keyClick(editor, Qt::Key_PageUp);
+        QVERIFY(editor->visibleIndexOfModelLine(editor->position().line) >= 0);
+    }
+    QCOMPARE(editor->position().line, 0);
+
+    // Multi-caret navigation walks the same map. Alt+Click on the SECOND
+    // visible row adds a caret on model line 4 — the click can never
+    // address a hidden line — and one Down then steps BOTH carets.
+    editor->setPosition({0, 0});
+    const int lh = editor->lineHeight();
+    QTest::mousePress(editor, Qt::LeftButton, Qt::AltModifier,
+                      QPoint(editor->contentLeft() + 5,
+                             editor->padding() + lh + lh / 2));
+    QTest::mouseRelease(editor, Qt::LeftButton, Qt::AltModifier,
+                        QPoint(editor->contentLeft() + 5,
+                               editor->padding() + lh + lh / 2));
+    QCOMPARE(editor->additionalCaretCount(), 1);
+    QTest::keyClick(editor, Qt::Key_Down);
+    QVector<int> lines;
+    lines << editor->position().line;
+    const QVector<qmn::view::TextPosition> extras = editor->additionalCarets();
+    for (const qmn::view::TextPosition& t : extras)
+        lines << t.line;
+    std::sort(lines.begin(), lines.end());
+    QCOMPARE(lines, QVector<int>({4, 5})); // {0,4} -> slot-step -> {4,5}
+    for (int l : lines)
+        QVERIFY(editor->visibleIndexOfModelLine(l) >= 0);
+
+    // A caret that a fold swallows is never stranded: the arrow steps and
+    // the programmatic setPosition both route through the reveal rule.
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    editor->setPosition({2, 2}); // caret INSIDE what is about to collapse
+    QVERIFY(editor->foldLine(0)); // allowed: folds under the caret
+    QCOMPARE(editor->visibleIndexOfModelLine(2), -1); // caret's row is now hidden
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_Down); // map step: header -> line 4
+    QVERIFY(editor->visibleIndexOfModelLine(editor->position().line) >= 0);
+    editor->setPosition({2, 2}); // programmatic move INTO a hidden line
+    QVERIFY(!editor->isFolded(0)); // reveal opened the fold first
+    QCOMPARE(editor->position().line, 2);
+}
+
+void TestCodeEditor::keyboardFoldUnfoldChords()
+{
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    editor->setPosition({0, 0});
+
+    // Ctrl+Shift+[ folds at the caret; the caret is NOT moved.
+    QTest::keyClick(editor, Qt::Key_BracketLeft, Qt::ControlModifier | Qt::ShiftModifier);
+    QVERIFY(editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    QCOMPARE(editor->position().line, 0);
+    QCOMPARE(editor->position().col, 0);
+    // Re-fold on an already-collapsed start: no-op (state + map unchanged).
+    QTest::keyClick(editor, Qt::Key_BracketLeft, Qt::ControlModifier | Qt::ShiftModifier);
+    QVERIFY(editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 3);
+
+    // Ctrl+Shift+] unfolds exactly this fold.
+    QTest::keyClick(editor, Qt::Key_BracketRight, Qt::ControlModifier | Qt::ShiftModifier);
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 6);
+
+    // Ctrl+Alt+[ / Ctrl+Alt+]: document-wide collapse/expand.
+    QTest::keyClick(editor, Qt::Key_BracketLeft, Qt::ControlModifier | Qt::AltModifier);
+    QVERIFY(editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    QTest::keyClick(editor, Qt::Key_BracketRight, Qt::ControlModifier | Qt::AltModifier);
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 6);
+    QCOMPARE(editor->toPlainText(), foldDoc()); // chords never touch the model
+
+    // The brace spellings (Key_BraceLeft/Right) work identically.
+    QTest::keyClick(editor, Qt::Key_BraceLeft, Qt::ControlModifier | Qt::ShiftModifier);
+    QVERIFY(editor->isFolded(0));
+    QTest::keyClick(editor, Qt::Key_BraceRight, Qt::ControlModifier | Qt::ShiftModifier);
+    QVERIFY(!editor->isFolded(0));
+
+    // Non-foldable caret line: the chord is consumed but changes nothing.
+    editor->setPosition({4, 1});
+    QTest::keyClick(editor, Qt::Key_BracketLeft, Qt::ControlModifier | Qt::ShiftModifier);
+    QVERIFY(!editor->isFolded(4));
+    QCOMPARE(editor->visibleLineTotal(), 6);
+}
+
+void TestCodeEditor::revealOnProgrammaticMove()
+{
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    QVERIFY(editor->foldLine(0));
+
+    // Mouse DRAG across a fold is always map-mapped (positionAt can never
+    // address a hidden line): the fold STAYS closed and the selection
+    // simply spans it, unfolded content included.
+    const int lh = editor->lineHeight();
+    const QPointF p0(editor->contentLeft() + 2, editor->padding() + lh / 2);
+    const QPointF p1(editor->contentLeft() + 2, editor->padding() + lh + lh / 2);
+    QMouseEvent pr(QEvent::MouseButtonPress, p0, p0, Qt::LeftButton, Qt::LeftButton,
+                   Qt::NoModifier);
+    QMouseEvent mv(QEvent::MouseMove, p1, p1, Qt::LeftButton, Qt::LeftButton,
+                   Qt::NoModifier);
+    QMouseEvent rl(QEvent::MouseButtonRelease, p1, p1, Qt::LeftButton, Qt::LeftButton,
+                   Qt::NoModifier);
+    QVERIFY(QApplication::sendEvent(editor, &pr));
+    QVERIFY(QApplication::sendEvent(editor, &mv));
+    QVERIFY(QApplication::sendEvent(editor, &rl));
+    QVERIFY(editor->isFolded(0)); // drag did NOT open the fold
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(),
+             QStringLiteral("root\n  child1\n  child2\n  child3\n")); // hidden text included
+    QCOMPARE(editor->position().line, 4); // released row = model line 4
+
+    // setPosition INTO a hidden line reveals the fold instead of stranding.
+    editor->setPosition({2, 2});
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->position().line, 2);
+    QCOMPARE(editor->position().col, 2);
+
+    // The reveal choke point is ONE guard (ensureCaretVisible) that every
+    // caret route funnels through — but the map-routed public entries
+    // (mouse, keyboard, drag) can never even NAME a hidden line, so
+    // setPosition is the only public door that must reveal, and it does.
+}
+
+void TestCodeEditor::mouseClickFoldZoneToggles()
+{
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    const int lh = editor->lineHeight();
+    const int fz = editor->foldZoneWidth();
+    QVERIFY(fz > 0);
+    const int zoneX = editor->contentLeft() - fz / 2; // middle of the strip
+    auto zoneY = [&](int slot) { return editor->padding() + slot * lh + lh / 2; };
+
+    // A marker-row click folds — and NEVER moves the caret (VS Code).
+    editor->setPosition({5, 2});
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(0)));
+    QVERIFY(editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    QCOMPARE(editor->position().line, 5);
+    QCOMPARE(editor->position().col, 2);
+    // The SAME point now sits on line 0 again (slot 0) and unfolds.
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(0)));
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 6);
+    QCOMPARE(editor->position().line, 5);
+    QCOMPARE(editor->position().col, 2);
+
+    // A zone click on a NON-foldable row falls through to plain caret
+    // placement (col clamps to 0 inside the gutter).
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(1)));
+    QVERIFY(!editor->isFolded(1));
+    QCOMPARE(editor->position().line, 1);
+    QCOMPARE(editor->position().col, 0);
+
+    // Alt+Click keeps its multi-caret meaning in the zone: no fold happens.
+    editor->setPosition({5, 2});
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::AltModifier, QPoint(zoneX, zoneY(0)));
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->additionalCaretCount(), 1);
+
+    // Left gutter (the numbers area) keeps caret behavior, marker row or not.
+    const int leftX = editor->padding() + 2;
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(leftX, zoneY(0)));
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->position().line, 0);
+
+    // With the fold intact, clicking the row BELOW the collapsed run
+    // addresses the map: slot 1 is model line 4 even mid-fold.
+    QVERIFY(editor->foldLine(0));
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(editor->contentLeft() + 2, zoneY(1)));
+    QCOMPARE(editor->position().line, 4);
+}
+
+void TestCodeEditor::foldTriangleInkProbe()
+{
+    // No-vision shape probe: ▾ (open) tapers top-to-bottom, ▸ (closed)
+    // tapers left-to-right, in both cases ONLY foldInk pixels (150,150,150,
+    // R==G==B) exist inside the zone band — the numbers stay left of it.
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    editor->setPosition({5, 2}); // current-line band away from row 0
+    const int lh = editor->lineHeight();
+    const int fz = editor->foldZoneWidth();
+    const int zx0 = editor->contentLeft() - fz;
+    const int zx1 = editor->contentLeft();
+    const int y0 = editor->padding();
+    const QColor ink(150, 150, 150);
+
+    auto rowCounts = [&](const QImage& im) {
+        QVector<int> out;
+        for (int y = y0; y < y0 + lh; ++y) {
+            int c = 0;
+            for (int x = zx0; x < zx1; ++x)
+                if (im.pixelColor(x, y) == ink)
+                    ++c;
+            out << c;
+        }
+        return out;
+    };
+    auto colCounts = [&](const QImage& im) {
+        QVector<int> out;
+        for (int x = zx0; x < zx1; ++x) {
+            int c = 0;
+            for (int y = y0; y < y0 + lh; ++y)
+                if (im.pixelColor(x, y) == ink)
+                    ++c;
+            out << c;
+        }
+        return out;
+    };
+    auto firstLast = [](const QVector<int>& prof, int& first, int& last) {
+        first = -1;
+        last = -1;
+        for (int i = 0; i < prof.size(); ++i) {
+            if (prof[i] == 0)
+                continue;
+            if (first < 0)
+                first = i;
+            last = i;
+        }
+    };
+
+    // OPEN fold: ▾ down-triangle. Rows: wide base up top, point at bottom.
+    QImage open = editor->grab().toImage();
+    const QVector<int> rows = rowCounts(open);
+    int f = -1, l = -1;
+    firstLast(rows, f, l);
+    QVERIFY2(f >= 0, "no fold-triangle ink in the zone on a foldable row");
+    QVERIFY2(rows[f] >= 5, QStringLiteral("▾ base only %1 px wide").arg(rows[f]).toUtf8().constData());
+    QVERIFY2(rows[l] <= rows[f] - 3, "▾ does not taper downward");
+
+    // CLOSED fold: ▸ right-triangle. Columns: full-height edge on the left,
+    // point on the right.
+    QVERIFY(editor->foldLine(0));
+    QImage closed = editor->grab().toImage();
+    const QVector<int> cols = colCounts(closed);
+    firstLast(cols, f, l);
+    QVERIFY2(f >= 0, "no fold-triangle ink on a collapsed fold row");
+    QVERIFY2(cols[f] >= 4, QStringLiteral("▸ back edge only %1 px tall").arg(cols[f]).toUtf8().constData());
+    QVERIFY2(cols[l] <= cols[f] - 3, "▸ does not taper rightward");
+
+    // Markers only exist on foldable rows: every OTHER slot's zone band is
+    // ink-free (the numbers sit left of the zone; fold ink never bleeds).
+    auto bandInkOutside = [&](const QImage& im, int skipSlot) {
+        int stray = 0;
+        for (int y = editor->padding() + (skipSlot + 1) * lh; y < editor->height(); ++y)
+            for (int x = zx0; x < zx1; ++x)
+                if (im.pixelColor(x, y) == ink)
+                    ++stray;
+        return stray;
+    };
+    QCOMPARE(bandInkOutside(open, 0), 0);
+    QCOMPARE(bandInkOutside(closed, 0), 0);
+}
+
+void TestCodeEditor::rulerReflectsFoldRanges()
+{
+    // DoD: the ruler rides the SAME one map — its mapping contract is the
+    // M7 formula over SLOT space + modelLineForVisibleIndex, never model
+    // arithmetic, and it can never address a hidden line.
+    QStringList doc;
+    doc << QStringLiteral("root") << QStringLiteral("  a") << QStringLiteral("  b")
+        << QStringLiteral("  c");
+    for (int i = 0; i < 200; ++i)
+        doc << QStringLiteral("tail%1").arg(i);
+    editor->setPlainText(doc.join(QLatin1Char('\n')));
+    editor->grab();
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const int h = editor->height();
+    QCOMPARE(editor->lineCount(), 204);
+
+    // Unfolded baseline mid-strip value (identity map, M7 contract):
+    const int totalU = 2 * pad + 204 * lh;
+    const int midU = editor->rulerLineAt(h / 2);
+    QCOMPARE(midU, (int(qint64(h / 2) * totalU / h) - pad) / lh);
+
+    QVERIFY(editor->foldLine(0)); // hides lines 1..3 of 204
+    const int vt = editor->visibleLineTotal();
+    QCOMPARE(vt, 201);
+    const int totalF = 2 * pad + vt * lh; // the strip ratio re-derives on slots
+    int prev = -1;
+    for (int y = 0; y < h; ++y) {
+        const int docPx = int(qint64(y) * totalF / h);
+        const int got = editor->rulerLineAt(y);
+        QCOMPARE(got, editor->modelLineForVisibleIndex((docPx - pad) / lh));
+        QVERIFY2(got >= prev, qPrintable(QStringLiteral("mapping not monotonic at y=%1").arg(y)));
+        prev = got;
+        QVERIFY2(editor->visibleIndexOfModelLine(got) >= 0, // NEVER a hidden line
+                 qPrintable(QStringLiteral("ruler y=%1 mapped to hidden line %2")
+                                .arg(y).arg(got)));
+    }
+    QCOMPARE(editor->rulerLineAt(0), 0);
+    QCOMPARE(editor->rulerLineAt(h - 1), 203); // last line still reachable
+    QVERIFY(editor->rulerLineAt(h / 2) != midU); // strip geometry actually moved
+    // Hidden lines cost NO strip rows anymore (the fold is visible IN the
+    // strip: the run simply does not exist there):
+    for (int y = 0; y < h; ++y) {
+        const int got = editor->rulerLineAt(y);
+        QVERIFY2(got != 1 && got != 2 && got != 3,
+                 qPrintable(QStringLiteral("strip row %1 shows hidden line %2").arg(y).arg(got)));
+    }
+
+    // The viewport rect rides the same slot-space total (vpWant math with
+    // visibleLineTotal()): deep wheel lands the rect at the strip bottom.
+    QWheelEvent wheel(QPointF(300, 200), QPointF(300, 200), QPoint(0, 0),
+                      QPoint(0, -120 * 1000), Qt::NoButton, Qt::NoModifier,
+                      Qt::NoScrollPhase, false);
+    QVERIFY(QApplication::sendEvent(editor, &wheel));
+    const int v = editor->verticalScrollOffset();
+    QCOMPARE(v, totalF - h);
+    const int y1 = int(qint64(std::min(totalF, v + h)) * h / totalF);
+    QCOMPARE(editor->overviewRulerViewportRect().bottom(), h - 1); // flush at strip end
+    QVERIFY(y1 >= h);
+    // Ruler click-to-scroll now addresses slots too: click strip bottom and
+    // the top row is the LAST slot's line (clamped), never a hidden line.
+    const int w = editor->width();
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(w - CodeEditor::kOverviewRulerWidth / 2, 2));
+    QVERIFY(editor->visibleIndexOfModelLine(editor->firstVisibleLine()) >= 0);
+    QCOMPARE(editor->firstVisibleLine(), 0); // strip top = slot 0 = model line 0
+}
+
+void TestCodeEditor::foldEditBookkeepingAndReset()
+{
+    // Reaching a fold BODY row with the caret is impossible (the reveal rule
+    // opens the fold under any programmatic move; mouse/keys ride the map),
+    // so the bookkeeping paths an edit can actually trigger are: an edit
+    // entirely ABOVE a fold (whole fold shifts), a join AT the header EOL
+    // (the END shifts; the fold survives shorter) and deletes collapsing
+    // end <= start (the fold dies). Each path gets its own paragraph.
+
+    // --- edit entirely above the fold: the whole fold slides down --------
+    editor->setPlainText(QStringLiteral("head\nroot\n  child1\n  child2\n  child3\nend"));
+    editor->grab();
+    QVERIFY(editor->foldLine(1)); // {1,4}: "root" heads the block, "end" ends it
+    QCOMPARE(editor->visibleLineTotal(), 3); // slots: head, root, end
+
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_Return); // a NEW line above the fold start
+    QCOMPARE(editor->lineCount(), 7);
+    QVERIFY(!editor->isFolded(1));
+    QVERIFY(editor->isFolded(2)); // {1,4} -> {2,5}: the whole fold shifted
+    QCOMPARE(editor->visibleLineTotal(), 4); // one more visible row, same body
+    QCOMPARE(editor->visibleIndexOfModelLine(0), 0); // "" (caret's new line)
+    QCOMPARE(editor->visibleIndexOfModelLine(1), 1); // "head"
+    QCOMPARE(editor->visibleIndexOfModelLine(2), 2); // "root" (fold header)
+    QCOMPARE(editor->visibleIndexOfModelLine(3), -1); // hidden body 3..5
+    QCOMPARE(editor->visibleIndexOfModelLine(5), -1);
+    QCOMPARE(editor->visibleIndexOfModelLine(6), 3); // "end": last slot
+
+    // Undo re-shifts the fold back (fold state itself is not an undoable
+    // action — documented v1 stance — but edits keep it consistent).
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->lineCount(), 6);
+    QVERIFY(editor->isFolded(1)); // {2,5} -> {1,4}
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    QCOMPARE(editor->visibleIndexOfModelLine(2), -1);
+    QCOMPARE(editor->visibleIndexOfModelLine(5), 2); // "end" back at slot 2
+
+    // --- delete spanning the hidden rows: the fold dies -------------------
+    // (header through the line after the body — the only keyboard-reachable
+    // selection spanning hidden rows — collapses end below the start)
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    QVERIFY(editor->foldLine(0)); // {0,3}
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_Down, Qt::ShiftModifier); // map step to (4,0)
+    QVERIFY(editor->hasSelection());
+    QTest::keyClick(editor, Qt::Key_Delete);
+    QCOMPARE(editor->lineCount(), 2);
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 2);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("next\nlast"));
+
+    // --- join AT the fold header's EOL: the END shifts, fold survives -----
+    // Delete at (0,4) eats the newline between the VISIBLE header and the
+    // hidden body: child1's text lands on the header row, and the fold's
+    // anchor (its start line) never moved — only the end shifts by delta.
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    QVERIFY(editor->foldLine(0)); // {0,3}, hidden run 1..3
+    editor->setPosition({0, 4}); // EOL of "root" (the header, visible)
+    QTest::keyClick(editor, Qt::Key_Delete); // anchor 0, delta -1: {0,3} -> {0,2}
+    QCOMPARE(editor->lineCount(), 5);
+    QVERIFY(editor->isFolded(0)); // the fold SURVIVED the join
+    QCOMPARE(editor->visibleLineTotal(), editor->lineCount() - 2); // 5 - 2 hidden
+    QCOMPARE(editor->toPlainText(),
+             QStringLiteral("root  child1\n  child2\n  child3\nnext\nlast"));
+
+    // setPlainText resets ALL fold state (fresh doc, fresh view).
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    QVERIFY(editor->foldLine(0));
+    editor->setPlainText(QStringLiteral("x"));
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 1);
+    QCOMPARE(editor->lineCount(), 1);
+}
+
+void TestCodeEditor::pythonGrammarFoldsAndCollapseAll()
+{
+    editor->setPlainText(QStringLiteral(
+        "def outer():\n"
+        "    x = 1\n"
+        "    def inner():\n"
+        "        return x\n"
+        "    return inner\n"
+        "print(outer())\n"));
+    editor->setLanguage(QStringLiteral("python"));
+    editor->grab(); // paint warms the windowed fold cache (paint-only pass)
+
+    // tree-sitter @fold captures, NOT the indent heuristic: the inner def
+    // is foldable even though the indent rule would also agree, and the
+    // OUTER capture's end is the node's last body line (line 4) — the
+    // print statement at line 5 is outside the function_definition node.
+    QVERIFY(editor->isFoldable(0));
+    QVERIFY(editor->isFoldable(2));
+    QVERIFY(!editor->isFoldable(1));
+    QVERIFY(!editor->isFoldable(4));
+    const auto ranges = editor->foldableRanges();
+    QCOMPARE(ranges.size(), 2);
+    QCOMPARE(ranges[0].startLine, 0);
+    QCOMPARE(ranges[0].endLine, 4);
+    QCOMPARE(ranges[1].startLine, 2);
+    QCOMPARE(ranges[1].endLine, 3);
+
+    // Same-start collision rule (widest capture wins = outermost fold).
+    QVERIFY(editor->foldLine(0)); // hides 1..4
+    QCOMPARE(editor->visibleLineTotal(), 3); // lines 0, 5, 6 (7 incl. EOL line)
+    QCOMPARE(editor->visibleIndexOfModelLine(4), -1);
+    QCOMPARE(editor->visibleIndexOfModelLine(5), 1);
+
+    // collapseAll: outer folds first, the inner start is then HIDDEN, and
+    // foldLine's hidden-start rule skips it — nesting without a fold tree.
+    editor->expandAll();
+    QCOMPARE(editor->visibleLineTotal(), 7);
+    editor->collapseAll();
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    QVERIFY(editor->isFolded(0));
+    QVERIFY(!editor->isFolded(2)); // inner skipped: its start row is gone
+    editor->expandAll();
+    QCOMPARE(editor->visibleLineTotal(), 7);
+    QCOMPARE(editor->lineCount(), 7);
+}
+
+void TestCodeEditor::jsonFoldHidesClosingBrace()
+{
+    // Grammar ends make the closing brace part of the fold: json object
+    // nodes END ON the `}` line, so (start, end] hides it — the standard
+    // editor behavior the header doc promises.
+    const QString doc = QStringLiteral("{\n  \"a\": [\n    1,\n    2\n  ]\n}");
+    editor->setPlainText(doc);
+    editor->setLanguage(QStringLiteral("json"));
+    editor->grab();
+    const auto ranges = editor->foldableRanges();
+    QCOMPARE(ranges.size(), 2); // object {0,5} + array {1,4}
+    QCOMPARE(ranges[0].startLine, 0);
+    QCOMPARE(ranges[0].endLine, 5);
+    QCOMPARE(ranges[1].startLine, 1);
+    QCOMPARE(ranges[1].endLine, 4);
+
+    QVERIFY(editor->foldLine(0));
+    QCOMPARE(editor->visibleLineTotal(), 1); // ONLY line 0 remains
+    QCOMPARE(editor->visibleIndexOfModelLine(5), -1); // the `}` is hidden too
+    QCOMPARE(editor->firstVisibleLine(), 0);
+    QVERIFY(editor->unfoldLine(0));
+    QCOMPARE(editor->visibleLineTotal(), 6);
+    QCOMPARE(editor->toPlainText(), doc); // DoD: model untouched by folding
+}
+
+void TestCodeEditor::foldZoneGutterConstant()
+{
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    const double cw = editor->cellWidth();
+    const int fz = std::max(10, qRound(2.2 * cw));
+    QCOMPARE(editor->foldZoneWidth(), fz);
+
+    // The zone width is a constant chrome budget: independent of document
+    // size, line-number width and fold state (the pre-M13 gutter tests
+    // already pin digit/crossover math — this pins the fold-zone term).
+    QStringList many;
+    for (int i = 0; i < 500; ++i)
+        many << QStringLiteral("line %1").arg(i);
+    editor->setPlainText(many.join(QLatin1Char('\n')));
+    editor->grab();
+    QCOMPARE(editor->foldZoneWidth(), fz);
+    const int wide = editor->gutterWidth();
+    QVERIFY(editor->foldLine(0) == false); // "line 0" is not foldable here
+    QCOMPARE(editor->gutterWidth(), wide); // fold state never resizes the gutter
+
+    // Gutter Off IS the fold-chrome switch: the zone disappears from the
+    // layout, the API reports 0, and folding itself keeps working.
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    const int wOn = editor->gutterWidth();
+    QVERIFY(wOn >= fz);
+    editor->setLineNumbersMode(CodeEditor::LineNumbersMode::Off);
+    QCOMPARE(editor->foldZoneWidth(), 0);
+    QCOMPARE(editor->gutterWidth(), 0); // Off = no gutter chrome at all
+    editor->grab();
+    QVERIFY(editor->foldLine(0)); // folding works without the chrome
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    editor->expandAll();
+    editor->setLineNumbersMode(CodeEditor::LineNumbersMode::On);
+    QCOMPARE(editor->gutterWidth(), wOn); // zone back, same constant
 }
 
 QTEST_MAIN(TestCodeEditor)

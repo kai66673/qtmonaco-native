@@ -264,8 +264,20 @@ minimap of lines/markers/folds.
 **DoD:** numeric viewport assertions (x-offset after arrow/scroll, caret
 scroll-into-view), ruler geometry state tests; no off-screen paint cost.
 
-### E2 — M13 code folding (**new milestone**, added to README roadmap)
+### E2 — M13 code folding (**done**, 2026-11-10)
 
+Shipped with the single **view-line map** as designed: hidden runs live in
+a prefix table (`HiddenRun{first,last,hiddenBefore}`), and paint, caret
+nav (arrows + Page keys step slots), selection, gutter, ruler, v-scroll
+space and hit tests all route through it. Fold sources: tree-sitter `@fold`
+captures (py/js/json, windowed at paint, whole-doc only on explicit
+actions) ∪ indent fallback. UX: 18px gutter fold zone with ▾/▸ triangles
+(clicks toggle, caret untouched) + Ctrl+Shift+[/] and Ctrl+Alt+[/] chords;
+ONE reveal guard (programmatic moves into a hidden line open the fold;
+drags across folds never do). Fold state rides edits via the buffer
+observer (shift/die rules, undo-consistent; the fold itself is not an
+undoable action — v1 stance). Suite: 134 slots (11 new M13), spike smoke
+on 22k lines stays O(viewport).
 Fold ranges from tree-sitter `@fold` captures per grammar + an
 indent-based fallback for grammar-less modes. Fold/unfold via gutter
 triangles (D3 layer 1) and keyboard. This is where lines *disappear* from

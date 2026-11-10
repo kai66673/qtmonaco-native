@@ -5,6 +5,7 @@
 #include <QElapsedTimer>
 
 #include <algorithm>
+#include <cstdint> // UINT32_MAX for the fold-cursor range reset
 #include <cstring>
 
 // Generated parsers export their entry points with C linkage; the
@@ -22,17 +23,55 @@ namespace {
 
 using TokenKind = CodeEditor::TokenKind;
 
+// M13 (Phase E2) fold sources. Upstream ships no folds.scm for the pinned
+// grammars (third_party/tree-sitter/grammars/*/queries holds highlights
+// only), and PLAN E2 calls for tree-sitter @fold captures + an indent
+// fallback — so the fold query TEXT is composed here, one `(node) @fold`
+// pattern per node type, from the per-language fold-node lists below.
+// Each name is checked with ts_language_symbol_for_name() before it goes in:
+// ts_query_new fails ATOMICALLY on an unknown node type, so without the
+// filter one renamed node would kill the whole query (and with it every
+// fold for that language). A grammar version that renames or drops a node
+// therefore costs exactly one fold pattern here. Ends come from the node's
+// own rows: python statement nodes end at their last body line (no closing
+// token exists), js/json brace nodes end at the closing brace - both mean
+// "hide (start, end]" (see the FoldRange note in the header).
+const char* const kFoldPython[] = {
+    "function_definition", "decorated_definition", "class_definition",
+    "if_statement",        "elif_clause",           "else_clause",
+    "for_statement",       "while_statement",       "try_statement",
+    "except_clause",       "with_statement",
+};
+const char* const kFoldJavascript[] = {
+    "class_declaration",        "class",                "function_declaration",
+    "function",                 "generator_function",   "generator_function_declaration",
+    "method_definition",        "arrow_function",       "statement_block",
+    "if_statement",             "else_clause",          "for_statement",
+    "for_in_statement",         "while_statement",      "do_statement",
+    "switch_body",              "try_statement",        "catch_clause",
+    "finally_clause",           "object",               "array",
+    "lexical_declaration",      "variable_declaration",
+};
+const char* const kFoldJson[] = {
+    "object", "array",
+};
+
 struct LangEntry {
     const char* id;
     const TSLanguage* (*langFn)();
     const char* (*queryFn)();
+    const char* const* foldNodes; // M13 fold-node list (see above)
+    uint32_t foldNodeCount;
 };
 
 // Registry order is surfaced by CodeEditor::availableLanguages().
 const LangEntry kRegistry[] = {
-    {"python", &tree_sitter_python, &queries::pythonHighlights},
-    {"json", &tree_sitter_json, &queries::jsonHighlights},
-    {"javascript", &tree_sitter_javascript, &queries::javascriptHighlights},
+    {"python", &tree_sitter_python, &queries::pythonHighlights, kFoldPython,
+     uint32_t(sizeof kFoldPython / sizeof kFoldPython[0])},
+    {"json", &tree_sitter_json, &queries::jsonHighlights, kFoldJson,
+     uint32_t(sizeof kFoldJson / sizeof kFoldJson[0])},
+    {"javascript", &tree_sitter_javascript, &queries::javascriptHighlights, kFoldJavascript,
+     uint32_t(sizeof kFoldJavascript / sizeof kFoldJavascript[0])},
 };
 
 // Capture name -> TokenKind: the union of the capture names used by the
@@ -77,6 +116,23 @@ int kindForCapture(const char* name, uint32_t len)
     return -1;
 }
 
+// Composes the fold query source for the names a language actually has; an
+// empty result means "no fold query". Names are single tokens by
+// construction (query syntax needs no escaping here).
+QByteArray composeFoldQuery(const TSLanguage* lang, const char* const* names, uint32_t count)
+{
+    QByteArray src;
+    for (uint32_t i = 0; i < count; ++i) {
+        const char* n = names[i];
+        if (!ts_language_symbol_for_name(lang, n, uint32_t(std::strlen(n)), true))
+            continue;
+        src += '(';
+        src += n;
+        src += ") @fold\n";
+    }
+    return src;
+}
+
 } // namespace
 
 // Zero-copy pull reader (PLAN.md D2 core decision). The lexer calls with
@@ -111,13 +167,16 @@ HighlightEngine::HighlightEngine()
 {
     parser_ = ts_parser_new();
     cursor_ = ts_query_cursor_new();
+    foldCursor_ = ts_query_cursor_new();
 }
 
 HighlightEngine::~HighlightEngine()
 {
     ts_tree_delete(tree_);
     ts_query_delete(query_);
+    ts_query_delete(foldQuery_);
     ts_query_cursor_delete(cursor_);
+    ts_query_cursor_delete(foldCursor_);
     ts_parser_delete(parser_);
 }
 
@@ -140,10 +199,14 @@ void HighlightEngine::clearState()
     tree_ = nullptr;
     ts_query_delete(query_);
     query_ = nullptr;
+    ts_query_delete(foldQuery_);
+    foldQuery_ = nullptr;
     captureKind_.clear();
     queryPredicates_.clear();
     lineStarts_.clear();
     spans_.clear();
+    folds_.clear();
+    foldsWhole_ = false;
     lang_ = nullptr;
     dirty_ = true;
     spansDirty_ = true;
@@ -194,6 +257,17 @@ void HighlightEngine::setLanguage(const QString& id)
         }
         buildQueryPredicates();
     }
+    // M13: the fold query is composed from the language's node list, so a
+    // name the pinned grammar does not have never reaches ts_query_new
+    // (that call fails atomically on an unknown node type). Composed text
+    // empty or a rejected query both mean foldQuery_ = nullptr: folding
+    // then runs on the view's indent scan alone, colors untouched.
+    const QByteArray foldSrc = composeFoldQuery(lang_, hit->foldNodes, hit->foldNodeCount);
+    if (!foldSrc.isEmpty())
+        foldQuery_ = ts_query_new(lang_, foldSrc.constData(), uint32_t(foldSrc.size()), &errOffset, &err);
+    // A null foldQuery_ (no usable node names, or a rejected query) leaves
+    // folds() empty: the view's indent scan is then the only fold source,
+    // and the highlight colors are untouched either way.
     rebuildLineIndex();
     dirty_ = true; // first parse is a full parse (old tree is null)
     spansDirty_ = true;
@@ -527,8 +601,14 @@ void HighlightEngine::refreshIfNeeded()
     const bool queryStale =
         (spansMode_ == Mode::Viewport) != scoped
         || (scoped && (spanQStart_ != vpStart_ || spanQEnd_ != vpEnd_));
-    if (spansDirty_ || queryStale)
+    if (spansDirty_ || queryStale) {
         rebuildSpans(qStart, qEnd);
+        // M13: folds ride the identical window, so a big document never
+        // pays a whole-tree fold query on the paint path either (the fold
+        // pattern set is tiny, but capture counts are not: a 200KB json doc
+        // has thousands of object/array nodes).
+        rebuildFolds(qStart, qEnd);
+    }
     windowDirty_ = false;
 }
 
@@ -669,6 +749,81 @@ void HighlightEngine::rebuildSpans(int qStart, int qEnd)
         }
         spans_.insert(spans_.begin() + long(i), Span{c.start, c.end, c.kind});
     }
+}
+
+// M13 (Phase E2): fold ranges straight off the tree. Same cursor pattern
+// and window semantics as rebuildSpans; fold patterns are bare node types
+// so there are no predicates to evaluate here.
+void HighlightEngine::rebuildFolds(int qStart, int qEnd)
+{
+    folds_.clear();
+    foldsWhole_ = qStart < 0;
+    if (!foldQuery_ || !tree_)
+        return;
+
+    ts_query_cursor_exec(foldCursor_, foldQuery_, ts_tree_root_node(tree_));
+    if (qStart >= 0 && qStart < qEnd) {
+        // Same after-exec range setting rebuildSpans measured: a capture
+        // whose NODE starts inside the window is emitted even when the node
+        // reaches past it, which is exactly what folding needs (a fold
+        // opened on a visible line, body running below the viewport). A
+        // fold starting above the window is not emitted — and never needed:
+        // its header line is off screen, and a collapsed fold's own state
+        // lives in the view (collapsed_), not here.
+        ts_query_cursor_set_byte_range(foldCursor_, uint32_t(qStart) * 2, uint32_t(qEnd) * 2);
+    } else {
+        ts_query_cursor_set_byte_range(foldCursor_, 0, UINT32_MAX); // reset a previous scope
+    }
+
+    TSQueryMatch match;
+    uint32_t capIdx = 0;
+    while (ts_query_cursor_next_capture(foldCursor_, &match, &capIdx)) {
+        const TSNode n = match.captures[capIdx].node;
+        const TSPoint sp = ts_node_start_point(n);
+        TSPoint ep = ts_node_end_point(n);
+        const int startLine = int(sp.row);
+        int endLine = int(ep.row);
+        // A node ending at column 0 of a row ends its last CONTENT on the
+        // row above (the exclusive end landed on the '\n'), so that row is
+        // not part of the fold. ts_node_end_point for a python block-ish
+        // node or a node ending right after a newline reports exactly this.
+        if (ep.column == 0 && endLine > startLine)
+            --endLine;
+        if (endLine <= startLine)
+            continue; // single-line object/array/lambda: nothing to hide
+        folds_.push_back(FoldRange{startLine, endLine});
+    }
+
+    // (start asc, end desc) is the fold-tree walk order the view consumes;
+    // duplicates are adjacent after the sort, so unique() is enough (the
+    // view still has to normalize genuine nestings and overlaps).
+    std::sort(folds_.begin(), folds_.end(), [](const FoldRange& a, const FoldRange& b) {
+        if (a.startLine != b.startLine)
+            return a.startLine < b.startLine;
+        return a.endLine > b.endLine;
+    });
+    folds_.erase(std::unique(folds_.begin(), folds_.end(),
+                             [](const FoldRange& a, const FoldRange& b) {
+                                 return a.startLine == b.startLine && a.endLine == b.endLine;
+                             }),
+                 folds_.end());
+}
+
+// Whole-document fold list on the CURRENT tree (explicit user actions only:
+// collapseAll, or foldLine addressed outside the painted window). No tree
+// reparse here — only the query walk — and the result stays cached until the
+// next scoped rebuild replaces it (foldsWhole_ back to false).
+const std::vector<HighlightEngine::FoldRange>& HighlightEngine::foldsFull()
+{
+    refreshIfNeeded();
+    if (!tree_) {
+        folds_.clear();
+        foldsWhole_ = true;
+        return folds_;
+    }
+    if (!foldsWhole_)
+        rebuildFolds(-1, -1);
+    return folds_;
 }
 
 QColor HighlightEngine::colorFor(CodeEditor::TokenKind kind)

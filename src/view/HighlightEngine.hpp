@@ -110,10 +110,39 @@ public:
 
     // Bring the tree current if dirty, then rebuild the merged spans if
     // the tree changed. Cheap no-op otherwise. Call before reading
-    // spans()/lineStarts().
+    // spans()/lineStarts()/folds().
     void refreshIfNeeded();
 
     const std::vector<Span>& spans() const { return spans_; }
+
+    // M13 fold ranges (Phase E2): the @fold captures of a per-language fold
+    // query, computed at the SAME refresh cadence and query window as spans
+    // (so a big document stays viewport-scoped here too). A range is an
+    // inclusive pair of MODEL lines with startLine < endLine: the fold hides
+    // (startLine, endLine] — the header line always stays visible, and the
+    // end row is the node's own last row (a node whose end_point sits at
+    // column 0 of the next row loses that row: the exclusive end landed on
+    // the newline, not on content). Sorted by (start asc, end desc),
+    // duplicates merged; single-line captures dropped (nothing to hide).
+    // Raw captures, so nested/overlapping ranges stay — the view normalizes
+    // them into a proper fold tree. An EMPTY list either means "no fold
+    // query for this language" (the view falls back to its indent scan) or
+    // "not computed yet"; empty is never a wrong answer, only a missing one.
+    struct FoldRange {
+        int startLine;
+        int endLine;
+    };
+
+    // The list the last refresh produced (window-scoped on big documents —
+    // same caveat as spans()). The paint path reads this; it never pays a
+    // whole-document fold query.
+    const std::vector<FoldRange>& folds() const { return folds_; }
+    // Exactness-forcing whole-document list (the foldsFor/spansFor pattern):
+    // CodeEditor::foldLine()/collapseAll() may address a fold outside the
+    // painted window, and collapseAll() needs every fold. One synchronous
+    // whole-tree fold query on the CURRENT tree, cached until the next
+    // scoped rebuild. Never called from paint.
+    const std::vector<FoldRange>& foldsFull();
     // Consistent with spans() after refreshIfNeeded(): lineStarts_[L] is
     // the document offset of line L. Only populated while active().
     const std::vector<int>& lineStarts() const { return lineStarts_; }
@@ -167,6 +196,11 @@ private:
     // byte_range, settable after exec - v0.27.2 measured). Each emitted
     // capture must also pass its pattern's predicates (see Predicate).
     void rebuildSpans(int qStart, int qEnd);
+    // M13 fold-capture rebuild: same window semantics as rebuildSpans
+    // (qStart < 0 = whole tree), no predicates (fold patterns are bare node
+    // types). Runs exactly when rebuildSpans runs, so fold cost rides the
+    // same at-most-once-per-keypress cadence and the same viewport scoping.
+    void rebuildFolds(int qStart, int qEnd);
     // Node text as UTF-16 units via the buffer's piece view (the tree and
     // buffer are always current inside rebuildSpans).
     QString nodeText(const TSNode& node) const;
@@ -179,8 +213,11 @@ private:
     // parse and, once it busts the latency budget on a big document,
     // switch to viewport-range parsing anchored at the nearest col-0
     // line (restores top-level context for column-based grammars like
-    // python). Threading is deferred to M13 (folding needs full trees;
-    // snapshot-copy cost is trivial per bench).
+    // python). Threading stays deferred: M13 folding turned out NOT to
+    // need whole trees on the paint path (fold captures ride the same
+    // viewport window as highlight captures; only the explicit
+    // collapseAll()/foldLine-outside-the-window path pays one whole-tree
+    // fold query, see foldsFull()).
     enum class Mode { Full, Viewport };
     Mode mode_ = Mode::Full; // parse strategy of the NEXT reparse
     Mode spansMode_ = Mode::Full; // query scope that produced spans_
@@ -218,6 +255,15 @@ private:
     TSQuery* query_ = nullptr;
     std::vector<int> captureKind_; // capture id -> TokenKind int, -1 = skip
     std::vector<PatternPredicates> queryPredicates_; // indexed by pattern id
+    // M13 fold query (Phase E2): composed `(node) @fold` patterns, one per
+    // node type of the language's fold-node list (see kFold* in the .cpp).
+    // Null = no fold query for this language -> the view's indent fallback
+    // is the only fold source. foldsWhole_ records whether the last fold
+    // pass covered the whole tree (foldsFull) or the spans window.
+    TSQuery* foldQuery_ = nullptr;
+    TSQueryCursor* foldCursor_ = nullptr;
+    std::vector<FoldRange> folds_;
+    bool foldsWhole_ = false;
     std::vector<int> lineStarts_;  // ascending; [0] == 0; empty = inactive
     bool dirty_ = true;            // tree_ lags behind buffer_
     bool spansDirty_ = true;

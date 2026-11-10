@@ -214,13 +214,20 @@ public:
     QString lineNumberText(int line) const;
 
     // Gutter geometry. gutterWidth() = 0 in Off mode; otherwise digit
-    // width + padding, plus one extra reserved slot while any breakpoint
-    // exists (adding a breakpoint must not shift already-drawn numbers).
+    // width + padding, plus the fold zone (M13: a fixed strip along the
+    // gutter's right edge where the fold triangles live — reserved
+    // whenever the gutter is on, so folding never shifts the numbers),
+    // plus one extra reserved slot while any breakpoint exists (adding a
+    // breakpoint must not shift already-drawn numbers).
     // contentLeft() = widget x where text begins: padding_ + gutterWidth().
     // xForCol()/positionAt()/painting all use it, so callers composing
     // widget x read contentLeft(), not padding().
     int gutterWidth() const;
     int contentLeft() const { return padding_ + gutterWidth(); }
+    // The M13 fold zone: fixed-width strip at [contentLeft()-foldZoneWidth(),
+    // contentLeft()), 0 in Off mode. Clicks inside it toggle the fold of
+    // that row's line and never move the caret.
+    int foldZoneWidth() const;
 
     // (1) Breakpoint glyphs: one filled dot per line, in the reserved
     // slot. Getter returns the sorted, deduplicated lines.
@@ -412,6 +419,61 @@ public:
     void setScrollBeyondLastLineEnabled(bool enabled);
     bool scrollBeyondLastLineEnabled() const { return scrollBeyondLastLine_; }
 
+    // Code folding (M13, Phase E2). A fold is an inclusive pair of MODEL
+    // lines (0-based) with startLine < endLine; collapsing it hides
+    // (startLine, endLine] — the header line never disappears (js/json
+    // closing braces hide with their body, python blocks end at the last
+    // body line). Foldable starts come from the engine's @fold captures
+    // where a grammar exists, plus the view's indent rule (the next visible
+    // line is deeper than this one) everywhere — the union is what the
+    // gutter triangles mark.
+    //
+    // Fold state is VIEW state: not undoable in v1, kept index-correct
+    // across edits on a best-effort sweep (a fold whose body was deleted
+    // vanishes), and cleared entirely by setPlainText/set_language-level
+    // document replaces. Hidden lines have no visible index: use the
+    // view-line map below before addressing any geometry.
+    struct FoldRange {
+        FoldRange() = default;
+        FoldRange(int startLine_, int endLine_) : startLine(startLine_), endLine(endLine_) {}
+        int startLine = 0;
+        int endLine = 0;
+        bool operator==(const FoldRange&) const = default;
+    };
+
+    // Foldable ranges as the view currently knows them: both sources
+    // merged, sorted by start, duplicate starts resolved (engine wins —
+    // its ends are exact). Non-const because lazy indent-rule ends get
+    // resolved exactly here (an explicit-caller cost, never a paint cost).
+    // Viewport-scoped on big documents (paint keeps the cache warm; an
+    // out-of-window fold is discovered exactly when scrolling reveals it).
+    QVector<FoldRange> foldableRanges();
+    bool isFoldable(int line) const; // would foldLine(line) find a fold?
+    bool isFolded(int line) const;   // line starts a currently collapsed fold
+
+    // Toggle on a foldable/collapsed START line. Targets hidden inside
+    // another fold do nothing (return false): the caret-based entry points
+    // unfold to reveal first, the mouse can only ever hit visible lines.
+    // Returns true if the fold state changed. Keyboard: Ctrl+Shift+[ / ]
+    // fold/unfold at the caret, Ctrl+Alt+[ / ] collapse/expand everything.
+    bool foldLine(int line);
+    bool unfoldLine(int line);
+    bool toggleFold(int line);
+    // Explicit whole-document passes (O(document) is acceptable here —
+    // never on a paint path): collapse every outermost fold, then every
+    // fold; expandAll unfolds everything.
+    void collapseAll();
+    void expandAll();
+
+    // The ONE view-line map (M13): visible slots are numbered
+    // [0, visibleLineTotal()) top-to-bottom; a hidden (folded-away) model
+    // line has visible index -1. Paint, caret navigation, hit-testing,
+    // scroll clamps and the ruler all route through it, so model space and
+    // screen space can never drift apart across a fold boundary.
+    int visibleLineTotal() const;
+    int visibleIndexOfModelLine(int line) const; // -1 = hidden
+    int modelLineForVisibleIndex(int visibleIndex) const; // clamped both ways
+
     int lineHeight() const { return lineHeight_; }
     double cellWidth() const { return cellWidth_; }
     int padding() const { return padding_; } // vertical/top-edge padding
@@ -419,6 +481,12 @@ public:
     // Viewport state read-out (the same window paintEvent and the
     // highlight policy consume). Read-only: scrolling itself happens via
     // wheel/scrollbar. Public for consumers, bindings and the policy test.
+    // firstVisibleLine() reports the MODEL line of the top visible slot
+    // (fold-aware since M13: across a collapsed fold it jumps to the line
+    // after the hidden run; hidden lines are never reported);
+    // visibleLineCount() is the slot budget the paint loop walks (a
+    // scroll-space measure, not the hidden-adjusted total — see
+    // visibleLineTotal() for that).
     int firstVisibleLine() const;
     int visibleLineCount() const;
     int verticalScrollOffset() const { return vScroll_; } // px, clamped
@@ -665,6 +733,50 @@ private:
     QScrollBar* hBar_ = nullptr;
     void setHScroll(int pixels); // the one clamping writer of hScroll_
 
+    // --- M13 folding state (semantics: public API comments) --------------
+    // Collapsed folds, model lines. Kept sorted by (start asc, end desc);
+    // strictly-contained entries are dropped at collapse time, so any
+    // remaining overlap is only partial (stale-edit residue) and rides the
+    // run merge below. Ends are clamped to the document on rebuild.
+    struct FoldState {
+        int start = 0;
+        int end = 0;
+    };
+    QVector<FoldState> collapsed_;
+    // Hidden runs derived from collapsed_: disjoint, NON-TOUCHING (runs
+    // that abut or overlap are merged — so the line after a run's last is
+    // always visible or past the document), sorted, each carrying the
+    // count of hidden lines before it. The view-line map is binary search
+    // over this table; visibleLines_ caches lineCount() - hidden total.
+    struct HiddenRun {
+        int first = 0;        // first hidden model line
+        int last = 0;         // last hidden model line (inclusive)
+        int hiddenBefore = 0; // hidden lines in earlier runs
+    };
+    static constexpr int kIndentWindow = 256; // indentOfModelLine read cap
+    QVector<HiddenRun> hiddenRuns_;
+    int foldVisibleTotal_ = 0; // cached visibleLineTotal() (set by rebuildHiddenRuns)
+    int foldDocLines_ = 0;     // lineCount() at the last fold sweep (edit diff)
+    void rebuildHiddenRuns();  // collapsed_ -> hiddenRuns_/visibleLines_
+    void shiftFoldStateForEdit(const qmn::core::TextBuffer::EditEvent& ev);
+    // Foldable starts known for the painted window: engine @fold captures
+    // (exact ends) union the indent rule (start-only; ends resolved lazily
+    // by foldEndForLine on the actual fold request, keeping paint O(view)).
+    // Mutable like the highlight engine: paintEvent keeps it warm.
+    mutable QVector<FoldState> foldables_; // sorted by start, one per start
+    void recomputeFoldables(int firstModel, int lastModel);
+    int foldEndForLine(int line); // exact end (engine full query, else indent scan)
+    int indentOfModelLine(int line) const; // leading ws units; -1 = blank line
+    // Unfold every collapsed fold strictly containing line (outermost
+    // first). True if anything opened. Caret choke points use this (a
+    // caret/selection target is never hidden); paint never reveals.
+    bool revealLine(int line);
+    int nextVisibleModelLine(int line) const; // slot+1 walk (caret jump over folds)
+    int prevVisibleModelLine(int line) const; // slot-1 walk
+    int slotOfModelLine(int line) const;      // visibleIndexOfModelLine, clamped >= 0
+    // Model line whose slot row contains widget y (-1 outside text rows).
+    int modelLineForY(int y) const;
+
     QTimer blinkTimer_;
     bool caretOn_ = true;
 
@@ -686,3 +798,6 @@ Q_DECLARE_OPERATORS_FOR_FLAGS(CodeEditor::FindFlags)
 // connectable from Python without this. Qt insists the declaration sit at global
 // scope - putting it inside qmn::view does not compile. Harmless for C++ users.
 Q_DECLARE_METATYPE(qmn::view::TextPosition)
+// Same reason for the M13 fold record (foldableRanges() returns a
+// QVector<FoldRange> the binding's container converter must resolve).
+Q_DECLARE_METATYPE(qmn::view::CodeEditor::FoldRange)

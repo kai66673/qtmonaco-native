@@ -243,6 +243,47 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   ride-along, and a pixel-band probe (zero-ink control at h=0, then Q
   glyph / selection blend / 2px caret bar ink exactly at predicted
   shifted widget x).
+- M13 code folding (Phase E2). Fold ranges come from tree-sitter `@fold`
+  captures per grammar (python/javascript/json node lists composed into one
+  query by `composeFoldQuery`; every name is filtered through
+  `ts_language_symbol_for_name`, so a grammar rename just drops that node
+  instead of failing the query) UNIONed with an indent fallback
+  (`indent(L+1) > indent(L)`, blank lines count as no-indent) that works in
+  every mode, grammar included. Public API: `foldableRanges()`,
+  `isFoldable(line)`, `isFolded(line)`, `foldLine/unfoldLine/toggleFold`,
+  `collapseAll()/expandAll()`, and the ONE view-line map everything routes
+  through: `visibleLineTotal()`, `visibleIndexOfModelLine(line)` (-1 =
+  hidden), `modelLineForVisibleIndex(i)` (clamped both ways). Painting,
+  caret navigation (Up/Down/PageUp/PageDown step SLOTs, jumping a whole
+  fold as one unit), selection, gutter, ruler, the v-scroll space
+  (`totalHeight()` rides slot space: hidden runs cost no pixels) and every
+  hit test ride the map — a click or arrow key can never address a hidden
+  line.
+- Fold UX: a fixed 18px fold zone at the gutter's right edge
+  (`foldZoneWidth()`; gutter Off removes the chrome but the fold API keeps
+  working) with ▾/▸ triangles in a fixed cool gray (the warm/red
+  decoration pixel probes stay green). Zone clicks toggle WITHOUT moving
+  the caret; non-foldable rows fall through to plain caret placement and
+  Alt+Click keeps its multi-caret meaning there. Keyboard: Ctrl+Shift+[/]
+  fold/unfold at the caret, Ctrl+Alt+[/] collapse-all/expand-all (bracket
+  or brace spelling, Meta noise tolerated; the caret is never moved).
+  Reveal rule, ONE guard (`ensureCaretVisible`): a caret route that names
+  a hidden line opens the containing fold first — and since mouse/keyboard
+  are map-routed, only programmatic `setPosition` can name one; a drag
+  across a fold never opens it, the selection just spans the hidden text.
+- Fold edit bookkeeping (fold state itself is NOT an undoable action —
+  documented v1 stance — but edits and undo keep it consistent): the
+  buffer observer shifts collapsed ranges by the op's net line delta —
+  folds entirely below the edit line shift whole, folds containing it
+  shift their END only (a join at the header EOL shortens the body and the
+  fold survives), a fold whose end collapses onto its start dies, and
+  `setPlainText` resets all fold state. Paint stays O(viewport): foldable
+  STARTS resolve inside the paint window (indent ends stay lazy — the
+  triangle only needs the start), whole-document fold queries run only on
+  explicit user actions (`foldLine`/`collapseAll`), never in a paint pass.
+  The ruler rides the same map: its M7 contract recomputes over slot
+  space, so hidden lines cost no strip rows and a strip row never maps to
+  a hidden line.
 
 ### Changed
 - The x anchor of all text geometry (caret, selection, painting, hit
@@ -274,6 +315,12 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   `FindFlag` uses explicit powers of two. And `QStringLiteral` prefixes
   `u""`, so UTF-8 byte hex escapes (`"\xE2\x96\xB2"`) sign-extend into
   mojibake; non-ASCII glyphs there must be `\uXXXX` escapes.
+- M13 measured traps: `modelLineForVisibleIndex` CLAMPS, so a foldable
+  slot walk bounded only by model lines spins forever when the paint
+  window ends at the document end (measured hang on first paint — the
+  loop must break on `slot >= visibleLineTotal()`); and libstdc++'s
+  `std::binary_search` comparator-argument-order gotchas bit, so the map/
+  fold lookups use `lower_bound` + explicit equality everywhere.
 
 ## [0.5.0] — 2026-11-09
 
