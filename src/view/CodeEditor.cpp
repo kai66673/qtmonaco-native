@@ -354,6 +354,10 @@ const CodeEditor::GeoSlot* CodeEditor::hitLine(int line) const
     victim->layout.setFont(font_);
     QTextOption opt;
     opt.setWrapMode(QTextOption::NoWrap);
+    // M14: literal '\t' in the text renders to the SAME stop grid the
+    // soft-typed spaces land on (stops every tabStopWidth_ cells from the
+    // line start), so pasted and typed indentation never split a grid.
+    opt.setTabStopDistance(static_cast<qreal>(tabStopWidth_) * cellWidth_);
     victim->layout.setTextOption(opt);
     victim->layout.beginLayout();
     victim->line = victim->layout.createLine();
@@ -1158,8 +1162,9 @@ bool CodeEditor::applyCaretsFanOut(const SlotEditFn& editFn)
             else if (t.ed.start < p && p < t.ed.end)
                 p = t.ed.start;
         }
-        // Self first: our own final caret is start + text in this frame.
-        t.finalOffset = t.ed.start + t.ed.text.size();
+        // Self first: our own final caret is start + text (minus any
+        // pair-split caretTrim) in this frame.
+        t.finalOffset = t.ed.start + t.ed.text.size() - t.ed.caretTrim;
         if (t.ed.end > t.ed.start)
             buffer_.removeRange(t.ed.start, t.ed.end);
         if (!t.ed.text.isEmpty())
@@ -2098,7 +2103,354 @@ void CodeEditor::expandAll()
     update();
 }
 
-void CodeEditor::insertTextAtCaret(const QString& text)
+// --- M14 indentation -------------------------------------------------------
+
+QString CodeEditor::leadingWsPrefix(const QString& line)
+{
+    // The whitespace prefix at the start of a line piece (spaces, '\t';
+    // form-feed is NOT indent — it is not even a line break in this buffer,
+    // it is an ordinary char the glyph engine draws).
+    int n = 0;
+    while (n < line.size()
+           && (line[n] == QLatin1Char(' ') || line[n] == QLatin1Char('\t')))
+        ++n;
+    return line.left(n);
+}
+
+// Leading whitespace measured in stop units: each space = 1, each '\t' =
+// the advance to its own stop (stop grid anchored at the line start).
+int CodeEditor::indentWidthOf(const QString& line, int stop)
+{
+    int col = 0;
+    int width = 0;
+    for (int i = 0; i < line.size(); ++i) {
+        if (line[i] == QLatin1Char(' ')) {
+            ++col;
+            ++width;
+        } else if (line[i] == QLatin1Char('\t')) {
+            const int next = ((col / stop) + 1) * stop;
+            width += next - col;
+            col = next;
+        } else {
+            break;
+        }
+    }
+    return width;
+}
+
+// Indent edit: `count` spaces inserted at col 0 of `line`.
+CodeEditor::SlotEdit CodeEditor::makeIndentEdit(const qmn::core::TextBuffer& buf,
+                                                int line, int count)
+{
+    SlotEdit ed;
+    ed.start = buf.offsetOf(line, 0);
+    ed.end = ed.start;
+    ed.text = QString(count, QLatin1Char(' '));
+    return ed;
+}
+
+// Chars to cut from the FRONT of an indent `prefix` so its stop-width
+// drops to the next lower stop boundary (VS Code's unindent): a width w>0
+// retires to ((w-1)/stop)*stop — a whole stop when sitting ON a boundary,
+// just the overshoot when mid-band. A '\t' leaves as one whole char (its
+// grid advance is >= 1); the cut never lands mid-prefix.
+int CodeEditor::prefixCutForOneStop(const QString& prefix, int stop)
+{
+    const int w = indentWidthOf(prefix, stop);
+    if (w == 0)
+        return 0;
+    const int target = ((w - 1) / stop) * stop;
+    const int need = w - target; // grid width that must at least be removed
+    int col = 0; // grid col AT index cut (the kept suffix is w-col wide)
+    for (int cut = 0; cut <= prefix.size(); ++cut) {
+        if (col >= need)
+            return cut;
+        if (prefix[cut] == QLatin1Char('\t'))
+            col = ((col / stop) + 1) * stop;
+        else
+            ++col;
+    }
+    return prefix.size();
+}
+
+// The caret column mapped onto the stop grid (visual column): spaces and
+// ordinary chars advance one cell, a literal '\t' advances to the next
+// stop — exactly the grid the renderer lays out (QTextOption tab stops).
+int CodeEditor::visualColOf(const QString& line, int col, int stop)
+{
+    int v = 0;
+    const int n = std::min(col, int(line.size()));
+    for (int i = 0; i < n; ++i) {
+        if (line[i] == QLatin1Char('\t'))
+            v = ((v / stop) + 1) * stop;
+        else
+            ++v;
+    }
+    return v;
+}
+
+// Outdent edit: up to one stop of leading whitespace removed from `line`.
+CodeEditor::SlotEdit CodeEditor::makeOutdentEdit(const qmn::core::TextBuffer& buf,
+                                                 int line, int stop)
+{
+    SlotEdit ed;
+    const int cut = prefixCutForOneStop(leadingWsPrefix(buf.lineText(line)), stop);
+    if (cut == 0)
+        return ed;
+    ed.start = buf.offsetOf(line, 0);
+    ed.end = ed.start + cut;
+    return ed;
+}
+
+bool CodeEditor::blockTouchesLines() const
+{
+    // Multi-line rule over ALL carets: a slot spans lines when caret and
+    // anchor disagree on the line (either selection direction).
+    if (hasSelection_ && caret_.line != anchor_.line)
+        return true;
+    for (const CaretSlot& s : extraCarets_)
+        if (s.hasSelection && s.caret.line != s.anchor.line)
+            return true;
+    return false;
+}
+
+QVector<int> CodeEditor::blockTouchedLines() const
+{
+    QVector<int> lines;
+    for (const CaretSlot& s : allCarets()) {
+        if (!s.hasSelection) {
+            lines.append(s.caret.line);
+            continue;
+        }
+        const TextPosition a = s.caret, b = s.anchor;
+        const int lo = std::min(a.line, b.line);
+        const int hi = std::max(a.line, b.line);
+        lines.append(lo); // the selection always covers its start line
+        for (int l = lo + 1; l < hi; ++l)
+            lines.append(l); // middle lines of the span are always inside it
+        // The END that sits on the last spanned line decides: at col 0 the
+        // selection merely ends ON that line, it does not touch it.
+        const TextPosition hiEnd = (a.line == hi) ? a : b;
+        if (hi > lo && hiEnd.col > 0)
+            lines.append(hi);
+    }
+    std::sort(lines.begin(), lines.end());
+    lines.erase(std::unique(lines.begin(), lines.end()), lines.end());
+    return lines;
+}
+
+// Apply one block pass (per-line edits computed against the PRE-action
+// document, ascending by start) as ONE bracketed core group, then remap
+// every caret through the SAME offset rule applyCaretsFanOut commits with:
+// a pre-action caret offset shifts by the delta of every edit ending at or
+// left of it (a pure insert right at the caret counts: the caret moves
+// right), and an offset sitting INSIDE a removed range collapses to that
+// edit's start. Caret offsets are captured in the pre-action frame before
+// anything is touched; edits apply right-to-left so their pre-action
+// offsets never shift.
+void CodeEditor::applyBlockEdits(const QVector<SlotEdit>& edits)
+{
+    QVector<int> preExtra;
+    preExtra.reserve(extraCarets_.size());
+    for (const CaretSlot& s : extraCarets_)
+        preExtra.append(buffer_.offsetOf(s.caret.line, s.caret.col));
+    const int prePrimary = buffer_.offsetOf(caret_.line, caret_.col);
+
+    buffer_.beginEditGroup();
+    for (int i = edits.size() - 1; i >= 0; --i) {
+        const SlotEdit& ed = edits[i];
+        if (ed.end > ed.start)
+            buffer_.removeRange(ed.start, ed.end);
+        if (!ed.text.isEmpty())
+            buffer_.insertAtOffset(ed.start, ed.text);
+    }
+    buffer_.endEditGroup();
+
+    auto remap = [this, &edits](int p) {
+        int cum = 0; // delta of the edits fully left of (or at) the caret
+        for (const SlotEdit& ed : edits) { // ascending starts
+            if (p < ed.end) {
+                if (p > ed.start)
+                    p = ed.start; // sat inside a removed range: collapse
+                break; // this edit and everything right of it is at/right of p
+            }
+            cum += int(ed.text.size()) - (ed.end - ed.start);
+        }
+        const auto lc = buffer_.lineColAt(p + cum);
+        return clampPos(TextPosition{lc.line, lc.col});
+    };
+    for (CaretSlot& s : extraCarets_) {
+        s.caret = remap(preExtra.takeFirst());
+        s.anchor = s.caret;
+        s.hasSelection = false; // the block action consumes every selection
+    }
+    caret_ = remap(prePrimary);
+    anchor_ = caret_;
+    hasSelection_ = false;
+    normalizeCarets(); // remapped carets can stack onto one point: fold
+
+    caretOn_ = true;
+    if (hasFocus())
+        blinkTimer_.start();
+    ensureCaretVisible();
+    updateScrollBarRange();
+    update();
+    emit cursorMoved(caret_);
+    emit selectionChanged();
+    updatePrimarySelection(); // the pre-action selection no longer exists
+}
+
+void CodeEditor::blockIndent()
+{
+    const QVector<int> lines = blockTouchedLines();
+    if (lines.isEmpty())
+        return;
+    QVector<SlotEdit> edits;
+    edits.reserve(lines.size());
+    for (int line : lines)
+        edits.append(makeIndentEdit(buffer_, line, tabStopWidth_));
+
+    const UndoMark pre = captureEditMark();
+    applyBlockEdits(edits);
+    reconcileUndoMarks(pre);
+}
+
+void CodeEditor::blockOutdent()
+{
+    const QVector<int> lines = blockTouchedLines();
+    if (lines.isEmpty())
+        return;
+    QVector<SlotEdit> edits;
+    edits.reserve(lines.size());
+    for (int line : lines) {
+        const SlotEdit ed = makeOutdentEdit(buffer_, line, tabStopWidth_);
+        if (ed.end > ed.start)
+            edits.append(ed); // already ascending by line = by start
+    }
+    if (edits.isEmpty())
+        return; // nothing edited: not even an empty bracket is recorded
+
+    const UndoMark pre = captureEditMark();
+    applyBlockEdits(edits);
+    reconcileUndoMarks(pre);
+}
+
+// Tab with a SINGLE caret and no multi-line selection (the key handler
+// routes blocks elsewhere): insert spaces up to the next stop boundary
+// right of the caret's VISUAL column — from a boundary that is a full
+// stop, a mid-band caret only crosses the next one, and a literal '\t'
+// left of the caret counts as its own grid advance. A selection under the
+// key is REPLACED (typing semantics) and bracketed, so the delete+insert
+// is one undo step; a plain pad is unbracketed and coalesces with the
+// Tab burst exactly like typing.
+void CodeEditor::tabInsertSpaces()
+{
+    const int stop = std::max(1, tabStopWidth_);
+    const UndoMark pre = captureEditMark();
+    const QString line = buffer_.lineText(caret_.line);
+    int editStart = buffer_.offsetOf(caret_.line, caret_.col);
+    int editEnd = editStart;
+    if (hasSelection_) {
+        editStart = buffer_.offsetOf(selStart().line, selStart().col);
+        editEnd = buffer_.offsetOf(selEnd().line, selEnd().col);
+    }
+    const int v = visualColOf(line, caret_.col, stop);
+    const QString text(((v / stop) + 1) * stop - v, QLatin1Char(' '));
+    if (editEnd > editStart) {
+        buffer_.beginEditGroup(); // the pair is ONE compound undo step
+        buffer_.removeRange(editStart, editEnd);
+        buffer_.insertAtOffset(editStart, text);
+        buffer_.endEditGroup();
+        updatePrimarySelection(); // the replaced selection must not linger
+        emit selectionChanged();
+    } else {
+        buffer_.insertAtOffset(editStart, text);
+    }
+    const auto lc = buffer_.lineColAt(editStart + text.size());
+    setCaret(clampPos(TextPosition{lc.line, lc.col}));
+    reconcileUndoMarks(pre);
+}
+
+// The Enter payload for one caret at (line, col) with auto-indent on
+// (public contract on setAutoIndentEnabled): the line's leading
+// whitespace rides over; a trailing opener `{([:` before the caret buys
+// one more stop; and when the caret sits exactly inside an empty pair
+// `{`|`}` (also `(`|`)`, `[`|`]`), the pair SPLITS: the closer moves to
+// its own line at the parent indent, the caret stays on the child line.
+QString CodeEditor::autoIndentNewline(int line, int col) const
+{
+    const QString text = line >= 0 ? buffer_.lineText(line) : QString();
+    const int stop = std::max(1, tabStopWidth_);
+    const QString parentIndent = leadingWsPrefix(text);
+
+    // Trailing non-space char before the caret (+1 stop after an opener).
+    // Enter AT col 0 stays plain: its own indent belongs to the line it
+    // sits on, and col 0 is never "after" anything (undo round-trips and
+    // the col-0 `|}` split both want a bare line break there).
+    int t = col - 1;
+    while (t >= 0 && (text[t] == QLatin1Char(' ') || text[t] == QLatin1Char('\t')))
+        --t;
+    const bool opens = col > 0 && t >= 0
+                       && (text[t] == QLatin1Char('{') || text[t] == QLatin1Char('(')
+                           || text[t] == QLatin1Char('[') || text[t] == QLatin1Char(':'));
+    const QString childIndent
+        = opens ? parentIndent + QString(stop, QLatin1Char(' ')) : parentIndent;
+
+    // Pair split: the caret sits flush inside an EMPTY pair — written out
+    // as `{|}` (both sides present) or typed at EOL as `{|` (the closer
+    // then implied), and `}|{` / `|}` at col 0 mirror it the other way
+    // (same for () and []). The closer moves to its own line at the
+    // parent indent, the caret stays on the child line.
+    const auto isOpener = [](QChar c) {
+        return c == QLatin1Char('{') || c == QLatin1Char('(')
+            || c == QLatin1Char('[');
+    };
+    const auto isCloser = [](QChar c) {
+        return c == QLatin1Char('}') || c == QLatin1Char(')')
+            || c == QLatin1Char(']');
+    };
+    const auto pairOf = [](QChar o, QChar c) {
+        return (o == QLatin1Char('{') && c == QLatin1Char('}'))
+            || (o == QLatin1Char('(') && c == QLatin1Char(')'))
+            || (o == QLatin1Char('[') && c == QLatin1Char(']'));
+    };
+            const QChar before = col > 0 ? text[col - 1] : QChar();
+    const QChar after = col < text.size() ? text[col] : QChar();
+    const auto closerOf = [](QChar o) {
+        return o == QLatin1Char('{') ? QChar(QLatin1Char('}'))
+             : o == QLatin1Char('(') ? QChar(QLatin1Char(')'))
+             : QChar(QLatin1Char(']'));
+    };
+    // `{|` at EOL: the closer is IMPLIED — the payload must conjure it on
+    // the parent line. Everywhere else it already sits in the document.
+    const QChar implied = (isOpener(before) && after.isNull()) ? closerOf(before) : QChar();
+    const bool emptyPair = pairOf(before, after) // {|}   and  }|{
+                           || pairOf(after, before)
+                           || !implied.isNull() // {| at EOL
+                           || (isCloser(after) && col == 0); // |} at col 0
+    if (emptyPair) {
+        QString payload = QLatin1String("\n") + childIndent + QLatin1String("\n") + parentIndent;
+        if (!implied.isNull())
+            payload += implied; // a null QChar would append U+0000
+        return payload;
+    }
+    return QLatin1String("\n") + childIndent;
+}
+
+// Code units to trim off an autoIndentNewline payload's END to park the
+// caret: the first '\n' + child indent is the caret's line, so anything
+// after it — the pair split's second '\n' + parent indent — sits right of
+// the caret. A plain payload has nothing after that run: trim 0.
+int CodeEditor::autoIndentCaretTrim(const QString& payload)
+{
+    int run = 0; // the child indent: the ' '/'\t' run right after the '\n'
+    while (run + 1 < payload.size()
+           && (payload[run + 1] == QLatin1Char(' ') || payload[run + 1] == QLatin1Char('\t')))
+        ++run;
+    return payload.size() - 1 - run;
+}
+
+void CodeEditor::insertTextAtCaret(const QString& text, int caretTrim)
 {
     if (text.isEmpty())
         return;
@@ -2107,7 +2459,7 @@ void CodeEditor::insertTextAtCaret(const QString& text)
         // Multi-caret typing (D1): one bracketed group per key press, so a
         // multi-caret action is exactly ONE undo step and deliberately does
         // NOT coalesce across presses (the bracket fences every group).
-        applyCaretsFanOut([this, &text](const CaretSlot& s, SlotEdit& ed) {
+        applyCaretsFanOut([this, &text, caretTrim](const CaretSlot& s, SlotEdit& ed) {
             if (s.hasSelection) {
                 const auto [st, en] = selRangeOf(buffer_, s);
                 ed.start = st;
@@ -2117,6 +2469,7 @@ void CodeEditor::insertTextAtCaret(const QString& text)
                 ed.end = ed.start;
             }
             ed.text = text;
+            ed.caretTrim = caretTrim;
             return true;
         });
         reconcileUndoMarks(pre);
@@ -2135,12 +2488,13 @@ void CodeEditor::insertTextAtCaret(const QString& text)
     if (bracket)
         buffer_.endEditGroup();
     TextPosition pos = caret_;
-    const int newlines = text.count(QLatin1Char('\n'));
+    const QString parked = text.left(text.size() - std::min<qsizetype>(caretTrim, text.size()));
+    const int newlines = parked.count(QLatin1Char('\n'));
     if (newlines > 0) {
         pos.line += newlines;
-        pos.col = static_cast<int>(text.size()) - text.lastIndexOf(QLatin1Char('\n')) - 1;
+        pos.col = static_cast<int>(parked.size()) - parked.lastIndexOf(QLatin1Char('\n')) - 1;
     } else {
-        pos.col += static_cast<int>(text.size());
+        pos.col += static_cast<int>(parked.size());
     }
     setCaret(clampPos(pos));
     reconcileUndoMarks(pre);
@@ -3001,6 +3355,30 @@ void CodeEditor::setCurrentLineHighlight(bool enabled)
     update();
 }
 
+void CodeEditor::setTabStopWidth(int columns)
+{
+    columns = std::max(1, columns);
+    if (columns == tabStopWidth_)
+        return;
+    tabStopWidth_ = columns;
+    // Tab stops are part of the LAYOUT (literal '\t' rendering), and the
+    // layout cache is not keyed on them: wipe it and let the visible lines
+    // re-measure their widths into docWidthPx_ the ambient way (hitLine).
+    resetGeoCache();
+    updateScrollBarRange();
+    update();
+}
+
+void CodeEditor::setAutoIndentEnabled(bool enabled)
+{
+    autoIndent_ = enabled; // state-only: no repaint, no cache effect
+}
+
+void CodeEditor::setTabChangesFocus(bool enabled)
+{
+    tabChangesFocus_ = enabled; // state-only: the key handler branches on it
+}
+
 // --- M6 find/replace (public API section) --------------------------------
 
 namespace {
@@ -3850,6 +4228,12 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             selectAll();
             finish();
             return;
+        case Qt::Key_Return:
+        case Qt::Key_Enter:
+            // Alt+Enter is M14's plain-newline escape hatch: let Enter
+            // through this modifier catch-all to the main switch below
+            // (the Enter case itself applies the Alt gate).
+            break;
         default:
             event->ignore();
             return;
@@ -3858,10 +4242,40 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
 
     switch (key) {
     case Qt::Key_Return:
-    case Qt::Key_Enter:
-        insertTextAtCaret(QStringLiteral("\n"));
+    case Qt::Key_Enter: {
+        // M14 auto-indent (public contract on setAutoIndentEnabled): Enter
+        // inserts '\n' + the policy-computed indent instead of a bare '\n'.
+        // Alt+Enter is the documented escape hatch: plain '\n', never the
+        // policy. Multi-caret rides the standard fan-out: ONE bracketed
+        // group per press (one undo step, same fence as every other
+        // multi-caret key), and the policy is computed PER SLOT against
+        // its own line.
+        const bool autoHere = autoIndent_ && !(allMods & Qt::AltModifier);
+        if (!extraCarets_.isEmpty()) {
+            const UndoMark pre = captureEditMark();
+            applyCaretsFanOut([this, autoHere](const CaretSlot& s, SlotEdit& ed) {
+                if (s.hasSelection) {
+                    const auto [st, en] = selRangeOf(buffer_, s);
+                    ed.start = st;
+                    ed.end = en;
+                } else {
+                    ed.start = buffer_.offsetOf(s.caret.line, s.caret.col);
+                    ed.end = ed.start;
+                }
+                ed.text = autoHere ? autoIndentNewline(s.caret.line, s.caret.col)
+                                   : QStringLiteral("\n");
+                ed.caretTrim = autoHere ? autoIndentCaretTrim(ed.text) : 0;
+                return true;
+            });
+            reconcileUndoMarks(pre);
+        } else {
+            const QString nl = autoHere ? autoIndentNewline(caret_.line, caret_.col)
+                                        : QStringLiteral("\n");
+            insertTextAtCaret(nl, autoHere ? autoIndentCaretTrim(nl) : 0);
+        }
         finish();
         return;
+    }
     case Qt::Key_Backspace:
         backspace();
         finish();
@@ -4033,9 +4447,25 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
     }
     case Qt::Key_Tab:
     case Qt::Key_Backtab:
-        // Indentation policy is a later milestone; typing with a selection
-        // present, however, must still replace it — but Tab indenting is
-        // deferred, so swallow the key for now.
+        // M14 indentation policy. tabChangesFocus wins first (the a11y
+        // escape hatch): ignore() hands the key to Qt's focus traversal.
+        // Backtab arrives both spellings — QTest sends Key_Backtab with no
+        // shift flag, a real shift+Tab sends Key_Tab with the ShiftModifier
+        // flag set — so `shift` (never masked here) picks the direction.
+        // Shift+Tab is VS Code's "unindent": ALWAYS the block outdent of
+        // the touched whole lines (no mid-line deletion path). Plain Tab
+        // blocks when any selection spans lines or extra carets exist,
+        // otherwise it pads the caret to the next tab stop.
+        if (tabChangesFocus_) {
+            event->ignore();
+            return; // no finish(): zero editing work was done
+        }
+        if (shift || key == Qt::Key_Backtab)
+            blockOutdent();
+        else if (blockTouchesLines() || !extraCarets_.isEmpty())
+            blockIndent();
+        else
+            tabInsertSpaces();
         finish();
         return;
     case Qt::Key_Escape:
@@ -4345,18 +4775,26 @@ void CodeEditor::changeEvent(QEvent* event)
         lineHeight_ = qCeil(fm.ascent() + fm.descent() + fm.leading());
         if (lineHeight_ <= 0)
             lineHeight_ = ascent_ + 4;
-        for (GeoSlot& s : geo_) { // reset in place: QTextLayout is uncopyable
-            s.keyLine = -1;
-            s.text.clear();
-            s.layout.clearLayout();
-            s.line = QTextLine();
-            s.valid = false;
-            s.stamp = 0;
-        }
+        // In-place wipe (QTextLayout is copy/move-deleted): the font is not
+        // part of the cache key, so every laid-out line must go.
+        resetGeoCache();
         updateScrollBarRange();
         ensureCaretVisible();
         update();
     }
+}
+
+void CodeEditor::resetGeoCache()
+{
+    for (GeoSlot& s : geo_) { // reset in place: QTextLayout is uncopyable
+        s.keyLine = -1;
+        s.text.clear();
+        s.layout.clearLayout();
+        s.line = QTextLine();
+        s.valid = false;
+        s.stamp = 0;
+    }
+    geoClock_ = 0; // fresh LRU epoch
 }
 
 void CodeEditor::focusInEvent(QFocusEvent*)

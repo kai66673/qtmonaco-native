@@ -113,6 +113,18 @@ private slots:
     void setPlainTextClearsUndoHistory();
     void undoOnEmptyHistoryIsNoOp();
 
+    // Indentation + auto-indent (M14).
+    void tabInsertsSpacesToNextStop();
+    void tabRespectsCustomStopAndSelectionReplace();
+    void blockIndentAndOutdentAcrossSelectionLines();
+    void multiCaretTabIndentsEachLineOneUndoStep();
+    void shiftTabNoOpAtColZeroRecordsNothing();
+    void enterAutoIndentCopiesIndentAndAddsLevel();
+    void enterSplitsEmptyPair();
+    void autoIndentDisableFlag();
+    void enterIsItsOwnUndoStepWithAutoIndent();
+    void tabChangesFocusIgnoresKey();
+
     // Multiple carets (Phase D1).
     void altClickAddsCaretsInDocOrder();
     void altClickInsideSelectionFollowsRules();
@@ -1998,6 +2010,299 @@ void TestCodeEditor::undoRestoresAllCaretsOneStepPerPress()
     QCOMPARE(editor->additionalCarets(),
              (QVector<qmn::view::TextPosition>{{0, 0}}));
     QVERIFY(!editor->canUndo()); // exactly ONE step per multi-caret press
+}
+
+// --- M14 indentation + auto-indent -----------------------------------------
+
+void TestCodeEditor::tabInsertsSpacesToNextStop()
+{
+    editor->setPlainText(QStringLiteral("x"));
+    QCOMPARE(editor->tabStopWidth(), 4); // default stop (Monaco tabSize)
+    QTest::keyClick(editor, Qt::Key_Tab); // col 0 -> stop at 4
+    QCOMPARE(editor->toPlainText(), QStringLiteral("    x"));
+    QTest::keyClick(editor, Qt::Key_Tab); // already ON a stop: full stop
+    QCOMPARE(editor->toPlainText(), QStringLiteral("        x"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 8}));
+    QVERIFY(editor->additionalCarets().isEmpty()); // Tab never conjures slots
+
+    // The two unbracketed inserts coalesced into ONE burst step: undo
+    // clears both and restores the caret where the burst began (col 0).
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+
+    // Shift+Tab: no-op at col 0; from right of a stop boundary it removes
+    // exactly one stop. Both spellings work (QTest sends Key_Backtab on
+    // itself, real shift+Tab arrives as Key_Tab + the shift flag).
+    QTest::keyClick(editor, Qt::Key_Backtab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x"));
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QTest::keyClick(editor, Qt::Key_Backtab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("    x"));
+    QTest::keyClick(editor, Qt::Key_Tab, Qt::ShiftModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+}
+
+void TestCodeEditor::tabRespectsCustomStopAndSelectionReplace()
+{
+    editor->setTabStopWidth(0); // clamped to 1 minimum
+    QCOMPARE(editor->tabStopWidth(), 1);
+    editor->setTabStopWidth(3);
+    editor->setPlainText(QStringLiteral("x"));
+    QTest::keyClick(editor, Qt::Key_Tab); // col 0 -> stop 3
+    QCOMPARE(editor->toPlainText(), QStringLiteral("   x"));
+    // From a NON-boundary column the pad only crosses the next boundary:
+    // End parks the caret at visual col 4, stop grid 0/3/6 -> two spaces.
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("   x  "));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 6}));
+
+    // Plain Tab REPLACES a single-line selection (typing semantics): the
+    // pad is measured at the caret (active end at col 3 = a stop -> 3sp).
+    editor->setPlainText(QStringLiteral("abcd"));
+    editor->setPosition({0, 1});
+    QTest::keyClick(editor, Qt::Key_Right, Qt::ShiftModifier);
+    QTest::keyClick(editor, Qt::Key_Right, Qt::ShiftModifier); // anchor 1, caret 3
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a   d"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4}));
+    QVERIFY(!editor->hasSelection());
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcd")); // ONE undo step
+    QVERIFY(!editor->canUndo());
+
+    // Shift+Tab is VS Code's "unindent": the touched WHOLE line only. With
+    // no leading whitespace it is a no-op and the selection SURVIVES.
+    editor->setPosition({0, 2});
+    QTest::keyClick(editor, Qt::Key_Right, Qt::ShiftModifier); // [2,3)
+    QTest::keyClick(editor, Qt::Key_Backtab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcd"));
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("c"));
+
+    // Mid-band stop math: col 1 with stop 3 pads to col 3 (two spaces).
+    editor->clearSelection();
+    editor->setPlainText(QStringLiteral("xy"));
+    editor->setPosition({0, 1});
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x  y"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+}
+
+void TestCodeEditor::blockIndentAndOutdentAcrossSelectionLines()
+{
+    // Selection (0,0)..(1,0): the caret sits at col 0 of line 1, so the
+    // end-at-col-0 rule leaves line 1 untouched — only line 0 indents.
+    editor->setPlainText(QStringLiteral("  two\nthree"));
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_Down, Qt::ShiftModifier);
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("      two\nthree"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0}));
+    QVERIFY(!editor->hasSelection()); // the block action consumes selections
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("  two\nthree")); // ONE step
+
+    // Deeper selection (caret at col > 0) touches BOTH lines; Shift+Tab
+    // then drops each line to the next lower stop boundary: 6 -> 4 (the
+    // mid-band overshoot only), 4 -> 0 (a full stop from a boundary).
+    editor->setPlainText(QStringLiteral("      six\n    four"));
+    editor->setPosition({0, 2});
+    QTest::keyClick(editor, Qt::Key_Down, Qt::ShiftModifier); // (0,2)..(1,2)
+    QTest::keyClick(editor, Qt::Key_Backtab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("    six\nfour"));
+    // Caret (1,2) sat INSIDE line 1's removed prefix: collapsed to col 0
+    // of the edit, then shifted by line 0's delta (-2).
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0}));
+
+    // End-at-col-0 convention again via selectAll: caret (2,1) at col > 0
+    // DOES touch the last line.
+    editor->setPlainText(QStringLiteral("a\nb\nc"));
+    editor->selectAll(); // anchor (0,0) .. caret (2,1)
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("    a\n    b\n    c"));
+
+    // A selection ending exactly at col 0 leaves that line alone (built by
+    // Shift+Up from (2,0): the END on line 2 sits at col 0, the caret is
+    // the (0,0) end — the exclusion looks at the end on the LAST line).
+    editor->setPlainText(QStringLiteral("a\nb\nc"));
+    editor->setPosition({2, 0});
+    QTest::keyClick(editor, Qt::Key_Up, Qt::ShiftModifier);
+    QTest::keyClick(editor, Qt::Key_Up, Qt::ShiftModifier);
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("    a\n    b\nc"));
+
+    // The stop follows the live tabStopWidth setting.
+    editor->setTabStopWidth(2);
+    editor->selectAll(); // caret (2,1): col > 0 touches line 2 again
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("      a\n      b\n  c"));
+    editor->setTabStopWidth(4); // back to the default for later slots
+}
+
+void TestCodeEditor::multiCaretTabIndentsEachLineOneUndoStep()
+{
+    editor->setPlainText(QStringLiteral("line one\nline two"));
+    editor->setPosition({0, 1}); // primary caret (0,1)
+    altClick(editor, 1, 1); // clicked caret becomes primary, (0,1) demotes
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QCOMPARE(editor->toPlainText(),
+             QStringLiteral("    line one\n    line two"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 5}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 5}}));
+    QVERIFY(editor->canUndo());
+    editor->undo(); // the whole multi-caret Tab is exactly ONE step
+    QCOMPARE(editor->toPlainText(), QStringLiteral("line one\nline two"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 1}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 1}}));
+    QVERIFY(!editor->canUndo()); // setPosition/alt+click record no history
+
+    // Extra carets on ONE line still route through the block path: the
+    // line is touched once (no double indent) and every caret shifts.
+    editor->setPlainText(QStringLiteral("abcdefg"));
+    editor->setPosition({0, 1});
+    altClick(editor, 0, 4); // primary (0,4), extra (0,1)
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("    abcdefg"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 8}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 5}}));
+}
+
+void TestCodeEditor::shiftTabNoOpAtColZeroRecordsNothing()
+{
+    editor->setPlainText(QStringLiteral("x"));
+    QTest::keyClick(editor, Qt::Key_Backtab);
+    QVERIFY(!editor->canUndo()); // a no-op must not even create an empty group
+    QVERIFY(!editor->canRedo());
+}
+
+void TestCodeEditor::enterAutoIndentCopiesIndentAndAddsLevel()
+{
+    // Enter on a whitespace-ended line copies the whitespace through.
+    editor->setPlainText(QStringLiteral("foo "));
+    QTest::keyClick(editor, Qt::Key_End); // setPlainText parks the caret at (0,0)
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("foo \n"));
+    QTest::keyClick(editor, Qt::Key_Return); // the copied prefix repeats
+    QCOMPARE(editor->toPlainText(), QStringLiteral("foo \n\n"));
+
+    editor->setPlainText(QStringLiteral("def f():"));
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClick(editor, Qt::Key_Return); // trailing ':' adds one stop
+    QCOMPARE(editor->toPlainText(), QStringLiteral("def f():\n    "));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 4}));
+    QTest::keyClicks(editor, "if x:");
+    QTest::keyClick(editor, Qt::Key_Return); // nested colon: one more stop
+    QCOMPARE(editor->toPlainText(), QStringLiteral("def f():\n    if x:\n        "));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 8}));
+
+    // Copied leading whitespace, no opener: the indent just rides over.
+    editor->setPlainText(QStringLiteral("        x = 1"));
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("        x = 1\n        "));
+    // Opener detection skips trailing whitespace before the caret.
+    editor->setPlainText(QStringLiteral("foo {   "));
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("foo {   \n    "));
+    // `{|` typed at EOL is the pair-split case: the implied closer moves
+    // onto its own line below the child line.
+    editor->setPlainText(QStringLiteral("foo {"));
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("foo {\n    \n}"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 4}));
+
+    // Alt+Enter bypasses the policy entirely (documented escape hatch):
+    // plain '\n' where plain Enter would have split the level in two.
+    editor->setPlainText(QStringLiteral("def f():"));
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClick(editor, Qt::Key_Return, Qt::AltModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("def f():\n"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0}));
+}
+
+void TestCodeEditor::enterSplitsEmptyPair()
+{
+    editor->setPlainText(QStringLiteral("foo {}"));
+    editor->setPosition({0, 5}); // exactly inside `{`|`}` (`}` sits at col 5)
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("foo {\n    \n}"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 4}));
+    QTest::keyClick(editor, Qt::Key_Return); // a bare child line copies
+    QCOMPARE(editor->toPlainText(), QStringLiteral("foo {\n    \n    \n}"));
+    // `[]` splits when the caret hugs the OPENER at EOL (the payload
+    // conjures the closer); a caret BEHIND the closer is a plain Enter.
+    editor->setPlainText(QStringLiteral("[]"));
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("[]\n"));
+    editor->setPlainText(QStringLiteral("["));
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("[\n    \n]"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 4}));
+    editor->setPlainText(QStringLiteral("(a)"));
+    editor->setPosition({0, 2}); // caret NOT flush against '('
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("(a\n)"));
+}
+
+void TestCodeEditor::autoIndentDisableFlag()
+{
+    QVERIFY(editor->autoIndentEnabled()); // default ON
+    editor->setAutoIndentEnabled(false);
+    editor->setPlainText(QStringLiteral("def f():"));
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("def f():\n")); // plain '\n'
+    editor->setAutoIndentEnabled(true);
+    QTest::keyClick(editor, Qt::Key_End); // caret (1,0): line 1 is EMPTY
+    QTest::keyClick(editor, Qt::Key_Return);
+    // Enter at col 0 of an empty line stays plain (its own indent belongs
+    // to the line it sits on): the level does NOT materialize from above.
+    QCOMPARE(editor->toPlainText(), QStringLiteral("def f():\n\n"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 0}));
+}
+
+void TestCodeEditor::enterIsItsOwnUndoStepWithAutoIndent()
+{
+    // M3 regression guard under the new payload: Enter must break the
+    // typing chain and stay a standalone undo step.
+    editor->setPlainText(QString());
+    QTest::keyClicks(editor, "ab");
+    QTest::keyClick(editor, Qt::Key_Return);
+    QTest::keyClicks(editor, "cd");
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab\ncd"));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab\n"));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+}
+
+void TestCodeEditor::tabChangesFocusIgnoresKey()
+{
+    QVERIFY(!editor->tabChangesFocus()); // default OFF
+    editor->setTabChangesFocus(true);
+    editor->setPlainText(QStringLiteral("x"));
+    QKeyEvent tab(QEvent::KeyPress, Qt::Key_Tab, Qt::NoModifier,
+                  QStringLiteral("\t")); // real Tab text, like X11 sends
+    QCoreApplication::sendEvent(editor, &tab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x")); // NO spaces...
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0})); // ...no caret move
+    QVERIFY(!editor->canUndo());
+    QVERIFY(!tab.isAccepted()); // and the key rides Qt's focus chain
+    editor->setTabChangesFocus(false);
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("    x"));
 }
 
 // --- M4 syntax highlighting (Phase D2) -------------------------------------

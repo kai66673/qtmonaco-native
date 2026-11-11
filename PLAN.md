@@ -315,6 +315,13 @@ multi-caret machinery. Bundles (one commit each, tests per bundle):
   header line's leading whitespace and adds one level after a trailing
   opener `{([:`. `setTabChangesFocus(bool)` (default false) keeps
   keyboard users able to leave the widget (a11y lever).
+  **M14 COMPLETE (2026-11-11)** — landed as specced plus two refinements
+  proven in test: block indent covers ALL selection middle lines (end
+  line excluded only at col 0), Enter at col 0 stays plain, and Enter's
+  pair split (`{|}`, `}|{`, `{|` at EOL CONJURING the missing closer,
+  `|}` at col 0) parks the caret on the child line via a per-slot
+  `caretTrim` on the fan-out commit; Alt+Enter is a plain-`\n` escape
+  hatch. 10 new slots, 146/0/2 suite, spike smoke green.
 - **M15 caret/mouse gestures.** Two-tap smart Home (first-non-blank ⇄
   col 0; End stays EOL); double-click selects the word (M2 word
   boundaries), drag then extends word-by-word; triple-click selects the

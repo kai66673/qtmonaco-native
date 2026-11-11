@@ -285,6 +285,37 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   The ruler rides the same map: its M7 contract recomputes over slot
   space, so hidden lines cost no strip rows and a strip row never maps to
   a hidden line.
+- M14 Tab indentation + auto-indent (Phase E3). Soft tabs only: public API
+  `setTabStopWidth(int)` (clamped ≥1, default 4 — Monaco's tabSize; a
+  change resets the geometry cache and the painter's `QTextOption` tab
+  stops, so hit tests and painting agree with the model),
+  `setAutoIndentEnabled(bool)` (default ON) and `setTabChangesFocus(bool)`
+  (default OFF; ON makes Tab/Backtab `event->ignore()` and hand off to Qt
+  focus traversal without touching the model). Plain Tab with one caret
+  pads to the next stop boundary right of the caret's VISUAL column
+  (a literal `\t` left of the caret counts as its grid advance, a
+  mid-band caret only crosses the next boundary); a single-line selection
+  under the key is REPLACED, bracketed as one compound undo step, while a
+  plain pad stays unbracketed so a Tab burst coalesces like typing. Any
+  multi-line selection or extra carets route to `blockIndent()`: every
+  line any caret's selection touches gets one stop, MIDDLE lines included,
+  the end line excluded only when its END sits at col 0 (the selection
+  ends ON it, it doesn't touch it) — one bracketed group, one undo step,
+  and every caret remaps through the applied edits (inside a removed
+  prefix collapses to the edit start). Shift+Tab is VS Code's "unindent":
+  always `blockOutdent()` of the touched whole lines — width w retires to
+  `((w-1)/stop)*stop` (a whole stop from a boundary, just the overshoot
+  mid-band), a tab never splits, and a col-0 doc records nothing, not even
+  an empty bracket. Enter's payload is policy-computed per caret
+  (`autoIndentNewline`): leading whitespace rides over, one more stop when
+  the caret sits after a trailing `{([:` (whitespace-skipping probe; Enter
+  AT col 0 stays plain), and a caret flush inside an empty pair splits it
+  — `{|}`, `}|{`, `{|` at EOL (the payload CONJURES the missing closer)
+  and `|}` at col 0 — the closer parks on its own line at the parent
+  indent and the caret stays on the child line (per-slot `caretTrim` on
+  the fan-out commit parks each caret mid-payload); Alt+Enter is the
+  documented escape hatch — always a plain `\n`, never the policy. All
+  indent math is UTF-16 code units, same as everywhere else.
 
 ### Changed
 - The x anchor of all text geometry (caret, selection, painting, hit

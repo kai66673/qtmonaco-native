@@ -118,6 +118,15 @@ public:
     void cut();
     void paste();
 
+    // Block indent/outdent (M14, also Tab / Shift+Tab in the key handler).
+    // Every line any caret's selection touches is shifted by one tab stop
+    // (indent: stop-many spaces at col 0; outdent: up to one stop of
+    // leading whitespace removed). The selection END line is excluded when
+    // the end sits at col 0. All carets end collapsed; one call = one
+    // undo step, multi-caret included.
+    void blockIndent();
+    void blockOutdent();
+
     // Undo/redo (M3). One step = one user action: typing runs coalesce into
     // a burst step (broken by Enter, caret moves and selection-replacing
     // edits), paste and over-selection typing are single compound steps.
@@ -280,6 +289,40 @@ public:
     // the theme pass (set_theme row, D3) picks the shipped default.
     void setCurrentLineHighlight(bool enabled);
     bool currentLineHighlight() const { return currentLineHl_; }
+
+    // Indentation + auto-indent (M14). SOFT TABS ONLY: Tab typing never
+    // puts literal '\t' into the buffer; literal tabs (paste, setPlainText)
+    // stay in the text and RENDER on the same stop grid. All three knobs
+    // are freeze-bound (Phase F binds the qtmonaco indent surface).
+    //
+    // Tab stop width: Tab advances the caret to the next column that is a
+    // multiple of this width (counted on the stop grid from the line
+    // start, so a literal '\t' left of the caret counts as its own grid
+    // advance), inserting exactly that many spaces; Shift+Tab is the VS
+    // Code "unindent": it retires the touched whole lines to the next
+    // lower stop boundary. Default 4 (Monaco's tabSize). Also drives the
+    // RENDER width of literal '\t' in the text (stops at every N cells
+    // from the line start), so typed and pasted indentation line up on
+    // one grid. Clamped to >= 1.
+    void setTabStopWidth(int columns);
+    int tabStopWidth() const { return tabStopWidth_; }
+
+    // Enter auto-indent (default ON): the new line copies the current
+    // line's leading whitespace; a trailing opener `{([:` right before the
+    // caret (whitespace skipped) adds one more stop — Enter AT col 0 never
+    // does. When the caret sits flush inside an empty pair it SPLITS:
+    // `{|}`, `}|{` (also () and []), `{|` at EOL — which CONJURES the
+    // missing closer — and `|}` at col 0; the closer parks on its own line
+    // at the parent indent and the caret stays on the child line.
+    // Alt+Enter and typed/pasted '\n' never auto-indent (plain newline).
+    void setAutoIndentEnabled(bool enabled);
+    bool autoIndentEnabled() const { return autoIndent_; }
+
+    // Tab as focus traversal (default false): with ON, Tab/Shift+Tab are
+    // ignored and ride Qt's focus chain — the a11y escape hatch out of
+    // the editor. With OFF, Tab indents (see above).
+    void setTabChangesFocus(bool enabled);
+    bool tabChangesFocus() const { return tabChangesFocus_; }
 
     // Find & replace (M6, Phase D4). The engine lives in the widget (a
     // drop-in of Chromium-Monaco must not lose its find UX); the built-in
@@ -573,15 +616,18 @@ private:
     void breakUndoChain(); // freeze coalescing on deliberate caret motion
 
     // One fan-out key's edit for a single caret, computed against the
-    // PRE-ACTION document (offsets and newCaret alike). Applying the edits
-    // right-to-left keeps every not-yet-applied edit's offsets valid, and
-    // a slot's own newCaret is already the post-edit position, so it is
-    // only shifted by edits strictly LEFT of it when those apply.
+    // PRE-ACTION document. Applying the edits right-to-left keeps every
+    // not-yet-applied edit's offsets valid, and a slot's own final caret is
+    // its edit's end (payload end minus caretTrim), so it is only shifted
+    // by edits strictly LEFT of it when those apply.
     struct SlotEdit {
         int start = 0;
         int end = 0;
         QString text; // replacement (empty = pure delete)
-        TextPosition newCaret;
+        // Code units trimmed off the payload's END when parking this slot's
+        // caret (M14 pair-split Enter): the caret lands at the payload's end
+        // minus this much; 0 for every plain replace/insert.
+        int caretTrim = 0;
     };
     // The per-slot edit for one fan-out key; return false if the slot edits
     // nothing (e.g. Backspace at the document start).
@@ -589,6 +635,36 @@ private:
     // Fans one action out to all carets (primary included) as ONE bracketed
     // core group. Returns true if anything was edited; also normalizes.
     bool applyCaretsFanOut(const SlotEditFn& editFn);
+
+    // --- indentation machinery (M14; semantics on the public blockIndent/
+    // --- indent setters). Lines are collected per slot: caret line always,
+    // --- plus every line a selection touches — the selection's END line is
+    // --- excluded when the end sits at col 0 (the selection visually ends
+    // --- ON it, VS Code's line-count convention). Indent inserts one stop
+    // --- of spaces at col 0 of each touched line; outdent removes up to one
+    // --- stop of LEADING whitespace (a '\t' counts as the advance to its own
+    // --- stop, so mixed-tab files survive the first outdent). All carets
+    // --- collapse; one action = one bracketed core group = one undo step.
+    bool blockTouchesLines() const; // any caret's selection spans lines?
+    QVector<int> blockTouchedLines() const; // sorted+deduped, end-col-0 rule
+    void applyBlockEdits(const QVector<SlotEdit>& edits); // bracket + caret remap
+    // Single caret, no multi-line selection and no extra carets: Tab
+    // inserts spaces to the next stop; a selection under the key is
+    // replaced (typing semantics).
+    void tabInsertSpaces();
+    // The text Enter should insert at one caret of `line` (auto-indent
+    // policy, see setAutoIndentEnabled). The pair-split case returns
+    // "\n" + childIndent + "\n" + parentIndent.
+    QString autoIndentNewline(int line, int col) const;
+    static int autoIndentCaretTrim(const QString& payload); // pair-split caret park
+    // Indent-edit arithmetic over line pieces (statics: pure functions of
+    // (text, stop); the '\t'-aware stop grid is anchored at the line start).
+    static QString leadingWsPrefix(const QString& line);
+    static int indentWidthOf(const QString& line, int stop);
+    static SlotEdit makeIndentEdit(const qmn::core::TextBuffer& buf, int line, int count);
+    static int prefixCutForOneStop(const QString& prefix, int stop);
+    static SlotEdit makeOutdentEdit(const qmn::core::TextBuffer& buf, int line, int stop);
+    static int visualColOf(const QString& line, int col, int stop); // caret col -> stop grid
     // One shared caret-movement target fn applied to every caret (nav fan-
     // out; no document change). `extend` grows each caret's own selection.
     void moveCarets(const std::function<TextPosition(const CaretSlot&)>& targetFn,
@@ -607,7 +683,7 @@ private:
     void setVScroll(int pixels);
     void updateScrollBarRange();
     void ensureCaretVisible();
-    void insertTextAtCaret(const QString& text);
+    void insertTextAtCaret(const QString& text, int caretTrim = 0);
     void backspace();
     void deleteForward();
     TextPosition clampPos(TextPosition pos) const;
@@ -662,6 +738,7 @@ private:
 
     mutable std::array<GeoSlot, kGeoSlots> geo_{};
     mutable quint64 geoClock_ = 0;
+    void resetGeoCache(); // wipe slots in place (QTextLayout is uncopyable)
 
     qmn::core::TextBuffer buffer_;
     // M4 highlight engine (declared right after the model it observes).
@@ -688,6 +765,11 @@ private:
     double cellWidth_ = 8.0;
     int lineHeight_ = 18;
     int ascent_ = 14;
+
+    // --- M14 indentation state (semantics: public API comments) -----------
+    int tabStopWidth_ = 4;  // soft-tab stop + literal-tab render grid
+    bool autoIndent_ = true; // Enter copies leading whitespace (+ stop)
+    bool tabChangesFocus_ = false; // Tab rides Qt's focus chain instead
 
     int vScroll_ = 0; // pixels
     int padding_ = 4;

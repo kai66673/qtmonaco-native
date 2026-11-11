@@ -116,7 +116,7 @@ Gate 1 — Code Editor v1:
 - [x] M13 code folding (tree-sitter `@fold` ranges + indent fallback; gutter
       ▾/▸ toggles + Ctrl+Shift+[/] chords; ONE view-line map routing paint,
       caret nav, selection, gutter, ruler and the v-scroll space)
-- [ ] E3 usability polish before the freeze: M14 Tab/auto-indent · M15
+- [ ] E3 usability polish before the freeze: M14 Tab/auto-indent ✔ · M15
       smart Home + double/triple-click + Ctrl+D · M16 context menu + text
       DnD · M17 font/zoom API · M18 auto-close pairs + long-line ruler +
       current-line style · M19 CodeEditorOptions settings object
