@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(qtmonaco-native
-    VERSION 0.1.0
+    VERSION 0.6.0
     DESCRIPTION "Native code editor widget for Qt6, built from scratch on a raw QWidget"
     LANGUAGES CXX)
 
@@ -33,3 +33,39 @@ endif()
 
 enable_testing()
 add_subdirectory(tests)
+
+# ---- C++ packaging (PLAN.md Phase F): make "usable from C++" real. ----------
+# One export set, namespaced qmn::core / qmn::view (EXPORT_NAMEs set in the
+# layer CMakeLists) plus qmn::internal_tree_sitter: qmn_view links the vendored
+# tree-sitter PRIVATE, and a STATIC private dependency is dropped from the
+# export (undefined symbols for consumers), so the archive ships in the package
+# and qmn_view re-references it through $<INSTALL_INTERFACE:...> — see
+# src/view/CMakeLists.txt. Internal: consumers never link it themselves.
+#
+# SOVERSION note (deviation from PLAN's "bump SOVERSION" freeze line): the C++
+# package ships STATIC archives — the wheel's _qmn module links qmn_view
+# statically and a static package sidesteps symbol-visibility/Qt-plugin
+# surgery; SOVERSION is a no-op for .a, so the freeze carries the package
+# VERSION only. Deliberate, documented.
+
+include(GNUInstallDirs)
+include(CMakePackageConfigHelpers)
+
+set_target_properties(qmn_ts PROPERTIES EXPORT_NAME internal_tree_sitter)
+install(TARGETS qmn_ts EXPORT qmnTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
+install(EXPORT qmnTargets
+    NAMESPACE qmn::
+    FILE qmnTargets.cmake
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/qmn)
+
+configure_package_config_file(
+    "${CMAKE_CURRENT_LIST_DIR}/cmake/qmnConfig.cmake.in"
+    "${CMAKE_CURRENT_BINARY_DIR}/qmnConfig.cmake"
+    INSTALL_DESTINATION "${CMAKE_INSTALL_LIBDIR}/cmake/qmn")
+write_basic_package_version_file(
+    "${CMAKE_CURRENT_BINARY_DIR}/qmnConfigVersion.cmake"
+    COMPATIBILITY SameMajorVersion)
+install(FILES
+    "${CMAKE_CURRENT_BINARY_DIR}/qmnConfig.cmake"
+    "${CMAKE_CURRENT_BINARY_DIR}/qmnConfigVersion.cmake"
+    DESTINATION ${CMAKE_INSTALL_LIBDIR}/cmake/qmn)

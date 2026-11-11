@@ -43,9 +43,12 @@ set_target_properties(qmn_ts PROPERTIES C_STANDARD 11 C_EXTENSIONS ON)
 
 # api.h for the runtime and the query shim; the generated parsers find
 # their own tree_sitter/parser.h in their grammar src dir. The shim
-# includes "view/QueryData.hpp" from the repo src root.
+# includes "view/QueryData.hpp" from the repo src root. BUILD_INTERFACE
+# only: qmn_ts ships in the install package as an internal archive
+# (top-level CMakeLists), and a raw source-tree include dir would break
+# install(EXPORT).
 target_include_directories(qmn_ts
-    PUBLIC ${CMAKE_CURRENT_LIST_DIR}/runtime/include
+    PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/runtime/include>
     PRIVATE
         ${CMAKE_CURRENT_LIST_DIR}/grammars/python/src
         ${CMAKE_CURRENT_LIST_DIR}/grammars/json/src

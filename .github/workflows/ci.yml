@@ -23,6 +23,15 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: ctest --test-dir build --output-on-failure
+      - name: Install + consumer smoke (Phase F)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          cmake --install build --prefix "$RUNNER_TEMP/qmn-prefix"
+          cmake -S examples/consumer -B build-consumer -G Ninja \
+                -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/qmn-prefix"
+          cmake --build build-consumer
+          ./build-consumer/qmn-consumer-smoke
 
   ubuntu:
     runs-on: ubuntu-24.04
@@ -41,3 +50,12 @@ jobs:
         env:
           QT_QPA_PLATFORM: offscreen
         run: ctest --test-dir build --output-on-failure
+      - name: Install + consumer smoke (Phase F)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: |
+          cmake --install build --prefix "$RUNNER_TEMP/qmn-prefix"
+          cmake -S examples/consumer -B build-consumer -G Ninja \
+                -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/qmn-prefix"
+          cmake --build build-consumer
+          ./build-consumer/qmn-consumer-smoke

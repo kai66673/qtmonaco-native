@@ -6,6 +6,11 @@ Each file is deliberately dense with the token roles its `highlights.scm`
 actually emits — the tables below are the measured span tally per document
 (whole-document merged spans), not an idealized wish-list.
 
+`examples/consumer/` is separate: the Phase F C++ consumer smoke, an
+external `find_package(qmn)` project built against the INSTALLED package
+(`cmake --install build --prefix /tmp/qmn-prefix`, then see the header
+comment in its `CMakeLists.txt`; both CI jobs run it).
+
 ```bash
 ./build/src/app/qmn-spike examples/demo.py        # python
 ./build/src/app/qmn-spike examples/demo.json      # json

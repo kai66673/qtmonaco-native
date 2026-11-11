@@ -1,0 +1,11 @@
+@PACKAGE_INIT@
+
+# The exported targets speak plain Qt: Core/Gui/Widgets usage requirements
+# must exist before qmnTargets.cmake is read (its INTERFACE_LINK_LIBRARIES
+# name Qt6::* imported targets).
+include(CMakeFindDependencyMacro)
+find_dependency(Qt6 6.6 REQUIRED COMPONENTS Core Gui Widgets)
+
+include("${CMAKE_CURRENT_LIST_DIR}/qmnTargets.cmake")
+
+check_required_components(qmn)

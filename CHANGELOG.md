@@ -6,6 +6,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Phase F C++ packaging: `install(TARGETS)` + exported namespace `qmn::`
+  (`qmn::core`, `qmn::view`, internal `qmn::internal_tree_sitter`),
+  `qmnConfig.cmake`/version file (`find_dependency(Qt6 6.6)`), public-
+  header allow-list (HighlightEngine/QueryData tree-sitter seam and
+  CodeEditorAccessible deliberately not installed), and an external
+  consumer smoke (`examples/consumer/`, `find_package(qmn)` against the
+  INSTALLED package only; also in both CI jobs) exercising language
+  doors, undo, options, decorations and the a11y interface across the
+  export boundary. STATIC archives shipped instead of shared (SOVERSION
+  is a no-op there — documented deviation from PLAN's freeze line); the
+  vendored tree-sitter PRIVATE-static export hole (CMake drops a private
+  archive from another STATIC lib's export) closed by shipping
+  `libqmn_ts.a` inside the package and re-referencing it from qmn_view
+  via `$<INSTALL_INTERFACE:qmn::internal_tree_sitter>`.
 - M3 undo/redo, core + view. `TextBuffer` now owns the undo history: every
   `insertAtOffset`/`removeRange` is recorded as an op (`start/end/removed/
   inserted`), grouped into undo steps with auto-coalescing — typing bursts
