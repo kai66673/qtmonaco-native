@@ -125,7 +125,7 @@ Gate 1 — Code Editor v1:
 - [x] M11 accessibility (QAccessible bridge: role EditableText, full
       text + editable-text interfaces over the raw document frame, M13
       view-map geometry, live events; final polish stays non-gating)
-- [ ] M12 PySide6 binding + wheel: expose `CodeEditor` via Shiboken6
+- [x] M12 PySide6 binding + wheel: expose `CodeEditor` via Shiboken6
       (scikit-build-core + cibuildwheel), production abi3 wheel +
       C++ install/export — the v1 API freeze (see PLAN.md Phase F)
 

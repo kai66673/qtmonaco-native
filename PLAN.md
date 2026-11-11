@@ -439,7 +439,7 @@ Each bundle: ctest green + spike smoke on `big_py.py` unchanged.
 New API discipline: plain Qt types at the boundary (Shiboken), behavior
 defaults documented on the setters (freeze-bound).
 
-## Phase F — ship v1 (gate exit)
+## Phase F — ship v1 (gate exit) — ✔ COMPLETE (v1.0.0, 2026-11-12)
 - **Python:** cibuildwheel matrix on `manylinux_2_34_x86_64` (match PySide6's
   own baseline) + `auditwheel` repair; real **abi3** wheel tag (`cp310-abi3`,
   Python floor 3.10); pin `PySide6>=6.12` in wheel metadata; the `cp311`
@@ -477,6 +477,9 @@ defaults documented on the setters (freeze-bound).
   | LSP hooks (`update_workspace_configuration`, `add_action`, lsp header) | none | **Gate 2** (M8) — deliberately ABSENT |
 
 - **Freeze:** bump `SOVERSION`, CHANGELOG discipline, then the v1 tag.
+  ✔ Done at freeze: package VERSION 1.0.0 (SOVERSION is a no-op for the
+  static-archive package — deviation documented in `CMakeLists.txt`),
+  CHANGELOG `[1.0.0] — 2026-11-12`, pyproject aligned, tag `v1.0`.
   M11 accessibility (QAccessible — a custom-painted widget gives screen
   readers nothing by default) is Gate-1 **polish**, non-gating: ship alpha
   without it, close it before calling v1 "finished".
@@ -497,6 +500,16 @@ and `current_cursor` is a *property*.
 
 **Gate-1 exit checklist:** ctest green + wheel smoke + C++ consumer smoke +
 bench within perf targets (README) on the big file → tag `v1.0`.
+
+✔ **CLOSED 2026-11-12 (v1.0.0 / tag `v1.0`):** ctest 2/2 (textbuffer +
+codeeditor); wheel smoke + qtmonaco parity against the auditwheel-REPAIRED
+`cp310-abi3-manylinux_2_34` wheel from the pinned container (one libQt6Core
+in maps — PySide6's own); consumer smoke against the installed exported
+`qmn::` package (41 units, 8 spans); bench **7.2 µs/op** on the 1,000,001-line
+document — the README perf table reproduces, after the gate did its job: it
+caught M3's undo-capture walk at 37 µs/op and that regression was fixed
+(`72fd735`, pruned `textRange` walk + deque undo stack) before the freeze.
+The v1 API is FROZEN: Gate-2 work may not require new view primitives.
 
 # GATE 2 — IDE surface (after v1 freeze)
 
