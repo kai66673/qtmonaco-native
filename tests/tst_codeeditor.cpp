@@ -213,6 +213,7 @@ private slots:
     void pythonGrammarFoldsAndCollapseAll();
     void jsonFoldHidesClosingBrace();
     void foldZoneGutterConstant();
+    void foldAutoExpandOnSourceDeath();
 
 private:
     CodeEditor* editor = nullptr;
@@ -4470,6 +4471,90 @@ void TestCodeEditor::grammarFoldsFollowBracketsNotIndent()
     QVERIFY(editor->isFoldable(0)); // plain text: the indent scan returns
     QVERIFY(editor->foldLine(0));
     QVERIFY(editor->isFolded(0));
+}
+
+void TestCodeEditor::foldAutoExpandOnSourceDeath()
+{
+    // Owner-requested symmetry (2026-11-11): an edit that kills a fold's
+    // SOURCE auto-expands a COLLAPSED fold, exactly like the same edit
+    // simply drops the marker of an unfolded one (whose line then gets no
+    // foldable row at all). The check rides the paint-time fold-cache
+    // recompute (grammar validation cannot run per keystroke on big docs),
+    // so each edit below needs one paint (grab) to take effect.
+
+    // --- indent mode, source DEAD: re-typing the header line with an
+    // indent kills the pair rule (next line no longer DEEPER than the
+    // header), while the edit bookkeeping (delta 0, alive end) happily
+    // keeps {0,3} — the old stale-marker branch kept ▸ + hidden rows
+    // forever; now only the source check decides, and it opens the fold.
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    QVERIFY(editor->foldLine(0)); // {0,3}, hidden run 1..3
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_End, Qt::ShiftModifier); // select "root"
+    QTest::keyClicks(editor, QStringLiteral("  root")); // indented header
+    QVERIFY(editor->isFolded(0)); // bookkeeping alone: still collapsed
+    editor->grab(); // the paint path runs the fold-source re-check
+    QVERIFY(!editor->isFolded(0)); // ...and auto-expands the dead fold
+    QCOMPARE(editor->lineCount(), 6);
+    QCOMPARE(editor->visibleLineTotal(), 6); // the body came back
+    QVERIFY(!editor->isFoldable(0)); // marker gone, like the twin case
+    QVERIFY(!editor->foldLine(0));
+    QCOMPARE(editor->toPlainText(),
+             QStringLiteral("  root\n  child1\n  child2\n  child3\nnext\nlast"));
+
+    // --- indent mode, source ALIVE: a blank line under the header must
+    // not fake a dead pair (the blank skip is part of the foldEndForLine
+    // source rule this probe mirrors).
+    editor->setPlainText(QStringLiteral("root\n\n  child\nnext"));
+    editor->grab();
+    QVERIFY(editor->foldLine(0)); // {0,2}: born through the blank skip
+    QCOMPARE(editor->visibleLineTotal(), 2);
+    editor->setPosition({0, 4}); // EOL of "root" (the visible header)
+    QTest::keyClicks(editor, QStringLiteral("!"));
+    editor->grab();
+    QVERIFY(editor->isFolded(0)); // pair (0 -> first NON-BLANK line 2) alive
+    QCOMPARE(editor->visibleLineTotal(), 2);
+    QVERIFY(editor->unfoldLine(0));
+
+    // --- grammar mode, source DEAD: the @fold capture IS the source.
+    // Replacing the header text kills the function_definition node (the
+    // orphaned indent block lands in ERROR nodes, which no fold capture
+    // matches) while delta bookkeeping keeps {0,2} intact — the grammar
+    // re-check opens it, and useIndent=false means no indent second
+    // opinion rescues it (grammar modes fold on syntax, not whitespace).
+    editor->setPlainText(QStringLiteral("def f():\n    x = 1\n    y = 2\nz = 3\n"));
+    editor->setLanguage(QStringLiteral("python"));
+    editor->grab();
+    QVERIFY(editor->isFoldable(0));
+    QVERIFY(editor->foldLine(0)); // function_definition {0,2}, hides 1..2
+    QCOMPARE(editor->visibleLineTotal(), 3); // 5 model lines - 2 hidden
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_End, Qt::ShiftModifier); // select header
+    QTest::keyClicks(editor, QStringLiteral("z = 3"));
+    QVERIFY(editor->isFolded(0)); // bookkeeping kept it...
+    editor->grab(); // ...the capture re-check opens it
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->lineCount(), 5);
+    QCOMPARE(editor->visibleLineTotal(), 5);
+    QVERIFY(!editor->isFoldable(0)); // no grammar capture starts line 0 now
+
+    // --- grammar mode, source ALIVE: a harmless header edit (whitespace
+    // after '{') moves no structure: the object capture still starts on
+    // line 0, the fold SURVIVES — auto-expand only fires on source death.
+    editor->setPlainText(QStringLiteral("{\n  \"a\": 1\n}"));
+    editor->setLanguage(QStringLiteral("json"));
+    editor->grab();
+    QVERIFY(editor->foldLine(0)); // object {0,2}
+    QCOMPARE(editor->visibleLineTotal(), 1); // 3 model lines - 2 hidden
+    editor->setPosition({0, 1}); // right after '{'
+    QTest::keyClicks(editor, QStringLiteral("  "));
+    editor->grab();
+    QVERIFY(editor->isFolded(0)); // capture alive: the fold stays closed
+    QCOMPARE(editor->visibleLineTotal(), 1);
+    QVERIFY(editor->unfoldLine(0));
+    QCOMPARE(editor->visibleLineTotal(), 3);
 }
 
 QTEST_MAIN(TestCodeEditor)

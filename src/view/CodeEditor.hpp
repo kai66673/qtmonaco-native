@@ -433,8 +433,13 @@ public:
     // Fold state is VIEW state: not undoable in v1, kept index-correct
     // across edits on a best-effort sweep (a fold whose body was deleted
     // vanishes), and cleared entirely by setPlainText/set_language-level
-    // document replaces. Hidden lines have no visible index: use the
-    // view-line map below before addressing any geometry.
+    // document replaces. A collapsed fold also AUTO-EXPANDS when an edit
+    // kills its source (the grammar capture or indent pair that makes the
+    // line foldable is gone): the body reappears, mirroring the way the
+    // same edit just drops the marker of an unfolded fold — the asymmetry
+    // that otherwise leaves ▸ + hidden rows on a block nothing folds.
+    // Hidden lines have no visible index: use the view-line map below
+    // before addressing any geometry.
     struct FoldRange {
         FoldRange() = default;
         FoldRange(int startLine_, int endLine_) : startLine(startLine_), endLine(endLine_) {}
@@ -778,6 +783,13 @@ private:
     // folding alive). In grammar-fold modes (js/json/python) leading
     // whitespace must NOT fake python-style nesting (owner report).
     bool indentFoldsActive() const;
+    // Does a COLLAPSED fold's indent source still exist, checked against
+    // MODEL lines (the fold itself hid line+1, so recomputeFoldables'
+    // visible-adjacency rule can never fire on its own start)? Same rule
+    // as foldEndForLine's scan, first step only: the first non-blank
+    // model line below the header must out-indent it. False means an
+    // edit killed the block and the fold auto-expands.
+    bool indentFoldSourceAlive(int header) const;
     // Unfold every collapsed fold strictly containing line (outermost
     // first). True if anything opened. Caret choke points use this (a
     // caret/selection target is never hidden); paint never reveals.

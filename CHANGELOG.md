@@ -294,6 +294,21 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   chrome only. Widget tests migrated to the new anchor.
 
 ### Fixed
+- M13 fold asymmetry (owner-reported): an edit killing a fold's SOURCE
+  (the grammar capture, or the indent pair in grammar-less modes) dropped
+  the fold marker of an unfolded fold, but a COLLAPSED one kept its ▸ —
+  and its hidden rows — forever, since the marker-persistence branch was
+  unconditional. The persistence now has a source re-check: a collapsed
+  fold whose header line is no longer foldable by the current source
+  AUTO-EXPANDS on that paint, body back and marker gone, fully symmetric
+  with the unfolded twin. Grammar modes validate against the windowed
+  `@fold` captures; indent modes against the MODEL-level indent pair
+  (the fold itself hid line+1, and blank runs skip exactly as the source
+  rule does). The check rides the paint-path fold-cache recompute (per
+  keystroke `foldsFull()` measured 24ms+ per key on big docs), so it
+  costs one O(1) probe per visible collapsed start and never a
+  whole-document fold query.
+  Test: `foldAutoExpandOnSourceDeath` (both sources × dead and alive).
 - M13 fold source slip (owner-reported): the first cut ran the indent
   fallback in ALL modes, so js/json got python-style pseudo-block folds
   following leading whitespace — a deeper-indented continuation or JSON

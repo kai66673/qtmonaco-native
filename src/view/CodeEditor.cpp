@@ -1693,6 +1693,27 @@ int CodeEditor::indentOfModelLine(int line) const
                : kIndentWindow;
 }
 
+bool CodeEditor::indentFoldSourceAlive(int header) const
+{
+    // A fold's own hidden body is the usual next line — and hidden lines
+    // are ordinary MODEL lines for this probe, which is exactly why it
+    // works on a folded header at all (its visible successor is no longer
+    // the fold's line+1). Blank runs skip, matching foldEndForLine's
+    // scan: a fold created through a blank run under its header survives
+    // that run the same way. Worst case O(blank run) per folded start,
+    // and only folded starts INSIDE the paint window pay it.
+    const int base = indentOfModelLine(header);
+    if (base < 0)
+        return false; // header went blank (or slid off the document)
+    for (int L = header + 1; L < buffer_.lineCount(); ++L) {
+        const int ind = indentOfModelLine(L);
+        if (ind < 0)
+            continue; // blank: neither ends nor starts the block
+        return ind > base; // the first real line below decides the pair
+    }
+    return false; // only blanks below: the block is gone
+}
+
 int CodeEditor::foldEndForLine(int line)
 {
     if (line < 0 || line >= buffer_.lineCount())
@@ -1748,6 +1769,14 @@ int CodeEditor::foldEndForLine(int line)
 // actual fold request) — paint stays O(viewport), even on a 5k-line
 // block. Blanks read as "no indent", so a fold never starts on a blank
 // line and blank runs between blocks keep separate folds separate.
+// ALSO the fold lifecycle choke point: a visible collapsed-fold start
+// whose source no longer marks it (grammar capture gone, or — in indent
+// modes — the model-level indent pair dead) AUTO-EXPANDS here: the body
+// comes back and the ▸ goes away, exactly mirroring the way the same
+// edit just drops the marker of an unfolded fold. Grammar validation
+// must ride this paint-scoped pass (foldsFull() per keystroke measured
+// 24ms+ per key on big docs) — the fold list and the fresh source list
+// meet nowhere cheaper.
 void CodeEditor::recomputeFoldables(int firstModel, int lastModel)
 {
     foldables_.clear();
@@ -1765,6 +1794,9 @@ void CodeEditor::recomputeFoldables(int firstModel, int lastModel)
         foldables_.push_back(FoldState{ef[i].startLine, ef[i].endLine});
     }
     const int docLines = buffer_.lineCount();
+    QVector<int> unfoldNow; // collapsed starts whose source died (applied
+                            // AFTER the walk: mutating collapsed_ mid-walk
+                            // would move the very map the walk rides)
     // first/last are VISIBLE lines (map outputs), so the walk starts at
     // first's own slot; the vt guard matters because modelLineForVisibleIndex
     // CLAMPS: past the last slot it keeps returning the last line, which
@@ -1781,12 +1813,17 @@ void CodeEditor::recomputeFoldables(int firstModel, int lastModel)
                       // cache on off-screen lines (visit order stays painted)
         // The indent rule only fires between two ADJACENT model lines: if
         // line+1 is hidden (inside a collapsed run), `line` is that run's
-        // fold start and needs no second opinion. A FOLDED start always
-        // stays in the cache (the ▸ marker must keep its row even though
-        // the indent pair no longer sits adjacent).
+        // fold start and needs no second opinion from the ADJACENCY rule.
+        // But it does need one from the SOURCE rule: a collapsed fold on
+        // a line nothing folds anymore auto-expands (unfoldNow below) —
+        // the marker asymmetry the owner asked to close.
         if (isFolded(line)) {
-            if (!isFoldable(line))
-                foldables_.push_back(FoldState{line, line}); // end lazy
+            if (!isFoldable(line)) {
+                if (useIndent && indentFoldSourceAlive(line))
+                    foldables_.push_back(FoldState{line, line}); // end lazy
+                else
+                    unfoldNow.push_back(line);
+            }
             continue;
         }
         if (!useIndent)
@@ -1814,6 +1851,26 @@ void CodeEditor::recomputeFoldables(int firstModel, int lastModel)
                                      return a.start == b.start;
                                  }),
                      foldables_.end());
+    if (!unfoldNow.isEmpty()) {
+        // AUTO-EXPAND (owner-requested symmetry with unfolded folds): an
+        // edit killed these folds' sources, so open them — the hidden
+        // rows return and this paint simply stops drawing their ▸ (the
+        // dead starts were deliberately not re-added to the cache). The
+        // map grew mid-paint, so ask for one more repaint: this frame's
+        // slot window was computed pre-expansion (inner folds newly
+        // visible get their own markers, and any stale inner fold is
+        // caught by this same check, on that next pass).
+        for (const int line : unfoldNow) {
+            auto at = std::lower_bound(
+                collapsed_.begin(), collapsed_.end(), line,
+                [](const FoldState& f, int l) { return f.start < l; });
+            while (at != collapsed_.end() && at->start == line)
+                at = collapsed_.erase(at);
+        }
+        rebuildHiddenRuns();
+        updateScrollBarRange(); // the slot space grew back: bar follows
+        update();
+    }
 }
 
 // Open every collapsed fold strictly containing `line` (start visible, so

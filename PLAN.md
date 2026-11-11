@@ -279,7 +279,11 @@ folds the fallback used to fake are now real grammar captures). UX: 18px gutter 
 ONE reveal guard (programmatic moves into a hidden line open the fold;
 drags across folds never do). Fold state rides edits via the buffer
 observer (shift/die rules, undo-consistent; the fold itself is not an
-undoable action — v1 stance). Suite: 134 slots (11 new M13), spike smoke
+undoable action — v1 stance); an edit that kills a fold's SOURCE
+(grammar capture / indent pair) AUTO-EXPANDS the collapsed fold on the
+next paint — owner symmetry ask, 2026-11-11 — the source re-check rides
+the paint-window fold-cache recompute, keeping it O(viewport).
+Suite: 136 slots (13 M13), spike smoke
 on 22k lines stays O(viewport).
 Fold ranges from tree-sitter `@fold` captures per grammar + an
 indent-based fallback for grammar-less modes. Fold/unfold via gutter
