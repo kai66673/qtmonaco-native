@@ -26,6 +26,14 @@
 
 using qmn::view::CodeEditor;
 
+// Human-readable TextPosition dumps: QCOMPARE failures then show the
+// offending {line,col} values instead of <null> (QTest streams elements,
+// so QVector<TextPosition> benefits automatically too).
+inline QDebug operator<<(QDebug dbg, const qmn::view::TextPosition& p)
+{
+    return dbg.nospace() << '{' << p.line << ", " << p.col << '}';
+}
+
 class TestCodeEditor : public QObject {
     Q_OBJECT
 private slots:
@@ -124,6 +132,14 @@ private slots:
     void autoIndentDisableFlag();
     void enterIsItsOwnUndoStepWithAutoIndent();
     void tabChangesFocusIgnoresKey();
+
+    // Caret/mouse gestures (M15): smart Home, multi-click, word drag, Ctrl+D.
+    void smartHomeTogglesIndentThenColZero();
+    void doubleClickSelectsWordRun();
+    void multiClickLinesSelectWholeLinesAndGrow();
+    void wordDragExtendsByWholeWords();
+    void ctrlDSelectsWordThenNextOccurrences();
+    void ctrlDEdgeCases();
 
     // Multiple carets (Phase D1).
     void altClickAddsCaretsInDocOrder();
@@ -2303,6 +2319,231 @@ void TestCodeEditor::tabChangesFocusIgnoresKey()
     editor->setTabChangesFocus(false);
     QTest::keyClick(editor, Qt::Key_Tab);
     QCOMPARE(editor->toPlainText(), QStringLiteral("    x"));
+}
+
+// --- caret/mouse gestures (M15) --------------------------------------------
+
+void TestCodeEditor::smartHomeTogglesIndentThenColZero()
+{
+    editor->setPlainText(QStringLiteral("    hello world\nplain\n   \n  bb"));
+
+    editor->setPosition({0, 8});
+    QTest::keyClick(editor, Qt::Key_Home);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4})); // first non-blank
+    QTest::keyClick(editor, Qt::Key_Home);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0})); // then col 0
+    QTest::keyClick(editor, Qt::Key_Home);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4})); // position-derived toggle
+
+    // Shift extends the selection across the hop.
+    editor->setPosition({0, 15});
+    QTest::keyClick(editor, Qt::Key_Home, Qt::ShiftModifier);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4}));
+    QCOMPARE(editor->selectedText(), QStringLiteral("hello world"));
+
+    // Unindented line: Home is plain and IDEMPOTENT (first == col == 0).
+    editor->setPosition({1, 5});
+    QTest::keyClick(editor, Qt::Key_Home);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0}));
+    QTest::keyClick(editor, Qt::Key_Home);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0}));
+
+    // Whitespace-only line: first non-blank is the EOL itself.
+    editor->setPosition({2, 1});
+    QTest::keyClick(editor, Qt::Key_Home);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 3}));
+    QTest::keyClick(editor, Qt::Key_Home);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 0}));
+
+    // Multi-caret: the policy applies per slot.
+    editor->setPosition({0, 0});
+    altClick(editor, 3, 4); // primary {3,4} (clicked), extra {0,0}
+    QTest::keyClick(editor, Qt::Key_Home);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{3, 2}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 4}}));
+    QTest::keyClick(editor, Qt::Key_Home);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{3, 0}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 0}}));
+}
+
+void TestCodeEditor::doubleClickSelectsWordRun()
+{
+    editor->setPlainText(QStringLiteral("let foo_bar = 42"));
+
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, caretPixel(editor, 0, 5));
+    QCOMPARE(editor->selectedText(), QStringLiteral("foo_bar"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 11}));
+
+    // A far second double-click is a FRESH word (chain x-slop), never a
+    // line selection: 11 cells >> max(8, ceil(cellWidth)).
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, caretPixel(editor, 0, 14));
+    QCOMPARE(editor->selectedText(), QStringLiteral("42"));
+    QCOMPARE(editor->additionalCaretCount(), 0);
+
+    // A hit on the space between words selects the PURE space run (the
+    // right-pivoted single-class range, not "word ").
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, caretPixel(editor, 0, 3));
+    QCOMPARE(editor->selectedText(), QStringLiteral(" "));
+
+    // Word-less spot (empty document): the double-click just re-places the
+    // caret and selects nothing (Monaco parity).
+    editor->setPlainText(QString());
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, caretPixel(editor, 0, 0));
+    QVERIFY(!editor->hasSelection());
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+}
+
+void TestCodeEditor::multiClickLinesSelectWholeLinesAndGrow()
+{
+    editor->setPlainText(QStringLiteral("alpha\nbeta gamma\ngamma2"));
+    const QPoint p = caretPixel(editor, 1, 1);
+
+    // Two chained double-clicks at the SAME pixel = triple-click semantics
+    // (Qt folds a fast click run into DblClick events; the detection rides
+    // timestamps + the landing spot).
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QCOMPARE(editor->selectedText(), QStringLiteral("beta")); // first: the word
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QCOMPARE(editor->selectedText(), QStringLiteral("beta gamma\n")); // whole line + newline
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 0}));
+    QCOMPARE(editor->additionalCaretCount(), 0);
+
+    // 4th chained click grows the span to the next line; the last line
+    // stops at EOL (there is no trailing newline to include).
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QCOMPARE(editor->selectedText(), QStringLiteral("beta gamma\ngamma2"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 6}));
+
+    // 5th: at the document bottom the growth FLIPS upward.
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QCOMPARE(editor->selectedText(), QStringLiteral("alpha\nbeta gamma\ngamma2"));
+
+    // A plain re-press breaks the chain and collapses to a bare caret...
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QVERIFY(!editor->hasSelection());
+    // ...so the next double-click starts over on the word (not the line).
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QCOMPARE(editor->selectedText(), QStringLiteral("beta"));
+}
+
+void TestCodeEditor::wordDragExtendsByWholeWords()
+{
+    editor->setPlainText(QStringLiteral("one two three four"));
+    auto sendMove = [this](const QPoint& to) {
+        const QPointF p(to);
+        QMouseEvent move(QEvent::MouseMove, p, p, Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+        QTEST_ASSERT(QApplication::sendEvent(editor, &move));
+    };
+
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, caretPixel(editor, 0, 1));
+    QCOMPARE(editor->selectedText(), QStringLiteral("one"));
+
+    // Drag right: crossing the space adds the WHOLE word at once.
+    sendMove(caretPixel(editor, 0, 9)); // inside "three"
+    QCOMPARE(editor->selectedText(), QStringLiteral("one two three"));
+
+    // Back left across "three"'s edge: only whole words remain.
+    sendMove(caretPixel(editor, 0, 5)); // inside "two"
+    QCOMPARE(editor->selectedText(), QStringLiteral("one two"));
+    // Inside the anchor word: the selection collapses back to the pins.
+    sendMove(caretPixel(editor, 0, 1));
+    QCOMPARE(editor->selectedText(), QStringLiteral("one"));
+
+    const QPoint end = caretPixel(editor, 0, 1);
+    const QPointF e(end);
+    QMouseEvent release(QEvent::MouseButtonRelease, e, e, Qt::LeftButton, Qt::NoButton,
+                        Qt::NoModifier);
+    QTEST_ASSERT(QApplication::sendEvent(editor, &release));
+    QCOMPARE(editor->selectedText(), QStringLiteral("one"));
+
+    // Release disarms the gesture: the next held move is CHAR-wise (a
+    // mid-word stop, no snap to the word edge).
+    sendMove(caretPixel(editor, 0, 1));
+    QCOMPARE(editor->selectedText(), QStringLiteral("o"));
+}
+
+void TestCodeEditor::ctrlDSelectsWordThenNextOccurrences()
+{
+    editor->setPlainText(QStringLiteral("foo bar foo baz\nfoo"));
+    editor->setPosition({0, 0});
+
+    // First press: the caret CONVERTS into its own word's selection
+    // (VS Code parity: no duplicate slot parked on top of the caret).
+    QTest::keyClick(editor, Qt::Key_D, Qt::ControlModifier);
+    QCOMPARE(editor->selectedText(), QStringLiteral("foo"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+    QCOMPARE(editor->additionalCaretCount(), 0);
+
+    // Next press: the next occurrence becomes a NEW SELECTED slot, and
+    // additionalCarets() reports the slot caret = the match END.
+    QTest::keyClick(editor, Qt::Key_D, Qt::ControlModifier);
+    QCOMPARE(editor->additionalCarets(), (QVector<qmn::view::TextPosition>{{0, 11}}));
+    QTest::keyClick(editor, Qt::Key_D, Qt::ControlModifier); // next line too: no wrap
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 11}, {1, 3}}));
+
+    // Past the last occurrence: no-op WITH a selection (this was the last
+    // match), never a wrap.
+    QTest::keyClick(editor, Qt::Key_D, Qt::ControlModifier);
+    QCOMPARE(editor->additionalCaretCount(), 2);
+    QCOMPARE(editor->selectedText(), QStringLiteral("foo"));
+
+    // The new slots are REAL carets: typing replaces every selection in
+    // one fan-out step...
+    QTest::keyClick(editor, Qt::Key_X);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x bar x baz\nx"));
+    // ...which undo restores in one step.
+    editor->undo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("foo bar foo baz\nfoo"));
+}
+
+void TestCodeEditor::ctrlDEdgeCases()
+{
+    // Empty document: wordless caret, nothing to add, nothing crashes.
+    editor->setPlainText(QString());
+    QTest::keyClick(editor, Qt::Key_D, Qt::ControlModifier);
+    QVERIFY(!editor->hasSelection());
+    QCOMPARE(editor->additionalCaretCount(), 0);
+
+    // Caret MID-word (not at the word start): the word becomes the search
+    // target (one contiguous Word-class run is ONE word in the M2 model,
+    // so "xfooz" would be a single word) and the next occurrence lands as
+    // an extra slot; the primary caret itself stays unselected.
+    editor->setPlainText(QStringLiteral("fooz fooz"));
+    editor->setPosition({0, 2});
+    QTest::keyClick(editor, Qt::Key_D, Qt::ControlModifier);
+    QCOMPARE(editor->additionalCarets(), (QVector<qmn::view::TextPosition>{{0, 9}}));
+    QVERIFY(!editor->hasSelection());
+
+    // Whitespace under the caret: the PURE space run is the word (right
+    // pivot), and the caret at its start converts like any other word.
+    editor->setPlainText(QStringLiteral("foo bar foo"));
+    editor->setPosition({0, 3});
+    QTest::keyClick(editor, Qt::Key_D, Qt::ControlModifier);
+    QCOMPARE(editor->selectedText(), QStringLiteral(" "));
+    QCOMPARE(editor->additionalCaretCount(), 0);
+    QTest::keyClick(editor, Qt::Key_D, Qt::ControlModifier);
+    QCOMPARE(editor->additionalCarets(), (QVector<qmn::view::TextPosition>{{0, 8}}));
+
+    // Multi-line primary selection: v1 degrades to the caret's word; the
+    // hit at the selection's own end line becomes an extra slot, and past
+    // it Ctrl+D is a no-op.
+    editor->setPlainText(QStringLiteral("aa foo\nfoo bb"));
+    dragSelect(editor, caretPixel(editor, 0, 3), caretPixel(editor, 1, 0));
+    QCOMPARE(editor->selectedText(), QStringLiteral("foo\n"));
+    QTest::keyClick(editor, Qt::Key_D, Qt::ControlModifier);
+    QCOMPARE(editor->additionalCarets(), (QVector<qmn::view::TextPosition>{{1, 3}}));
+    QTest::keyClick(editor, Qt::Key_D, Qt::ControlModifier);
+    QCOMPARE(editor->additionalCaretCount(), 1);
+
+    // Alt+D is NOT Ctrl+D: the chord stays unclaimed chrome.
+    editor->setPlainText(QStringLiteral("foo foo"));
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_D, Qt::AltModifier);
+    QVERIFY(!editor->hasSelection());
+    QCOMPARE(editor->additionalCaretCount(), 0);
 }
 
 // --- M4 syntax highlighting (Phase D2) -------------------------------------

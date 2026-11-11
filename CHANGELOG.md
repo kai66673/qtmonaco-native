@@ -316,6 +316,44 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   the fan-out commit parks each caret mid-payload); Alt+Enter is the
   documented escape hatch — always a plain `\n`, never the policy. All
   indent math is UTF-16 code units, same as everywhere else.
+- M15 caret/mouse gestures (Phase E3, no new public API — behavior only,
+  deliberately). Smart Home: Home lands on the first non-blank, and col 0
+  only when the caret is ALREADY at the first non-blank — the target is
+  derived from the caret position, so there is no smart-Home editor state
+  and every other caret motion resets the toggle (unindented lines are
+  plain Home and idempotent; blank/EOL targets too; applies per slot
+  under multi-caret; End untouched). Double-click selects the word under
+  the pointer via the M2 class runs, but as ONE pure run: `wordSelRange`
+  pivots right (the run starting at/right of the hit) — pairing
+  wordLeftCol with wordRightCol at a class boundary spans TWO runs (
+  wordLeftCol skips the space AND the word before it, that is Ctrl+Left
+  navigation, not a selection bound), so double-clicking the space
+  between words selects exactly that space run; at EOL the run left of
+  the hit wins, word-less spots just re-place the caret (Monaco parity).
+  Chaining: Qt folds a fast click run into DblClick events, so the chain
+  is detected from event timestamps + line + x (slop max(8, cellWidth))
+  against `QApplication::doubleClickInterval()`; a re-press at
+  mousePress resets it. Triple-click (2nd chained DblClick) selects the
+  whole line INCLUDING the trailing newline (caret at next-line col 0;
+  last line stops at EOL), and 4th+ clicks grow the span one line per
+  click, flipping direction at document edges. A double-click arms a
+  WORD DRAG: the selection always covers whole words at both ends (pins
+  = the double-clicked word, plus the word under the pointer), release
+  disarms and further drags are char-wise again. Ctrl+D (Ctrl only,
+  Alt/Meta stay unclaimed): target = the primary selection's text, or
+  the caret's word when nothing/whitespace/multi-line is selected (v1:
+  occurrences are single-line, plain case-sensitive substring — never
+  regex), scanned line-by-line strictly right of the rightmost slot
+  edge, never wrapping; a hit becomes a NEW SELECTED extra slot
+  (additionalCarets() shows the match END; the new slots are real carets
+  so typing fans out over all of them as one undo step), a caret parked
+  at its own word start CONVERTS the primary into that word's selection
+  instead (VS Code first-press parity, no duplicate slot), and no match
+  means: with a selection a no-op (this was the last match), without one
+  the caret's word gets selected. The ruler/fold chrome keep their
+  gestures: double-clicks there accept-and-no-op, Alt+click double
+  events never multi-click. Tests gained a TextPosition QDebug streamer
+  so QCOMPARE failures print {line,col} instead of <null>.
 
 ### Changed
 - The x anchor of all text geometry (caret, selection, painting, hit

@@ -151,6 +151,44 @@ int wordLeftCol(const QString& text, int col)
     return i;
 }
 
+// M15 smart Home: the first column that is not a space/tab (0 for blank or
+// unindented lines — there is no indentation, so smart Home collapses onto
+// the plain one). The target DERIVES from the caret column: a caret already
+// at the first non-blank toggles to col 0, anywhere else it goes to the
+// first non-blank (VS Code's smart select; no editor state to track).
+int smartHomeTargetCol(const QString& text, int col)
+{
+    int first = 0;
+    while (first < text.size()
+           && (text[first] == QLatin1Char(' ') || text[first] == QLatin1Char('\t')))
+        ++first;
+    return col == first ? 0 : first;
+}
+
+// M15 word SELECTION range [lo,hi) for a hit column (double-click, word
+// drag, Ctrl+D): one single CLASS run, pivoted right of the hit — the run
+// that starts at or right of the column. Naively pairing wordLeftCol/
+// wordRightCol at a class boundary would span TWO runs (the boundary sits
+// between them), e.g. a double-click on the space between words selecting
+// "word "; the right pivot keeps the run pure, and at EOL it falls back
+// to the run on the hit's left. Empty at an empty line (hi == lo).
+std::pair<int, int> wordSelRange(const QString& text, int col)
+{
+    const int hi = wordRightCol(text, col);
+    if (hi <= 0)
+        return {0, 0};
+    // Start of hi's class run: walk back over the SAME class only —
+    // wordLeftCol would skip the space AND the word before it (that is
+    // M2's Ctrl+Left navigation semantic, not a selection bound).
+    const WordClass cls = wordClassOf(text.at(hi - 1));
+    int lo = hi;
+    while (lo > 0 && wordClassOf(text.at(lo - 1)) == cls)
+        --lo;
+    if (lo > 0 && !isGraphemeBoundary(text, lo))
+        lo = prevGraphemeCol(text, lo);
+    return {lo, hi};
+}
+
 } // namespace
 
 CodeEditor::CodeEditor(QWidget* parent)
@@ -4228,6 +4266,14 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             selectAll();
             finish();
             return;
+        case Qt::Key_D: // M15 add-next-occurrence caret (Ctrl only: Alt/Meta
+            if (ctrl & Qt::ControlModifier) { // combos stay unclaimed chrome)
+                addNextOccurrenceCaret();
+                finish();
+                return;
+            }
+            event->ignore();
+            return;
         case Qt::Key_Return:
         case Qt::Key_Enter:
             // Alt+Enter is M14's plain-newline escape hatch: let Enter
@@ -4392,14 +4438,21 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         return;
     }
     case Qt::Key_Home:
+        // M15 smart Home: first non-blank, and col 0 when the caret is
+        // ALREADY there (the position-derived toggle: every other caret
+        // motion lands the caret off the boundary and resets it). Blank
+        // and unindented lines behave exactly like the plain Home always.
         if (!extraCarets_.isEmpty()) {
             moveCarets(
-                [this](const CaretSlot& s) { return TextPosition{s.caret.line, 0}; },
+                [this](const CaretSlot& s) {
+                    return TextPosition{s.caret.line,
+                                        smartHomeTargetCol(buffer_.lineText(s.caret.line), s.caret.col)};
+                },
                 shift);
             finish();
             return;
         }
-        nav({caret_.line, 0}, shift);
+        nav({caret_.line, smartHomeTargetCol(buffer_.lineText(caret_.line), caret_.col)}, shift);
         finish();
         return;
     case Qt::Key_End:
@@ -4628,12 +4681,237 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
     extraCarets_.clear();
     altDragSlot_ = -1;
     altDragPrimary_ = false;
+    // M15: a fresh press starts a fresh multi-click chain (Qt consumes the
+    // 2nd+ press of a fast click run, so only a SLOW click re-presses and
+    // thereby resets the chain), and no word-drag survives it.
+    multiClickDepth_ = 0;
+    wordDrag_ = false;
     // Shift+click extends the selection from the existing anchor; a plain
     // click collapses it at the new position.
     if (event->modifiers() & Qt::ShiftModifier)
         moveCaret(pos, true);
     else
         setCaret(pos);
+}
+
+// M15 multi-click: the double-click selects the word under the pointer
+// (M2's word classes), the chained repeats select WHOLE lines. Qt eats the
+// 2nd+ press of a fast click run, so the chaining is detected here from the
+// event timestamps + landing spot; a slow re-press resets it (see the
+// mousePress chain reset). The chrome strips take their own gestures: a
+// double-click in the ruler or the fold zone selects nothing (the fold
+// toggle already fired on the first press), and Alt+click stays a
+// multi-caret gesture.
+void CodeEditor::mouseDoubleClickEvent(QMouseEvent* event)
+{
+    if (event->button() != Qt::LeftButton) {
+        QWidget::mouseDoubleClickEvent(event);
+        return;
+    }
+    const QPoint pt = event->position().toPoint();
+    if (rulerEnabled_ && overviewRulerGeometry().contains(pt)) {
+        event->accept();
+        return;
+    }
+    const int fz = foldZoneWidth();
+    if (fz > 0 && pt.x() >= contentLeft() - fz && pt.x() < contentLeft()) {
+        event->accept();
+        return;
+    }
+    if (event->modifiers() & Qt::AltModifier) {
+        event->accept(); // never multi-click: the press already handled the add
+        return;
+    }
+
+    const TextPosition pos = positionAt(pt);
+    const qint64 now = event->timestamp();
+    // Chained = same line, same spot (within half a cell of slop), inside
+    // the platform double-click window. QTest stamps every event 0, which
+    // keeps synthetic multi-click sequences chained, as the tests want.
+    const bool chained =
+        multiClickDepth_ > 0 && lastDblLine_ == pos.line
+        && qAbs(pt.x() - lastDblX_) <= qMax(8, int(std::ceil(cellWidth_)))
+        && now - lastDblMs_ <= qint64(QApplication::doubleClickInterval());
+    if (!chained) {
+        // Word selection on the M2 class runs (one pure run, see
+        // wordSelRange); at a word-less spot the double-click just
+        // re-places the caret (Monaco parity).
+        const QString line = buffer_.lineText(pos.line);
+        const auto [lo, hi] = wordSelRange(line, pos.col);
+        multiClickDepth_ = 1;
+        lastDblMs_ = now;
+        lastDblLine_ = pos.line;
+        lastDblX_ = pt.x();
+        if (hi > lo) {
+            anchor_ = {pos.line, lo};
+            caret_ = {pos.line, hi};
+            hasSelection_ = true;
+            wordDrag_ = true; // further drags move by whole words
+            wordSelLo_ = anchor_;
+            wordSelHi_ = caret_;
+        } else {
+            wordDrag_ = false;
+            anchor_ = caret_ = pos;
+            hasSelection_ = false;
+        }
+        ensureCaretVisible();
+        update();
+        emit cursorMoved(caret_);
+        emit selectionChanged();
+        updatePrimarySelection();
+        event->accept();
+        return;
+    }
+    if (multiClickDepth_ == 1) {
+        // Triple-click: the whole line, trailing newline INCLUDED — the
+        // selection reaches col 0 of the next line (last line stops at EOL).
+        multiClickDepth_ = 2;
+        lineSelAnchor_ = lineSelEnd_ = pos.line;
+        lineSelDir_ = 1;
+        wordDrag_ = false;
+        applyLineSpan();
+    } else {
+        // 4th and later chained clicks wrap to the NEXT line per press (VS
+        // Code's line-selection growth); at a document edge the direction
+        // flips and keeps growing from the other end.
+        ++multiClickDepth_;
+        const int lastLine = buffer_.lineCount() - 1;
+        if (lineSelDir_ > 0) {
+            if (lineSelEnd_ < lastLine)
+                ++lineSelEnd_;
+            else {
+                lineSelDir_ = -1;
+                if (lineSelAnchor_ > 0)
+                    --lineSelAnchor_;
+            }
+        } else {
+            if (lineSelAnchor_ > 0)
+                --lineSelAnchor_;
+            else {
+                lineSelDir_ = 1;
+                if (lineSelEnd_ < lastLine)
+                    ++lineSelEnd_;
+            }
+        }
+        applyLineSpan();
+    }
+    lastDblMs_ = now; // the chain stays alive as long as the clicks keep up
+    event->accept();
+}
+
+// The triple+-click line selection: whole lines [lineSelAnchor_..lineSelEnd_],
+// each covered line's newline part of the selection. A one-line empty
+// document selects nothing (anchor == caret), everything else a real range.
+void CodeEditor::applyLineSpan()
+{
+    anchor_ = {lineSelAnchor_, 0};
+    caret_ = lineSelEnd_ + 1 < buffer_.lineCount()
+                 ? TextPosition{lineSelEnd_ + 1, 0}
+                 : TextPosition{lineSelEnd_, lineLength(lineSelEnd_)};
+    hasSelection_ = posLess(anchor_, caret_);
+    ensureCaretVisible();
+    update();
+    emit cursorMoved(caret_);
+    emit selectionChanged();
+    updatePrimarySelection();
+}
+
+// Ctrl+D (M15, VS Code's order): the target is the primary selection's text
+// — or, with nothing selected, the word under the primary caret (word-only,
+// NEVER regex). The next plain case-sensitive occurrence strictly right of
+// the rightmost slot edge becomes a NEW slot carrying that selection; the
+// scan runs line by line like the M6 finder and never wraps. A multi-line
+// selection degrades to the caret's word (v1: occurrences stay single-line).
+// Nothing found: with a selection it is a no-op (this WAS the last match);
+// without one the caret's own word gets selected ("select word first").
+void CodeEditor::addNextOccurrenceCaret()
+{
+    breakUndoChain(); // pure caret work, never an edit
+
+    // Search frame: strictly after the rightmost edge of the whole slot set
+    // (so a new slot can never land on top of an existing one).
+    auto slotRight = [this](const CaretSlot& s) {
+        if (!s.hasSelection)
+            return buffer_.offsetOf(s.caret.line, s.caret.col);
+        const TextPosition e = posLess(s.caret, s.anchor) ? s.anchor : s.caret;
+        return buffer_.offsetOf(e.line, e.col);
+    };
+    int from = slotRight(CaretSlot{caret_, anchor_, hasSelection_});
+    for (const CaretSlot& s : extraCarets_)
+        from = std::max(from, slotRight(s));
+
+    const bool hadSelection = hasSelection_;
+    QString target = hadSelection ? selectedText() : QString();
+    int wordLo = -1, wordHi = -1; // the caret's word (for the two fallbacks)
+    if (target.isEmpty() || target.contains(QLatin1Char('\n'))) {
+        const QString line = buffer_.lineText(caret_.line);
+        const auto [wLo, wHi] = wordSelRange(line, caret_.col);
+        wordLo = wLo;
+        wordHi = wHi;
+        if (wordHi <= wordLo)
+            return; // empty line: no word, nothing to add
+        target = line.mid(wordLo, wordHi - wordLo);
+        if (!hadSelection)
+            from = std::max(from, buffer_.offsetOf(caret_.line, wordLo));
+    }
+
+    // Line-by-line scan (same cost class as the M6 rebuild): the target is
+    // single-line, so a per-line indexOf cannot miss a match.
+    const auto fromLc = buffer_.lineColAt(from);
+    int foundLine = -1, foundCol = -1;
+    for (int l = fromLc.line; l < buffer_.lineCount() && foundLine < 0; ++l) {
+        const int idx = buffer_.lineText(l).indexOf(target, l == fromLc.line ? fromLc.col : 0);
+        if (idx >= 0) {
+            foundLine = l;
+            foundCol = idx;
+        }
+    }
+    if (foundLine < 0) {
+        if (hadSelection)
+            return; // VS Code no-op: the selection already IS the last match
+        // "Select word first": land the selection on the caret's own word.
+        anchor_ = {caret_.line, wordLo};
+        caret_ = {caret_.line, wordHi};
+        hasSelection_ = true;
+        ensureCaretVisible();
+        update();
+        emit cursorMoved(caret_);
+        emit selectionChanged();
+        updatePrimarySelection();
+        return;
+    }
+    if (!hadSelection && wordLo >= 0 && foundLine == caret_.line && foundCol == wordLo) {
+        // The hit IS the caret's own word (caret parked at its start):
+        // VS Code's first Ctrl+D converts the caret into that word's
+        // selection instead of stacking a duplicate slot.
+        anchor_ = {caret_.line, wordLo};
+        caret_ = {caret_.line, wordHi};
+        hasSelection_ = true;
+        ensureCaretVisible();
+        update();
+        emit cursorMoved(caret_);
+        emit selectionChanged();
+        updatePrimarySelection();
+        return;
+    }
+
+    const int start = buffer_.offsetOfLine(foundLine) + foundCol;
+    const int end = start + int(target.size());
+    const auto sLc = buffer_.lineColAt(start);
+    const auto eLc = buffer_.lineColAt(end);
+    CaretSlot slot;
+    slot.anchor = {sLc.line, sLc.col};
+    slot.caret = {eLc.line, eLc.col};
+    slot.hasSelection = true;
+    extraCarets_.append(slot);
+    std::stable_sort(extraCarets_.begin(), extraCarets_.end(),
+                     [](const CaretSlot& a, const CaretSlot& b) { return posLess(a.caret, b.caret); });
+    normalizeCarets(); // the new selection can stack on an existing slot
+    ensureCaretVisible();
+    update();
+    emit cursorMoved(caret_);
+    emit selectionChanged();
+    updatePrimarySelection();
 }
 
 void CodeEditor::mouseMoveEvent(QMouseEvent* event)
@@ -4705,6 +4983,28 @@ void CodeEditor::mouseMoveEvent(QMouseEvent* event)
         event->accept();
         return;
     }
+    // M15 word-drag (armed by the double-click, see mouseDoubleClickEvent):
+    // the selection always covers WHOLE words at both ends — both the
+    // double-clicked word (wordSelLo_/wordSelHi_, fixed for the drag) and
+    // the word currently under the pointer are included, so crossing a
+    // class boundary adds the entire next word at once while dragging back
+    // inside the anchor word changes nothing until the far edge crosses.
+    if (wordDrag_) {
+        const QString hit = buffer_.lineText(target.line);
+        const auto [hitLo, hitHi] = wordSelRange(hit, target.col);
+        const TextPosition loHit{target.line, hitLo};
+        const TextPosition hiHit{target.line, hitHi};
+        anchor_ = posLess(loHit, wordSelLo_) ? loHit : wordSelLo_;
+        caret_ = posLess(wordSelHi_, hiHit) ? hiHit : wordSelHi_;
+        hasSelection_ = posLess(anchor_, caret_);
+        ensureCaretVisible();
+        update();
+        emit cursorMoved(caret_);
+        emit selectionChanged();
+        updatePrimarySelection();
+        event->accept();
+        return;
+    }
     moveCaret(target, true);
     event->accept();
 }
@@ -4730,6 +5030,8 @@ void CodeEditor::mouseReleaseEvent(QMouseEvent* event)
         event->accept();
         return;
     }
+    if (event->button() == Qt::LeftButton)
+        wordDrag_ = false; // the M15 word-drag gesture ends at this release
     QWidget::mouseReleaseEvent(event);
 }
 

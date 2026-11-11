@@ -328,6 +328,17 @@ multi-caret machinery. Bundles (one commit each, tests per bundle):
   line (repeat wraps to the next); Ctrl+D adds the next occurrence of
   the word under the caret as a caret slot (word only, never regex; no
   match → select-word first, VS Code order).
+  **M15 COMPLETE (2026-11-11)** — landed as specced, no new public API;
+  test-proven refinements: smart Home is POSITION-DERIVED (zero editor
+  state, resets on any other motion), double-click/word-drag ranges are
+  ONE pure class run via a right-pivoted `wordSelRange` (naive
+  wordLeftCol+wordRightCol pairing spans two runs at a class boundary —
+  wordLeftCol is Ctrl+Left navigation, not a selection bound), chains
+  ride event timestamps + landing spot (Qt folds fast click runs into
+  DblClick events; a re-press resets), Ctrl+D is Ctrl-only and has a
+  CONVERSION branch (caret at its word start turns the primary into the
+  word selection instead of stacking a duplicate slot). 6 new slots
+  (152/0/2) + a TextPosition QDebug streamer in the test file.
 - **M16 context menu + text DnD.** Right-click QMenu (Cut/Copy/Paste/
   Select all, paste-clipboard vs primary), enabled-state per selection;
   internal drag of a selection via `createMimeDataFromSelection` +

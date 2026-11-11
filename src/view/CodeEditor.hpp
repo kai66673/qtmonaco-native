@@ -572,6 +572,7 @@ protected:
     void inputMethodEvent(QInputMethodEvent* event) override;
     QVariant inputMethodQuery(Qt::InputMethodQuery query) const override;
     void mousePressEvent(QMouseEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
@@ -698,6 +699,13 @@ private:
     void updatePrimarySelection(); // mirror an active selection to X11 primary
     int lineLength(int line) const;
 
+    // --- M15 multi-click / Ctrl+D ----------------------------------------
+    // Ctrl+D: next occurrence of the selection text / caret's word becomes
+    // a new SELECTED slot (word-only, never wraps; semantics at the impl).
+    void addNextOccurrenceCaret();
+    // Commit the triple+-click whole-line span [lineSelAnchor_..lineSelEnd_].
+    void applyLineSpan();
+
     // Per-line glyph-engine layout cache. A laid-out QTextLine is the sole
     // authority for caret x, selection x and mouse hit-testing (measured on
     // Qt 6.12: emoji ZWJ families occupy ~1.8 cells, not their code-unit
@@ -757,6 +765,17 @@ private:
     // targets the primary caret instead (Alt+Press landed on it).
     int altDragSlot_ = -1;
     bool altDragPrimary_ = false;
+
+    // M15 multi-click + word-drag state. The chain lives across the DblClick
+    // events Qt delivers for a fast click run (a re-press at mousePress
+    // resets it); wordSelLo_/Hi_ pin the double-clicked word for the drag.
+    bool wordDrag_ = false;
+    TextPosition wordSelLo_, wordSelHi_;
+    int multiClickDepth_ = 0;                  // chained DblClick count (2 = line mode)
+    int lineSelAnchor_ = 0, lineSelEnd_ = 0;   // triple+-click line span, inclusive
+    int lineSelDir_ = 1;                       // repeat wraps: +1 down, -1 up
+    qint64 lastDblMs_ = 0;                     // event timestamps, chaining window
+    int lastDblLine_ = -1, lastDblX_ = 0;
     QString preedit_; // IME composition string, display-only: never in buffer_
     QScrollBar* vBar_ = nullptr;
     bool scrollbarSync_ = false;
