@@ -6,6 +6,51 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Phase F parity surface (C++ doors + full Gate-1 Python binding): view
+  doors `insertTextAt(TextPosition, QString)` / `deleteLineAt(int)` back
+  `insert_text`/`delete_line` — riding the SAME user-edit machinery as
+  typed keys (undo-bracketing mirror discipline
+  `captureEditMark`/`reconcileUndoMarks`, caret normalization, surrogate
+  safety) and SELF-GATING on the M19 readOnly flag at entry, caret
+  included (the single-caret `deleteSelection()` path reaches the buffer
+  without a readOnly check, so the doors guard themselves; the Python
+  layer pre-checks and raises ValueError — qtmonaco's error semantics).
+  `insertTextAt` parks the caret just past the insert (Monaco
+  `executeEdits`); `deleteLineAt` removes the whole line with its '\n'
+  and clamps the caret; invalid input is a silent no-op.
+  `revealAt(TextPosition, RevealMode)` is the set_cursor
+  `moveToPosition` door (reveal-ONLY, caret never moves; M13 auto-unfold
+  first), its Center/NearTop/Minimal mirroring Monaco's
+  revealPositionInCenter / revealPositionNearTop / revealPosition.
+  `textChanged()` now fires from the core EditEvent observer for EVERY
+  mutation (typed, paste, drag, programmatic, undo/redo); the shim's
+  echo guard keeps `set_text` announcing once per real change.
+  The typesystem now covers the WHOLE frozen surface: CodeEditor plus
+  its nested records (HighlightSpan/Diagnostic/InlayHint/MatchRange/
+  FoldRange as value types) and enums (TokenKind/Severity/RevealMode/
+  LineNumbersMode/CurrentLineMode, FindFlag with
+  `flags="FindFlags"` — PySide6's own flag-enum shape; a separate
+  value-type FindFlags also binds but costs a TU and loses flag-set
+  behavior), plus CodeEditorOptions (ctor removed: only
+  `CodeEditor::options()` hands one out); PerfStats stays unbound
+  (perfStats() self-drops, resetPerfStats() removed). The qmn shim grew
+  a `Monaco(CodeEditor)` class mirroring qtmonaco's public API:
+  1-based cursor dicts (`current_cursor` property), the set_text ORDER
+  (same-value early return → readonly ValueError → TypeError),
+  insert_text's line/column rules, delete_line(None) = cursor line,
+  the moveToPosition reveal mapping, minimap→overview-ruler, the
+  vim-mode warn-only stub, and honest AttributeError for the Gate-2
+  absences (open_diffs + LSP hooks). Driver:
+  `bindings/tests/parity_monaco.py` (state/numeric assertions, run by
+  the container script against build tree AND installed wheel).
+  Container build fixes measured on the way: vendored tree-sitter needs
+  `runtime/src` on qmn_ts's PRIVATE include path (its internal headers
+  include the vendored ICU subset as "unicode/utf8.h"; Arch's system
+  /usr/include/unicode masked that on the host, RHEL9 proved it fatal),
+  and CMAKE_POSITION_INDEPENDENT_CODE is set for `QMN_BUILD_PYTHON=ON`
+  builds — the extension MODULE cannot link our archives otherwise
+  ("relocation R_X86_64_32S ... recompile with -fPIC"; Arch's
+  default-PIE GCC masked this too).
 - Phase F C++ packaging: `install(TARGETS)` + exported namespace `qmn::`
   (`qmn::core`, `qmn::view`, internal `qmn::internal_tree_sitter`),
   `qmnConfig.cmake`/version file (`find_dependency(Qt6 6.6)`), public-
@@ -545,6 +590,16 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   caret-never-moves); 181/0/2.
 
 ### Changed
+- `RevealMode::NearTop` is now an UNCONDITIONAL top-edge flush
+  (`CodeEditor::revealAt`), matching Monaco's `revealPositionNearTop`
+  measured against monaco.d.ts 0.52.2: that primitive's doc-comment
+  carries no "if outside the viewport" clause (the conditional variants
+  are the separate `...IfOutsideViewport` APIs), and qtmonaco's
+  set_cursor "top" flag calls it. An already-visible line is therefore
+  re-flushed; Minimal keeps the conditional edge-flush (it is the
+  ensureCaretVisible leg). The mode split has a numeric tripwire pair in
+  `revealAtScrollsPerModeAndUnfoldsFolds` (NearTop re-scrolls a visible
+  line, Minimal does not).
 - The x anchor of all text geometry (caret, selection, painting, hit
   testing, IM anchor) moved from `padding()` to `contentLeft()` =
   padding + gutter width. With the gutter Off the geometry is

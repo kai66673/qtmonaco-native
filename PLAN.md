@@ -453,18 +453,18 @@ defaults documented on the setters (freeze-bound).
 
   | qtmonaco API | our state today | where |
   |---|---|---|
-  | `set_text` / `get_text` | `setPlainText` / `toPlainText` | bind at F |
-  | `insert_text` / `delete_line` | `insertAtOffset` / `removeRange` | bind at F |
-  | `set_cursor` / `current_cursor` | `setPosition` / `position` | thin, since B |
-  | `set_language` / `get_language` | none | D2, bind at F |
-  | `set_highlighted_lines` / `clear_highlighted_lines` | none | D3 |
-  | `set_line_numbers_mode` | gutter not built | D3 |
-  | `set_theme`, `set_readonly` | none | D2–D3 (token palette + view flags) |
-  | `set_scroll_beyond_last_line_enabled` | not implemented | E1 |
-  | `set_minimap_enabled` | no minimap by design | E1 ruler (**maps to it**, decided) |
-  | `set_vim_mode_enabled` | out of scope | binding **warns, never implements** |
-  | `open_diffs` | none | **Gate 2** (M10) |
-  | LSP hooks (`update_workspace_configuration`, `add_action`, lsp header) | none | **Gate 2** (M8) |
+  | `set_text` / `get_text` | `setPlainText` / `toPlainText` | ✔ bound (shim) |
+  | `insert_text` / `delete_line` | view doors `insertTextAt`/`deleteLineAt` (NOT the core `insertAtOffset`/`removeRange` — those skip the view's caret/undo/surrogate machinery) | ✔ bound |
+  | `set_cursor` / `current_cursor` | `setPosition` + `revealAt` / `position` | ✔ bound (shim keeps the 1-based dict from `cursorMoved`) |
+  | `set_language` / `get_language` | none | D2, ✔ bound (unknown id → native plain-text fallback, Python signal still echoes the request, qtmonaco-style) |
+  | `set_highlighted_lines` / `clear_highlighted_lines` | none | D3, ✔ bound |
+  | `set_line_numbers_mode` | gutter not built | D3, ✔ bound (string→enum on the shim, ValueError on unknown) |
+  | `set_theme`, `set_readonly` | none | D2–D3, ✔ bound |
+  | `set_scroll_beyond_last_line_enabled` | not implemented | E1, ✔ bound |
+  | `set_minimap_enabled` | no minimap by design | E1 ruler (**maps to it**, decided), ✔ bound |
+  | `set_vim_mode_enabled` | out of scope | binding **warns, never implements** — ✔ stub exists |
+  | `open_diffs` | none | **Gate 2** (M10) — deliberately ABSENT (honest AttributeError) |
+  | LSP hooks (`update_workspace_configuration`, `add_action`, lsp header) | none | **Gate 2** (M8) — deliberately ABSENT |
 
 - **Freeze:** bump `SOVERSION`, CHANGELOG discipline, then the v1 tag.
   M11 accessibility (QAccessible — a custom-painted widget gives screen

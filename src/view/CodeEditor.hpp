@@ -148,6 +148,39 @@ public:
     bool canUndo() const { return buffer_.canUndo(); }
     bool canRedo() const { return buffer_.canRedo(); }
 
+    // Programmatic edit doors backing the parity binding (Phase F:
+    // qtmonaco `insert_text`/`delete_line`). They ride the SAME user-edit
+    // machinery as typed keys (undo bracketing, caret normalization,
+    // surrogate safety) — and honor the M19 readOnly lock at entry (the
+    // single-caret deleteSelection path reaches the buffer directly, so
+    // these doors guard themselves). The Python layer pre-checks the flag
+    // and raises ValueError there (qtmonaco's error semantics); these
+    // doors stay silent, even the caret stays put.
+    // insertTextAt moves the caret to just past the inserted text
+    // (Monaco's executeEdits behavior); deleteLineAt removes the whole
+    // line including its '\n' and parks the caret at the start of where
+    // it was (clamped). Both no-op on invalid input.
+    void insertTextAt(TextPosition pos, const QString& text);
+    void deleteLineAt(int line);
+
+    // The qtmonaco set_cursor `moveToPosition` door. revealAt is reveal-
+    // ONLY (never moves the caret — the binding calls setPosition first):
+    // M13 fold-unfold of the target line, then vertical scroll per mode.
+    // The three modes mirror the three Monaco reveal primitives (measured
+    // against monaco.d.ts 0.52.2):
+    //  - Center: revealPositionInCenter — ALWAYS scrolls, line's cell
+    //    middle at the viewport middle.
+    //  - NearTop: revealPositionNearTop — ALWAYS scrolls, line flush at
+    //    the top edge, even when already visible (Monaco's doc-comment
+    //    carries no "if outside viewport" clause; the conditional variant
+    //    is the separate revealRangeNearTopIfOutsideViewport).
+    //  - Minimal: revealPosition — conditional minimal edge-flush, no-op
+    //    when visible (also the ensureCaretVisible leg used by caret moves).
+    // All clamp through setVScroll (blank-space rules included).
+    enum class RevealMode { Center, NearTop, Minimal };
+    Q_ENUM(RevealMode)
+    void revealAt(TextPosition pos, RevealMode mode);
+
     // Multiple carets (Phase D1). Alt+Click adds a caret, Alt+Drag drags a
     // selection for the caret under its start; typed edits, Enter,
     // Backspace/Delete, paste, cut and the navigation keys then act on
@@ -646,6 +679,11 @@ public:
 signals:
     void cursorMoved(TextPosition pos);
     void selectionChanged();
+    // Every document mutation, programmatic and typed, undo/redo replay
+    // included (it rides the core EditEvent observer: exactly one emit per
+    // primitive mutation, none on no-op sets). The detail-free change ping
+    // the parity binding mirrors into qtmonaco's `text_changed(str)`.
+    void textChanged();
 
 protected:
     void paintEvent(QPaintEvent* event) override;

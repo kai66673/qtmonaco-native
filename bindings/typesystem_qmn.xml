@@ -1,27 +1,42 @@
 <?xml version="1.0"?>
 <!--
-  Shiboken6 typesystem for the native editor binding - the Phase B "thin spine"
-  of PLAN.md.
+  Shiboken6 typesystem for the native editor binding.
 
-  Bound on purpose: only the stable, position-semantics-agnostic surface -
-  text in/out, caret get/set, selection, and the two signals. Nothing
-  grapheme-sensitive is bound yet, because PLAN.md Phase C (M2) changes what a
-  column means and the bound surface is what freezes the C++ API.
+  What used to be the Phase B "thin spine" is, since Phase F, the WHOLE frozen
+  Gate 1 public surface: every public door of CodeEditor/CodeEditorOptions is
+  meant to be reachable from Python, because the Gate 1 API freeze must be the
+  last chance to shape what a wheel can express. Everything crossing that
+  boundary is a plain Qt type (QString/QStringList/QRect/QPoint/QFont/int/
+  bool/double), a nested plain struct, or a nested enum class - no templates,
+  no STL, no overloads (the Shiboken contract, AGENTS.md).
 
-  Deliberately not bound: PerfStats (the per-keystroke latency counters) and the
-  protected paint/event overrides. Shiboken would otherwise happily generate
-  wrappers for them.
+  Nested classes/enums are declared as CHILD elements of the class that owns
+  them (Shiboken 6.12 rejects '::' inside name attributes), and the C++
+  namespace qmn::view is mirrored with nested <namespace-type> elements -
+  the same shape PySide6 uses for QNativeInterface / QColorConstants::Svg.
+
+  Bound beyond the thin spine:
+    * CodeEditorOptions - reached only through CodeEditor::options(); the one
+      instance is owned by the editor, so it is read AND written, never built
+      from Python (its ctor is removed below).
+    * the nested data structs (HighlightSpan, Diagnostic, InlayHint, MatchRange,
+      FoldRange) - the M4/M15/M16 decoration records the Python layer feeds.
+      They are value types: fields become attributes, operator== becomes __eq__.
+    * the nested enums - written explicitly rather than relying on the
+      generator's automatic enum pickup, so the audit trail in
+      mjb_rejected_functions.log stays about the deliberately unbound parts.
+
+  Deliberately not bound: PerfStats (the per-keystroke latency counters - a
+  bench-harness detail, not editor API), so perfStats() drops by itself (its
+  return type has no entry) and resetPerfStats() is removed explicitly. A
+  <modify-function> for perfStats() would only warn ("signature ... not
+  found"): the function is already gone by then. Audit that log after every
+  API growth - it is the list of silently unbound API.
 
   The load-typesystem line is what makes QWidget a known base class, so
   qmn::view::CodeEditor inherits PySide6.QtWidgets.QWidget instead of becoming a
   standalone Shiboken object. Search path (-T) for it is provided by
   find_package(PySide6) -> PYSIDE_TYPESYSTEMS.
--->
-<!--
-  Shiboken 6.12 rejects '::' inside name attributes ("Nesting types by
-  specifying '::' is no longer supported"), so the C++ namespace is mirrored
-  with nested <namespace-type> elements - the same shape PySide6 uses for
-  QNativeInterface / QColorConstants::Svg.
 -->
 <typesystem package="_qmn">
     <load-typesystem name="typesystem_widgets.xml" generate="no"/>
@@ -36,14 +51,40 @@
 
         <object-type name="CodeEditor">
             <include file-name="view/CodeEditor.hpp" location="global"/>
+
+            <!-- The editor's nested records (value semantics) and enums. -->
+            <value-type name="HighlightSpan"/>
+            <value-type name="Diagnostic"/>
+            <value-type name="InlayHint"/>
+            <value-type name="MatchRange"/>
+            <value-type name="FoldRange"/>
+            <enum-type name="TokenKind"/>
+            <enum-type name="Severity"/>
+            <enum-type name="RevealMode"/>
+            <enum-type name="LineNumbersMode"/>
+            <enum-type name="CurrentLineMode"/>
+            <!-- flags="FindFlags" ties the Q_DECLARE_FLAGS/Q_FLAG alias to the
+                 enum (the same shape PySide6 uses for its own flag enums).
+                 Without it the generator drops setFindFlags()/findFlags() for
+                 "Cannot find type entry for QFlags<...FindFlag>" - a separately
+                 declared <value-type name="FindFlags"/> also binds them, but it
+                 costs an extra wrapper TU and the alias then behaves like a
+                 plain value object instead of a flag set. -->
+            <enum-type name="FindFlag" flags="FindFlags"/>
+
             <!-- resetPerfStats() is removed explicitly; perfStats() needs no
                  rule at all: its return type qmn::view::CodeEditor::PerfStats
                  has no type entry, so Shiboken drops the function by itself and
-                 writes that to gen/mjb_rejected_functions.log. A
-                 <modify-function> for it would only warn ("signature ... not
-                 found") because the function is already gone by then.
-                 Audit that log, it is the list of silently unbound API. -->
+                 writes that to gen/mjb_rejected_functions.log. -->
             <modify-function signature="resetPerfStats()" remove="all"/>
+        </object-type>
+
+        <!-- Owned by the editor (its ctor takes the CodeEditor*): only
+             CodeEditor::options() hands one out, so the ctor never becomes a
+             Python constructor. -->
+        <object-type name="CodeEditorOptions">
+            <include file-name="view/CodeEditorOptions.hpp" location="global"/>
+            <modify-function signature="CodeEditorOptions(qmn::view::CodeEditor*,QObject*)" remove="all"/>
         </object-type>
       </namespace-type>
     </namespace-type>

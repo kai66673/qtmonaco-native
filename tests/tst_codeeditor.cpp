@@ -190,6 +190,12 @@ private slots:
     void accessibleBoundariesFollowTheLineModel();
     void accessibleCharRectAndPointHitRoundTrip();
 
+    // Phase F parity doors (the qtmonaco insert_text/delete_line/set_cursor
+    // backing) + the textChanged ping the Python shim mirrors.
+    void parityInsertAndDeleteLineDoors();
+    void parityDoorsAndEveryMutationPingTextChanged();
+    void revealAtScrollsPerModeAndUnfoldsFolds();
+
     // Multiple carets (Phase D1).
     void altClickAddsCaretsInDocOrder();
     void altClickInsideSelectionFollowsRules();
@@ -4219,6 +4225,282 @@ void TestCodeEditor::accessibleCharRectAndPointHitRoundTrip()
     QVERIFY(yTop >= 0);
     QVERIFY(yTop + lh <= editor->height()); // fully visible, flush bottom
     QCOMPARE(editor->position(), caretBefore); // the caret NEVER moved
+}
+
+// --- Phase F parity doors (qtmonaco insert_text/delete_line) ---------------
+
+void TestCodeEditor::parityInsertAndDeleteLineDoors()
+{
+    // insertTextAt mid-line: the caret lands just PAST the insert (Monaco's
+    // executeEdits behavior, the contract behind qtmonaco's insert_text).
+    editor->setPlainText(QStringLiteral("hello world"));
+    editor->insertTextAt({0, 5}, QStringLiteral("!!"));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("hello!! world"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 7}));
+
+    // On another line: the caret travels there first.
+    editor->setPlainText(QStringLiteral("aa\nbb"));
+    editor->insertTextAt({1, 0}, QStringLiteral("x"));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("aa\nxbb"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 1}));
+
+    // Inserted text itself carries a '\n': the caret normalizes onto the
+    // last inserted row (the insertTextAtCaret newline math rides along).
+    editor->setPlainText(QStringLiteral("aa\nbb"));
+    editor->insertTextAt({0, 2}, QStringLiteral("\n--")); // BEFORE the existing \n
+    QCOMPARE(editor->toPlainText(), QStringLiteral("aa\n--\nbb"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 2}));
+
+    // Empty document (lineCount() >= 1 always): an insert at {0,0} works.
+    editor->setPlainText(QString());
+    QCOMPARE(editor->lineCount(), 1);
+    editor->insertTextAt({0, 0}, QStringLiteral("abc"));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abc"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+
+    // Out-of-range clamps FIRST (like setPosition), THEN the door inserts:
+    // col 99 on a real line clamps to its EOL; line 9 clamps to the last.
+    editor->setPlainText(QStringLiteral("one\ntwo\nthree"));
+    editor->insertTextAt({2, 99}, QStringLiteral("!"));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("one\ntwo\nthree!"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 6}));
+    editor->insertTextAt({9, 9}, QStringLiteral("z"));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("one\ntwo\nthree!z"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 7}));
+
+    // Empty text is a no-op — and the caret stays put too (the door returns
+    // before its setPosition).
+    editor->insertTextAt({0, 0}, QString());
+    QCOMPARE(editor->toPlainText(), QStringLiteral("one\ntwo\nthree!z"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 7}));
+
+    // The doors ride undo: a non-adjacent insert is its own group.
+    editor->insertTextAt({0, 0}, QStringLiteral("Q"));
+    QVERIFY(editor->canUndo());
+    editor->undo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("one\ntwo\nthree!z"));
+
+    // deleteLineAt: a middle line goes with its '\n'.
+    editor->setPlainText(QStringLiteral("a\nb\nc"));
+    editor->deleteLineAt(1);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a\nc"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0})); // parked
+
+    // Last line: its separator goes too, leaving a real EMPTY last line.
+    editor->setPlainText(QStringLiteral("a\nb"));
+    editor->deleteLineAt(1);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a\n"));
+    QCOMPARE(editor->lineCount(), 2);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0}));
+
+    // First line:
+    editor->setPlainText(QStringLiteral("a\nb"));
+    editor->deleteLineAt(0);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("b"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+
+    // Solo line: the document ends up empty, lineCount() stays 1.
+    editor->setPlainText(QStringLiteral("only"));
+    editor->deleteLineAt(0);
+    QCOMPARE(editor->toPlainText(), QString());
+    QCOMPARE(editor->lineCount(), 1);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+
+    // Out of range: silent no-op, nothing recorded on the undo stack.
+    editor->setPlainText(QStringLiteral("x"));
+    QVERIFY(!editor->canUndo());
+    editor->deleteLineAt(-1);
+    editor->deleteLineAt(1);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x"));
+    QVERIFY(!editor->canUndo());
+
+    // One delete_line call = one undo step.
+    editor->setPlainText(QStringLiteral("a\nb\nc"));
+    editor->deleteLineAt(1);
+    QVERIFY(editor->canUndo());
+    editor->undo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a\nb\nc"));
+
+    // M19 readOnly locks the doors completely: no text change, no undo
+    // entry (the ValueError lives in the Python shim, the C++ door is mute).
+    editor->setPlainText(QStringLiteral("a\nb\nc"));
+    const auto caretBefore = editor->position(); // {0,0} from setPlainText
+    editor->options()->setReadOnly(true);
+    editor->insertTextAt({0, 1}, QStringLiteral("X")); // caret must NOT travel
+    editor->deleteLineAt(1);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a\nb\nc"));
+    QCOMPARE(editor->position(), caretBefore);
+    QVERIFY(!editor->canUndo());
+    editor->options()->setReadOnly(false);
+}
+
+void TestCodeEditor::parityDoorsAndEveryMutationPingTextChanged()
+{
+    QSignalSpy spy(editor, &CodeEditor::textChanged);
+    QVERIFY(spy.isValid());
+
+    // setPlainText is ONE primitive mutation -> exactly one ping…
+    editor->setPlainText(QStringLiteral("abc"));
+    QCOMPARE(spy.count(), 1);
+    // …and re-setting the SAME value pings too: the core setText fires
+    // whenever the old document was non-empty (oldChars > 0) — there is no
+    // value-equality no-op at that level. Frozen frame, shim echo-guard
+    // (last-value cache) lives in Python instead, like qtmonaco's.
+    editor->setPlainText(QStringLiteral("abc"));
+    QCOMPARE(spy.count(), 2);
+
+    // Primitive user gestures: one ping each (caret sits at {0,0}).
+    QTest::keyClick(editor, Qt::Key_X); // types lowercase 'x'
+    QCOMPARE(spy.count(), 3);
+    QTest::keyClick(editor, Qt::Key_Backspace);
+    QCOMPARE(spy.count(), 4);
+
+    // undo/redo replay the ops -> one ping per replayed op.
+    editor->undo();
+    QCOMPARE(spy.count(), 5);
+    editor->redo();
+    QCOMPARE(spy.count(), 6);
+
+    // Caret motion / selection NEVER pings.
+    int before = spy.count();
+    editor->setPosition({0, 2});
+    editor->selectAll();
+    QTest::keyClick(editor, Qt::Key_Left);
+    QCOMPARE(spy.count(), before);
+
+    // The parity doors: exactly one ping per successful call.
+    editor->setPlainText(QStringLiteral("a\nb\nc"));
+    before = spy.count();
+    editor->insertTextAt({1, 1}, QStringLiteral("Q"));
+    QCOMPARE(spy.count(), before + 1);
+    before = spy.count();
+    editor->deleteLineAt(0);
+    QCOMPARE(spy.count(), before + 1);
+    // Refused door calls stay mute (no mutation, no ping).
+    before = spy.count();
+    editor->insertTextAt({0, 0}, QString());
+    editor->deleteLineAt(99);
+    QCOMPARE(spy.count(), before);
+
+    // Consecutive typing pings per KEY PRESS (each press is its own
+    // primitive mutation) — but tryCoalesce rewrites the chain into ONE
+    // merged op, so one undo/redo call replays one op = one ping. Caret
+    // sits at {0,0} on "ab": 'a' lands at 0, 'b' at 1 -> "abab".
+    editor->setPlainText(QStringLiteral("ab"));
+    before = spy.count();
+    QTest::keyClick(editor, Qt::Key_A); // "aab"
+    QTest::keyClick(editor, Qt::Key_B); // "abab" — coalesced chain
+    QCOMPARE(spy.count(), before + 2);
+    before = spy.count();
+    editor->undo();
+    QCOMPARE(spy.count(), before + 1);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("ab"));
+    before = spy.count();
+    editor->redo();
+    QCOMPARE(spy.count(), before + 1);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abab"));
+
+    // A genuinely MULTI-OP group: typing over a selection is a compound
+    // delete+insert step under one bracket — undo STILL pings per replayed
+    // primitive op, pinging per mutation, not per group.
+    editor->selectAll(); // selects all of "abab"
+    before = spy.count();
+    QTest::keyClick(editor, Qt::Key_Q); // type-over-selection: 2 mutations
+    QCOMPARE(spy.count(), before + 2);
+    before = spy.count();
+    editor->undo();
+    QCOMPARE(spy.count(), before + 2);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abab"));
+
+    // readOnly: the doors ping zero (M19), and undo is refused too.
+    editor->options()->setReadOnly(true);
+    before = spy.count();
+    editor->insertTextAt({0, 0}, QStringLiteral("no"));
+    editor->deleteLineAt(0);
+    editor->undo();
+    editor->redo();
+    QCOMPARE(spy.count(), before);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abab"));
+    editor->options()->setReadOnly(false);
+}
+
+void TestCodeEditor::revealAtScrollsPerModeAndUnfoldsFolds()
+{
+    QStringList lines;
+    for (int i = 0; i < 100; ++i)
+        lines << (QStringLiteral("line") + QString::number(i));
+    editor->setPlainText(lines.join(QLatin1Char('\n')));
+
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const int h = editor->height();
+    const auto caretHome = editor->position(); // {0,0}: setPlainText reset it
+    QCOMPARE(editor->verticalScrollOffset(), 0);
+
+    // Center: the line's cell middle at the viewport middle. No clamp here:
+    // the doc has plenty of lines below and scroll-past-end is OFF.
+    editor->revealAt({50, 2}, CodeEditor::RevealMode::Center);
+    QCOMPARE(editor->verticalScrollOffset(), 50 * lh + lh / 2 + pad - h / 2);
+    QCOMPARE(editor->position(), caretHome); // reveal-ONLY: caret never moves
+
+    // NearTop on a line hidden BELOW: flush at the top edge.
+    editor->revealAt({70, 2}, CodeEditor::RevealMode::NearTop);
+    QCOMPARE(editor->verticalScrollOffset(), 70 * lh - pad);
+    // NearTop on an ALREADY-VISIBLE line (72 sits inside the viewport that
+    // just opened, lines ~71..94): still re-flushes to the top edge, exactly
+    // like Monaco's revealPositionNearTop (unconditional; the conditional
+    // variants carry ...IfOutsideViewport in their names). Tripwire.
+    editor->revealAt({72, 2}, CodeEditor::RevealMode::NearTop);
+    QCOMPARE(editor->verticalScrollOffset(), 72 * lh - pad);
+
+    // Minimal on a line hidden ABOVE: travel to the top edge only.
+    editor->revealAt({10, 2}, CodeEditor::RevealMode::Minimal);
+    QCOMPARE(editor->verticalScrollOffset(), 10 * lh - pad);
+
+    // Minimal on a line hidden BELOW: flush against the bottom edge.
+    editor->revealAt({60, 2}, CodeEditor::RevealMode::Minimal);
+    QCOMPARE(editor->verticalScrollOffset(), 61 * lh + pad - h);
+    // Minimal on an already-visible line (50 sits inside the viewport that
+    // flush just opened, lines ~38..61): unlike NearTop it does NOT re-scroll
+    // — the conditional counterpart of the NearTop tripwire above.
+    editor->revealAt({50, 2}, CodeEditor::RevealMode::Minimal);
+    QCOMPARE(editor->verticalScrollOffset(), 61 * lh + pad - h);
+    // Visible: Minimal is a no-op.
+    editor->revealAt({60, 2}, CodeEditor::RevealMode::Minimal);
+    QCOMPARE(editor->verticalScrollOffset(), 61 * lh + pad - h);
+
+    // Positions clamp through clampPos FIRST: line 999 -> the last line,
+    // and Minimal flushes its bottom edge (below maxScroll: no clamp).
+    editor->revealAt({999, 99}, CodeEditor::RevealMode::Minimal);
+    QCOMPARE(editor->verticalScrollOffset(), 100 * lh + pad - h);
+
+    // setVScroll's edge clamp backstops the formulas: line 0 wants NEGATIVE
+    // scroll for NearTop, and lands at 0 instead.
+    editor->revealAt({0, 0}, CodeEditor::RevealMode::NearTop);
+    QCOMPARE(editor->verticalScrollOffset(), 0);
+    QCOMPARE(editor->position(), caretHome); // still untouched throughout
+
+    // M13 reveal contract: the target of a reveal is never meant to be
+    // hidden, so a collapsed fold containing it unfolds first. Rebuild the
+    // doc with an indented block (grammar-less mode -> indent fallback).
+    lines[40] = QStringLiteral("block:");
+    for (int i = 41; i <= 45; ++i)
+        lines[i] = QStringLiteral("  ") + lines[i]; // deeper than the header
+    editor->setPlainText(lines.join(QLatin1Char('\n')));
+    // Fold DISCOVERY (the foldables cache) is paint-fed, so probing via
+    // isFoldable needs an event-loop pump; foldLine resolves the lazy
+    // indent end itself — call the door directly.
+    editor->revealAt({40, 0}, CodeEditor::RevealMode::NearTop);
+    QCOMPARE(editor->verticalScrollOffset(), 40 * lh - pad);
+    QVERIFY(editor->foldLine(40));
+    QCOMPARE(editor->visibleIndexOfModelLine(43), -1); // hidden inside the fold
+    editor->revealAt({43, 4}, CodeEditor::RevealMode::Center);
+    QVERIFY(!editor->isFolded(40));
+    QVERIFY(editor->visibleIndexOfModelLine(43) != -1);
+    // With the map unfolded again, slot 43 is model 43; Center ALWAYS
+    // scrolls, so the exact math also pins the auto-unfold having happened.
+    QCOMPARE(editor->verticalScrollOffset(), 43 * lh + lh / 2 + pad - h / 2);
+    QCOMPARE(editor->position(), caretHome);
 }
 
 // --- M4 syntax highlighting (Phase D2) -------------------------------------

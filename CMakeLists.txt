@@ -15,6 +15,19 @@ set(CMAKE_EXPORT_COMPILE_COMMANDS ON)
 # host, see AGENTS.md). Default OFF keeps the C++ spike and CI Python-free.
 option(QMN_BUILD_PYTHON "Build the Shiboken6 Python extension module" OFF)
 
+# The extension is a shared MODULE that links our STATIC archives in, so in a
+# binding build every archive has to be position independent. Measured in the
+# RHEL9 binding container: without this the link of _qmn.abi3.so dies on
+# "relocation R_X86_64_32S against `.rodata.str1.1' ... recompile with -fPIC"
+# (tree-sitter + query_data + qmn_core/qmn_view objects). The Arch host hid the
+# same gap because its GCC is configured --enable-default-pie, so the archives
+# were already PIC there. Scoped to the binding build on purpose: a plain C++
+# build (CI, the benchmark) keeps non-PIC code, which is what the per-keystroke
+# perf budgets were measured with.
+if(QMN_BUILD_PYTHON)
+    set(CMAKE_POSITION_INDEPENDENT_CODE ON)
+endif()
+
 find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Widgets Test)
 
 qt_standard_project_setup()

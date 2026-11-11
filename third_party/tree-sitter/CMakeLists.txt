@@ -50,6 +50,14 @@ set_target_properties(qmn_ts PROPERTIES C_STANDARD 11 C_EXTENSIONS ON)
 target_include_directories(qmn_ts
     PUBLIC $<BUILD_INTERFACE:${CMAKE_CURRENT_LIST_DIR}/runtime/include>
     PRIVATE
+        # The runtime's own src dir: its internal headers include the vendored
+        # ICU subset as "unicode/utf8.h" / "unicode/umachine.h" (runtime/src/
+        # unicode/), which only resolves with runtime/src on the search path.
+        # Without it the quoted include falls through to the SYSTEM ICU headers
+        # - measured on Arch, where /usr/include/unicode exists, and measured
+        # fatal in the RHEL9 binding container, where it does not (upstream's
+        # own build lists runtime/src too).
+        ${CMAKE_CURRENT_LIST_DIR}/runtime/src
         ${CMAKE_CURRENT_LIST_DIR}/grammars/python/src
         ${CMAKE_CURRENT_LIST_DIR}/grammars/json/src
         ${CMAKE_CURRENT_LIST_DIR}/grammars/javascript/src

@@ -23,7 +23,9 @@ run() {
 }
 
 if [ "${1:-}" = "--codegen" ]; then
-    docker build -f "$REPO/bindings/Dockerfile" -t "$IMAGE" "$REPO"
+    if [ "${REBUILD_IMAGE:-0}" = "1" ]; then
+        docker build -f "$REPO/bindings/Dockerfile" -t "$IMAGE" "$REPO"
+    fi
     # Exactly the CLI the Shiboken6 CMake macro runs (Shiboken6ToolsMacros.
     # cmake), reproduced by hand so the generated names and the rejected-API
     # log can be inspected before any compiling happens.
@@ -43,7 +45,8 @@ mkdir -p /tmp/gen
   -I/work/src \
   -T"$SP/PySide6/typesystems" \
   --output-directory=/tmp/gen \
-  /work/src/view/CodeEditor.hpp /work/bindings/typesystem_qmn.xml
+  /work/src/view/CodeEditor.hpp /work/src/view/CodeEditorOptions.hpp \
+  /work/bindings/typesystem_qmn.xml
 echo "=== generated files ==="
 find /tmp/gen -type f | sort
 echo "=== rejected functions ==="
@@ -74,6 +77,8 @@ echo "=== wheel contents ==="
 echo "=== smoke test against installed wheel (cwd=/tmp) ==="
 cd /tmp
 PYTHONPATH=/tmp/pylibs /opt/venv/bin/python /work/bindings/tests/smoke_wheel.py
+echo "=== qtmonaco parity test against installed wheel (cwd=/tmp) ==="
+PYTHONPATH=/tmp/pylibs /opt/venv/bin/python /work/bindings/tests/parity_monaco.py
 '
     exit 0
 fi
@@ -95,4 +100,8 @@ find /work/build-py/bindings -name "*.so" -printf "%p (%s bytes)\n"
 
 echo "=== smoke test ==="
 PYTHONPATH=/work/bindings/python /opt/venv/bin/python /work/bindings/tests/smoke_qmn.py
+
+echo "=== qtmonaco parity test (build tree) ==="
+PYTHONPATH=/work/bindings/python:/work/build-py/bindings \
+  /opt/venv/bin/python /work/bindings/tests/parity_monaco.py
 '

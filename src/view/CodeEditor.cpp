@@ -297,6 +297,10 @@ CodeEditor::CodeEditor(QWidget* parent)
                 QAccessible::updateAccessibility(&ins);
             }
         }
+        // Phase F: the detail-free document ping — unconditional (no AT
+        // gate), emitted once per primitive mutation, observers of the
+        // parity textChanged door ride it.
+        emit textChanged();
     });
 
     // M11: the caret/selection half of the a11y event bus. cursorMoved and
@@ -1447,6 +1451,75 @@ void CodeEditor::redo()
     undoMarks_.append(current);
     lastPushSerial_ = buffer_.undoPushSerial();
     applyEditMark(after);
+}
+
+void CodeEditor::insertTextAt(TextPosition pos, const QString& text)
+{
+    if (text.isEmpty() || readOnly_)
+        return; // empty insert is a no-op; M19 gate up front so even the
+                // caret stays put while the document is locked
+    const TextPosition p = clampPos(pos);
+    setPosition(p);          // the caret travels to the edit door's header
+    insertTextAtCaret(text); // one recorded op (surrogate-safe, undo-bracketed)
+}
+
+void CodeEditor::deleteLineAt(int line)
+{
+    // Gated up front: the selection-delete path below reaches buffer_
+    // directly (the fan-out/block-edit backstops never see a single-caret
+    // deleteSelection), so this door guards itself, like M19's front doors.
+    if (line < 0 || line >= buffer_.lineCount() || readOnly_)
+        return; // out of range, silently (the binding pre-checks for ValueError)
+    // Select the whole line through the NEXT line start (that way the '\n'
+    // goes with it), or just its content for the last line (there is no
+    // separator to eat) — then ride the selection-delete door: one undo
+    // group, surrogate-safe, caret normalizes to where the line was.
+    if (line + 1 < buffer_.lineCount())
+        setSelection(TextPosition{line, 0}, TextPosition{line + 1, 0});
+    else
+        setSelection(TextPosition{line, 0}, TextPosition{line, lineLength(line)});
+    // Same mirror discipline as every view edit action: capture the pre
+    // state, ride the door, reconcile the mark stack against the core
+    // (which pushed — or coalesced into — exactly one group).
+    const UndoMark pre = captureEditMark();
+    deleteSelection(); // refuses while readOnly (guarded above anyway)
+    reconcileUndoMarks(pre);
+}
+
+void CodeEditor::revealAt(TextPosition pos, RevealMode mode)
+{
+    const TextPosition p = clampPos(pos);
+    revealLine(p.line); // M13: a folded-away line is unfolded before reveal
+    const int top = slotOfModelLine(p.line) * lineHeight_; // pad-offset frame:
+    const int bot = top + lineHeight_;                     // y = padding+top-vScroll
+    int target = vScroll_;
+    switch (mode) {
+    case RevealMode::Center:
+        // The cell's MIDDLE at the viewport's middle; setVScroll's clamp
+        // keeps document edges honest (Center degrades to flush there).
+        target = top + lineHeight_ / 2 + padding_ - height() / 2;
+        break;
+    case RevealMode::NearTop:
+        // UNCONDITIONAL (Monaco revealPositionNearTop semantics — measured
+        // against monaco.d.ts 0.52.2: the doc-comment has no "if outside
+        // viewport" clause; that variant is the separate ...IfOutsideViewport
+        // API). "Optimized for viewing a code definition": even an already-
+        // visible line is re-flushed to the top edge.
+        target = top - padding_;
+        break;
+    case RevealMode::Minimal: {
+        // The conditional edge-flush (Monaco revealPosition / our own
+        // ensureCaretVisible leg): reacts only when the cell is outside.
+        const bool hiddenAbove = top - padding_ < vScroll_;
+        const bool hiddenBelow = bot + padding_ > vScroll_ + height();
+        if (hiddenAbove)
+            target = top - padding_;
+        else if (hiddenBelow)
+            target = bot + padding_ - height();
+        break; // visible: target stays put (no-op)
+    }
+    }
+    setVScroll(target); // clamps inside; equal target = no movement
 }
 
 void CodeEditor::updatePrimarySelection()

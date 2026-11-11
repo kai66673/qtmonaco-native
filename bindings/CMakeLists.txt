@@ -1,6 +1,7 @@
-# Shiboken6/PySide6 extension for CodeEditor - the Phase B "thin spine" of
-# PLAN.md. Only reached when the root option QMN_BUILD_PYTHON=ON, so the spike
-# and CI stay Python-free.
+# Shiboken6/PySide6 extension for CodeEditor (PLAN.md: the Phase B "thin spine"
+# spike, now grown into the frozen Gate 1 binding surface of Phase F). Only
+# reached when the root option QMN_BUILD_PYTHON=ON, so the C++-only build and CI
+# stay Python-free.
 #
 # Everything here is written against facts read out of the installed 6.12.0
 # wheels (see AGENTS.md):
@@ -54,14 +55,24 @@ endif()
 
 # Names emitted by the generator (verified by running it, see
 # bindings/build_in_container.sh --codegen). Output lands in a subdirectory
-# named after the typesystem package, i.e. _qmn/.
+# named after the typesystem package, i.e. _qmn/. One TU per bound type: the two
+# QObjects, the free TextPosition struct, and one per nested record struct
+# (HighlightSpan/Diagnostic/InlayHint/MatchRange/FoldRange). The nested ENUMS
+# (RevealMode, LineNumbersMode, ...) get no file of their own - since Shiboken
+# 6.8 smart enums are emitted inside the owning class's TU.
 set(_gen_dir "${CMAKE_CURRENT_BINARY_DIR}/_qmn")
 set(_generated
     "${_gen_dir}/_qmn_module_wrapper.cpp"
     "${_gen_dir}/qmn_wrapper.cpp"
     "${_gen_dir}/qmn_view_wrapper.cpp"
     "${_gen_dir}/qmn_view_codeeditor_wrapper.cpp"
-    "${_gen_dir}/qmn_view_textposition_wrapper.cpp")
+    "${_gen_dir}/qmn_view_codeeditoroptions_wrapper.cpp"
+    "${_gen_dir}/qmn_view_textposition_wrapper.cpp"
+    "${_gen_dir}/qmn_view_codeeditor_highlightspan_wrapper.cpp"
+    "${_gen_dir}/qmn_view_codeeditor_diagnostic_wrapper.cpp"
+    "${_gen_dir}/qmn_view_codeeditor_inlayhint_wrapper.cpp"
+    "${_gen_dir}/qmn_view_codeeditor_matchrange_wrapper.cpp"
+    "${_gen_dir}/qmn_view_codeeditor_foldrange_wrapper.cpp")
 
 # The macro forwards -I only for the listed QT_MODULES, and Qt6::Widgets'
 # interface carries [include, include/QtWidgets]; CodeEditor.hpp itself includes
@@ -79,7 +90,11 @@ shiboken_generator_create_binding(
     EXTENSION_TARGET  _qmn
     LIBRARY_TARGET    qmn_view          # src/view, PUBLIC include dir = src/
     TYPESYSTEM_FILE   "${CMAKE_CURRENT_SOURCE_DIR}/typesystem_qmn.xml"
+    # Both headers are handed to the parser: CodeEditorOptions.hpp is reachable
+    # through CodeEditor.hpp's include, but naming it explicitly keeps the
+    # generated set independent of that include.
     HEADERS           "${PROJECT_SOURCE_DIR}/src/view/CodeEditor.hpp"
+                      "${PROJECT_SOURCE_DIR}/src/view/CodeEditorOptions.hpp"
     GENERATED_SOURCES ${_generated}
     QT_MODULES        Widgets
     SHIBOKEN_EXTRA_OPTIONS
