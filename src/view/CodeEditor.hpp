@@ -293,10 +293,39 @@ public:
     int highlightedLinesStart() const { return highlightStart_; }
     int highlightedLinesEnd() const { return highlightEnd_; }
 
-    // (2) Current-line band (Monaco's renderLineHighlight). Default off;
-    // the theme pass (set_theme row, D3) picks the shipped default.
-    void setCurrentLineHighlight(bool enabled);
-    bool currentLineHighlight() const { return currentLineHl_; }
+    // (2) Current-line band (Monaco's renderLineHighlight). M18: the
+    // mode enum replaces the old bool; the bool setter survives as a
+    // delegate (true→Background, false→Off) and currentLineHighlight()
+    // reads "mode != Off". Default Background (the band ships on now;
+    // the wash ink was strengthened in the same pass). BackgroundFrame
+    // adds a 1px outline around the band.
+    enum class CurrentLineMode { Off, Background, BackgroundFrame };
+    Q_ENUM(CurrentLineMode)
+    void setCurrentLineMode(CurrentLineMode mode);
+    CurrentLineMode currentLineMode() const { return currentLineMode_; }
+    void setCurrentLineHighlight(bool enabled)
+        { setCurrentLineMode(enabled ? CurrentLineMode::Background
+                                     : CurrentLineMode::Off); }
+    bool currentLineHighlight() const
+        { return currentLineMode_ != CurrentLineMode::Off; }
+
+    // M18 long-line ruler (VS Code's editor.rulers): one 1px vertical
+    // guide at a fixed TEXT column. It rides h-scroll and is chrome
+    // independent (its x = contentLeft() + col*cellWidth() - hScroll,
+    // drawn only inside the text viewport — never over the gutter or
+    // the overview ruler, and it never changes any scroll range).
+    // 0 or negative = off; default off.
+    void setLongLineRulerColumn(int column);
+    int longLineRulerColumn() const { return longLineRulerCol_; }
+    // M18 auto-close pairs (behavior only, no public toggle until M19's
+    // settings object): typing one of ()[]{}""''``  with a selection
+    // WRAPS it; at a bare caret it inserts the pair and parks the caret
+    // between; typing a closer that is already right of the caret JUMPS
+    // over it instead (no insert, no undo entry); a quote inside or
+    // right beside a word char inserts plain (the apostrophe guard,
+    // VS Code model — brackets always pair). Backspace with the caret
+    // between an empty pair removes BOTH sides. Fans out per caret like
+    // every other edit; one bracketed undo group per multi press.
 
     // Indentation + auto-indent (M14). SOFT TABS ONLY: Tab typing never
     // puts literal '\t' into the buffer; literal tabs (paste, setPlainText)
@@ -710,9 +739,12 @@ private:
     static SlotEdit makeOutdentEdit(const qmn::core::TextBuffer& buf, int line, int stop);
     static int visualColOf(const QString& line, int col, int stop); // caret col -> stop grid
     // One shared caret-movement target fn applied to every caret (nav fan-
-    // out; no document change). `extend` grows each caret's own selection.
+    // out; no document change). `extend` grows each caret's own selection;
+    // `freezeChain` breaks the core's coalescing chain — real navigation
+    // does, M18's pair-Skip hop deliberately does not (it is part of the
+    // typing flow, and skipping over a closer must not fence undo chunks).
     void moveCarets(const std::function<TextPosition(const CaretSlot&)>& targetFn,
-                    bool extend);
+                    bool extend, bool freezeChain = true);
     // VS Code-style caret cleanup after adds/moves: fold duplicate carets,
     // drop carets strictly inside another slot's selection, and resolve
     // intersecting selections by keeping the LEFT one and collapsing the
@@ -728,6 +760,11 @@ private:
     void updateScrollBarRange();
     void ensureCaretVisible();
     void insertTextAtCaret(const QString& text, int caretTrim = 0);
+    // M18 auto-close pairs: claim a printable press of one ()[]{}""''``
+    // char (public contract next to the API docs above). Returns false for
+    // "ordinary typing please" — non-pair chars, and slots where every
+    // decision is Plain (the plain path then fans out exactly that char).
+    bool handleAutoClosePair(QChar ch);
     void backspace();
     void deleteForward();
     TextPosition clampPos(TextPosition pos) const;
@@ -892,7 +929,8 @@ private:
     QVector<InlayHint> inlayHints_; // sorted by (line, col)
     int highlightStart_ = -1; // inclusive whole-line range; -1 = unset
     int highlightEnd_ = -1;
-    bool currentLineHl_ = false;
+    CurrentLineMode currentLineMode_ = CurrentLineMode::Background; // M18 default on
+    int longLineRulerCol_ = 0; // M18 long-line ruler column; 0 = off
     int gutterInnerPad() const; // gutter digit/glyph padding (M5)
 
     // --- M6 find/replace state (semantics: public API comments) ---

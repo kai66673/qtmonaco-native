@@ -386,7 +386,8 @@ multi-caret machinery. Bundles (one commit each, tests per bundle):
   Offscreen trap: QWheelEvent's Orientation ctor is GONE in 6.12
   (single 10-arg ctor) and an explicit null device segfaults the
   QSinglePointEvent ctor — lean on the default. 6 new slots (167/0/2).
-- **M18 auto-close pairs + long-line ruler + current line.** Typing
+- **M18 COMPLETE (2026-11-11): auto-close pairs + long-line ruler +
+  current line.** Typing
   `([{`'` wraps the selection, inserts the pair at a bare caret, and
   skips a typed closer when it is already there; backspace on a paired
   empty pair removes both. `setLongLineRulerColumn(int)`/`0=off` paints

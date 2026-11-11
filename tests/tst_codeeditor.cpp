@@ -167,6 +167,15 @@ private slots:
     void zoomScalesChromeAndHitTesting();
     void externalSetFontRebasesBaseAndZoom();
 
+    // Auto-close pairs + long-line ruler + current-line mode (M18).
+    void autoClosePairInsertsSkipsAndDeletesBoth();
+    void autoCloseWrapsSelection();
+    void autoCloseQuotesRespectWordBoundary();
+    void autoCloseSkipStaysTextualAndClosersPlain();
+    void autoCloseFansOutMixedSlotsAsOneUndoStep();
+    void longLineRulerMapsToColumnAndRidesHScroll();
+    void currentLineModeWashFrameAndDelegates();
+
     // Multiple carets (Phase D1).
     void altClickAddsCaretsInDocOrder();
     void altClickInsideSelectionFollowsRules();
@@ -572,6 +581,10 @@ void TestCodeEditor::textGlyphsShareCaretBands()
     // the scanned x window.
     editor->setPlainText(QStringLiteral("x\ny\nz\nw\nv"));
     editor->setPosition({4, 1});
+    // M18: the current-line wash ships ON and is a non-Base band — the
+    // probe pins glyph GEOMETRY, so switch the wash off and keep the
+    // background uniform.
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Off);
     const int pad = editor->padding();
     const int lh = editor->lineHeight();
     const int x0 = editor->contentLeft(); // M5: scan the TEXT area only;
@@ -3261,6 +3274,383 @@ void TestCodeEditor::externalSetFontRebasesBaseAndZoom()
     QCOMPARE(editor->cellWidth(), cw14);
 }
 
+// --- M18 auto-close pairs + long-line ruler + current-line mode ------------
+
+void TestCodeEditor::autoClosePairInsertsSkipsAndDeletesBoth()
+{
+    // VS Code parity pair set: bare caret inserts the pair with the caret
+    // parked BETWEEN the two chars, the matching closer merely hops over,
+    // and one backspace inside an empty pair kills BOTH sides.
+    struct Case { Qt::Key open; Qt::Key close; const char* text; };
+    const Case cases[] = {
+        { Qt::Key_ParenLeft, Qt::Key_ParenRight, "()" },
+        { Qt::Key_BracketLeft, Qt::Key_BracketRight, "[]" },
+        { Qt::Key_BraceLeft, Qt::Key_BraceRight, "{}" },
+        { Qt::Key_QuoteDbl, Qt::Key_QuoteDbl, "\"\"" },
+        { Qt::Key_Apostrophe, Qt::Key_Apostrophe, "''" },
+        { Qt::Key_QuoteLeft, Qt::Key_QuoteLeft, "``" },
+    };
+    for (const Case& c : cases) {
+        editor->setPlainText(QString());
+        QTest::keyClick(editor, c.open);
+        QCOMPARE(editor->toPlainText(), QString::fromLatin1(c.text));
+        QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1})); // BETWEEN
+        QTest::keyClick(editor, c.close); // the closer already sits at the
+        QCOMPARE(editor->toPlainText(), QString::fromLatin1(c.text));   // caret:
+        QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));  // hop only
+        editor->setPosition({0, 1});
+        QTest::keyClick(editor, Qt::Key_Backspace); // caret inside the pair:
+        QCOMPARE(editor->toPlainText(), QString());                     // BOTH die
+        QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+    }
+
+    // The hop is motion-only: no undo entry, no chain freeze — pair, skip
+    // and letter stay ONE coalesced typing chunk.
+    editor->setPlainText(QString());
+    QTest::keyClick(editor, Qt::Key_ParenLeft);
+    QTest::keyClick(editor, Qt::Key_ParenRight); // skip: caret motion only
+    QTest::keyClick(editor, Qt::Key_X);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("()x"));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QString());
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+}
+
+void TestCodeEditor::autoCloseWrapsSelection()
+{
+    // Open the selected text, caret ends up after the close, selection gone.
+    editor->setPlainText(QStringLiteral("hello"));
+    editor->selectAll();
+    QTest::keyClick(editor, Qt::Key_ParenLeft);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("(hello)"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 7}));
+    QVERIFY(!editor->hasSelection());
+
+    // Quote wrap IGNORES the word-boundary guard (VS Code: the guard only
+    // guards bare-caret pairing, never a deliberate wrap). One bracketed
+    // undo step brings the selection back whole.
+    editor->setPlainText(QStringLiteral("xhello"));
+    editor->setPosition({0, 1});
+    QTest::keyClick(editor, Qt::Key_End, Qt::ShiftModifier); // select "hello"
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("hello"));
+    QTest::keyClick(editor, Qt::Key_QuoteDbl);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x\"hello\""));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 8}));
+    QVERIFY(!editor->hasSelection());
+    QVERIFY(editor->canUndo());
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("xhello"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 6}));
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("hello"));
+
+    // Multi-line selection wrap: the payload spans lines, the caret parks
+    // after the close on the final line.
+    editor->setPlainText(QStringLiteral("a\nb"));
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_Down, Qt::ShiftModifier);
+    QTest::keyClick(editor, Qt::Key_Right, Qt::ShiftModifier); // select "a\nb"
+    QTest::keyClick(editor, Qt::Key_BraceLeft);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("{a\nb}"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 2}));
+}
+
+void TestCodeEditor::autoCloseQuotesRespectWordBoundary()
+{
+    // The apostrophe case: a quote typed right after word ink is prose,
+    // not a pair opener — it stays a single plain char.
+    editor->setPlainText(QStringLiteral("don"));
+    editor->setPosition({0, 3}); // EOL, right after word ink
+    QTest::keyClick(editor, Qt::Key_Apostrophe);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("don'"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4}));
+
+    // Word ink on the RIGHT of a bare caret guards too.
+    editor->setPlainText(QStringLiteral("t"));
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_Apostrophe);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("'t"));
+
+    // '_' counts as wordish (identifier context).
+    editor->setPlainText(QStringLiteral("a_1"));
+    editor->setPosition({0, 3});
+    QTest::keyClick(editor, Qt::Key_QuoteDbl);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a_1\""));
+
+    // Neutral context pairs normally — the guard is contextual, not global.
+    editor->setPlainText(QString());
+    QTest::keyClick(editor, Qt::Key_QuoteDbl);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("\"\""));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+
+    // Brackets never guard: word context is irrelevant for them.
+    editor->setPlainText(QStringLiteral("foo"));
+    editor->setPosition({0, 3});
+    QTest::keyClick(editor, Qt::Key_ParenLeft);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("foo()"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4}));
+}
+
+void TestCodeEditor::autoCloseSkipStaysTextualAndClosersPlain()
+{
+    // Skip only hops the caret: the model never sees an edit.
+    editor->setPlainText(QStringLiteral("[]"));
+    editor->setPosition({0, 1});
+    QTest::keyClick(editor, Qt::Key_BracketRight);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("[]"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+
+    // A closer typed where its char does NOT sit at the caret is ordinary
+    // typing (the full pair never "resonates" against unrelated ink).
+    editor->setPlainText(QStringLiteral("ab"));
+    editor->setPosition({0, 1});
+    QTest::keyClick(editor, Qt::Key_ParenRight);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a)b"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+
+    // Closer over a selection: plain replace — Skip needs no selection.
+    editor->setPlainText(QStringLiteral("ab"));
+    editor->selectAll();
+    QTest::keyClick(editor, Qt::Key_BracketRight);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("]"));
+
+    // At EOL nothing sits at the caret (the '\n'/EOF probe never matches),
+    // so right after an empty pair the closer types for real.
+    editor->setPlainText(QStringLiteral("()"));
+    editor->setPosition({0, 2});
+    QTest::keyClick(editor, Qt::Key_ParenRight);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("())"));
+}
+
+void TestCodeEditor::autoCloseFansOutMixedSlotsAsOneUndoStep()
+{
+    // Mixed slots ride ONE bracketed fan-out group. altClick promotes the
+    // clicked slot to primary (D1), so primary identity follows the click.
+    editor->setPlainText(QStringLiteral(")ab"));
+    editor->setPosition({0, 0});
+    altClick(editor, 0, 3); // primary {0,3} (Plain), extra {0,0} (Skip)
+    QTest::keyClick(editor, Qt::Key_ParenRight);
+    QCOMPARE(editor->toPlainText(), QStringLiteral(")ab)"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4}));
+    QCOMPARE(editor->additionalCarets(),
+             (QVector<qmn::view::TextPosition>{{0, 1}})); // the Skip slot
+                                                          // parked past its
+                                                          // re-inserted closer
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral(")ab")); // ONE step for
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3})); // the whole batch
+    QCOMPARE(editor->additionalCarets(), (QVector<qmn::view::TextPosition>{{0, 0}}));
+
+    // All slots Pair: still one bracketed group per press (D1 typing rule).
+    editor->setPlainText(QStringLiteral("xy"));
+    editor->setPosition({0, 0});
+    altClick(editor, 0, 2);
+    QTest::keyClick(editor, Qt::Key_ParenLeft);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("()xy()"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 5})); // inside
+                                                                   // the pair
+                                                                   // it opened
+    QCOMPARE(editor->additionalCarets(), (QVector<qmn::view::TextPosition>{{0, 1}}));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("xy"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+    QCOMPARE(editor->additionalCarets(), (QVector<qmn::view::TextPosition>{{0, 0}}));
+
+    // All-Skip is pure motion: no text, no undo entry, no chain freeze —
+    // the next Ctrl+Z still pops the earlier Pair group.
+    editor->setPlainText(QStringLiteral("()\n()"));
+    editor->setPosition({0, 1});
+    altClick(editor, 1, 1);
+    QTest::keyClick(editor, Qt::Key_ParenLeft); // both slots bare carets:
+    QCOMPARE(editor->toPlainText(), QStringLiteral("(())\n(())")); // Pair fan-out
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 2}));
+    QCOMPARE(editor->additionalCarets(), (QVector<qmn::view::TextPosition>{{0, 2}}));
+    QTest::keyClick(editor, Qt::Key_ParenRight); // both now face a ')': all-Skip
+    QCOMPARE(editor->toPlainText(), QStringLiteral("(())\n(())"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 3}));
+    QCOMPARE(editor->additionalCarets(), (QVector<qmn::view::TextPosition>{{0, 3}}));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier); // pops the Pair
+    QCOMPARE(editor->toPlainText(), QStringLiteral("()\n()")); // group only
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 1}));
+    QCOMPARE(editor->additionalCarets(), (QVector<qmn::view::TextPosition>{{0, 1}}));
+
+    // All-Plain bails out to the ordinary typing fan-out (the guard fired
+    // on both slots: wordish char before every caret).
+    editor->setPlainText(QStringLiteral("a\nb"));
+    editor->setPosition({0, 1});
+    altClick(editor, 1, 1);
+    QTest::keyClick(editor, Qt::Key_Apostrophe);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a'\nb'"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 2}));
+    QCOMPARE(editor->additionalCarets(), (QVector<qmn::view::TextPosition>{{0, 2}}));
+}
+
+void TestCodeEditor::longLineRulerMapsToColumnAndRidesHScroll()
+{
+    // Pixel-differential (no vision): the ruler is exactly ONE lit column at
+    // contentLeft + qRound(col*cw) - hScroll, full height, and nothing else
+    // in the frame changes. Pin the current-line wash off so the backdrop
+    // stays uniform Base.
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Off);
+    QCOMPARE(editor->longLineRulerColumn(), 0); // off by default
+    editor->setLongLineRulerColumn(-7);
+    QCOMPARE(editor->longLineRulerColumn(), 0); // negatives clamp to off
+
+    const double cw = editor->cellWidth();
+    const int x0 = editor->contentLeft();
+    const int h = editor->height();
+    editor->setPlainText(QStringLiteral("ab"));
+    editor->setPosition({0, 0}); // caret col 0, far from the probe column
+    const QImage base = editor->grab().toImage();
+
+    auto diffAt = [h](const QImage& a, const QImage& b, int x) {
+        int n = 0;
+        for (int y = 0; y < h; ++y)
+            if (a.pixelColor(x, y) != b.pixelColor(x, y))
+                ++n;
+        return n;
+    };
+    auto totalDiff = [w = editor->width(), h](const QImage& a, const QImage& b) {
+        int n = 0;
+        for (int y = 0; y < h; ++y)
+            for (int x = 0; x < w; ++x)
+                if (a.pixelColor(x, y) != b.pixelColor(x, y))
+                    ++n;
+        return n;
+    };
+
+    editor->setLongLineRulerColumn(10);
+    QCOMPARE(editor->longLineRulerColumn(), 10);
+    const QImage lit = editor->grab().toImage();
+    const int want = x0 + qRound(10 * cw);
+    QVERIFY(diffAt(base, lit, want) > 5); // lit column exists
+    for (int d = 1; d <= 3; ++d) {        // no AA bleed into neighbours
+        QCOMPARE(diffAt(base, lit, want - d), 0);
+        QCOMPARE(diffAt(base, lit, want + d), 0);
+    }
+    QCOMPARE(totalDiff(base, lit), diffAt(base, lit, want)); // exactly one column
+
+    // Off-screen far right: clipped away, frame stays pixel-identical.
+    editor->setLongLineRulerColumn(100000);
+    QCOMPARE(editor->longLineRulerColumn(), 100000); // setter does not clamp up
+    QCOMPARE(totalDiff(base, editor->grab().toImage()), 0);
+
+    // Rides horizontal scroll: the guide shifts left by exactly the offset.
+    editor->setLongLineRulerColumn(0);
+    editor->setPlainText(QString(200, QLatin1Char(' '))); // wide, all blank
+    editor->setPosition({0, 0});
+    editor->setHorizontalScrollOffset(37);
+    QCOMPARE(editor->horizontalScrollOffset(), 37);
+    const QImage baseH = editor->grab().toImage();
+    editor->setLongLineRulerColumn(20);
+    const QImage litH = editor->grab().toImage();
+    const int wantH = x0 + qRound(20 * cw) - 37;
+    QVERIFY(diffAt(baseH, litH, wantH) > 5);
+    QCOMPARE(diffAt(baseH, litH, x0 + qRound(20 * cw)), 0); // unscrolled x is dead
+    editor->setHorizontalScrollOffset(0);
+    editor->setLongLineRulerColumn(0);
+}
+
+void TestCodeEditor::currentLineModeWashFrameAndDelegates()
+{
+    // The M18 enum replaces the old bool; the default is the ON wash.
+    // Pixel-differential checks: the wash covers exactly one line band in
+    // exact Text-ink@30-over-Base blend; the Frame mode adds exactly the
+    // band outline in Text@90-over-wash. Wash on, caret line empty -> the
+    // band interior is pure blend (the caret block cancels between grabs).
+    QCOMPARE(editor->currentLineMode(), CodeEditor::CurrentLineMode::Background);
+    QVERIFY(editor->currentLineHighlight()); // the bool delegate reads ON
+
+    editor->setPlainText(QStringLiteral("abc\n"));
+    editor->setPosition({1, 0});
+    const int pad = editor->padding();
+    const int lh = editor->lineHeight();
+    const int bandTop = pad + lh; // caret line 1, no v-scroll, no folds
+    const int xL = editor->contentLeft();
+    const int xR = editor->width() - editor->overviewRulerWidth() - 3;
+    const int h = editor->height();
+    const QColor baseC = editor->palette().color(QPalette::Base);
+    const QColor ink = editor->palette().color(QPalette::Text);
+    auto blendOver = [&](const QColor& under, const QColor& over, int a) {
+        const qreal f = a / 255.0;
+        return QColor(qRound(under.red() + f * (over.red() - under.red())),
+                      qRound(under.green() + f * (over.green() - under.green())),
+                      qRound(under.blue() + f * (over.blue() - under.blue())));
+    };
+
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Off);
+    const QImage off = editor->grab().toImage();
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Background);
+    const QImage bg = editor->grab().toImage();
+
+    const QColor wash = blendOver(baseC, ink, 30);
+    auto washLike = [&](const QColor& c) {
+        return qAbs(c.red() - wash.red()) <= 4 && qAbs(c.green() - wash.green()) <= 4
+            && qAbs(c.blue() - wash.blue()) <= 4;
+    };
+    int changed = 0, inBand = 0, exact = 0, outside = 0;
+    for (int y = 0; y < h; ++y)
+        for (int x = xL; x < xR; ++x) {
+            if (off.pixelColor(x, y) == bg.pixelColor(x, y))
+                continue;
+            ++changed;
+            if (y >= bandTop && y < bandTop + lh) {
+                ++inBand;
+                if (washLike(bg.pixelColor(x, y)))
+                    ++exact;
+            } else {
+                ++outside;
+            }
+        }
+    QCOMPARE(outside, 0);   // the wash paints nothing outside its band
+    QVERIFY(inBand > 30);   // …and plenty of it (minus caret-column cancels)
+    QCOMPARE(exact, inBand); // every wash pixel is the exact Text@30 blend
+
+    // BackgroundFrame = Background + the band outline. Measured rows of
+    // Qt's cosmetic 1px outline of band.adjusted(0,0,-1,-1): bandTop and
+    // bandTop+lh-1; the vertical edges sit at widget x 0 / width-2, both
+    // outside the scanned window.
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::BackgroundFrame);
+    const QImage fr = editor->grab().toImage();
+    const QColor frameInk = blendOver(wash, ink, 90);
+    auto frameLike = [&](const QColor& c) {
+        return qAbs(c.red() - frameInk.red()) <= 4 && qAbs(c.green() - frameInk.green()) <= 4
+            && qAbs(c.blue() - frameInk.blue()) <= 4;
+    };
+    int frameChanged = 0, frameExact = 0, frameRows[2] = {0, 0}, strays = 0;
+    for (int y = 0; y < h; ++y)
+        for (int x = xL + 6; x < xR; ++x) { // xL+6: skip the caret block columns
+            if (bg.pixelColor(x, y) == fr.pixelColor(x, y))
+                continue;
+            ++frameChanged;
+            if (y == bandTop)
+                ++frameRows[0];
+            else if (y == bandTop + lh - 1)
+                ++frameRows[1];
+            else
+                ++strays;
+            if (frameLike(fr.pixelColor(x, y)))
+                ++frameExact;
+        }
+    QCOMPARE(strays, 0);       // outline rows only — no interior repaint
+    QVERIFY(frameRows[0] > 30 && frameRows[1] > 30);
+    QCOMPARE(frameChanged, frameRows[0] + frameRows[1]);
+    QCOMPARE(frameExact, frameChanged);
+
+    // Bool delegates round-trip over the enum in both directions.
+    editor->setCurrentLineHighlight(false);
+    QCOMPARE(editor->currentLineMode(), CodeEditor::CurrentLineMode::Off);
+    QVERIFY(!editor->currentLineHighlight());
+    editor->setCurrentLineHighlight(true);
+    QCOMPARE(editor->currentLineMode(), CodeEditor::CurrentLineMode::Background);
+    QVERIFY(editor->currentLineHighlight());
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::BackgroundFrame);
+    QVERIFY(editor->currentLineHighlight());
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Off);
+    QVERIFY(!editor->currentLineHighlight());
+}
+
 // --- M4 syntax highlighting (Phase D2) -------------------------------------
 
 namespace {
@@ -3848,11 +4238,16 @@ void TestCodeEditor::decorationsRoundTripUpdateRemove()
     QCOMPARE(editor->highlightedLinesStart(), -1);
     QCOMPARE(editor->highlightedLinesEnd(), -1);
 
-    // Current-line band defaults off (the set_theme pass picks the
-    // shipped default, D3 theme row).
-    QVERIFY(!editor->currentLineHighlight());
-    editor->setCurrentLineHighlight(true);
+    // Current-line band defaults ON since M18 (Background wash; the mode
+    // enum replaced the old bool, whose setter/getter are delegates).
     QVERIFY(editor->currentLineHighlight());
+    QCOMPARE(editor->currentLineMode() == CodeEditor::CurrentLineMode::Background, true);
+    editor->setCurrentLineHighlight(false);
+    QVERIFY(!editor->currentLineHighlight());
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::BackgroundFrame);
+    QVERIFY(editor->currentLineHighlight());
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Off);
+    QVERIFY(!editor->currentLineHighlight());
 
     // Paint smoke: every layer live in one frame (the state checks above
     // stay pixel-free; this only proves the composite paint path runs -
@@ -4910,6 +5305,10 @@ void TestCodeEditor::paintClusterWindowXOffsetProbe()
     // the windowed paint kept them unlit. The caret parks on line 0 so
     // line 1's band is caret-free for the zero-ink control.
     const double cw = editor->cellWidth();
+    // M18: the selection-blend / caret-ink halves of this probe compare
+    // against an exact Base backdrop; the current-line wash (ON by default
+    // since M18) would blend under them, so pin the wash off.
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Off);
     editor->setPlainText(QStringLiteral("ab\n") + QString(200, QLatin1Char(' '))
                         + QStringLiteral("QQ") + QString(200, QLatin1Char(' ')));
     editor->setPosition({0, 0});

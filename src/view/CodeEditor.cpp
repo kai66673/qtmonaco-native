@@ -1302,9 +1302,10 @@ bool CodeEditor::applyCaretsFanOut(const SlotEditFn& editFn)
 }
 
 void CodeEditor::moveCarets(const std::function<TextPosition(const CaretSlot&)>& targetFn,
-                            bool extend)
+                            bool extend, bool freezeChain)
 {
-    breakUndoChain(); // deliberate motion freezes any edit chain
+    if (freezeChain)
+        breakUndoChain(); // deliberate motion freezes any edit chain
 
     struct Ref {
         CaretSlot slot;
@@ -2592,6 +2593,178 @@ void CodeEditor::insertTextAtCaret(const QString& text, int caretTrim)
     reconcileUndoMarks(pre);
 }
 
+// --- M18 auto-close pairs ------------------------------------------------
+
+namespace {
+// VS Code parity pair set. Quotes are self-closing and word-guarded: the
+// guard is what keeps `don't`, `it's` and prose backticks from opening a
+// pair — brackets always pair.
+struct PairRule {
+    QChar open;
+    QChar close;
+    bool quote;
+};
+const PairRule kPairRules[] = {
+    { QLatin1Char('('), QLatin1Char(')'), false },
+    { QLatin1Char('['), QLatin1Char(']'), false },
+    { QLatin1Char('{'), QLatin1Char('}'), false },
+    { QLatin1Char('"'), QLatin1Char('"'), true },
+    { QLatin1Char('\''), QLatin1Char('\''), true },
+    { QLatin1Char('`'), QLatin1Char('`'), true },
+};
+
+// True when line[col-1..col] straddles an EMPTY pair: the caret sits
+// between open and close, so one backspace removes BOTH sides.
+bool pairAroundCol(const QString& line, int col)
+{
+    if (col <= 0 || col >= static_cast<int>(line.size()))
+        return false;
+    for (const PairRule& r : kPairRules)
+        if (line[col - 1] == r.open && line[col] == r.close)
+            return true;
+    return false;
+}
+} // namespace
+
+// Per-slot decisions for one typed pair char (public contract on the hpp
+// declaration): Skip FIRST — the closer already sits at an unselected
+// caret, so jump over it instead of typing a second one. Then the quote
+// guard, bare caret only: a wordish char touching either side makes the
+// quote Plain (the apostrophe case); selections ALWAYS wrap (VS Code).
+// Then Wrap over a selection, Pair at a bare caret. Plain slots either
+// send the whole press to the ordinary typing path (all-Plain) or take
+// just the char inside the mixed fan-out below.
+bool CodeEditor::handleAutoClosePair(QChar ch)
+{
+    const PairRule* openRule = nullptr;  // ch plays open in some rule
+    const PairRule* closeRule = nullptr; // ch plays close in some rule
+    for (const PairRule& r : kPairRules) { // quotes set BOTH
+        if (ch == r.open)
+            openRule = &r;
+        if (ch == r.close)
+            closeRule = &r;
+    }
+    if (!openRule && !closeRule)
+        return false; // not a pair char: the plain typing path owns the key
+
+    auto charAt = [this](int off) { // '\n' across EOL, QChar() past the doc
+        const QString t = buffer_.textRange(off, off + 1);
+        return t.isEmpty() ? QChar() : t[0];
+    };
+    auto isWordish = [](QChar c) {
+        return c.isLetterOrNumber() || c == QLatin1Char('_');
+    };
+
+    enum class Act { Plain, Pair, Wrap, Skip };
+    auto actFor = [&](const CaretSlot& s) {
+        if (closeRule && !s.hasSelection
+            && charAt(buffer_.offsetOf(s.caret.line, s.caret.col)) == closeRule->close)
+            return Act::Skip; // closer already at the caret: jump over it
+                              // (always mid-line: EOL/EOF chars never match)
+        if (!openRule)
+            return Act::Plain; // a bare closer: plain replace/insert like
+                               // every other key — closers never wrap
+        if (openRule->quote && !s.hasSelection) {
+            const int off = buffer_.offsetOf(s.caret.line, s.caret.col);
+            if (isWordish(off > 0 ? charAt(off - 1) : QChar())
+                || isWordish(charAt(off)))
+                return Act::Plain; // the apostrophe guard
+        }
+        return s.hasSelection ? Act::Wrap : Act::Pair;
+    };
+
+    if (!extraCarets_.isEmpty()) {
+        normalizeCarets(); // classify post-normalization (the fan-out below
+                           // normalizes again — the second pass is a no-op)
+        const QVector<CaretSlot> allSlots = allCarets();
+        int plainCount = 0, skipCount = 0;
+        for (const CaretSlot& s : allSlots) {
+            const Act a = actFor(s);
+            if (a == Act::Plain)
+                ++plainCount;
+            else if (a == Act::Skip)
+                ++skipCount;
+        }
+        if (plainCount == static_cast<int>(allSlots.size()))
+            return false; // every slot just wants the char: the ordinary
+                          // typing fan-out reproduces exactly that
+        if (skipCount == static_cast<int>(allSlots.size())) {
+            // every slot hops over its closer: pure caret motion — no model
+            // edit, hence no undo entry — and no chain freeze (this key is
+            // part of the typing flow, not a navigation beat)
+            moveCarets([](const CaretSlot& s) {
+                return TextPosition{s.caret.line, s.caret.col + 1};
+            }, false, false);
+            return true;
+        }
+        const UndoMark pre = captureEditMark();
+        applyCaretsFanOut([&](const CaretSlot& s, SlotEdit& ed) {
+            const int off = buffer_.offsetOf(s.caret.line, s.caret.col);
+            switch (actFor(s)) {
+            case Act::Skip:
+                // net-zero replace: the closer is removed and reinserted
+                // IDENTICAL, so the slot still rides this key's ONE
+                // bracketed group while parking its caret at the payload
+                // end — one past the closer. (Clash policy drops a leftward
+                // collision before anything can shift, like every edit.)
+                ed.start = off;
+                ed.end = off + 1;
+                ed.text = QString(1, ch);
+                return true;
+            case Act::Pair:
+                ed.start = off;
+                ed.end = off;
+                ed.text = QString(openRule->open) + openRule->close;
+                ed.caretTrim = 1; // caret BETWEEN the pair
+                return true;
+            case Act::Wrap: {
+                const auto [st, en] = selRangeOf(buffer_, s);
+                ed.start = st;
+                ed.end = en;
+                ed.text = QString(openRule->open) + buffer_.textRange(st, en)
+                          + openRule->close;
+                return true; // caret after the close (caretTrim stays 0)
+            }
+            case Act::Plain: // just the char, in the ordinary fan-out shape
+                if (s.hasSelection) {
+                    const auto [st, en] = selRangeOf(buffer_, s);
+                    ed.start = st;
+                    ed.end = en;
+                } else {
+                    ed.start = off;
+                    ed.end = off;
+                }
+                ed.text = QString(1, ch);
+                return true;
+            }
+            return false; // unreachable
+        });
+        reconcileUndoMarks(pre);
+        return true;
+    }
+
+    const CaretSlot single{caret_, anchor_, hasSelection_};
+    switch (actFor(single)) {
+    case Act::Plain:
+        return false; // let the ordinary typing path insert
+    case Act::Skip:
+        // pure caret hop: setCaret is motion-only — no edit, no undo entry,
+        // and it never touches the coalescing chain
+        setCaret(clampPos(TextPosition{caret_.line, caret_.col + 1}));
+        return true;
+    case Act::Pair:
+        insertTextAtCaret(QString(openRule->open) + openRule->close, 1);
+        return true;
+    case Act::Wrap: {
+        const auto [st, en] = selRangeOf(buffer_, single);
+        insertTextAtCaret(QString(openRule->open) + buffer_.textRange(st, en)
+                          + openRule->close, 0);
+        return true; // the selection-over single path brackets its group
+    }
+    }
+    return false;
+}
+
 void CodeEditor::backspace()
 {
     const UndoMark pre = captureEditMark(); // unbracketed: backspace runs
@@ -2607,6 +2780,15 @@ void CodeEditor::backspace()
             }
             if (s.caret.col > 0) {
                 const QString line = buffer_.lineText(s.caret.line);
+                if (pairAroundCol(line, s.caret.col)) {
+                    // M18 per-slot pair kill: caret between an empty pair,
+                    // both sides go in ONE delete; the slot's caret parks at
+                    // the former open side (default caretTrim 0).
+                    const int off = buffer_.offsetOf(s.caret.line, s.caret.col);
+                    ed.start = off - 1;
+                    ed.end = off + 1;
+                    return true; // empty text: pure delete
+                }
                 const int start = prevGraphemeCol(line, s.caret.col);
                 const int end = isGraphemeBoundary(line, s.caret.col)
                     ? s.caret.col : nextGraphemeCol(line, s.caret.col);
@@ -2627,18 +2809,28 @@ void CodeEditor::backspace()
     }
     if (!deleteSelection()) {
         if (caret_.col > 0) {
-            // Grapheme-cluster backspace (M2): deletes exactly the cluster
-            // before the caret. When the caret sits inside a cluster (possible
-            // after a programmatic setPlainText split one, or a mid-cluster
-            // mouse click) the WHOLE cluster goes, so orphan surrogate halves
-            // or dangling combining marks never accumulate.
             const QString line = buffer_.lineText(caret_.line);
-            const int start = prevGraphemeCol(line, caret_.col);
-            const int end = isGraphemeBoundary(line, caret_.col)
-                ? caret_.col : nextGraphemeCol(line, caret_.col);
-            buffer_.removeRange(buffer_.offsetOf(caret_.line, start),
-                                buffer_.offsetOf(caret_.line, end));
-            setCaret({caret_.line, start});
+            if (pairAroundCol(line, caret_.col)) {
+                // M18: caret between an empty pair — ONE backspace removes
+                // BOTH sides (the undo of a bare auto-close; pairs typed or
+                // pasted textually behave the same). Coalesces like every
+                // other unbracketed backspace press.
+                const int off = buffer_.offsetOf(caret_.line, caret_.col);
+                buffer_.removeRange(off - 1, off + 1);
+                setCaret({caret_.line, caret_.col - 1});
+            } else {
+                // Grapheme-cluster backspace (M2): deletes exactly the cluster
+                // before the caret. When the caret sits inside a cluster (possible
+                // after a programmatic setPlainText split one, or a mid-cluster
+                // mouse click) the WHOLE cluster goes, so orphan surrogate halves
+                // or dangling combining marks never accumulate.
+                const int start = prevGraphemeCol(line, caret_.col);
+                const int end = isGraphemeBoundary(line, caret_.col)
+                    ? caret_.col : nextGraphemeCol(line, caret_.col);
+                buffer_.removeRange(buffer_.offsetOf(caret_.line, start),
+                                    buffer_.offsetOf(caret_.line, end));
+                setCaret({caret_.line, start});
+            }
         } else if (caret_.line > 0) {
             const int prevLen = lineLength(caret_.line - 1);
             const int nlPos = buffer_.offsetOfLine(caret_.line) - 1;
@@ -2843,12 +3035,38 @@ void CodeEditor::paintEvent(QPaintEvent*)
             if (const int slot = visibleIndexOfModelLine(line); slot >= 0) // M13: hidden rows
                 p.fillRect(QRect(0, padding_ + slot * lh - vScroll_, width(), lh), band);
     }
-    if (currentLineHl_ && caret_.line >= first && caret_.line <= last
-        && visibleIndexOfModelLine(caret_.line) >= 0) {
+    if (currentLineMode_ != CurrentLineMode::Off && caret_.line >= first
+        && caret_.line <= last && visibleIndexOfModelLine(caret_.line) >= 0) {
+        const QRect band(0, padding_ + slotOfModelLine(caret_.line) * lh - vScroll_,
+                         width(), lh);
         QColor cur = palette().color(QPalette::Text);
-        cur.setAlpha(16); // subtle wash: lighter on dark, darker on light
-        p.fillRect(QRect(0, padding_ + slotOfModelLine(caret_.line) * lh - vScroll_, width(), lh),
-                   cur);
+        cur.setAlpha(30); // M18: wash strengthened (was 16) — the band must
+                          // read at a glance without competing with selections
+        p.fillRect(band, cur);
+        if (currentLineMode_ == CurrentLineMode::BackgroundFrame) {
+            QColor frame = palette().color(QPalette::Text);
+            frame.setAlpha(90);
+            const QPen oldPen = p.pen(); // restore: later layers set their own
+            p.setPen(QPen(frame));
+            p.drawRect(band.adjusted(0, 0, -1, -1));
+            p.setPen(oldPen);
+        }
+    }
+
+    // M18 long-line ruler: a 1px vertical guide at a fixed TEXT column,
+    // riding h-scroll (VS Code's editor.rulers). Chrome-independent by
+    // construction: the x only derives from contentLeft()/cellWidth_/
+    // hScroll_, and it is clipped to the text viewport — never over the
+    // gutter, never under the overview ruler. Ambient decoration: it
+    // changes no scroll range and no geometry cache key.
+    if (longLineRulerCol_ > 0) {
+        const int rx = contentLeft() + qRound(longLineRulerCol_ * cellWidth_)
+                       - hScroll_;
+        if (rx >= contentLeft() && rx < width() - overviewRulerWidth()) {
+            QColor guide = palette().color(QPalette::Text);
+            guide.setAlpha(40);
+            p.fillRect(QRect(rx, 0, 1, height()), guide);
+        }
     }
 
     // M6: match quads - all matches muted, current bright (they ride
@@ -3439,11 +3657,22 @@ void CodeEditor::clearHighlightedLines()
     update();
 }
 
-void CodeEditor::setCurrentLineHighlight(bool enabled)
+void CodeEditor::setCurrentLineMode(CurrentLineMode mode)
 {
-    if (enabled == currentLineHl_)
+    if (mode == currentLineMode_)
         return;
-    currentLineHl_ = enabled;
+    currentLineMode_ = mode;
+    update();
+}
+
+void CodeEditor::setLongLineRulerColumn(int column)
+{
+    const int col = std::max(0, column); // negatives mean "off", not "mirror"
+    if (col == longLineRulerCol_)
+        return;
+    longLineRulerCol_ = col;
+    // Ambient paint only: the guide rides the live metrics + hScroll, so
+    // neither scroll ranges nor the geometry cache have anything to redo.
     update();
 }
 
@@ -4623,6 +4852,13 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
 
     const QString text = event->text();
     if (!text.isEmpty() && text[0].isPrint()) {
+        // M18 auto-close pairs: single-char pair presses get claimed before
+        // ordinary typing; false means "nothing pair-shaped here", and the
+        // ordinary path then inserts exactly like before.
+        if (text.size() == 1 && handleAutoClosePair(text[0])) {
+            finish();
+            return;
+        }
         insertTextAtCaret(text);
         finish();
         return;

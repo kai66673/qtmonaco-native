@@ -414,6 +414,33 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   scaleFontForZoom(base, factor), adopts it as the new base and returns
   the factor to 1.0, so codeFont() never lies about what is drawn.
   Shiboken-clean (QFont/double only). 6 new slots (167/0/2).
+- **M18 auto-close pairs + long-line ruler + current line.** Typing one
+  of `()`/`[]`/`{}`/`""`/`''`/`` `` `` (VS Code parity) is claimed by
+  `handleAutoClosePair`: per slot it decides Skip > (quote guard) > Wrap >
+  Pair > Plain. Skip (closer already at an unselected caret) is pure
+  caret motion — no edit, no undo entry, and `moveCarets` grew a
+  `freezeChain` param precisely so the hop also leaves the coalescing
+  chain alone; a typed closer never wraps or pairs. The quote word-guard
+  (`isLetterOrNumber || '_'` touching either side) applies at a BARE
+  caret only — prose `don't` stays one char, wrap is never gated. Wrap
+  replaces the selection with open+sel+close, caret after the close, ONE
+  bracketed step (undo restores the selection whole). Multi-caret: all
+  Plain bails to the ordinary typing fan-out, all Skip is a single
+  motion pass, mixed rides ONE bracketed fan-out where Skip slots take a
+  net-zero replace (closer removed + reinserted identical) to park past
+  it — one Ctrl+Z for the whole batch. Backspace with the caret between
+  an empty pair removes BOTH sides (textual rule, `pairAroundCol` —
+  works on typed/pasted pairs too; single path coalesces, fan-out rides
+  the per-press group). `setLongLineRulerColumn(int)` (0=off default,
+  negatives clamp, getter verbatim) paints a 1px Text@40 guide at
+  `contentLeft + qRound(col*cellWidth) - hScroll`, full height, clipped
+  to the text viewport (never under gutter/overview-ruler chrome;
+  ambient — no geo-cache or scroll-range change). `CurrentLineMode
+  { Off, Background, BackgroundFrame }` (Q_ENUM) replaces the M5 bool:
+  default `Background`, wash ink Text@16→30, BackgroundFrame adds a
+  cosmetic Text@90 band outline; the old bool setter/getter survive as
+  one-line delegates. Shiboken-clean (bool/Q_ENUM/int only). 7 new
+  slots (174/0/2).
 
 ### Changed
 - The x anchor of all text geometry (caret, selection, painting, hit
