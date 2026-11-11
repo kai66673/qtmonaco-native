@@ -1,5 +1,6 @@
 #include "CodeEditor.hpp"
 
+#include "view/CodeEditorAccessible.hpp"
 #include "view/CodeEditorOptions.hpp"
 #include "view/HighlightEngine.hpp"
 
@@ -260,6 +261,11 @@ CodeEditor::CodeEditor(QWidget* parent)
     // ctor only stores the pointer, so the back-link cannot misfire.
     options_ = new CodeEditorOptions(this, this);
 
+    // M11: a drop-in of Chromium-Monaco must be accessible WITHOUT the app
+    // wiring anything, so the widget registers its QAccessible factory
+    // itself (idempotent: one static installFactory call per process).
+    CodeEditorAccessible::install();
+
     // M4: one core EditEvent per primitive mutation keeps the highlight
     // tree current (ts_tree_edit happens inside the engine; the reparse
     // itself waits for refreshIfNeeded() in paint, so a whole key press -
@@ -273,6 +279,49 @@ CodeEditor::CodeEditor(QWidget* parent)
         // M13: keep collapsed-fold indices aligned with the model (a
         // best-effort line-index sweep; fold STATE is not undoable in v1).
         shiftFoldStateForEdit(ev);
+        // M11: the edit half of the a11y event bus. The observer fires for
+        // EVERY primitive mutation (typing, paste, undo/redo replay and
+        // setPlainText's whole-doc op included), so one hook here covers
+        // the whole document side. isActive() is the cheap gate: with no
+        // AT bridge listening, the whole payload stays unconstructed.
+        // TextRemoved carries a POSITION only — the observer runs AFTER
+        // the mutation and the EditEvent frame has no removed-text payload
+        // (ATs re-read the document; see CodeEditorAccessible.hpp).
+        if (QAccessible::isActive()) {
+            if (ev.end > ev.start) {
+                QAccessibleTextRemoveEvent rem(this, ev.start, QString());
+                QAccessible::updateAccessibility(&rem);
+            }
+            if (!ev.inserted.isEmpty()) {
+                QAccessibleTextInsertEvent ins(this, ev.start, ev.inserted);
+                QAccessible::updateAccessibility(&ins);
+            }
+        }
+    });
+
+    // M11: the caret/selection half of the a11y event bus. cursorMoved and
+    // selectionChanged are the editor's own truth doors (every caret or
+    // selection change funnels through them), so the bridge events ride
+    // the exact same moments the paint does. Offsets: document frame (the
+    // TextInterface contract); the selection event puts the caret at the
+    // active end (the ctor's own convention).
+    connect(this, &CodeEditor::cursorMoved, this, [this](TextPosition) {
+        if (!QAccessible::isActive())
+            return;
+        QAccessibleTextCursorEvent ev(this,
+                                      buffer_.offsetOf(caret_.line, caret_.col));
+        QAccessible::updateAccessibility(&ev);
+    });
+    connect(this, &CodeEditor::selectionChanged, this, [this]() {
+        if (!QAccessible::isActive())
+            return;
+        // NOTE the explicit ints: std::minmax over two call RESULTS yields
+        // a pair of dangling references (temporaries die with the statement).
+        const int caretOff = buffer_.offsetOf(caret_.line, caret_.col);
+        const int anchorOff = buffer_.offsetOf(anchor_.line, anchor_.col);
+        QAccessibleTextSelectionEvent ev(this, std::min(caretOff, anchorOff),
+                                         std::max(caretOff, anchorOff));
+        QAccessible::updateAccessibility(&ev);
     });
 
     font_ = QFontDatabase::systemFont(QFontDatabase::FixedFont);

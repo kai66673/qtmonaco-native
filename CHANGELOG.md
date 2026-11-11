@@ -473,6 +473,62 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   emit), clamped values are notified as-applied. No Q_PROPERTY
   (moc/Shiboken discipline: plain methods + Qt6 signals; the Q_ENUM
   knobs ride QSignalSpy metatypes). 3 new slots (177/0/2).
+- **M11 accessibility bridge (QAccessible).** `CodeEditorAccessible`
+  (view layer) makes the editor legible to assistive technologies: a
+  `QAccessibleWidget` + `QAccessibleTextInterface` + `QAccessible-
+  EditableTextInterface` with role EditableText, Name "code editor"
+  (a widget property), Value = the whole document (Qt's multiline-
+  editor convention) and state {selectableText, multiLine, editable}
+  — the M19 lock flips the state to {readOnly, !editable} through the
+  options door while the programmatic Value WRITE door keeps working
+  (same split as M19). Registration is automatic and needs no app
+  wiring: the CodeEditor ctor calls an idempotent `install()` that
+  registers one factory keyed on `CodeEditor::staticMetaObject
+  .className()` — NOT a hand-spelled "CodeEditor": Q_OBJECT in a
+  namespace makes className() QUALIFIED, and the metaObject chain
+  means subclasses hit the same entry. Offsets are the RAW document
+  frame: 0-based UTF-16 code units INCLUDING the '\n' separators
+  (exactly TextBuffer's own frame — `text(from,to)` is `textRange`
+  verbatim, clamps and all), no line-number/offset translation layer.
+  Boundaries are native over the line model (never materialize the
+  whole document): Char/Line/Paragraph native; Line/Paragraph spans
+  INCLUDE the trailing '\n' and the before-frame is the Qt default's
+  EXACT semantics (line-by-line verified against 6.10's
+  textLineBoundary helper: the span terminated by the LAST '\n'
+  strictly before the offset; offset ON a '\n' of line 0 fails);
+  Word is LINE-LOCAL (letter/number + '_' runs; a '\n' ends the hunt
+  — deliberate Gate-1 simplification, documented in the header);
+  NoBoundary yields the whole prefix/suffix/document (the Qt default
+  fails NoBoundary-before — our friendlier choice, documented);
+  Sentence delegates to the Qt base (rare for code, pays the
+  whole-doc detour once). The -1 (document end) / -2 (cursor) offset
+  conventions and the failure frame ("" with *start=*end=-1) follow
+  Qt. Selection is the ONE primary selection (count 0/1): extra
+  carets stay AT-invisible (Gate-1), setSelection/addSelection drive
+  the primary (reversed ends sort, caret rides endOffset),
+  selection(idx!=0) answers the -1/-1 frame. Geometry rides the M13
+  view map: characterRect is the GLOBAL rect of the cell (fold-aware
+  y through visibleIndexOfModelLine, x through xForCol; EOL/'\n'
+  cells clamp to 1px wide), offsetAtPoint is its inverse
+  (mapFromGlobal + positionAt), scrollToSubstring is the ensureCaret-
+  Visible flush math WITHOUT moving the caret, attributes() returns
+  the empty role map with the line's span sans '\n' (Gate-1: no
+  syntax roles across the a11y boundary yet). The editable interface
+  routes through the editor's own caret doors: insert/replace/delete
+  honor the M19 readOnly refusal, ride the undo brackets (Ctrl+Z
+  undoes an AT edit as one step) and move the PRIMARY caret (single
+  documented deviation for multi-caret states). Live events: cursor-
+  Moved/selectionChanged re-emit as TextCursor/TextSelection events,
+  the core EditEvent observer re-emits TextInsertEvent and
+  TextRemoveEvent — the Remove payload is POSITION only, no text
+  (deliberate: the removed text can be MBs; AT queries what it needs)
+  — all gated on `QAccessible::isActive()` so inactive apps pay zero
+  per-edit cost. Event DELIVERY is not observable offscreen, so the
+  4 new slots assert the state/query contracts (interface identity
+  through the QAccessible cache, readOnly mirror, offset/caret/
+  selection round-trips, boundary frames incl. every fail case,
+  char-rect/point-hit round trip, scrollToSubstring flush math +
+  caret-never-moves); 181/0/2.
 
 ### Changed
 - The x anchor of all text geometry (caret, selection, painting, hit

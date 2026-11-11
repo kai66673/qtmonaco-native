@@ -10,6 +10,7 @@
 
 #include <QtTest>
 
+#include <QAccessible>
 #include <QClipboard>
 #include <QContextMenuEvent>
 #include <QDragEnterEvent>
@@ -182,6 +183,12 @@ private slots:
     void optionsMirrorsKnobsAndNotifies();
     void autoCloseToggleOnOptions();
     void readOnlyBlocksUserEdits();
+
+    // Accessibility bridge (M11).
+    void accessibleInterfaceMirrorsRoleStateAndText();
+    void accessibleTextOffsetsMapDocumentAndDriveCaret();
+    void accessibleBoundariesFollowTheLineModel();
+    void accessibleCharRectAndPointHitRoundTrip();
 
     // Multiple carets (Phase D1).
     void altClickAddsCaretsInDocOrder();
@@ -3925,6 +3932,293 @@ void TestCodeEditor::readOnlyBlocksUserEdits()
     QCOMPARE(editor->toPlainText(), QStringLiteral("replace"));
     QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
     QCOMPARE(editor->toPlainText(), QStringLiteral("replaced"));
+}
+
+// --- M11 accessibility bridge (QAccessible) -------------------------------
+
+void TestCodeEditor::accessibleInterfaceMirrorsRoleStateAndText()
+{
+    editor->setPlainText(QStringLiteral("alpha\nbeta"));
+
+    QAccessibleInterface* iface = QAccessible::queryAccessibleInterface(editor);
+    QVERIFY(iface); // the CodeEditor ctor installed the factory: no app wiring
+    QVERIFY(iface->role() == QAccessible::EditableText);
+    QVERIFY(iface->textInterface());
+    QVERIFY(iface->editableTextInterface());
+
+    // Factory + cache: ONE interface object per editor (the second query
+    // hits QAccessible's cache, it is not a fresh allocation).
+    QCOMPARE(QAccessible::queryAccessibleInterface(editor), iface);
+
+    // Name rides the widget property set in the ctor; Value is the whole
+    // document (Qt's multiline-editor convention, the QAccessibleTextEdit
+    // model).
+    QCOMPARE(iface->text(QAccessible::Name), QStringLiteral("code editor"));
+    QCOMPARE(iface->text(QAccessible::Value), editor->toPlainText());
+
+    // The state flags that make a screen reader treat the widget as an
+    // editable multiline text area.
+    QAccessible::State st = iface->state();
+    QVERIFY(st.selectableText);
+    QVERIFY(st.multiLine);
+    QVERIFY(st.editable);
+    QVERIFY(!st.readOnly);
+
+    // The M19 lock reaches the state through the options door…
+    editor->options()->setReadOnly(true);
+    st = iface->state();
+    QVERIFY(st.readOnly);
+    QVERIFY(!st.editable);
+
+    // …while the Value WRITE door (the programmatic setPlainText contract
+    // the M19 suite froze) survives the lock.
+    iface->setText(QAccessible::Value, QStringLiteral("gamma"));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("gamma"));
+    editor->options()->setReadOnly(false);
+}
+
+void TestCodeEditor::accessibleTextOffsetsMapDocumentAndDriveCaret()
+{
+    const QString doc = QStringLiteral("abc\nde\nfghi"); // 11 units, LFs at 3, 6
+    editor->setPlainText(doc);
+    QAccessibleInterface* iface = QAccessible::queryAccessibleInterface(editor);
+    QAccessibleTextInterface* ti = iface->textInterface();
+    QAccessibleEditableTextInterface* et = iface->editableTextInterface();
+    QVERIFY(ti);
+    QVERIFY(et);
+
+    QCOMPARE(ti->characterCount(), 11);
+    // The read door IS TextBuffer::textRange verbatim (document frame with
+    // the '\n' separators; core clamps both ends).
+    QCOMPARE(ti->text(1, 4), QStringLiteral("bc\n"));
+    QCOMPARE(ti->text(-5, 100), doc);
+
+    // Caret: offsets resolve through lineColAt — offset 3 sits ON the '\n'
+    // after "abc", and the buffer maps that position to {0, 3} (BEFORE the
+    // separator, the core convention surfacing unchanged here); offset 4 is
+    // then line 1's start.
+    ti->setCursorPosition(7);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 0}));
+    QCOMPARE(ti->cursorPosition(), 7);
+    ti->setCursorPosition(3);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+    ti->setCursorPosition(4);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0}));
+    ti->setCursorPosition(999); // clamped to the document end
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 4}));
+    ti->setCursorPosition(-7); // and to the beginning (no -1 magic here:
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0})); // that
+    // -1/-2 convention belongs to the boundary queries, test 3 proves it.
+
+    int a = -9, b = -9;
+    ti->setSelection(0, 1, 4);
+    QCOMPARE(ti->selectionCount(), 1); // Gate-1: the ONE primary selection
+    ti->selection(0, &a, &b);
+    QCOMPARE(a, 1);
+    QCOMPARE(b, 4);
+    QCOMPARE(editor->selectedText(), QStringLiteral("bc\n"));
+    QCOMPARE(ti->cursorPosition(), 4); // endOffset is the ACTIVE end
+    ti->selection(1, &a, &b); // index 1 does not exist (extras are AT-invisible)
+    QCOMPARE(a, -1);
+    QCOMPARE(b, -1);
+
+    ti->setSelection(0, 9, 2); // reversed ends sort; caret rides endOffset
+    ti->selection(0, &a, &b);
+    QCOMPARE(a, 2);
+    QCOMPARE(b, 9);
+    QCOMPARE(ti->cursorPosition(), 9);
+
+    ti->addSelection(6, 8); // add == set(0,…) here (no per-slot AT semantics)
+    ti->selection(0, &a, &b);
+    QCOMPARE(a, 6);
+    QCOMPARE(b, 8);
+    ti->removeSelection(0);
+    QCOMPARE(ti->selectionCount(), 0);
+    QVERIFY(!editor->hasSelection());
+    ti->setSelection(3, 0, 4); // idx != 0: ignored, never a second selection
+    QCOMPARE(ti->selectionCount(), 0);
+
+    // Editable doors route through the editor's caret doors: the caret
+    // travels to every edit, undo stays intact, cross-line works.
+    ti->setCursorPosition(0);
+    et->insertText(0, QStringLiteral("X"));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Xabc\nde\nfghi"));
+    QCOMPARE(ti->cursorPosition(), 1);
+    et->replaceText(2, 5, QStringLiteral("Y")); // "bc\n" -> "Y" (spans a line)
+    QCOMPARE(editor->toPlainText(), QStringLiteral("XaYde\nfghi"));
+    et->deleteText(1, 3); // "aY"
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Xde\nfghi"));
+    QVERIFY(editor->canUndo()); // rode the editor's own undo doors
+
+    // readOnly turns every editable door into a no-op (the M19 user-edit
+    // contract)…
+    editor->options()->setReadOnly(true);
+    et->insertText(0, QStringLiteral("NO"));
+    et->deleteText(0, 1);
+    et->replaceText(0, 1, QStringLiteral("Z"));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Xde\nfghi"));
+    // …while caret/selection stay alive (navigation is not an edit).
+    ti->setSelection(0, 0, 2);
+    QCOMPARE(ti->selectionCount(), 1);
+    ti->setCursorPosition(0);
+    QCOMPARE(ti->cursorPosition(), 0);
+    editor->options()->setReadOnly(false);
+
+    // Read-side freshness: the interface caches nothing — plain typing is
+    // immediately visible in every query.
+    ti->setCursorPosition(0);
+    const int before = ti->characterCount();
+    QTest::keyClick(editor, Qt::Key_Z);
+    QCOMPARE(ti->characterCount(), before + 1);
+    QCOMPARE(ti->text(ti->cursorPosition() - 1, ti->cursorPosition()),
+             QStringLiteral("z")); // (keyClick lands lowercase)
+}
+
+void TestCodeEditor::accessibleBoundariesFollowTheLineModel()
+{
+    editor->setPlainText(QStringLiteral("hello world\nsecond line")); // 23 units
+    QAccessibleTextInterface* ti =
+        QAccessible::queryAccessibleInterface(editor)->textInterface();
+    QCOMPARE(ti->characterCount(), 23);
+    editor->setPosition({1, 3}); // offset 15 is the cursor for the -2 probes
+
+    enum Which { Before, After, At };
+    auto call = [ti](Which w, int off, QAccessible::TextBoundaryType bt,
+                     int* s, int* e) -> QString {
+        switch (w) {
+        case Before: return ti->textBeforeOffset(off, bt, s, e);
+        case After:  return ti->textAfterOffset(off, bt, s, e);
+        case At:     return ti->textAtOffset(off, bt, s, e);
+        }
+        return QString();
+    };
+    auto item = [call](Which w, int off, QAccessible::TextBoundaryType bt,
+                       const QString& want, int ws, int we) {
+        int s = -9, e = -9;
+        QCOMPARE(call(w, off, bt, &s, &e), want);
+        QCOMPARE(s, ws);
+        QCOMPARE(e, we);
+    };
+    auto fail = [call](Which w, int off, QAccessible::TextBoundaryType bt) {
+        int s = 9, e = 9;
+        QVERIFY(call(w, off, bt, &s, &e).isEmpty());
+        QCOMPARE(s, -1); // Qt's failure frame
+        QCOMPARE(e, -1);
+    };
+
+    // Char: native, single code units. -1 == the document end convention.
+    item(Before, 1, QAccessible::CharBoundary, QStringLiteral("h"), 0, 1);
+    fail(Before, 0, QAccessible::CharBoundary);
+    item(Before, -1, QAccessible::CharBoundary, QStringLiteral("e"), 22, 23);
+    item(After, 22, QAccessible::CharBoundary, QStringLiteral("e"), 22, 23);
+    fail(After, 23, QAccessible::CharBoundary);
+    item(At, 0, QAccessible::CharBoundary, QStringLiteral("h"), 0, 1);
+    item(At, 22, QAccessible::CharBoundary, QStringLiteral("e"), 22, 23);
+    fail(At, 23, QAccessible::CharBoundary); // past the last char: none
+
+    // Word: LINE-LOCAL runs (letter/number + '_'): before mid-word is the
+    // partial span ending AT the offset, before at a gap jumps to the whole
+    // previous word, at = the word straddling the offset.
+    item(Before, 4, QAccessible::WordBoundary, QStringLiteral("hell"), 0, 4);
+    item(Before, 5, QAccessible::WordBoundary, QStringLiteral("hello"), 0, 5);
+    item(Before, 6, QAccessible::WordBoundary, QStringLiteral("hello"), 0, 5);
+    item(Before, 22, QAccessible::WordBoundary, QStringLiteral("lin"), 19, 22);
+    item(Before, -2, QAccessible::WordBoundary, QStringLiteral("sec"), 12, 15);
+    fail(Before, 12, QAccessible::WordBoundary); // no word before line 1 start
+    item(After, 0, QAccessible::WordBoundary, QStringLiteral("hello"), 0, 5);
+    item(After, 4, QAccessible::WordBoundary, QStringLiteral("o"), 4, 5);
+    item(After, 5, QAccessible::WordBoundary, QStringLiteral("world"), 6, 11);
+    item(After, 18, QAccessible::WordBoundary, QStringLiteral("line"), 19, 23);
+    fail(After, 11, QAccessible::WordBoundary); // a '\n' ends the line-local hunt
+    item(At, 3, QAccessible::WordBoundary, QStringLiteral("hello"), 0, 5);
+    item(At, 0, QAccessible::WordBoundary, QStringLiteral("hello"), 0, 5);
+    item(At, 11, QAccessible::WordBoundary, QStringLiteral("world"), 6, 11); // the '\n' offset resolves to the line's last word
+    item(At, 18, QAccessible::WordBoundary, QStringLiteral("second"), 12, 18);
+    item(At, 22, QAccessible::WordBoundary, QStringLiteral("line"), 19, 23);
+
+    // Line: EXACTLY the Qt default frame, spans include the trailing '\n':
+    // before = the line terminated by the LAST '\n' strictly before the
+    // offset (so offset ON the '\n' fails for line 0, and offsets anywhere
+    // inside/after line 0's terminator yield line 0 — first-line fail);
+    // after skips to the NEXT line; at = the line containing the offset.
+    fail(Before, 5, QAccessible::LineBoundary); // nothing before line 0
+    fail(Before, 11, QAccessible::LineBoundary); // offset ON the '\n': no LF yet
+    item(Before, 12, QAccessible::LineBoundary, QStringLiteral("hello world\n"), 0, 12);
+    item(Before, 15, QAccessible::LineBoundary, QStringLiteral("hello world\n"), 0, 12);
+    item(Before, -1, QAccessible::LineBoundary, QStringLiteral("hello world\n"), 0, 12);
+    item(After, 5, QAccessible::LineBoundary, QStringLiteral("second line"), 12, 23);
+    item(After, 11, QAccessible::LineBoundary, QStringLiteral("second line"), 12, 23);
+    fail(After, 12, QAccessible::LineBoundary); // nothing after the last line
+    fail(After, 22, QAccessible::LineBoundary);
+    item(At, 5, QAccessible::LineBoundary, QStringLiteral("hello world\n"), 0, 12);
+    item(At, 11, QAccessible::LineBoundary, QStringLiteral("hello world\n"), 0, 12);
+    item(At, 12, QAccessible::LineBoundary, QStringLiteral("second line"), 12, 23);
+    // Paragraph == Line (one paragraph per line).
+    item(At, 5, QAccessible::ParagraphBoundary, QStringLiteral("hello world\n"), 0, 12);
+    item(Before, 15, QAccessible::ParagraphBoundary, QStringLiteral("hello world\n"), 0, 12);
+    item(After, 5, QAccessible::ParagraphBoundary, QStringLiteral("second line"), 12, 23);
+
+    // NoBoundary: the whole prefix / suffix / document.
+    item(Before, 5, QAccessible::NoBoundary, QStringLiteral("hello"), 0, 5);
+    item(After, 12, QAccessible::NoBoundary, QStringLiteral("second line"), 12, 23);
+    item(At, 7, QAccessible::NoBoundary, QStringLiteral("hello world\nsecond line"), 0, 23);
+
+    // attributes: empty role map (Gate-1), span = the line sans its '\n'.
+    int as = -9, ae = -9;
+    QVERIFY(ti->attributes(15, &as, &ae).isEmpty());
+    QCOMPARE(as, 12);
+    QCOMPARE(ae, 23);
+}
+
+void TestCodeEditor::accessibleCharRectAndPointHitRoundTrip()
+{
+    editor->setPlainText(QStringLiteral("0123456789\nabcdefghij"));
+    QAccessibleTextInterface* ti =
+        QAccessible::queryAccessibleInterface(editor)->textInterface();
+
+    const int lh = editor->lineHeight();
+    const double cw = editor->cellWidth();
+    // Offset 12 == line 1, col 1 ('b'): the rect must sit EXACTLY where the
+    // renderer puts that cell — the M13 slot map for y, xForCol for x —
+    // in the GLOBAL frame rect() uses.
+    const QPoint wantTopLeft = editor->mapToGlobal(
+        QPoint(int(std::floor(editor->xForCol(1, 1))),
+               editor->padding() + 1 * lh - editor->verticalScrollOffset()));
+    const QRect r = ti->characterRect(12);
+    QCOMPARE(r.topLeft(), wantTopLeft);
+    QCOMPARE(r.width(), qMax(1, int(std::ceil(cw)))); // EOL/'\n' cells stay 1px
+    QCOMPARE(r.height(), lh);
+
+    // offsetAtPoint is the inverse (mapFromGlobal + positionAt): a point
+    // just inside the cell maps back to the same offset…
+    QCOMPARE(ti->offsetAtPoint(r.topLeft() + QPoint(int(0.3 * cw), lh / 2)), 12);
+    // …and a probe left of the text (gutter) clamps to the line start,
+    // exactly like a click does.
+    QCOMPARE(ti->offsetAtPoint(editor->mapToGlobal(
+                 QPoint(2, editor->padding() + lh + lh / 2))), 12 - 1);
+
+    // scrollToSubstring over a far-below substring: the ensureCaretVisible
+    // math WITHOUT a caret move — minimal flush, the range's bottom edge
+    // flush against the viewport bottom (minus padding).
+    QStringList lines;
+    for (int i = 0; i < 100; ++i)
+        lines << (QStringLiteral("line") + QString::number(i));
+    const QString big = lines.join(QLatin1Char('\n'));
+    editor->setPlainText(big); // scroll + caret reset with the document
+    const qmn::view::TextPosition caretBefore = editor->position();
+    const int at = big.indexOf(QStringLiteral("line50"));
+    QVERIFY(at > 0);
+    QCOMPARE(editor->verticalScrollOffset(), 0);
+    ti->scrollToSubstring(at, at + 6);
+    const int slot = editor->visibleIndexOfModelLine(50);
+    QCOMPARE(slot, 50); // no folds: the M13 map is the identity
+    const int vs = editor->verticalScrollOffset();
+    QVERIFY(vs > 0);
+    QCOMPARE(vs, (slot + 1) * lh + editor->padding() - editor->height());
+    const int yTop = editor->padding() + slot * lh - vs;
+    QVERIFY(yTop >= 0);
+    QVERIFY(yTop + lh <= editor->height()); // fully visible, flush bottom
+    QCOMPARE(editor->position(), caretBefore); // the caret NEVER moved
 }
 
 // --- M4 syntax highlighting (Phase D2) -------------------------------------

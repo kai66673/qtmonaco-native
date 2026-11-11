@@ -37,6 +37,7 @@ namespace qmn::view {
 
 class HighlightEngine; // M4 private seam; defined in view/HighlightEngine.hpp
 class CodeEditorOptions; // M19 settings object; view/CodeEditorOptions.hpp
+class CodeEditorAccessible; // M11 a11y bridge; view/CodeEditorAccessible.hpp
 
 // 0-based text position. col is counted in UTF-16 code units.
 struct TextPosition {
@@ -781,6 +782,8 @@ private:
     void setReadOnly(bool readOnly);
     bool isReadOnly() const { return readOnly_; }
     friend class CodeEditorOptions;
+    friend class CodeEditorAccessible; // M11: the a11y bridge reads the live
+                                       // model/caret/geometry state directly
 
     void insertTextAtCaret(const QString& text, int caretTrim = 0);
     // M18 auto-close pairs: claim a printable press of one ()[]{}""''``

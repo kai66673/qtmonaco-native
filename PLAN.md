@@ -413,10 +413,25 @@ multi-caret machinery. Bundles (one commit each, tests per bundle):
   door, silent on same-value re-sets. Flat setters kept verbatim (they
   ARE the store); new knobs (autoCloseEnabled, readOnly) live only on
   options. Same DoD: 10 knobs + signals, Shiboken-clean, no Q_PROPERTY.
-- **M11 QAccessible (unchanged scope, last).** Full text interface over
-  the final frozen surface: role Text/EditableText, document line/caret
-  queries through the M13 view-map (visible vs model!), selection,
-  `QAccessibleTextCursorEvent/TextInsertEvent` on edits.
+- **M11 COMPLETE (2026-11-11): QAccessible bridge.** Full text interface
+  over the final frozen surface: role EditableText, document/caret/
+  selection queries through the M13 view map, characterRect/offsetAtPoint
+  geometry, editable-text methods, live TextCursor/TextSelection/
+  TextInsert/TextRemove events.
+  LANDED AS: all of the above plus documented contracts — offsets are
+  the RAW TextBuffer frame (UTF-16 code units incl. '\n', no trans-
+  lation layer); selection is the ONE primary (extra carets AT-in-
+  visible, Gate-1); Word boundaries are line-local ('\n' ends the
+  hunt); Line/Paragraph before-frame is the Qt default's EXACT frame
+  (verified against 6.10's textLineBoundary helper), NoBoundary-before
+  yields the prefix where Qt fails (friendlier, documented); Sentence
+  delegates to the Qt base; Remove events carry POSITION only (no MB
+  payloads); editable methods honor M19 readOnly and move the primary
+  caret; factory key taken from `staticMetaObject.className()` (Q_OBJECT
+  in a namespace = QUALIFIED name — a hand-spelled "CodeEditor" never
+  matches); events gated on `QAccessible::isActive()`; attributes()
+  empty (no syntax roles across the boundary until Gate 2). 4 new
+  slots (181/0/2).
 
 Order above = dependency order (options object LAST so the new knobs of
 M14–M18 land in it once; a11y LAST-LAST so it mirrors the frozen API).
