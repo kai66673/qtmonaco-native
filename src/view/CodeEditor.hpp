@@ -19,6 +19,14 @@
 #include <functional>
 #include <memory>
 
+// M16 seams, pointer-only in the API (the menu/DnD machinery lives in the .cpp).
+QT_FORWARD_DECLARE_CLASS(QMenu)
+QT_FORWARD_DECLARE_CLASS(QMimeData)
+QT_FORWARD_DECLARE_CLASS(QContextMenuEvent)
+QT_FORWARD_DECLARE_CLASS(QDragEnterEvent)
+QT_FORWARD_DECLARE_CLASS(QDragMoveEvent)
+QT_FORWARD_DECLARE_CLASS(QDropEvent)
+
 // Used by a private method signature only (the paint pass lives in the .cpp).
 QT_FORWARD_DECLARE_CLASS(QPainter)
 #include <utility>
@@ -575,6 +583,11 @@ protected:
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     void mouseMoveEvent(QMouseEvent* event) override;
     void mouseReleaseEvent(QMouseEvent* event) override;
+    // M16 context menu + text DnD.
+    void contextMenuEvent(QContextMenuEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dragMoveEvent(QDragMoveEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void focusInEvent(QFocusEvent* event) override;
@@ -706,6 +719,33 @@ private:
     // Commit the triple+-click whole-line span [lineSelAnchor_..lineSelEnd_].
     void applyLineSpan();
 
+    // --- M16 context menu + text DnD --------------------------------------
+    // Menu factory behind contextMenuEvent (split out as a test seam: the
+    // exec() inside contextMenuEvent would block an offscreen test run).
+    // Both sit under protected so the test subclass can reach the seam;
+    // the Python binding surface keeps them invisible (internal classes).
+protected:
+    QMenu* createContextMenu();
+    // Right-click caret rules: a click outside the selection re-places the
+    // caret first (Qt convention), one inside keeps the selection intact.
+    void prepareContextMenuAt(const QPoint& widgetPos);
+private:
+    // Drag-out of the live selection (armed by a press inside it, fired at
+    // startDragDistance): mime = plain text + our move marker; exec prefers
+    // Move, and a Move accepted elsewhere still owes the source-side delete.
+    void startSelectionDrag();
+    // True iff the mime carries our move marker AND it names THIS widget AND
+    // the marker's offsets are exactly the live primary selection (a marker
+    // from a sibling editor or a round-tripped external copy degrades to a
+    // text-only copy drop).
+    bool internalMoveSource(const QMimeData* mime, int& srcStart, int& srcEnd) const;
+    // Copy-drop insertion at an offset (not at the caret): one bracketed
+    // edit, caret at the inserted end, primary mirror like pasteText.
+    void insertAtDrop(const QString& text, int dropOff);
+    // M1 drag auto-scroll: past the viewport edges scroll and map the point
+    // back inside. Shared by mouseMoveEvent and (M16) dragMoveEvent.
+    QPoint edgeAutoScroll(QPoint pos);
+
     // Per-line glyph-engine layout cache. A laid-out QTextLine is the sole
     // authority for caret x, selection x and mouse hit-testing (measured on
     // Qt 6.12: emoji ZWJ families occupy ~1.8 cells, not their code-unit
@@ -776,6 +816,18 @@ private:
     int lineSelDir_ = 1;                       // repeat wraps: +1 down, -1 up
     qint64 lastDblMs_ = 0;                     // event timestamps, chaining window
     int lastDblLine_ = -1, lastDblX_ = 0;
+
+    // M16 DnD state. pressInSelection_ arms the drag gesture: a plain press
+    // strictly inside the live selection keeps the selection (no collapse),
+    // moves under startDragDistance are swallowed, and a release without
+    // drag collapses at the release point. dndSelfDragLive_ marks "inside
+    // our own QDrag::exec" (drop-side copy/move decisions); dndDropHandled_
+    // says the internal drop already performed the whole move, so the
+    // post-exec MoveAction branch must not delete the source again.
+    bool pressInSelection_ = false;
+    QPoint pressPos_;
+    bool dndSelfDragLive_ = false;
+    bool dndDropHandled_ = false;
     QString preedit_; // IME composition string, display-only: never in buffer_
     QScrollBar* vBar_ = nullptr;
     bool scrollbarSync_ = false;

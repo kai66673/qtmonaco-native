@@ -11,11 +11,18 @@
 #include <QtTest>
 
 #include <QClipboard>
+#include <QContextMenuEvent>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
 #include <QImage>
 #include <QInputMethodEvent>
 #include <QInputMethodQueryEvent>
 #include <QLineEdit>
+#include <QMenu>
+#include <QMimeData>
 #include <QPushButton>
+#include <QUrl>
 #include <QWheelEvent>
 
 #include "view/CodeEditor.hpp"
@@ -140,6 +147,17 @@ private slots:
     void wordDragExtendsByWholeWords();
     void ctrlDSelectsWordThenNextOccurrences();
     void ctrlDEdgeCases();
+
+    // Context menu + text DnD (M16).
+    void contextMenuPlacementKeepsOrMovesCaret();
+    void contextMenuChromeGuardsSkipMenu();
+    void contextMenuActionsMirrorChords();
+    void pressInsideSelectionHoldsForDrag();
+    void dragGestureOffscreenIsPayloadSafe();
+    void dropTextInsertsAtDropPoint();
+    void dropMoveMarkerMovesSelection();
+    void dropIgnoresForeignAndCopyVariants();
+    void dragMoveAutoscrolls();
 
     // Multiple carets (Phase D1).
     void altClickAddsCaretsInDocOrder();
@@ -1589,6 +1607,54 @@ void altDrag(CodeEditor* e, const QPoint& from, const QPoint& to)
     QTEST_ASSERT(QApplication::sendEvent(e, &release));
 }
 
+// --- M16 context-menu + DnD test plumbing ----------------------------------
+
+// Test-side twin of the private move-marker codec in CodeEditor.cpp.
+// CodeEditor has a single inheritance chain, so the widget address equals
+// the `this` a real drag would stamp.
+QByteArray moveMarkerFor(const CodeEditor* e, int startOff, int endOff)
+{
+    return QStringLiteral("%1:%2:%3")
+        .arg(quint64(reinterpret_cast<quintptr>(e)), 0, 16)
+        .arg(startOff)
+        .arg(endOff)
+        .toUtf8();
+}
+
+// Hand-built drag-protocol sends. Measured: offscreen QDrag::exec returns
+// synchronously (NoAction) and NEVER delivers a drop, so the drop side is
+// only reachable through synthetic events; sendEvent dispatches DragEnter/
+// DragMove/Drop straight into the widget overrides. Returns whether the
+// dragEnter stage was accepted (QEvent copies are not assignable).
+bool sendDropAt(CodeEditor* e, const QPoint& at, Qt::DropAction action, const QMimeData& md)
+{
+    QDragEnterEvent de(at, action, &md, Qt::LeftButton, Qt::NoModifier);
+    QTEST_ASSERT(QApplication::sendEvent(e, &de));
+    const bool entered = de.isAccepted();
+    QDropEvent dr(at, action, &md, Qt::LeftButton, Qt::NoModifier);
+    QTEST_ASSERT(QApplication::sendEvent(e, &dr));
+    return entered;
+}
+
+// Exposes the M16 protected menu seam (contextMenuEvent itself ends in
+// QMenu::exec, which would block an offscreen test forever - tests use the
+// prepare/factory split instead, and only ever send real ContextMenu events
+// at CHROME pixels, whose guards return before the exec).
+class MenuProbe : public CodeEditor {
+public:
+    using CodeEditor::createContextMenu;
+    using CodeEditor::prepareContextMenuAt;
+};
+
+QAction* menuAction(QMenu* menu, const QString& text)
+{
+    for (QAction* a : menu->actions()) {
+        if (!a->isSeparator() && a->text() == text)
+            return a;
+    }
+    return nullptr;
+}
+
 } // namespace
 
 void TestCodeEditor::altClickAddsCaretsInDocOrder()
@@ -2420,10 +2486,15 @@ void TestCodeEditor::multiClickLinesSelectWholeLinesAndGrow()
     QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
     QCOMPARE(editor->selectedText(), QStringLiteral("alpha\nbeta gamma\ngamma2"));
 
-    // A plain re-press breaks the chain and collapses to a bare caret...
+    // A plain re-press of a grown line selection ARMS the M16 press-hold
+    // (the selection survives the press for a possible text drag)...
     QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QVERIFY(editor->hasSelection());
+    // ...and the release without a drag finalizes the collapse: bare caret
+    // at the release point, chain broken.
+    QTest::mouseRelease(editor, Qt::LeftButton, Qt::NoModifier, p);
     QVERIFY(!editor->hasSelection());
-    // ...so the next double-click starts over on the word (not the line).
+    // So the next double-click starts over on the word (not the line).
     QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
     QCOMPARE(editor->selectedText(), QStringLiteral("beta"));
 }
@@ -2544,6 +2615,333 @@ void TestCodeEditor::ctrlDEdgeCases()
     QTest::keyClick(editor, Qt::Key_D, Qt::AltModifier);
     QVERIFY(!editor->hasSelection());
     QCOMPARE(editor->additionalCaretCount(), 0);
+}
+
+// --- context menu + text DnD (M16) ------------------------------------------
+
+void TestCodeEditor::contextMenuPlacementKeepsOrMovesCaret()
+{
+    MenuProbe probe;
+    probe.resize(600, 400);
+    probe.setPlainText(QStringLiteral("hello world"));
+    dragSelect(&probe, caretPixel(&probe, 0, 0), caretPixel(&probe, 0, 5)); // "hello"
+    QCOMPARE(probe.selectedText(), QStringLiteral("hello"));
+
+    // Right-click STRICTLY inside the live selection: the selection stands,
+    // the caret stays put (the menu then acts on it).
+    probe.prepareContextMenuAt(caretPixel(&probe, 0, 2));
+    QVERIFY(probe.hasSelection());
+    QCOMPARE(probe.selectedText(), QStringLiteral("hello"));
+    QCOMPARE(probe.position(), (qmn::view::TextPosition{0, 5}));
+
+    // Also AT the selection's left edge: the menu gate is INCLUSIVE of both
+    // ends (wider than the left-drag arm, which needs interior room).
+    probe.prepareContextMenuAt(caretPixel(&probe, 0, 0));
+    QVERIFY(probe.hasSelection());
+    QCOMPARE(probe.selectedText(), QStringLiteral("hello"));
+
+    // Outside the selection: the caret is re-placed first (Qt convention).
+    probe.prepareContextMenuAt(caretPixel(&probe, 0, 9));
+    QVERIFY(!probe.hasSelection());
+    QCOMPARE(probe.position(), (qmn::view::TextPosition{0, 9}));
+}
+
+void TestCodeEditor::contextMenuChromeGuardsSkipMenu()
+{
+    editor->setPlainText(QStringLiteral("hello world"));
+    editor->setPosition({0, 3});
+
+    // These are the ONLY real context events an offscreen test may send: the
+    // chrome guards return BEFORE QMenu::exec (which blocks forever here).
+    // Overview ruler strip: like the ruler press guard, no caret, no menu.
+    QPoint rulerPt(editor->width() - CodeEditor::kOverviewRulerWidth / 2,
+                   editor->padding() + editor->lineHeight() / 2);
+    QContextMenuEvent e1(QContextMenuEvent::Mouse, rulerPt, rulerPt);
+    QVERIFY(QApplication::sendEvent(editor, &e1));
+    QVERIFY(e1.isAccepted());
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3})); // unmoved
+    QVERIFY(editor->findChildren<QMenu*>().isEmpty());
+
+    // Fold zone at the gutter's right edge: same guard.
+    const int fz = editor->foldZoneWidth();
+    QVERIFY(fz > 0);
+    QPoint zonePt(editor->contentLeft() - fz / 2,
+                  editor->padding() + editor->lineHeight() / 2);
+    QContextMenuEvent e2(QContextMenuEvent::Mouse, zonePt, zonePt);
+    QVERIFY(QApplication::sendEvent(editor, &e2));
+    QVERIFY(e2.isAccepted());
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+    QVERIFY(editor->findChildren<QMenu*>().isEmpty());
+}
+
+void TestCodeEditor::contextMenuActionsMirrorChords()
+{
+    MenuProbe probe;
+    probe.resize(600, 400);
+    probe.setPlainText(QStringLiteral("abc\ndef"));
+    probe.setPosition({0, 0});
+
+    // init() left the clipboard empty: Paste gates on it, the rest stay
+    // ENABLED without a selection (they do the whole-line cut/copy the Ctrl
+    // chords already implement — M1b parity).
+    QMenu* menu = probe.createContextMenu();
+    QAction* cut = menuAction(menu, QStringLiteral("Cut"));
+    QAction* copy = menuAction(menu, QStringLiteral("Copy"));
+    QAction* paste = menuAction(menu, QStringLiteral("Paste"));
+    QAction* all = menuAction(menu, QStringLiteral("Select All"));
+    QVERIFY(cut && copy && paste && all);
+    QVERIFY(cut->isEnabled() && copy->isEnabled() && all->isEnabled());
+    QVERIFY(!paste->isEnabled());
+
+    cut->trigger(); // no selection: line cut of "abc\n" (Monaco semantics)
+    QCOMPARE(probe.toPlainText(), QStringLiteral("def"));
+    QCOMPARE(QApplication::clipboard()->text(QClipboard::Clipboard),
+             QStringLiteral("abc\n"));
+    delete menu;
+
+    // Fresh menu: Paste is now offered; triggering it re-inserts the cut line.
+    QMenu* menu2 = probe.createContextMenu();
+    // Re-fetch ALL actions from menu2: delete menu destroyed menu1's
+    // actions with it (QMenu owns them), so any stale QAction* would be a
+    // dangling deref (freed-heap reuse only shows up as a crash, as the
+    // paired-run segfault at QAction::activate proved).
+    paste = menuAction(menu2, QStringLiteral("Paste"));
+    QVERIFY(paste && paste->isEnabled());
+    paste->trigger();
+    QCOMPARE(probe.toPlainText(), QStringLiteral("abc\ndef"));
+    QCOMPARE(probe.position(), (qmn::view::TextPosition{1, 0})); // caret after "abc\n"
+
+    all = menuAction(menu2, QStringLiteral("Select All"));
+    all->trigger();
+    QCOMPARE(probe.selectedText(), probe.toPlainText());
+    copy = menuAction(menu2, QStringLiteral("Copy"));
+    QVERIFY(copy && copy->isEnabled());
+    copy->trigger();
+    QCOMPARE(QApplication::clipboard()->text(QClipboard::Clipboard),
+             probe.toPlainText());
+    delete menu2;
+}
+
+void TestCodeEditor::pressInsideSelectionHoldsForDrag()
+{
+    editor->setPlainText(QStringLiteral("abcdefgh"));
+    dragSelect(editor, caretPixel(editor, 0, 1), caretPixel(editor, 0, 4)); // [1,4) "bcd"
+    QCOMPARE(editor->selectedText(), QStringLiteral("bcd"));
+
+    // A plain press STRICTLY inside the live selection does not collapse it...
+    const QPoint in = caretPixel(editor, 0, 2);
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, in);
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("bcd"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4})); // caret untouched
+
+    // ...moves under startDragDistance are swallowed (held, not resized)...
+    const QPoint nudge = in + QPoint(2, 0); // 2 px: well under the drag start
+    const QPointF np(nudge);
+    QMouseEvent move(QEvent::MouseMove, np, np, Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+    QVERIFY(QApplication::sendEvent(editor, &move));
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("bcd"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4}));
+
+    // ...and a release that never grew into a drag collapses AT the release
+    // point (still col 2: the nearest-edge walk-back floors the nudge).
+    QTest::mouseRelease(editor, Qt::LeftButton, Qt::NoModifier, nudge);
+    QVERIFY(!editor->hasSelection());
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+}
+
+void TestCodeEditor::dragGestureOffscreenIsPayloadSafe()
+{
+    editor->setPlainText(QStringLiteral("abcdefgh"));
+    editor->show(); // the QDrag path mirrors the shown-widget measurement
+    dragSelect(editor, caretPixel(editor, 0, 1), caretPixel(editor, 0, 4)); // [1,4) "bcd"
+    QCOMPARE(editor->selectedText(), QStringLiteral("bcd"));
+
+    const QPoint from = caretPixel(editor, 0, 2);
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, from);
+    QVERIFY(editor->hasSelection());
+
+    // Past startDragDistance the real QDrag::exec runs; offscreen it returns
+    // NoAction synchronously and delivers nothing (measured), so the editor
+    // must come out unscathed: no edit, nothing undoable, and the SOURCE
+    // selection survives (Copy is the effective action offscreen).
+    const QPoint to = caretPixel(editor, 0, 7);
+    const QPointF tp(to);
+    QMouseEvent move(QEvent::MouseMove, tp, tp, Qt::NoButton, Qt::LeftButton, Qt::NoModifier);
+    QVERIFY(QApplication::sendEvent(editor, &move));
+    QTest::mouseRelease(editor, Qt::LeftButton, Qt::NoModifier, to);
+
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefgh"));
+    QVERIFY(!editor->canUndo());
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("bcd"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4}));
+}
+
+void TestCodeEditor::dropTextInsertsAtDropPoint()
+{
+    editor->setPlainText(QStringLiteral("abcdefgh"));
+
+    QMimeData md;
+    md.setText(QStringLiteral("P\r\nQ")); // CRLF must be sanitized (paste parity)
+    QVERIFY(sendDropAt(editor, caretPixel(editor, 0, 4), Qt::CopyAction, md));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdP\nQefgh"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 1})); // caret at inserted end
+
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier); // one undo for the whole drop
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefgh"));
+
+    // A urls payload IS text to Qt (QMimeData::text() mirrors the stored
+    // uri-list), so the editor takes it — the classic fallback that lands
+    // a file-manager drop's path as plain text.
+    QMimeData urls;
+    urls.setUrls({QUrl(QStringLiteral("https://qt.io"))});
+    QVERIFY(sendDropAt(editor, caretPixel(editor, 0, 2), Qt::CopyAction, urls));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abhttps://qt.iocdefgh"));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefgh"));
+
+    // Empty text: the format IS present (hasText), so the drag is accepted,
+    // but there is nothing to insert — no edit, not even an empty undo step.
+    QMimeData empty;
+    empty.setText(QString());
+    QVERIFY(sendDropAt(editor, caretPixel(editor, 0, 2), Qt::CopyAction, empty));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefgh"));
+    QVERIFY(!editor->canUndo());
+
+    // A drop over the gutter clamps to the nearest text edge, just like a
+    // click does (positionAt), landing the insert at the line start.
+    QMimeData hash;
+    hash.setText(QStringLiteral("#"));
+    sendDropAt(editor, QPoint(editor->contentLeft() - 30,
+                              editor->padding() + editor->lineHeight() / 2),
+               Qt::CopyAction, hash);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("#abcdefgh"));
+}
+
+void TestCodeEditor::dropMoveMarkerMovesSelection()
+{
+    QMimeData md;
+    md.setText(QStringLiteral("bcd"));
+    md.setData(QStringLiteral("application/x-qmn-selection"), moveMarkerFor(editor, 1, 4));
+    const auto rearm = [this] {
+        editor->setPlainText(QStringLiteral("abcdefgh"));
+        dragSelect(editor, caretPixel(editor, 0, 1), caretPixel(editor, 0, 4)); // [1,4) "bcd"
+    };
+
+    // (a) move right (drop after the source): ONE bracketed step remaps
+    // "a|bcd|efgh" -> "aef|bcd|gh", caret parked at the moved block's end.
+    rearm();
+    sendDropAt(editor, caretPixel(editor, 0, 6), Qt::MoveAction, md);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("aefbcdgh"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 6}));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier); // undo kills BOTH halves
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefgh"));
+
+    // (b) move left (drop before the source): "bcdaefgh".
+    rearm();
+    sendDropAt(editor, caretPixel(editor, 0, 0), Qt::MoveAction, md);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("bcdaefgh"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+
+    // (c) drop INSIDE the dragged range: the drop point is swallowed by the
+    // source, so nothing moves — a text-preserving no-op whose caret lands
+    // at the source start (the same landing boundary drops take via the
+    // remap table; overlapping del+ins never reaches applyBlockEdits).
+    rearm();
+    sendDropAt(editor, caretPixel(editor, 0, 2), Qt::MoveAction, md);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefgh"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+}
+
+void TestCodeEditor::dropIgnoresForeignAndCopyVariants()
+{
+    const auto selectBcd = [this] {
+        editor->setPlainText(QStringLiteral("abcdefgh"));
+        dragSelect(editor, caretPixel(editor, 0, 1), caretPixel(editor, 0, 4)); // [1,4) "bcd"
+    };
+    editor->setPlainText(QStringLiteral("abcdefgh")); // make the widget address real
+    selectBcd();
+
+    // Foreign source id (a sibling editor, or a copy round-tripped through
+    // an external app): those offsets belong to ANOTHER buffer, so the drop
+    // degrades to a plain copy — nothing gets deleted.
+    QMimeData foreign;
+    foreign.setText(QStringLiteral("bcd"));
+    foreign.setData(QStringLiteral("application/x-qmn-selection"),
+                    QByteArrayLiteral("deadbeef:1:4"));
+    sendDropAt(editor, caretPixel(editor, 0, 6), Qt::MoveAction, foreign);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefbcdgh"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 9})); // caret at copied end
+
+    // Own marker + Copy action (Ctrl modified the drag): the action gate
+    // makes it a copy even though the marker would pass.
+    selectBcd();
+    QMimeData own;
+    own.setText(QStringLiteral("bcd"));
+    own.setData(QStringLiteral("application/x-qmn-selection"), moveMarkerFor(editor, 1, 4));
+    sendDropAt(editor, caretPixel(editor, 0, 6), Qt::CopyAction, own);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefbcdgh"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 9}));
+
+    // Own marker + Move, but the live selection no longer matches the marker
+    // (caret collapsed after the drag armed): the offsets cannot be trusted,
+    // so this too degrades to a copy.
+    selectBcd();
+    editor->setPosition({0, 4}); // collapse the selection the marker names
+    sendDropAt(editor, caretPixel(editor, 0, 6), Qt::MoveAction, own);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefbcdgh"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 9}));
+}
+
+void TestCodeEditor::dragMoveAutoscrolls()
+{
+    QStringList lines;
+    for (int i = 0; i < 100; ++i)
+        lines << QStringLiteral("line %1").arg(i, 3);
+    editor->setPlainText(lines.join(QLatin1Char('\n')));
+
+    QMimeData md;
+    md.setText(QStringLiteral("x"));
+    const int lh = editor->lineHeight();
+
+    // QDragMoveEvent/DropEvent are routed by QApplication::notify to the
+    // QDragManager's CURRENT TARGET — which only an accepted DragEnter
+    // sets (and a Drop clears). So synthetic drag-moves MUST be preceded
+    // by a DragEnter send, or notify discards them before the widget ever
+    // sees them (measured with Qt 6.12).
+    QDragEnterEvent enter(QPointF(editor->width() - 1.0, editor->height() + 5.0),
+                          Qt::CopyAction, &md, Qt::LeftButton, Qt::NoModifier);
+    QVERIFY(QApplication::sendEvent(editor, &enter));
+    QVERIFY(enter.isAccepted());
+
+    // Past the bottom edge: one line of scroll per drag-move event, and the
+    // payload stays accepted — dragMoveEvent rides the same edge logic the
+    // selection drag uses (edgeAutoScroll).
+    QDragMoveEvent down(QPointF(editor->width() - 1.0, editor->height() + 5.0),
+                        Qt::CopyAction, &md, Qt::LeftButton, Qt::NoModifier);
+    QVERIFY(QApplication::sendEvent(editor, &down));
+    QVERIFY(down.isAccepted());
+    QCOMPARE(editor->verticalScrollOffset(), lh);
+
+    // Past the top edge: it scrolls back out.
+    QDragMoveEvent up(QPointF(10, -5), Qt::CopyAction, &md, Qt::LeftButton, Qt::NoModifier);
+    QVERIFY(QApplication::sendEvent(editor, &up));
+    QVERIFY(up.isAccepted());
+    QCOMPARE(editor->verticalScrollOffset(), 0);
+
+    // A non-text payload is refused even at the move stage (dragEnter parity).
+    QMimeData bin;
+    bin.setData(QStringLiteral("application/x-qmn-binary"), QByteArray("1"));
+    QDragMoveEvent noText(QPointF(10, 10), Qt::CopyAction, &bin, Qt::LeftButton, Qt::NoModifier);
+    QVERIFY(QApplication::sendEvent(editor, &noText));
+    QVERIFY(!noText.isAccepted());
+
+    // DragLeave ends the gesture and (via notify) clears the manager's
+    // target, so no stale routing state leaks into later tests.
+    QDragLeaveEvent leave;
+    QApplication::sendEvent(editor, &leave);
 }
 
 // --- M4 syntax highlighting (Phase D2) -------------------------------------

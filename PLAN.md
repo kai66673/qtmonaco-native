@@ -346,6 +346,23 @@ multi-caret machinery. Bundles (one commit each, tests per bundle):
   copy like Qt widgets), external text drops accepted
   (`Qt::TextDrop`/`qmn-internal-mime` marker), drop caret tracked,
   autoscroll during drag rides the M1 helper.
+  **M16 COMPLETE (2026-11-11)** — landed as specced, no new public API;
+  deviations recorded by measurement: hand-rolled press-hold arm inside
+  the live selection replaces the QAbstractScrollArea drag hooks (press
+  does NOT collapse; <startDragDistance moves swallowed; release
+  collapses at the release point); mime = text + private
+  `application/x-qmn-selection` marker (`hex(this):start:end`, Move
+  preferred, Ctrl drop degrades to copy); internal-move gate = own id
+  AND marker offsets == live primary selection (foreign/stale degrade
+  to copy); drop STRICTLY inside the source range = caret no-op, the
+  overlapping del+ins pair never reaches `applyBlockEdits` (contract:
+  non-overlapping edits); urls payloads ACCEPT as text (Qt mirrors the
+  uri-list into `text()`); menu factory + caret rules are a protected
+  test seam (QMenu::exec blocks offscreen tests); offscreen traps:
+  `QClipboard::mimeData()` is null until first fill (null-guard!),
+  Qt 6.12 `QApplication::notify` routes synthetic DragMove/Drop only to
+  the QDragManager currentTarget (accepted DragEnter first), and
+  `QDrag::exec` returns NoAction synchronously. 9 new slots (161/0/2).
 - **M17 font/zoom API.** `setCodeFont(QFont)`/`codeFont()` recompute
   cell/line metrics + invalidate every geometry/fold cache (today
   metrics die at construction — QWidget::setFont silently desyncs);

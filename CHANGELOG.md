@@ -354,6 +354,40 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   gestures: double-clicks there accept-and-no-op, Alt+click double
   events never multi-click. Tests gained a TextPosition QDebug streamer
   so QCOMPARE failures print {line,col} instead of <null>.
+- M16 context menu + text DnD (Phase E3, no new public API — user-facing
+  behavior; the menu factory + caret-placement rules sit under `protected:`
+  as a test seam only, invisible to the binding). Right-click opens a
+  QMenu(Cut/Copy/Paste/Select All) whose actions reuse the exact Ctrl-chord
+  implementations (M1b whole-line semantics included); Paste alone gates
+  on the clipboard having text — and `QClipboard::mimeData()` is NULL
+  until the session fills it (and again after a clear(), measured on the
+  offscreen plugin), so it is null-checked before deref. Caret rules: a
+  right-click outside the selection re-places the caret first (Qt
+  convention), inside — inclusive of both edges — keeps the selection
+  intact for the menu; ruler and fold-zone right-clicks stay chrome
+  guards (accept, no caret, no menu). Drag-out: a press held inside the
+  live selection does NOT collapse it; sub-`startDragDistance()` moves
+  are swallowed, a never-grown release collapses at the release point,
+  and past the threshold a QDrag starts with mime = plain text PLUS a
+  private `application/x-qmn-selection` marker
+  (`widgetAddressHex:startOffset:endOffset`), `exec(Copy|Move,
+  preferred=Move)` (Ctrl at the drop degrades to copy). Drop-in: any
+  text payload is accepted (urls count as text — Qt mirrors the uri-list
+  into `text()`, so a file-manager drop lands its path); CRLF is
+  sanitized like the paste path; a drop over gutter/ruler clamps to the
+  text edge via `positionAt` like a click. Internal MOVE (own marker AND
+  marker offsets == live primary selection — a foreign widget's or a
+  stale selection degrade to copy): the del+ins pair goes through ONE
+  bracketed `applyBlockEdits` step (caret pre-parked at the drop offset,
+  the remap lands it at the block's end); a drop STRICTLY inside the
+  source range is a special-cased caret no-op — the overlapping pair
+  must never reach `applyBlockEdits`, whose contract is non-overlapping
+  edits. Drag-moves ride `edgeAutoScroll` (the M1 selection-drag helper)
+  for autoscroll. Offscreen test traps proven along the way: Qt 6.12's
+  `QApplication::notify` routes synthetic DragMove/Drop only to the
+  QDragManager's currentTarget (an accepted DragEnter first, DragLeave
+  to clean up), and `QDrag::exec` returns NoAction synchronously there.
+  9 new slots (161/0/2).
 
 ### Changed
 - The x anchor of all text geometry (caret, selection, painting, hit

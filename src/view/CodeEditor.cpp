@@ -4,6 +4,11 @@
 
 #include <QApplication>
 #include <QClipboard>
+#include <QContextMenuEvent>
+#include <QDrag>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
+#include <QDropEvent>
 #include <QFocusEvent>
 #include <QFontDatabase>
 #include <QFontMetricsF>
@@ -14,8 +19,11 @@
 #include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
+#include <QMenu>
+#include <QMimeData>
 #include <QMouseEvent>
 #include <QPainter>
+#include <QPixmap>
 #include <QPolygonF> // M13 fold triangles
 #include <QPushButton>
 #include <QRegularExpression>
@@ -189,6 +197,53 @@ std::pair<int, int> wordSelRange(const QString& text, int col)
     return {lo, hi};
 }
 
+// The buffer only knows '\n' separators, so externally arriving text
+// (clipboard drops as well as pastes) must be normalized. Order matters:
+// the two-char sequence first, then whatever '\r' remains.
+QString sanitizeLineEnds(QString text)
+{
+    text.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
+    text.replace(QLatin1Char('\r'), QStringLiteral("\n"));
+    return text;
+}
+
+// --- M16 internal drag-move marker ---------------------------------------
+// A CodeEditor drag carries its payload as plain text PLUS this private
+// format: "<sourceAddressHex>:<startOffset>:<endOffset>". A drop-back
+// into the SAME editor recognizes it as a MOVE (delete + reinsert, one undo
+// step); the source-address stamp keeps sibling editors and foreign
+// round-trips from trusting offsets that belong to another buffer (they
+// degrade to a plain text COPY). DropEvent double-checks the offsets against
+// the live selection, so even an accidental collision (another process
+// guessing our heap address) cannot delete the wrong range.
+const QString kQmnMoveMarkerC = QStringLiteral("application/x-qmn-selection");
+
+QByteArray makeMoveMarker(quintptr sourceId, int startOff, int endOff)
+{
+    return QStringLiteral("%1:%2:%3")
+        .arg(quint64(sourceId), 0, 16)
+        .arg(startOff)
+        .arg(endOff)
+        .toUtf8();
+}
+
+bool parseMoveMarker(const QByteArray& data, quintptr& sourceId, int& startOff, int& endOff)
+{
+    const QList<QByteArray> parts = data.split(':');
+    if (parts.size() != 3)
+        return false;
+    bool okId = false, okStart = false, okEnd = false;
+    const quint64 id = parts[0].toULongLong(&okId, 16);
+    const qint64 start = parts[1].toLongLong(&okStart);
+    const qint64 end = parts[2].toLongLong(&okEnd);
+    if (!okId || !okStart || !okEnd || end < start || start < 0)
+        return false;
+    sourceId = quintptr(id);
+    startOff = int(start);
+    endOff = int(end);
+    return true;
+}
+
 } // namespace
 
 CodeEditor::CodeEditor(QWidget* parent)
@@ -196,6 +251,9 @@ CodeEditor::CodeEditor(QWidget* parent)
 {
     setFocusPolicy(Qt::StrongFocus);
     setAccessibleName(QStringLiteral("code editor"));
+    // M16: the widget accepts text drops (dropEvent filters on hasText;
+    // setAcceptDrops only opens the drag-protocol channel).
+    setAcceptDrops(true);
 
     // M4: one core EditEvent per primitive mutation keeps the highlight
     // tree current (ts_tree_edit happens inside the engine; the reparse
@@ -859,12 +917,7 @@ void CodeEditor::paste()
 
 void CodeEditor::pasteText(const QString& text)
 {
-    QString clean = text;
-    // The buffer only knows '\n' separators, so clipboard text arriving with
-    // '\r\n' (Windows) or lone '\r' must be normalized. Order matters: the
-    // two-char sequence first, then whatever '\r' remains.
-    clean.replace(QStringLiteral("\r\n"), QStringLiteral("\n"));
-    clean.replace(QLatin1Char('\r'), QLatin1Char('\n'));
+    const QString clean = sanitizeLineEnds(text);
     if (clean.isEmpty())
         return; // empty clipboard: paste is a no-op, not a delete
     const UndoMark pre = captureEditMark();
@@ -4677,6 +4730,25 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
         event->accept();
         return;
     }
+    // M16 press inside a live selection: a plain (no Shift) left press
+    // STRICTLY inside the primary selection does NOT collapse it there.
+    // The selection is held so a drag starting on it can be carried away
+    // (startSelectionDrag once startDragDistance is crossed), and a
+    // release without such a drag collapses at the release point (see
+    // mouseReleaseEvent). Extra carets still force the full D1 collapse,
+    // so this branch reads them BEFORE the collapse below.
+    pressInSelection_ = false;
+    if (extraCarets_.isEmpty() && hasSelection_
+        && !(event->modifiers() & Qt::ShiftModifier)) {
+        const int off = buffer_.offsetOf(pos.line, pos.col);
+        const auto [ss, se] = selRangeOf(buffer_, CaretSlot{caret_, anchor_, true});
+        if (ss < off && off < se) {
+            pressInSelection_ = true;
+            pressPos_ = event->position().toPoint();
+            event->accept();
+            return;
+        }
+    }
     // A plain (or Shift+) left click collapses the caret set to ONE (D1).
     extraCarets_.clear();
     altDragSlot_ = -1;
@@ -4914,6 +4986,33 @@ void CodeEditor::addNextOccurrenceCaret()
     updatePrimarySelection();
 }
 
+// M1 drag auto-scroll (M16: extracted so dragMoveEvent rides the same edge
+// logic as the selection drag). Moving past the top/bottom edge scrolls one
+// line per event; M9's horizontal twin past the text window's left/right
+// edges goes 3 cells per event (the hBar singleStep), the right edge being
+// the ruler chrome boundary. The point is mapped back into the shifted
+// window so the target keeps following the pointer (positionAt rides hScroll_).
+QPoint CodeEditor::edgeAutoScroll(QPoint pos)
+{
+    const int margin = padding_ + 2;
+    if (pos.y() < margin) {
+        setVScroll(vScroll_ - lineHeight_);
+        pos.setY(margin + 1);
+    } else if (pos.y() > height() - margin) {
+        setVScroll(vScroll_ + lineHeight_);
+        pos.setY(height() - margin - 1);
+    }
+    const int rightEdge = width() - overviewRulerWidth();
+    if (pos.x() < contentLeft()) {
+        setHScroll(hScroll_ - 3 * int(std::ceil(cellWidth_)));
+        pos.setX(contentLeft());
+    } else if (pos.x() > rightEdge) {
+        setHScroll(hScroll_ + 3 * int(std::ceil(cellWidth_)));
+        pos.setX(rightEdge);
+    }
+    return pos;
+}
+
 void CodeEditor::mouseMoveEvent(QMouseEvent* event)
 {
     // M7 ruler drag: continuous scroll while the press started in the
@@ -4927,30 +5026,21 @@ void CodeEditor::mouseMoveEvent(QMouseEvent* event)
         event->ignore();
         return;
     }
+    // M16: a press that landed inside the live selection armed a potential
+    // text drag. Under startDragDistance the selection is simply HELD (no
+    // resize: the press-inside-selection hold semantics, see press event);
+    // past it, the selection is carried away as a QDrag payload.
+    if (pressInSelection_) {
+        if ((event->position().toPoint() - pressPos_).manhattanLength()
+            >= QApplication::startDragDistance()) {
+            pressInSelection_ = false;
+            startSelectionDrag();
+        }
+        event->accept();
+        return;
+    }
     breakUndoChain(); // drag motion freezes the edit chain (idempotent)
-    QPoint pos = event->position().toPoint();
-    // Drag auto-scroll: moving past the top/bottom edge scrolls one line
-    // per event and maps the position inside the viewport.
-    const int margin = padding_ + 2;
-    if (pos.y() < margin) {
-        setVScroll(vScroll_ - lineHeight_);
-        pos.setY(margin + 1);
-    } else if (pos.y() > height() - margin) {
-        setVScroll(vScroll_ + lineHeight_);
-        pos.setY(height() - margin - 1);
-    }
-    // M9 horizontal twin: past the text window's left/right edges, 3 cells
-    // per event (the hBar singleStep). The right edge is the ruler chrome
-    // boundary; positions are mapped back into the shifted window so the
-    // caret target keeps following the pointer (positionAt rides hScroll_).
-    const int rightEdge = width() - overviewRulerWidth();
-    if (pos.x() < contentLeft()) {
-        setHScroll(hScroll_ - 3 * int(std::ceil(cellWidth_)));
-        pos.setX(contentLeft());
-    } else if (pos.x() > rightEdge) {
-        setHScroll(hScroll_ + 3 * int(std::ceil(cellWidth_)));
-        pos.setX(rightEdge);
-    }
+    QPoint pos = edgeAutoScroll(event->position().toPoint());
     const TextPosition target = positionAt(pos);
     if (altDragPrimary_) {
         // Alt+Drag on the primary caret: resize its selection, the anchor
@@ -5017,6 +5107,16 @@ void CodeEditor::mouseReleaseEvent(QMouseEvent* event)
         event->accept();
         return;
     }
+    if (event->button() == Qt::LeftButton && pressInSelection_) {
+        // M16: a press inside the selection that never grew into a text
+        // drag ends as a plain click after all: the caret collapses at the
+        // release point (the press-hold kept the selection for exactly
+        // this moment). The drag path already cleared the flag.
+        pressInSelection_ = false;
+        setCaret(positionAt(event->position().toPoint()));
+        event->accept();
+        return;
+    }
     if (event->button() == Qt::LeftButton && (altDragPrimary_ || altDragSlot_ >= 0)) {
         // End the Alt+Drag: the dragged selection may now overlap others,
         // so let the normalization rules settle the caret set.
@@ -5033,6 +5133,262 @@ void CodeEditor::mouseReleaseEvent(QMouseEvent* event)
     if (event->button() == Qt::LeftButton)
         wordDrag_ = false; // the M15 word-drag gesture ends at this release
     QWidget::mouseReleaseEvent(event);
+}
+
+// --- M16 context menu + text DnD -------------------------------------------
+
+void CodeEditor::contextMenuEvent(QContextMenuEvent* event)
+{
+    const QPoint pt = event->pos();
+    // Chrome strips keep their meaning: no caret move, no menu (mirrors the
+    // ruler/fold guards of the left-click press handler).
+    if (rulerEnabled_ && overviewRulerGeometry().contains(pt)) {
+        event->accept();
+        return;
+    }
+    const int fz = foldZoneWidth();
+    if (fz > 0 && pt.x() >= contentLeft() - fz && pt.x() < contentLeft()) {
+        event->accept();
+        return;
+    }
+    setFocus(Qt::OtherFocusReason);
+    prepareContextMenuAt(pt);
+    QMenu* menu = createContextMenu();
+    menu->exec(event->globalPos());
+    menu->deleteLater();
+    event->accept();
+}
+
+void CodeEditor::prepareContextMenuAt(const QPoint& widgetPos)
+{
+    // A context click mirrors a plain left click as a gesture: it freezes
+    // the edit chain, collapses the caret set to one (D1) and ends the
+    // M15/M16 gesture states.
+    breakUndoChain();
+    extraCarets_.clear();
+    altDragSlot_ = -1;
+    altDragPrimary_ = false;
+    pressInSelection_ = false;
+    wordDrag_ = false;
+    multiClickDepth_ = 0;
+    // Qt menu convention: right-click INSIDE the live selection keeps it
+    // (the menu then acts on it), right-click OUTSIDE re-places the caret
+    // first. The inside test is INCLUSIVE of both selection ends - wider
+    // than the left-drag arm (which needs room to tell a click from a
+    // drag); at an edge there is nothing to drag but the selection stands.
+    const TextPosition pos = positionAt(widgetPos);
+    if (hasSelection_) {
+        const int off = buffer_.offsetOf(pos.line, pos.col);
+        const auto [ss, se] = selRangeOf(buffer_, CaretSlot{caret_, anchor_, true});
+        if (ss <= off && off <= se) {
+            update(); // the selection stands as it is
+            return;
+        }
+    }
+    setCaret(pos);
+}
+
+QMenu* CodeEditor::createContextMenu()
+{
+    auto* menu = new QMenu(this);
+    const QClipboard* cb = QGuiApplication::clipboard();
+    // mimeData() is null until the platform clipboard has been filled (and
+    // goes null again after a clear() — measured on the offscreen plugin,
+    // where it also happens on real X11/Wayland whenever the clipboard was
+    // never touched this session), so it must be null-checked before deref.
+    const QMimeData* clip = cb ? cb->mimeData() : nullptr;
+    const bool canPaste = clip && clip->hasText();
+    // Cut/Copy stay enabled WITHOUT a selection too: they do the whole-line
+    // cut/copy the Ctrl chords already implement (M1b, Monaco semantics), so
+    // nothing is ever greyed for lack of a selection. Paste gates alone: an
+    // empty clipboard has nothing to insert.
+    connect(menu->addAction(tr("Cut")), &QAction::triggered, this, [this] { cut(); });
+    connect(menu->addAction(tr("Copy")), &QAction::triggered, this, [this] { copy(); });
+    QAction* pasteAct = menu->addAction(tr("Paste"));
+    pasteAct->setEnabled(canPaste);
+    connect(pasteAct, &QAction::triggered, this, [this] { paste(); });
+    menu->addSeparator();
+    connect(menu->addAction(tr("Select All")), &QAction::triggered, this, [this] {
+        selectAll();
+    });
+    return menu;
+}
+
+void CodeEditor::startSelectionDrag()
+{
+    const auto [srcStart, srcEnd] = selRangeOf(buffer_, CaretSlot{caret_, anchor_, true});
+    if (srcEnd <= srcStart)
+        return; // defensive: the arm only ever parks inside a live selection
+    const QString payload = buffer_.textRange(srcStart, srcEnd);
+    if (payload.isEmpty())
+        return;
+    auto* mime = new QMimeData; // QDrag takes ownership
+    mime->setText(payload);
+    mime->setData(kQmnMoveMarkerC, makeMoveMarker(quintptr(this), srcStart, srcEnd));
+    QDrag drag(this);
+    // Drag chip: the elided first payload line in the editor's own font.
+    // (No vision here, but the X11 drag feedback deserves the pixels, and
+    // QPixmap painting works identically offscreen.)
+    const QString firstLine = payload.section(QLatin1Char('\n'), 0, 0).left(32);
+    const QFontMetricsF fm(font_);
+    const QString label = fm.elidedText(firstLine, Qt::ElideRight, 240);
+    const int chipW = qMax(8, int(std::ceil(fm.horizontalAdvance(label))) + 10);
+    const int chipH = int(std::ceil(fm.height())) + 6;
+    QPixmap pm(chipW, chipH);
+    pm.fill(Qt::transparent);
+    QPainter p(&pm);
+    p.setPen(palette().color(QPalette::WindowText));
+    p.drawText(QRect(0, 0, chipW, chipH), Qt::AlignCenter, label);
+    p.end();
+    drag.setPixmap(pm);
+    drag.setHotSpot(QPoint(chipW / 2, chipH / 2));
+    drag.setMimeData(mime);
+    dndSelfDragLive_ = true;
+    const Qt::DropAction result = drag.exec(Qt::CopyAction | Qt::MoveAction, Qt::MoveAction);
+    dndSelfDragLive_ = false;
+    // Move bookkeeping: an internal drop handled the whole move itself
+    // (dndDropHandled_), but a Move accepted by ANYONE ELSE (sibling editor,
+    // protocol-correct external app) still owes the source-side delete -
+    // pay it now as one bracketed step. (Measured: offscreen exec returns
+    // NoAction synchronously without delivering drops, so this branch is
+    // X11/Wayland-only; its caret landing rides applyBlockEdits' proven
+    // remap for p == an edit start.)
+    if (result == Qt::MoveAction && !dndDropHandled_) {
+        const UndoMark pre = captureEditMark();
+        extraCarets_.clear();
+        const auto srcLc = buffer_.lineColAt(srcStart);
+        caret_ = anchor_ = clampPos(TextPosition{srcLc.line, srcLc.col});
+        hasSelection_ = false;
+        applyBlockEdits(QVector<SlotEdit>{SlotEdit{srcStart, srcEnd, QString()}});
+        reconcileUndoMarks(pre);
+    }
+    dndDropHandled_ = false;
+}
+
+bool CodeEditor::internalMoveSource(const QMimeData* mime, int& srcStart, int& srcEnd) const
+{
+    if (!mime->hasFormat(kQmnMoveMarkerC))
+        return false;
+    quintptr id = 0;
+    int s = -1, e = -1;
+    if (!parseMoveMarker(mime->data(kQmnMoveMarkerC), id, s, e) || id != quintptr(this))
+        return false; // a sibling's (or a foreign round-trip's) marker: copy only
+    if (!extraCarets_.isEmpty() || !hasSelection_)
+        return false;
+    const auto [ss, se] = selRangeOf(buffer_, CaretSlot{caret_, anchor_, true});
+    if (s != ss || e != se || e <= s)
+        return false; // the marker must still name the live primary selection
+    srcStart = s;
+    srcEnd = e;
+    return true;
+}
+
+void CodeEditor::insertAtDrop(const QString& text, int dropOff)
+{
+    // A drop targets ONE caret (v1): the pre-caret rule parks anchor_/caret_
+    // at the drop offset, and applyBlockEdits' remap (p == an empty edit's
+    // start shifts by the text length) lands them at the inserted end.
+    extraCarets_.clear();
+    const auto insLc = buffer_.lineColAt(dropOff);
+    caret_ = anchor_ = clampPos(TextPosition{insLc.line, insLc.col});
+    hasSelection_ = false;
+    const UndoMark pre = captureEditMark();
+    applyBlockEdits(QVector<SlotEdit>{SlotEdit{dropOff, dropOff, text}});
+    reconcileUndoMarks(pre);
+}
+
+void CodeEditor::dragEnterEvent(QDragEnterEvent* event)
+{
+    // Text in, drag on; every other payload (urls, rich text...) stays
+    // refused. Chrome strips need no special case: positionAt clamps a drop
+    // over the gutter/ruler to the nearest text edge, exactly like a click.
+    if (isEnabled() && event->mimeData()->hasText())
+        event->acceptProposedAction();
+    else
+        event->ignore();
+}
+
+void CodeEditor::dragMoveEvent(QDragMoveEvent* event)
+{
+    if (!event->mimeData()->hasText()) {
+        event->ignore();
+        return;
+    }
+    edgeAutoScroll(event->position().toPoint()); // M1 autoscroll rides the
+    event->acceptProposedAction(); // drag protocol too (the drop offset is
+}                                  // re-derived from the final drop point)
+
+void CodeEditor::dropEvent(QDropEvent* event)
+{
+    if (!event->mimeData()->hasText()) {
+        event->ignore();
+        return;
+    }
+    const TextPosition dropPos = positionAt(event->position().toPoint());
+    const int dropOff = buffer_.offsetOf(dropPos.line, dropPos.col);
+
+    int srcStart = -1, srcEnd = -1;
+    if (event->dropAction() == Qt::MoveAction
+        && internalMoveSource(event->mimeData(), srcStart, srcEnd)) {
+        dndDropHandled_ = true; // stop the drag source's post-exec delete
+        if (dropOff > srcStart && dropOff < srcEnd) {
+            // A drop point swallowed by the dragged range itself moves
+            // nothing. Settle as a text-preserving no-op with the caret at
+            // the SOURCE start — the same landing the boundary drops
+            // (dropOff == srcStart/srcEnd) take via the remap table. (The
+            // overlapping del+ins pair must not reach applyBlockEdits: its
+            // contract is non-overlapping edits, right-to-left.)
+            breakUndoChain();
+            const auto srcLc = buffer_.lineColAt(srcStart);
+            setCaret(clampPos(TextPosition{srcLc.line, srcLc.col}));
+            event->acceptProposedAction();
+            return;
+        }
+        // Internal move: delete the source range and re-insert the payload
+        // at the drop point as ONE bracketed undo step. Both edits speak
+        // the PRE-EDIT offset space (applyBlockEdits' contract) and are
+        // listed ascending by start; the pre-caret rule parks caret_ at
+        // the drop offset, where the remap lands it at the inserted
+        // block's end.
+        const QString payload = buffer_.textRange(srcStart, srcEnd);
+        extraCarets_.clear();
+        const auto dropLc = buffer_.lineColAt(dropOff);
+        caret_ = anchor_ = clampPos(TextPosition{dropLc.line, dropLc.col});
+        hasSelection_ = false;
+        const SlotEdit del{srcStart, srcEnd, QString()};
+        const SlotEdit ins{dropOff, dropOff, payload};
+        const UndoMark pre = captureEditMark();
+        applyBlockEdits(dropOff < srcStart ? QVector<SlotEdit>{ins, del}
+                                           : QVector<SlotEdit>{del, ins});
+        reconcileUndoMarks(pre);
+        if (QClipboard* cb = QGuiApplication::clipboard();
+            cb && cb->supportsSelection())
+            cb->setText(payload, QClipboard::Selection); // X11: moved text is primary
+        event->acceptProposedAction();
+        return;
+    }
+    // Copy drop: external text, a foreign widget's marker (the id check
+    // above fails) or a Ctrl-modified internal drag. (Measured: offscreen
+    // QDrag::exec never delivers drops, so tests land here with synthetic
+    // events - which is why the marker gate above is address+offset based,
+    // never "am I mid-drag".)
+    const QString text = sanitizeLineEnds(event->mimeData()->text());
+    if (!text.isEmpty()) {
+        if (dndSelfDragLive_) {
+            // Our own Ctrl-copy drag: the source selection SURVIVES the
+            // drop (VS Code), so no pre-caret override - applyBlockEdits
+            // just shifts carets at/after the insertion point right.
+            const UndoMark pre = captureEditMark();
+            applyBlockEdits(QVector<SlotEdit>{SlotEdit{dropOff, dropOff, text}});
+            reconcileUndoMarks(pre);
+        } else {
+            insertAtDrop(text, dropOff);
+        }
+        if (QClipboard* cb = QGuiApplication::clipboard();
+            cb && cb->supportsSelection())
+            cb->setText(text, QClipboard::Selection); // X11: dropped text is primary
+    }
+    event->acceptProposedAction();
 }
 
 void CodeEditor::wheelEvent(QWheelEvent* event)
