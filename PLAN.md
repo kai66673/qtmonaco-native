@@ -297,8 +297,72 @@ across fold boundaries, caret jump over a fold, unfolded content unchanged,
 ruler reflects fold ranges; large file stays O(viewport) via D2's
 included-ranges story.
 
-## Phase F — ship v1 (gate exit)
+### E3 — usability polish (M14–M19, pre-freeze; owner package 2026-11-11)
 
+Owner-requested usability bundle, deliberately BEFORE the Phase-F freeze:
+every item below adds public API, and post-freeze view surgery is a
+Gate-1 design bug per the PLAN rules. Decisions taken with the owner:
+long-line ruler is a FIXED column (default off), settings move into a
+`CodeEditorOptions` QObject child (existing setters stay as thin
+delegates — qtmonaco parity names untouched), current-line highlight
+defaults ON with a stronger style (enum), Ctrl+D rides the existing
+multi-caret machinery. Bundles (one commit each, tests per bundle):
+
+- **M14 Tab indent + Enter auto-indent.** Tab inserts spaces to the next
+  tab stop (`tabStopWidth`, default 4 — soft tabs; pasted `\t` glyphs
+  render to the same stop grid via `QTextOption`), Tab/Shift+Tab block
+  indent/outdent across every line a selection touches, Enter copies the
+  header line's leading whitespace and adds one level after a trailing
+  opener `{([:`. `setTabChangesFocus(bool)` (default false) keeps
+  keyboard users able to leave the widget (a11y lever).
+- **M15 caret/mouse gestures.** Two-tap smart Home (first-non-blank ⇄
+  col 0; End stays EOL); double-click selects the word (M2 word
+  boundaries), drag then extends word-by-word; triple-click selects the
+  line (repeat wraps to the next); Ctrl+D adds the next occurrence of
+  the word under the caret as a caret slot (word only, never regex; no
+  match → select-word first, VS Code order).
+- **M16 context menu + text DnD.** Right-click QMenu (Cut/Copy/Paste/
+  Select all, paste-clipboard vs primary), enabled-state per selection;
+  internal drag of a selection via `createMimeDataFromSelection` +
+  `startDrag` (move by default, Ctrl copy, Alt copy — decided: Ctrl
+  copy like Qt widgets), external text drops accepted
+  (`Qt::TextDrop`/`qmn-internal-mime` marker), drop caret tracked,
+  autoscroll during drag rides the M1 helper.
+- **M17 font/zoom API.** `setCodeFont(QFont)`/`codeFont()` recompute
+  cell/line metrics + invalidate every geometry/fold cache (today
+  metrics die at construction — QWidget::setFont silently desyncs);
+  zoom = a factor over the base font: `zoomIn()/zoomOut()/resetZoom()`
+  + Ctrl+= / Ctrl+- / Ctrl+0 and Ctrl+wheel. Shiboken-clean (QFont is
+  a registered PySide6 type).
+- **M18 auto-close pairs + long-line ruler + current line.** Typing
+  `([{`'` wraps the selection, inserts the pair at a bare caret, and
+  skips a typed closer when it is already there; backspace on a paired
+  empty pair removes both. `setLongLineRulerColumn(int)`/`0=off` paints
+  a fixed guide line at the column (rides h-scroll, chrome-independent);
+  `CurrentLineMode { Off, Background, BackgroundFrame }` replaces the
+  bool (bool setter kept as delegate), default `Background`, wash ink
+  strengthened.
+- **M19 `CodeEditorOptions` (settings object).** Child QObject returned
+  by `CodeEditor::options()`; every knob (gutter mode, current line,
+  ruler column, tab stop, scroll-past-end, ruler/minimap, readonly,
+  auto-indent/auto-close flags, tab-changes-focus…) lives there with
+  notify-on-change; CodeEditor listens and applies. Existing flat
+  setters become ONE-LINE delegates (API never breaks); NEW settings
+  exist only on the options object. Shiboken: plain QObject, plain
+  Qt types, enums as nested Q_ENUM — wrappable without typesystem
+  surgery.
+- **M11 QAccessible (unchanged scope, last).** Full text interface over
+  the final frozen surface: role Text/EditableText, document line/caret
+  queries through the M13 view-map (visible vs model!), selection,
+  `QAccessibleTextCursorEvent/TextInsertEvent` on edits.
+
+Order above = dependency order (options object LAST so the new knobs of
+M14–M18 land in it once; a11y LAST-LAST so it mirrors the frozen API).
+Each bundle: ctest green + spike smoke on `big_py.py` unchanged.
+New API discipline: plain Qt types at the boundary (Shiboken), behavior
+defaults documented on the setters (freeze-bound).
+
+## Phase F — ship v1 (gate exit)
 - **Python:** cibuildwheel matrix on `manylinux_2_34_x86_64` (match PySide6's
   own baseline) + `auditwheel` repair; real **abi3** wheel tag (`cp310-abi3`,
   Python floor 3.10); pin `PySide6>=6.12` in wheel metadata; the `cp311`
