@@ -30,11 +30,13 @@ The spike validates the two make-or-break risks of the plan:
   the caret off the text; on monospace ASCII the result is bit-identical to
   the original `col * cellWidth` grid model.
 
-Measured on a 62 MB / 1,000,001-line document (Linux, GCC 16, `-O3`):
+Measured on a 61 MiB / 1,000,001-line document (Linux, GCC 16, `-O3`;
+re-measured at the v1 freeze 2026-11-12 on HEAD, undo log included — the
+exact document is reproducible, recipe under "Model micro-benchmark" below):
 
 | Operation | Result |
 |---|---|
-| `setPlainText` (whole document) | ~4 ms after file read (~104 ms I/O + decode) |
+| `setPlainText` (whole document) | ~5 ms after file read (~110 ms I/O + decode cold, ~2 ms cached) |
 | 20,000 random edits (insert/delete) inside the document | mean ~7 µs/op, ~30k pieces after the run |
 | first-edit worst spike | ~20 ms (cold cache; later ops are µs) |
 
@@ -147,4 +149,19 @@ g++ -O3 -std=c++20 tools/bench_model.cpp -Isrc/core/.. \
     build/src/core/libqmn_core.a \
     -isystem /usr/include/qt6/QtCore -isystem /usr/include/qt6 \
     -lQt6Core -o bench_model && ./bench_model <big-file>
+```
+
+The perf-table rows use a synthetic 61 MiB / 1,000,001-line document,
+regenerable deterministically (seed 1; the bench itself seeds 42):
+
+```bash
+python3 - > bench1m.py <<'EOF'
+import random
+random.seed(1)
+kw = ["def", "class", "if", "else", "for", "while", "return",
+      "import", "from", "with", "as", "pass", "yield"]
+for i in range(1_000_001):
+    print("    %s value_%d = compute(x, y) + offset # comment %d"
+          % (random.choice(kw), i, i))
+EOF
 ```

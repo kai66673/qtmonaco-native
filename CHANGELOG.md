@@ -636,6 +636,26 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   chrome only. Widget tests migrated to the new anchor.
 
 ### Fixed
+- core: M3's undo inverse-capture regression, caught by the Gate-1 bench
+  exit criterion. `removeRange` captured the inverse text with a `textRange`
+  that walked EVERY piece left of the window (its own comment called it
+  "O(pieces-before-end), fine at our piece counts" — the bench document
+  disagreed: mean 7 → 37 µs/op on the 1M-line bench, bisected to `ab0f1e0`).
+  The walk now prunes with the cached subtree char counts, back to
+  O(log n + pieces overlapping the span) — the same walk is also the read
+  door for every small view probe (paint space checks, a11y word
+  navigation, pair matching), all of which had been paying piece-count
+  costs on big documents. `undoStack_` also became a `std::deque`: past the
+  2,048-group cap the drop-oldest front-`erase` memmoved the whole window
+  per edit (worth another ~2 µs/op). Post-fix `bench_model` on the 61 MiB
+  / 1,000,001-line document (GCC 16, -O3, same machine as the v0.1-era
+  numbers): setText ~5 ms, mean **7.2 µs/op**, first-edit spike ~20 ms,
+  29,973 nodes — the README perf table reproduces on HEAD with the undo
+  log present. Tripwires: `textRangeVsReferenceAcrossPieces` (exhaustive +
+  random spans over a fragmented document, incl. swapped/clamped/empty
+  windows) and `textRangeWalkStaysPrunedWithManyPieces` (1,000
+  end-of-document probes on a 20,001-piece document must stay under
+  10 µs/probe — the unpruned walk missed it by >5x on any runner).
 - M13 fold asymmetry (owner-reported): an edit killing a fold's SOURCE
   (the grammar capture, or the indent pair in grammar-less modes) dropped
   the fold marker of an unfolded fold, but a COLLAPSED one kept its ▸ —

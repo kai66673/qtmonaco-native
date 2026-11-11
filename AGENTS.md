@@ -197,6 +197,12 @@ clang-format / pre-commit). Match surrounding style; don't invent a formatter.
   checked against a naive `QString` reference with a **full treap-invariant
   check after every op**. Fixed seed (`0xC0FFEE`) — deterministic, so a failure
   is reproducible. Uses `QTEST_GUILESS_MAIN` (no display).
+- `textRangeWalkStaysPrunedWithManyPieces` is the suite's ONLY
+  timing-dependent test (budget: 1,000 end-of-document probes on a 20k-piece
+  document, best-of-3 rounds, < 10 ms). It guards the Gate-1 bench gate
+  (pruned O(log n) walk vs the M3 regression, 7 -> 37 µs/op); on a timing
+  failure re-measure the bench before touching the budget — the margin is
+  ~100x, so a legitimate pass never comes close.
 - `tst_codeeditor.cpp` drives keyboard/mouse via `QTest`, asserts on model state
   (not pixels). It builds with `QTEST_MAIN` and needs offscreen.
 - **No vision here.** Image/screenshot input is unavailable to the agent in this

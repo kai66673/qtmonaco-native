@@ -1,6 +1,7 @@
 #pragma once
 
 #include <QString>
+#include <deque>
 #include <functional>
 #include <vector>
 
@@ -210,7 +211,11 @@ private:
 
     static constexpr int kMaxCoalesceUnits = 64; // merged-insert text cap
 
-    std::vector<UndoGroup> undoStack_;
+    // deque, not vector: once past the group cap, EVERY recorded edit drops
+    // the oldest group; a vector front-erase memmoves the whole ~2k-group
+    // window per keystroke (measured in the bench gate), deque pops in
+    // amortized O(1). Access is only at the ends plus iteration.
+    std::deque<UndoGroup> undoStack_;
     std::vector<UndoGroup> redoStack_;
     std::vector<EditOp> openGroup_; // accumulated between begin/endEditGroup
     int groupDepth_ = 0;            // begin/endEditGroup nest depth

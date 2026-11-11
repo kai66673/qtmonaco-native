@@ -217,9 +217,10 @@ void TextBuffer::removeRange(int startOffset, int endOffset)
     endOffset = std::clamp(endOffset, 0, charCount());
     if (startOffset == endOffset)
         return;
-    // The inverse text must be captured before the mutation. Walking the
-    // pieces for it is O(pieces-before-end), fine at our piece counts (the
-    // op cap keeps history-bounded edits from exploding the treap anyway).
+    // The inverse text must be captured before the mutation. The textRange
+    // walk is pruned by subtree char counts, so this costs O(log n + pieces
+    // overlapping the span — not the piece count of the whole document
+    // (that mistake showed up as 7 -> 37 us/op in the bench gate).
     const QString removed = textRange(startOffset, endOffset);
     recordEdit(EditOp{startOffset, endOffset, removed, QString()});
     applyRemove(startOffset, endOffset);
@@ -396,7 +397,7 @@ void TextBuffer::enforceCapacity()
     while (undoStack_.size() > 1 && (undoStack_.size() > static_cast<std::size_t>(kMaxUndoGroups) ||
                                      logBytes_ > kMaxUndoLogBytes)) {
         logBytes_ -= opsBytes(undoStack_.front().ops);
-        undoStack_.erase(undoStack_.begin());
+        undoStack_.pop_front(); // deque: amortized O(1) drop-oldest per edit
     }
 }
 
@@ -600,20 +601,41 @@ QString TextBuffer::textRange(int startOffset, int endOffset) const
     endOffset = std::clamp(endOffset, 0, charCount());
 
     QString out;
+    if (startOffset >= endOffset)
+        return out;
     out.reserve(endOffset - startOffset);
-    std::vector<int> stack;
+    // In-order walk pruned with the cached subtree char counts: subtrees
+    // ending at or before startOffset are dropped during the left-spine
+    // descent, and anything starting at or past endOffset ends the walk
+    // (in-order offsets are monotonic). Cost is O(log n + pieces overlapping
+    // the span). The unpruned version — walk everything left of endOffset —
+    // made every undo inverse capture and every small view probe (paint
+    // indent checks, word navigation) linear in pieces-before-offset: a 5x
+    // regression on the bench document (7 -> 37 us/op), caught by the
+    // Gate-1 bench exit criterion. Pairs are (node, base): base = char
+    // offset of the subtree's leftmost code unit.
+    std::vector<std::pair<int, int>> stack;
+    stack.reserve(64); // treap depth is logarithmic; avoids growth mid-walk
     int cur = root_;
-    int base = 0; // char offset of the next piece in in-order sequence
+    int base = 0;
     while (cur != kNull || !stack.empty()) {
         while (cur != kNull) {
-            stack.push_back(cur);
-            cur = nodes_[static_cast<std::size_t>(cur)].left;
+            const Node& n = nodes_[static_cast<std::size_t>(cur)];
+            if (base + n.subChars <= startOffset) {
+                cur = kNull; // subtree entirely left of the window: pop
+            } else {
+                stack.push_back({cur, base});
+                cur = n.left; // left subtree shares this base
+            }
         }
-        cur = stack.back();
+        const auto [node, subBase] = stack.back();
         stack.pop_back();
-        const Node& n = nodes_[static_cast<std::size_t>(cur)];
-        const int pieceStart = base;
-        const int pieceEnd = base + n.chars;
+        const Node& n = nodes_[static_cast<std::size_t>(node)];
+        const int leftChars = n.left == kNull
+            ? 0
+            : nodes_[static_cast<std::size_t>(n.left)].subChars;
+        const int pieceStart = subBase + leftChars;
+        const int pieceEnd = pieceStart + n.chars;
         if (pieceStart >= endOffset)
             break; // remaining pieces are further right
         if (pieceEnd > startOffset) {
@@ -622,8 +644,12 @@ QString TextBuffer::textRange(int startOffset, int endOffset) const
             const QString& buf = buffers_[static_cast<std::size_t>(n.piece.buf)];
             out += buf.mid(n.piece.start + from, to - from);
         }
-        base = pieceEnd;
-        cur = n.right;
+        if (n.right != kNull) {
+            cur = n.right;
+            base = pieceEnd; // right subtree starts after this piece
+        } else {
+            cur = kNull;
+        }
     }
     return out;
 }

@@ -1,4 +1,4 @@
-// Ad-hoc model latency bench: 20k random edits inside a ~62 MB document.
+// Ad-hoc model latency bench: 20k random edits inside a ~61 MiB document.
 #include <QElapsedTimer>
 #include <QFile>
 #include <QTextStream>

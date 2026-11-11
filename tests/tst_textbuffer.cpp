@@ -39,6 +39,8 @@ private slots:
     void capDropsOldestGroups();
     void capByLogBytes();
     void randomUndoRedoVsReference();
+    void textRangeVsReferenceAcrossPieces();
+    void textRangeWalkStaysPrunedWithManyPieces();
 
 private:
     static void verifyAllLines(const TextBuffer& buf, const QString& ref);
@@ -458,6 +460,91 @@ void TestTextBuffer::randomOpsVsReference()
     }
     verifyAllLines(*buffer, ref);
     QVERIFY(buffer->debugNodeCount() > 0);
+}
+
+void TestTextBuffer::textRangeVsReferenceAcrossPieces()
+{
+    // The undo inverse-capture door and every small view probe ride on
+    // textRange's pruned walk — compare it against a QString reference over
+    // a fragmented document. The unpruned M3 walk was correct but slow, so
+    // nothing else in the suite pins this door; these spans must stay exact.
+    QString ref = QStringLiteral("The quick brown fox.\nsecond line\nthird");
+    buffer->setText(ref);
+    std::mt19937 rng(0x5EEDu);
+    for (int i = 0; i < 40; ++i) {
+        std::uniform_int_distribution<int> posDist(0, static_cast<int>(ref.size()));
+        const int at = posDist(rng);
+        const QString chunk = QStringLiteral("<%1>").arg(i);
+        ref.insert(at, chunk);
+        buffer->insertAtOffset(at, chunk);
+    }
+    for (int i = 0; i < 15; ++i) {
+        std::uniform_int_distribution<int> posDist(0, std::max(0, static_cast<int>(ref.size()) - 8));
+        const int at = posDist(rng);
+        ref.remove(at, 5);
+        buffer->removeRange(at, at + 5);
+    }
+    QVERIFY(buffer->debugCheckInvariants());
+
+    // Exhaustive all-pairs over a small window around the front half.
+    const int limit = std::min<int>(ref.size(), 60);
+    for (int a = 0; a <= limit; ++a)
+        for (int b = a; b <= limit; ++b) {
+            QVERIFY2(buffer->textRange(a, b) == ref.mid(a, b - a),
+                     qPrintable(QStringLiteral("span [%1,%2)").arg(a).arg(b)));
+            // Swapped arguments must behave identically (removeRange convention).
+            QVERIFY2(buffer->textRange(b, a) == ref.mid(a, b - a),
+                     qPrintable(QStringLiteral("swapped span [%1,%2)").arg(b).arg(a)));
+            // Single-unit probes (the paint indent-check door).
+            if (b + 1 < limit)
+                QVERIFY(buffer->textRange(b, b + 1) == ref.mid(b, 1));
+        }
+
+    // Random far-flung spans on the whole fragmented document, plus clamps
+    // and empty windows at the seams.
+    for (int s = 0; s < 500; ++s) {
+        std::uniform_int_distribution<int> posDist(0, std::max(0, static_cast<int>(ref.size()) - 1));
+        const int a = posDist(rng);
+        const int b = std::min<int>(static_cast<int>(ref.size()), a + std::uniform_int_distribution<int>(0, 97)(rng));
+        QVERIFY2(buffer->textRange(a, b) == ref.mid(a, b - a),
+                 qPrintable(QStringLiteral("random span [%1,%2)").arg(a).arg(b)));
+    }
+    QCOMPARE(buffer->textRange(-100, 100000), ref); // clamped
+    QCOMPARE(buffer->textRange(buffer->charCount(), buffer->charCount()), QString());
+    QCOMPARE(buffer->textRange(5, 5), QString());   // empty window
+    QCOMPARE(buffer->text(), ref);
+}
+
+void TestTextBuffer::textRangeWalkStaysPrunedWithManyPieces()
+{
+    // Tripwire for the regression the Gate-1 bench exit criterion caught
+    // (mean 7 -> 37 us/op on the bench document): a small-span textRange was
+    // walking EVERY piece left of the window. Prepend many single-char
+    // pieces, then probe the document's last unit: an unpruned walk costs
+    // ~pieces-per-probe (~20k steps x 1000 probes is >> this budget on any
+    // runner), while the subtree-char-pruned walk costs ~treap depth.
+    buffer->setText(QString(20000, QLatin1Char('x')));
+    for (int i = 0; i < 20000; ++i)
+        buffer->insertAtOffset(0, QStringLiteral("a"));
+    buffer->clearUndoHistory(); // probe cost, not history cost
+    QVERIFY2(buffer->debugNodeCount() > 20000,
+             qPrintable(QStringLiteral("fragmentation sanity: %1 nodes").arg(buffer->debugNodeCount())));
+
+    const int last = buffer->charCount() - 1;
+    QElapsedTimer t;
+    double bestMs = 1e30;
+    for (int round = 0; round < 3; ++round) {
+        t.start();
+        for (int probe = 0; probe < 1000; ++probe)
+            QCOMPARE(buffer->textRange(last, last + 1), QLatin1String("x"));
+        bestMs = std::min(bestMs, static_cast<double>(t.nsecsElapsed()) / 1e6);
+    }
+    // 10 us/probe: ~100x above the pruned walk's ~treap-depth cost, ~5x
+    // BELOW the unpruned walk even on a cache-friendly small tree.
+    QVERIFY2(bestMs < 10.0,
+             qPrintable(QStringLiteral("1000 end-of-document probes took %1 ms best-of-3; "
+                                       "the textRange walk is no longer pruned by subtree chars")
+                            .arg(bestMs, 0, 'f', 2)));
 }
 
 void TestTextBuffer::randomUndoRedoVsReference()
