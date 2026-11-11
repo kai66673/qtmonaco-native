@@ -26,12 +26,14 @@
 #include <QWheelEvent>
 
 #include "view/CodeEditor.hpp"
+#include "view/CodeEditorOptions.hpp"
 
 #include <algorithm> // std::min in the ruler mapping contract
 #include <cmath> // std::ceil in the h-scroll exact-offset arithmetic
 #include <functional> // std::function for the probe predicates
 
 using qmn::view::CodeEditor;
+using qmn::view::CodeEditorOptions;
 
 // Human-readable TextPosition dumps: QCOMPARE failures then show the
 // offending {line,col} values instead of <null> (QTest streams elements,
@@ -175,6 +177,11 @@ private slots:
     void autoCloseFansOutMixedSlotsAsOneUndoStep();
     void longLineRulerMapsToColumnAndRidesHScroll();
     void currentLineModeWashFrameAndDelegates();
+
+    // Settings object (M19).
+    void optionsMirrorsKnobsAndNotifies();
+    void autoCloseToggleOnOptions();
+    void readOnlyBlocksUserEdits();
 
     // Multiple carets (Phase D1).
     void altClickAddsCaretsInDocOrder();
@@ -3649,6 +3656,275 @@ void TestCodeEditor::currentLineModeWashFrameAndDelegates()
     QVERIFY(editor->currentLineHighlight());
     editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Off);
     QVERIFY(!editor->currentLineHighlight());
+}
+
+// --- M19 settings object ----------------------------------------------------
+
+void TestCodeEditor::optionsMirrorsKnobsAndNotifies()
+{
+    // ONE stable, parented child; two doors (this object OR the flat
+    // CodeEditor setters) into the SAME room. The editor keeps the state,
+    // so options getters can never drift stale.
+    CodeEditorOptions* opt = editor->options();
+    QVERIFY(opt);
+    QCOMPARE(editor->options(), opt); // stable instance
+    QCOMPARE(opt->parent(), static_cast<QObject*>(editor)); // owned child
+
+    // Getters mirror the live editor state without setting anything.
+    QCOMPARE(opt->lineNumbersMode(), editor->lineNumbersMode());
+    QCOMPARE(opt->currentLineMode(), editor->currentLineMode());
+    QCOMPARE(opt->currentLineHighlight(), editor->currentLineHighlight());
+    QCOMPARE(opt->longLineRulerColumn(), editor->longLineRulerColumn());
+    QCOMPARE(opt->tabStopWidth(), editor->tabStopWidth());
+    QCOMPARE(opt->autoIndentEnabled(), editor->autoIndentEnabled());
+    QCOMPARE(opt->tabChangesFocus(), editor->tabChangesFocus());
+    QCOMPARE(opt->overviewRulerEnabled(), editor->overviewRulerEnabled());
+    QCOMPARE(opt->scrollBeyondLastLineEnabled(),
+             editor->scrollBeyondLastLineEnabled());
+    QVERIFY(opt->autoCloseEnabled()); // M19-only knobs: default ON…
+    QVERIFY(!opt->isReadOnly());      // …and OFF
+
+    // Change through options -> editor sees it, ONE signal with the new
+    // value; same-value sets are silent; the flat door fires the SAME spy.
+    QSignalSpy lnSpy(opt, &CodeEditorOptions::lineNumbersModeChanged);
+    const auto lnBase = opt->lineNumbersMode();
+    const auto lnOther = lnBase == CodeEditor::LineNumbersMode::On
+        ? CodeEditor::LineNumbersMode::Off : CodeEditor::LineNumbersMode::On;
+    opt->setLineNumbersMode(lnOther);
+    QCOMPARE(editor->lineNumbersMode(), lnOther);
+    QCOMPARE(lnSpy.count(), 1);
+    QCOMPARE(lnSpy.at(0).at(0).value<CodeEditor::LineNumbersMode>(), lnOther);
+    opt->setLineNumbersMode(lnOther); // same value: no re-emit
+    QCOMPARE(lnSpy.count(), 1);
+    editor->setLineNumbersMode(lnBase); // the flat setter rides this spy too
+    QCOMPARE(opt->lineNumbersMode(), lnBase);
+    QCOMPARE(lnSpy.count(), 2);
+
+    // Pin the base, then walk the enum through every door.
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Background);
+    QSignalSpy clSpy(opt, &CodeEditorOptions::currentLineModeChanged);
+    opt->setCurrentLineMode(CodeEditor::CurrentLineMode::BackgroundFrame);
+    QCOMPARE(editor->currentLineMode(), CodeEditor::CurrentLineMode::BackgroundFrame);
+    QCOMPARE(clSpy.count(), 1);
+    opt->setCurrentLineHighlight(false); // the bool delegate rides the enum:
+    QCOMPARE(editor->currentLineMode(), CodeEditor::CurrentLineMode::Off); // exactly ONE emit
+    QCOMPARE(clSpy.count(), 2);
+    QVERIFY(!opt->currentLineHighlight());
+    opt->setCurrentLineHighlight(true);
+    QCOMPARE(opt->currentLineMode(), CodeEditor::CurrentLineMode::Background);
+    QCOMPARE(clSpy.count(), 3);
+
+    QSignalSpy rulerSpy(opt, &CodeEditorOptions::longLineRulerColumnChanged);
+    opt->setLongLineRulerColumn(40);
+    QCOMPARE(editor->longLineRulerColumn(), 40);
+    QCOMPARE(rulerSpy.count(), 1);
+    opt->setLongLineRulerColumn(-3); // the editor's clamp lives in the
+    QCOMPARE(opt->longLineRulerColumn(), 0); // setter, so options inherit it…
+    QCOMPARE(rulerSpy.at(1).at(0).toInt(), 0); // …and notifies with the CLAMPED value
+    QCOMPARE(rulerSpy.count(), 2);
+    opt->setLongLineRulerColumn(0); // same (clamped) value: silent
+    QCOMPARE(rulerSpy.count(), 2);
+
+    QSignalSpy tabSpy(opt, &CodeEditorOptions::tabStopWidthChanged);
+    opt->setTabStopWidth(10);
+    QCOMPARE(editor->tabStopWidth(), 10);
+    QCOMPARE(tabSpy.at(0).at(0).toInt(), 10);
+    QCOMPARE(tabSpy.count(), 1);
+    opt->setTabStopWidth(0); // >=1 clamp, reported as 1
+    QCOMPARE(opt->tabStopWidth(), 1);
+    QCOMPARE(tabSpy.count(), 2);
+    QCOMPARE(tabSpy.at(1).at(0).toInt(), 1);
+
+    // The four plain-bool mirrors, one door each (invert whatever the
+    // current state is — the test must not bake in the shipped defaults).
+    QSignalSpy aiSpy(opt, &CodeEditorOptions::autoIndentEnabledChanged);
+    editor->setAutoIndentEnabled(!opt->autoIndentEnabled());
+    QCOMPARE(opt->autoIndentEnabled(), editor->autoIndentEnabled());
+    QCOMPARE(aiSpy.count(), 1);
+    QSignalSpy tfSpy(opt, &CodeEditorOptions::tabChangesFocusChanged);
+    const bool tfWant = !editor->tabChangesFocus();
+    opt->setTabChangesFocus(tfWant);
+    QCOMPARE(editor->tabChangesFocus(), tfWant);
+    QCOMPARE(tfSpy.count(), 1);
+    QSignalSpy orSpy(opt, &CodeEditorOptions::overviewRulerEnabledChanged);
+    const bool orWant = !editor->overviewRulerEnabled();
+    opt->setOverviewRulerEnabled(orWant);
+    QCOMPARE(editor->overviewRulerEnabled(), orWant);
+    QCOMPARE(orSpy.count(), 1);
+    QSignalSpy sbSpy(opt, &CodeEditorOptions::scrollBeyondLastLineEnabledChanged);
+    editor->setScrollBeyondLastLineEnabled(!opt->scrollBeyondLastLineEnabled());
+    QCOMPARE(opt->scrollBeyondLastLineEnabled(), editor->scrollBeyondLastLineEnabled());
+    QCOMPARE(sbSpy.count(), 1);
+    editor->setScrollBeyondLastLineEnabled(!opt->scrollBeyondLastLineEnabled());
+    QCOMPARE(sbSpy.count(), 2);
+    opt->setScrollBeyondLastLineEnabled(opt->scrollBeyondLastLineEnabled()); // same: silent
+    QCOMPARE(sbSpy.count(), 2);
+
+    // The two options-only knobs also notify; the behavioral half of the
+    // contract is exercised by autoCloseToggleOnOptions/readOnlyBlocksUserEdits.
+    QSignalSpy acSpy(opt, &CodeEditorOptions::autoCloseEnabledChanged);
+    QSignalSpy roSpy(opt, &CodeEditorOptions::readOnlyChanged);
+    opt->setAutoCloseEnabled(false);
+    opt->setReadOnly(true);
+    QCOMPARE(acSpy.count(), 1);
+    QVERIFY(!acSpy.at(0).at(0).toBool());
+    QCOMPARE(roSpy.count(), 1);
+    QVERIFY(roSpy.at(0).at(0).toBool());
+    opt->setReadOnly(true); // same: silent
+    QCOMPARE(roSpy.count(), 1);
+    opt->setAutoCloseEnabled(true); // leave the room as we found it
+    opt->setReadOnly(false);
+    QCOMPARE(acSpy.count(), 2);
+    QCOMPARE(roSpy.count(), 2);
+}
+
+// The auto-close toggle is M19-options-only (no flat setter on purpose):
+// OFF must degrade EVERY pairing behavior (Pair/Wrap/Skip) to plain
+// single-char typing, while the textual "backspace between an empty pair
+// removes both" rule stays alive (it never claims pairing, it just reads
+// the text — documented contract in CodeEditorOptions.hpp).
+void TestCodeEditor::autoCloseToggleOnOptions()
+{
+    CodeEditorOptions* opt = editor->options();
+    QVERIFY(opt->autoCloseEnabled()); // default ON = the M18 behavior
+    QSignalSpy spy(opt, &CodeEditorOptions::autoCloseEnabledChanged);
+
+    opt->setAutoCloseEnabled(false);
+    QVERIFY(!opt->autoCloseEnabled());
+    QCOMPARE(spy.count(), 1);
+    opt->setAutoCloseEnabled(false); // same value: silent
+    QCOMPARE(spy.count(), 1);
+
+    // OFF: the opener is one plain char — no pair, no wrap, no skip.
+    editor->setPlainText(QString());
+    QTest::keyClick(editor, Qt::Key_ParenLeft);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("("));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+    QTest::keyClick(editor, Qt::Key_QuoteDbl); // quote: same, plain
+    QCOMPARE(editor->toPlainText(), QStringLiteral("(\""));
+    QTest::keyClick(editor, Qt::Key_ParenRight); // the closer would have
+    QCOMPARE(editor->toPlainText(), QStringLiteral("(\")")); // inserted plain anyway
+
+    // Wrap degrades to a plain selection-replace with the single char.
+    editor->setPlainText(QStringLiteral("hello"));
+    editor->selectAll();
+    QTest::keyClick(editor, Qt::Key_ParenLeft);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("("));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+
+    // The textual backspace rule is NOT gated: two plain inserts spelling
+    // "()" still die as a pair between the empty pair.
+    editor->setPlainText(QString());
+    QTest::keyClick(editor, Qt::Key_ParenLeft);
+    QTest::keyClick(editor, Qt::Key_ParenRight);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("()")); // two real inserts
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+    editor->setPosition({0, 1});
+    QTest::keyClick(editor, Qt::Key_Backspace);
+    QCOMPARE(editor->toPlainText(), QString());
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+
+    // Back ON: every M18 behavior resumes.
+    opt->setAutoCloseEnabled(true);
+    QCOMPARE(spy.count(), 2);
+    editor->setPlainText(QString());
+    QTest::keyClick(editor, Qt::Key_ParenLeft);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("()")); // Pair again
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+    QTest::keyClick(editor, Qt::Key_ParenRight); // Skip again: motion only
+    QCOMPARE(editor->toPlainText(), QStringLiteral("()"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+}
+
+// Read-only mode (options-only knob): EVERY user edit gesture is refused;
+// caret motion, selection, copy, find, and programmatic setPlainText stay
+// fully alive. Clipboard content is deliberately NOT asserted (offscreen
+// clipboard flakiness) — only the model state matters.
+void TestCodeEditor::readOnlyBlocksUserEdits()
+{
+    CodeEditorOptions* opt = editor->options();
+    QVERIFY(!opt->isReadOnly()); // default OFF
+    QSignalSpy spy(opt, &CodeEditorOptions::readOnlyChanged);
+
+    // Seed an undoable edit BEFORE the lock: if any gate leaked, the
+    // frozen-text comparisons below would catch the mutation.
+    editor->setPlainText(QStringLiteral("hello world"));
+    editor->setPosition({0, 5});
+    QTest::keyClick(editor, Qt::Key_X); // allowed while unlocked
+    QVERIFY(editor->canUndo());
+
+    opt->setReadOnly(true);
+    QVERIFY(opt->isReadOnly());
+    QCOMPARE(spy.count(), 1);
+    opt->setReadOnly(true); // same value: silent
+    QCOMPARE(spy.count(), 1);
+    const QString frozen = editor->toPlainText(); // "hellox world"
+    QCOMPARE(frozen, QStringLiteral("hellox world"));
+
+    // Refused gestures — typing, IME commit, deletes (incl. the Ctrl word
+    // variant), Enter, Tab/Shift+Tab indentation, auto-close, replace
+    // actions, undo/redo, cut/paste, DnD drop.
+    QTest::keyClick(editor, Qt::Key_Y);
+    QTest::keyClick(editor, Qt::Key_Backspace);
+    QTest::keyClick(editor, Qt::Key_Delete);
+    QTest::keyClick(editor, Qt::Key_Delete, Qt::ControlModifier);
+    QTest::keyClick(editor, Qt::Key_Return);
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QTest::keyClick(editor, Qt::Key_Backtab);
+    QTest::keyClick(editor, Qt::Key_ParenLeft); // auto-close stays out too…
+    QTest::keyClick(editor, Qt::Key_Apostrophe); // …and no skip/pair motion
+    QInputMethodEvent ime(QStringLiteral("\u4F60"), // IME commit = typing
+                          {});
+    QApplication::sendEvent(editor, &ime);
+    // The refuses are inert: not one of them even moved the caret.
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 6}));
+    QTest::keyClick(editor, Qt::Key_A, Qt::ControlModifier); // selection OK…
+    QVERIFY(editor->hasSelection()); // …selection gestures stay alive…
+    QTest::keyClick(editor, Qt::Key_Q); // …but type-over-selection is refused
+    editor->undo();
+    editor->redo();
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier); // chord too
+    editor->cut();
+    editor->paste();
+    QMimeData md;
+    md.setText(QStringLiteral("DROPPED"));
+    QDragEnterEvent de(editor->rect().center(), Qt::CopyAction, &md,
+                       Qt::LeftButton, Qt::NoModifier); // (deprecated QPoint
+    QApplication::sendEvent(editor, &de);               // ctor: the in-repo
+    QVERIFY(!de.isAccepted()); // helper spells it the same way)
+    // readOnly refuses at the drag-enter door — the real protocol never
+    // reaches dragMove/drop. (The dropEvent guard is the belt to this
+    // braces; sendDropAt's QTEST_ASSERT would fire precisely because the
+    // Drop event stays ignored — that refusal is the assertion here.)
+    QCOMPARE(editor->toPlainText(), frozen); // NONE of it touched the model
+    QVERIFY(editor->canUndo()); // the pre-lock edit is still pending
+
+    // Find stays fully alive; only the replace ACTIONS refuse.
+    editor->setFindText(QStringLiteral("o"));
+    QCOMPARE(editor->matchCount(), 2);
+    // (replaceRange is the private replace-bar internal; the public door
+    // is replaceAll — refused, returns 0 matches acted on.)
+    QCOMPARE(editor->replaceAll(QStringLiteral("0")), 0);
+    QCOMPARE(editor->toPlainText(), frozen);
+
+    // The programmatic door and the read side of the widget are untouched.
+    editor->setPlainText(QStringLiteral("replaced")); // allowed by contract
+    QCOMPARE(editor->toPlainText(), QStringLiteral("replaced"));
+    editor->setPosition({0, 3});
+    QTest::keyClick(editor, Qt::Key_Right);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 4}));
+    QTest::keyClick(editor, Qt::Key_End, Qt::ShiftModifier);
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("aced")); // copy side alive
+    editor->setPosition({0, 8});
+
+    // Unlock: edits resume exactly where they stopped.
+    opt->setReadOnly(false);
+    QCOMPARE(spy.count(), 2);
+    QTest::keyClick(editor, Qt::Key_Backspace);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("replace"));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("replaced"));
 }
 
 // --- M4 syntax highlighting (Phase D2) -------------------------------------

@@ -395,15 +395,24 @@ multi-caret machinery. Bundles (one commit each, tests per bundle):
   `CurrentLineMode { Off, Background, BackgroundFrame }` replaces the
   bool (bool setter kept as delegate), default `Background`, wash ink
   strengthened.
-- **M19 `CodeEditorOptions` (settings object).** Child QObject returned
-  by `CodeEditor::options()`; every knob (gutter mode, current line,
-  ruler column, tab stop, scroll-past-end, ruler/minimap, readonly,
-  auto-indent/auto-close flags, tab-changes-focus…) lives there with
-  notify-on-change; CodeEditor listens and applies. Existing flat
-  setters become ONE-LINE delegates (API never breaks); NEW settings
-  exist only on the options object. Shiboken: plain QObject, plain
-  Qt types, enums as nested Q_ENUM — wrappable without typesystem
-  surgery.
+- **M19 COMPLETE (2026-11-11): `CodeEditorOptions` (settings object).**
+  Child QObject returned by `CodeEditor::options()`; every knob (gutter
+  mode, current line, ruler column, tab stop, scroll-past-end,
+  ruler/minimap, readonly, auto-indent/auto-close flags,
+  tab-changes-focus…) lives there with notify-on-change; CodeEditor
+  listens and applies. Existing flat setters become ONE-LINE delegates
+  (API never breaks); NEW settings exist only on the options object.
+  Shiboken: plain QObject, plain Qt types, enums as nested Q_ENUM —
+  wrappable without typesystem surgery.
+  LANDED AS: mirror-proxy (dev decision, deliberate deviation from the
+  literal "options-as-store / CodeEditor listens" wording above): the
+  editor is the single source of truth — options setters delegate INTO
+  the editor's existing setters (validation/clamping/invalidation
+  inherited, getters never stale), and the editor's setters emit the
+  options' `*Changed` signal — one notify per change through EITHER
+  door, silent on same-value re-sets. Flat setters kept verbatim (they
+  ARE the store); new knobs (autoCloseEnabled, readOnly) live only on
+  options. Same DoD: 10 knobs + signals, Shiboken-clean, no Q_PROPERTY.
 - **M11 QAccessible (unchanged scope, last).** Full text interface over
   the final frozen surface: role Text/EditableText, document line/caret
   queries through the M13 view-map (visible vs model!), selection,

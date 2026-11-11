@@ -1,5 +1,6 @@
 #include "CodeEditor.hpp"
 
+#include "view/CodeEditorOptions.hpp"
 #include "view/HighlightEngine.hpp"
 
 #include <QApplication>
@@ -254,6 +255,10 @@ CodeEditor::CodeEditor(QWidget* parent)
     // M16: the widget accepts text drops (dropEvent filters on hasText;
     // setAcceptDrops only opens the drag-protocol channel).
     setAcceptDrops(true);
+
+    // M19: the settings object is a parented child, one per editor. Its
+    // ctor only stores the pointer, so the back-link cannot misfire.
+    options_ = new CodeEditorOptions(this, this);
 
     // M4: one core EditEvent per primitive mutation keeps the highlight
     // tree current (ts_tree_edit happens inside the engine; the reparse
@@ -747,6 +752,8 @@ void CodeEditor::copy()
 
 void CodeEditor::cut()
 {
+    if (readOnly_) // M19: cut is refused outright — VS Code does not even
+        return;   // fill the clipboard from a read-only document
     QClipboard* cb = QGuiApplication::clipboard();
     if (!cb)
         return;
@@ -918,6 +925,8 @@ void CodeEditor::paste()
 
 void CodeEditor::pasteText(const QString& text)
 {
+    if (readOnly_) // M19 user-edit gate (paste() and menu/DnD funnel here)
+        return;
     const QString clean = sanitizeLineEnds(text);
     if (clean.isEmpty())
         return; // empty clipboard: paste is a no-op, not a delete
@@ -1181,6 +1190,10 @@ void CodeEditor::normalizeCarets()
 
 bool CodeEditor::applyCaretsFanOut(const SlotEditFn& editFn)
 {
+    if (readOnly_) // M19 backstop: every multi-caret EDIT rides here, so
+        return false; // even a forgotten entry-point gate cannot mutate.
+                      // Callers' captureEditMark/reconcileUndoMarks see a
+                      // zero depth delta and push no undo mark.
     normalizeCarets();
 
     struct Target {
@@ -1361,6 +1374,8 @@ void CodeEditor::moveCarets(const std::function<TextPosition(const CaretSlot&)>&
 
 void CodeEditor::undo()
 {
+    if (readOnly_) // M19: undo/redo mutate the document — refused too
+        return;
     if (!buffer_.canUndo() || undoMarks_.isEmpty())
         return; // out of sync would be a bug; refuse rather than corrupt
     const UndoMark current = captureEditMark(); // what redo must restore
@@ -1373,6 +1388,8 @@ void CodeEditor::undo()
 
 void CodeEditor::redo()
 {
+    if (readOnly_) // M19 user-edit gate
+        return;
     if (!buffer_.canRedo() || redoMarks_.isEmpty())
         return;
     const UndoMark current = captureEditMark(); // the group's pre-state again
@@ -1527,6 +1544,9 @@ void CodeEditor::setScrollBeyondLastLineEnabled(bool enabled)
                             // clamp below re-tune vScroll_ (ruler mapping
                             // follows the same total, by contract)
     update();
+    if (options_) // M19 notify bus: emitted here so BOTH doors (this flat
+                  // setter and the options object) announce exactly once
+        emit options_->scrollBeyondLastLineEnabledChanged(enabled);
 }
 
 void CodeEditor::updateScrollBarRange()
@@ -1574,6 +1594,8 @@ void CodeEditor::setOverviewRulerEnabled(bool enabled)
     // toggling it changes both the clamp contract and the hBar geometry.
     updateScrollBarRange();
     update();
+    if (options_)
+        emit options_->overviewRulerEnabledChanged(enabled);
 }
 
 QRect CodeEditor::overviewRulerGeometry() const
@@ -2343,6 +2365,8 @@ QVector<int> CodeEditor::blockTouchedLines() const
 // offsets never shift.
 void CodeEditor::applyBlockEdits(const QVector<SlotEdit>& edits)
 {
+    if (readOnly_) // M19 backstop (blockIndent/blockOutdent gate at entry)
+        return;
     QVector<int> preExtra;
     preExtra.reserve(extraCarets_.size());
     for (const CaretSlot& s : extraCarets_)
@@ -2395,6 +2419,8 @@ void CodeEditor::applyBlockEdits(const QVector<SlotEdit>& edits)
 
 void CodeEditor::blockIndent()
 {
+    if (readOnly_) // M19 user-edit gate (Tab indentation is an edit)
+        return;
     const QVector<int> lines = blockTouchedLines();
     if (lines.isEmpty())
         return;
@@ -2410,6 +2436,8 @@ void CodeEditor::blockIndent()
 
 void CodeEditor::blockOutdent()
 {
+    if (readOnly_) // M19 user-edit gate (Shift+Tab unindent is an edit)
+        return;
     const QVector<int> lines = blockTouchedLines();
     if (lines.isEmpty())
         return;
@@ -2438,6 +2466,8 @@ void CodeEditor::blockOutdent()
 // Tab burst exactly like typing.
 void CodeEditor::tabInsertSpaces()
 {
+    if (readOnly_) // M19 user-edit gate
+        return;
     const int stop = std::max(1, tabStopWidth_);
     const UndoMark pre = captureEditMark();
     const QString line = buffer_.lineText(caret_.line);
@@ -2545,6 +2575,8 @@ int CodeEditor::autoIndentCaretTrim(const QString& payload)
 
 void CodeEditor::insertTextAtCaret(const QString& text, int caretTrim)
 {
+    if (readOnly_) // M19: typing, IME commit and Enter all funnel here —
+        return;   // one gate covers them (options hpp spells the contract)
     if (text.isEmpty())
         return;
     const UndoMark pre = captureEditMark();
@@ -2636,6 +2668,8 @@ bool pairAroundCol(const QString& line, int col)
 // just the char inside the mixed fan-out below.
 bool CodeEditor::handleAutoClosePair(QChar ch)
 {
+    if (!autoCloseEnabled_) // M19 toggle (options-only knob): OFF makes
+        return false;      // every pair char plain single-char typing
     const PairRule* openRule = nullptr;  // ch plays open in some rule
     const PairRule* closeRule = nullptr; // ch plays close in some rule
     for (const PairRule& r : kPairRules) { // quotes set BOTH
@@ -2767,6 +2801,8 @@ bool CodeEditor::handleAutoClosePair(QChar ch)
 
 void CodeEditor::backspace()
 {
+    if (readOnly_) // M19 user-edit gate (covers the empty-pair rule too)
+        return;
     const UndoMark pre = captureEditMark(); // unbracketed: backspace runs
     if (!extraCarets_.isEmpty()) {         // coalesce into one chunk
         // Multi-caret (D1): per-slot grapheme-safe deletes, one bracketed
@@ -2843,6 +2879,8 @@ void CodeEditor::backspace()
 
 void CodeEditor::deleteForward()
 {
+    if (readOnly_) // M19 user-edit gate
+        return;
     const UndoMark pre = captureEditMark(); // unbracketed, see backspace
     if (!extraCarets_.isEmpty()) {
         applyCaretsFanOut([this](const CaretSlot& s, SlotEdit& ed) {
@@ -3601,6 +3639,8 @@ void CodeEditor::setLineNumbersMode(LineNumbersMode mode)
     updateScrollBarRange(); // contentLeft moved: the h-window width (and the
                             // hBar geometry riding it) changed with the gutter
     update(); // contentLeft() shifts everything drawn at x
+    if (options_)
+        emit options_->lineNumbersModeChanged(mode);
 }
 
 void CodeEditor::setBreakpointLines(const QVector<int>& lines)
@@ -3663,6 +3703,9 @@ void CodeEditor::setCurrentLineMode(CurrentLineMode mode)
         return;
     currentLineMode_ = mode;
     update();
+    if (options_) // the bool delegate routes through here: ONE emit per
+                  // real change, whichever spelling was used
+        emit options_->currentLineModeChanged(mode);
 }
 
 void CodeEditor::setLongLineRulerColumn(int column)
@@ -3674,6 +3717,8 @@ void CodeEditor::setLongLineRulerColumn(int column)
     // Ambient paint only: the guide rides the live metrics + hScroll, so
     // neither scroll ranges nor the geometry cache have anything to redo.
     update();
+    if (options_)
+        emit options_->longLineRulerColumnChanged(col);
 }
 
 void CodeEditor::setTabStopWidth(int columns)
@@ -3688,16 +3733,48 @@ void CodeEditor::setTabStopWidth(int columns)
     resetGeoCache();
     updateScrollBarRange();
     update();
+    if (options_)
+        emit options_->tabStopWidthChanged(columns);
+}
+
+// M19-only knobs: stored here, exposed only through the options object
+// (friend), so no flat public setter. State-only: no repaint, no cache.
+void CodeEditor::setAutoCloseEnabled(bool enabled)
+{
+    if (enabled == autoCloseEnabled_)
+        return;
+    autoCloseEnabled_ = enabled;
+    if (options_)
+        emit options_->autoCloseEnabledChanged(enabled);
+}
+
+void CodeEditor::setReadOnly(bool readOnly)
+{
+    if (readOnly == readOnly_)
+        return;
+    readOnly_ = readOnly;
+    if (options_)
+        emit options_->readOnlyChanged(readOnly);
+    // No repaint: the read-only state refuses edits, it does not restyle
+    // (Gate-1 minimal surface; a themed lock badge is Gate-2 territory).
 }
 
 void CodeEditor::setAutoIndentEnabled(bool enabled)
 {
+    if (enabled == autoIndent_)
+        return;
     autoIndent_ = enabled; // state-only: no repaint, no cache effect
+    if (options_)
+        emit options_->autoIndentEnabledChanged(enabled);
 }
 
 void CodeEditor::setTabChangesFocus(bool enabled)
 {
+    if (enabled == tabChangesFocus_)
+        return;
     tabChangesFocus_ = enabled; // state-only: the key handler branches on it
+    if (options_)
+        emit options_->tabChangesFocusChanged(enabled);
 }
 
 // --- M6 find/replace (public API section) --------------------------------
@@ -4161,6 +4238,8 @@ bool CodeEditor::findPrevious()
 
 bool CodeEditor::replaceRange(const MatchRange& m, const QString& replacement)
 {
+    if (readOnly_) // M19: find/replace ACTIONS are edits; finding itself
+        return false; // (findMatches/findAll) stays fully alive
     const UndoMark pre = captureEditMark();
     buffer_.beginEditGroup(); // bracketed: its own undo step, never coalesced
     const int start = buffer_.offsetOf(m.startLine, m.startCol);
@@ -4217,6 +4296,8 @@ bool CodeEditor::replaceNext(const QString& replacement)
 
 int CodeEditor::replaceAll(const QString& replacement)
 {
+    if (readOnly_) // M19 replace-action gate (see replaceRange)
+        return 0;
     refreshFindMatches();
     const int n = static_cast<int>(matches_.size());
     if (n == 0)
@@ -4517,6 +4598,10 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             return;
         }
         case Qt::Key_Delete: {
+            if (readOnly_) { // M19: this Ctrl variant deletes inline (it
+                finish();   // never routes through deleteForward)
+                return;
+            }
             if (!extraCarets_.isEmpty()) {
                 // Multi-caret word delete (D1): bracketed group, one step.
                 const UndoMark pre = captureEditMark();
@@ -5566,10 +5651,10 @@ void CodeEditor::dragEnterEvent(QDragEnterEvent* event)
     // Text in, drag on; every other payload (urls, rich text...) stays
     // refused. Chrome strips need no special case: positionAt clamps a drop
     // over the gutter/ruler to the nearest text edge, exactly like a click.
-    if (isEnabled() && event->mimeData()->hasText())
-        event->acceptProposedAction();
-    else
-        event->ignore();
+    if (isEnabled() && !readOnly_ && event->mimeData()->hasText())
+        event->acceptProposedAction(); // M19: readOnly refuses drops at the
+    else                              // protocol door — the drag cursor
+        event->ignore();              // already says "not allowed"
 }
 
 void CodeEditor::dragMoveEvent(QDragMoveEvent* event)
@@ -5584,6 +5669,10 @@ void CodeEditor::dragMoveEvent(QDragMoveEvent* event)
 
 void CodeEditor::dropEvent(QDropEvent* event)
 {
+    if (readOnly_) { // M19 backstop (dragEnter already refuses the drop)
+        event->ignore();
+        return;
+    }
     if (!event->mimeData()->hasText()) {
         event->ignore();
         return;

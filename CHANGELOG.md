@@ -441,6 +441,38 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   cosmetic Text@90 band outline; the old bool setter/getter survive as
   one-line delegates. Shiboken-clean (bool/Q_ENUM/int only). 7 new
   slots (174/0/2).
+- **M19 `CodeEditorOptions` (settings object).** `CodeEditor::options()`
+  returns a parented child QObject carrying TEN knobs, each with a
+  `*Changed` signal: the nine existing editor knobs (lineNumbersMode,
+  currentLineMode + the currentLineHighlight bool delegate,
+  longLineRulerColumn, tabStopWidth, autoIndentEnabled,
+  tabChangesFocus, overviewRulerEnabled, scrollBeyondLastLineEnabled)
+  plus TWO options-only settings (the M19 rule: new settings live
+  only here): `autoCloseEnabled` (default ON; OFF degrades pair
+  typing to plain single-char typing — Pair/Wrap/Skip all die, the
+  textual "backspace between an empty pair removes both" rule stays,
+  it never claimed pairing) and `setReadOnly`/`isReadOnly` (default
+  OFF; VS Code model: EVERY user edit gesture is refused — typing
+  incl. IME commit, Enter, Tab/Shift+Tab indentation, Backspace and
+  Delete incl. the Ctrl word variant, paste, cut (the clipboard
+  stays untouched too), DnD drops (refused at the drag-enter door),
+  find/replace ACTIONS, undo/redo — while caret navigation,
+  selection, copy, finding and programmatic setPlainText stay fully
+  alive; the applyCaretsFanOut/applyBlockEdits entry gates are the
+  backstop: a forgotten front door cannot mutate, and callers'
+  captureEditMark/reconcile see the zero depth delta and push no
+  undo mark). DESIGN note (deliberate deviation from PLAN's literal
+  "options-as-store / flat setters become delegates" wording,
+  mirror-proxy instead): the EDITOR keeps every value and every
+  setter body verbatim — the options setters are one-line
+  delegations INTO it (so validation, clamping and invalidation are
+  inherited for free and options getters can never drift stale),
+  and each editor setter ends `emit options_->xChanged(value)` —
+  ONE notification no matter which door the change came through,
+  same-value sets stay silent (the early-return guards predate the
+  emit), clamped values are notified as-applied. No Q_PROPERTY
+  (moc/Shiboken discipline: plain methods + Qt6 signals; the Q_ENUM
+  knobs ride QSignalSpy metatypes). 3 new slots (177/0/2).
 
 ### Changed
 - The x anchor of all text geometry (caret, selection, painting, hit

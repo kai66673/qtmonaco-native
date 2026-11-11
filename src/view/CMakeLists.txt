@@ -1,6 +1,8 @@
 add_library(qmn_view STATIC
     CodeEditor.hpp
     CodeEditor.cpp
+    CodeEditorOptions.hpp
+    CodeEditorOptions.cpp
     HighlightEngine.hpp
     HighlightEngine.cpp
     QueryData.hpp)

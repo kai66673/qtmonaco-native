@@ -36,6 +36,7 @@ class QInputMethodEvent;
 namespace qmn::view {
 
 class HighlightEngine; // M4 private seam; defined in view/HighlightEngine.hpp
+class CodeEditorOptions; // M19 settings object; view/CodeEditorOptions.hpp
 
 // 0-based text position. col is counted in UTF-16 code units.
 struct TextPosition {
@@ -317,8 +318,8 @@ public:
     // 0 or negative = off; default off.
     void setLongLineRulerColumn(int column);
     int longLineRulerColumn() const { return longLineRulerCol_; }
-    // M18 auto-close pairs (behavior only, no public toggle until M19's
-    // settings object): typing one of ()[]{}""''``  with a selection
+    // M18 auto-close pairs (behavior; the on/off toggle lives on
+    // options(), M19): typing one of ()[]{}""''``  with a selection
     // WRAPS it; at a bare caret it inserts the pair and parks the caret
     // between; typing a closer that is already right of the caret JUMPS
     // over it instead (no insert, no undo entry); a quote inside or
@@ -326,6 +327,18 @@ public:
     // VS Code model — brackets always pair). Backspace with the caret
     // between an empty pair removes BOTH sides. Fans out per caret like
     // every other edit; one bracketed undo group per multi press.
+
+    // M19 settings object: ONE child QObject mirroring every editor knob
+    // (gutter mode, current line, long-line ruler, tab stop, auto-indent,
+    // tab-changes-focus, overview ruler, scroll-past-end) PLUS the two
+    // M19-only settings (auto-close toggle, read-only mode), each with a
+    // *Changed signal. The editor is the single source of truth: options
+    // setters delegate here (existing validation/invalidation stays), and
+    // the editor emits the signal — so the flat setters and the options
+    // object are two doors into the same room, and options never go
+    // stale. Owned by the editor (parented child); one per editor.
+    // Full contract: view/CodeEditorOptions.hpp.
+    CodeEditorOptions* options() const { return options_; }
 
     // Indentation + auto-indent (M14). SOFT TABS ONLY: Tab typing never
     // puts literal '\t' into the buffer; literal tabs (paste, setPlainText)
@@ -759,6 +772,16 @@ private:
     void setVScroll(int pixels);
     void updateScrollBarRange();
     void ensureCaretVisible();
+    // M19-only settings: stored here (single source of truth) but exposed
+    // ONLY through the options object — no flat public setter (M19 rule:
+    // new settings live only on the options object). handleAutoClosePair
+    // and the user-edit entry points read the flags directly.
+    void setAutoCloseEnabled(bool enabled);
+    bool autoCloseEnabled() const { return autoCloseEnabled_; }
+    void setReadOnly(bool readOnly);
+    bool isReadOnly() const { return readOnly_; }
+    friend class CodeEditorOptions;
+
     void insertTextAtCaret(const QString& text, int caretTrim = 0);
     // M18 auto-close pairs: claim a printable press of one ()[]{}""''``
     // char (public contract next to the API docs above). Returns false for
@@ -931,6 +954,9 @@ private:
     int highlightEnd_ = -1;
     CurrentLineMode currentLineMode_ = CurrentLineMode::Background; // M18 default on
     int longLineRulerCol_ = 0; // M18 long-line ruler column; 0 = off
+    bool autoCloseEnabled_ = true; // M19 (options-only knob)
+    bool readOnly_ = false; // M19 (options-only knob): user edits refused
+    CodeEditorOptions* options_ = nullptr; // M19; ctor parents it to this
     int gutterInnerPad() const; // gutter digit/glyph padding (M5)
 
     // --- M6 find/replace state (semantics: public API comments) ---
