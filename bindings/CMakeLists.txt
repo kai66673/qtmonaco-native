@@ -121,4 +121,9 @@ set_target_properties(_qmn PROPERTIES AUTOMOC OFF AUTOUIC OFF AUTORCC OFF)
 # package at site-packages root - `import _qmn` searches sys.path, not the qmn/
 # subdirectory. The generated import path is _qmn.qmn.view.CodeEditor; the
 # package flattens it to qmn.CodeEditor.
-install(TARGETS _qmn LIBRARY DESTINATION .)
+# COMPONENT python is the wheel filter: pyproject sets scikit-build-core's
+# install.components = ["python"], so the wheel build installs ONLY this rule -
+# without the filter the whole Phase F C++ install tree (include/, lib64/*.a,
+# lib/cmake/qmn) rode into the wheel too (measured). A plain `cmake --install`
+# without --component still installs everything, C++ side unaffected.
+install(TARGETS _qmn LIBRARY DESTINATION . COMPONENT python)

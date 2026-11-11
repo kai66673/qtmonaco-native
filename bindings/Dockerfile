@@ -17,8 +17,10 @@
 # directly instead - pinned by version string and checked against the mirror's
 # .sha1. Qt 6.12's Linux build being RHEL 9 based also matches manylinux_2_34.
 #
-# patchelf is deliberately absent: it is not in the RHEL9 base repos. Phase F
-# (auditwheel/cibuildwheel) gets it from the PyPI patchelf wheel instead.
+# patchelf is not in the RHEL9 base repos, so the PyPI patchelf wheel supplies
+# it to auditwheel (Phase F: repair rewrites the extension's RUNPATH); both it
+# and auditwheel are baked into /opt/venv because runs execute as --user and
+# cannot pip into it.
 # libicu-devel is deliberately absent too: Qt wants ICU 73 (bundled in the Qt
 # archive, and the PySide6 wheel bundles the same 73), while RHEL9 ships ICU 67 -
 # installing -devel would let find_package(ICU) record libicu*.so.67 in the link
@@ -40,7 +42,8 @@ RUN python3.11 -m venv /opt/venv && \
     /opt/venv/bin/pip install --no-cache-dir \
         "PySide6-Essentials==6.12.0" \
         "shiboken6_generator==6.12.0" \
-        py7zr scikit-build-core ninja cmake
+        py7zr scikit-build-core ninja cmake \
+        auditwheel patchelf
 
 # Qt 6.12.0 headers, moc, CMake configs and runtime libs.
 # mirror.yandex.ru/mirrors/qt.io measured 0.32s from inside the container

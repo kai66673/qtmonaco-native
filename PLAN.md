@@ -444,6 +444,16 @@ defaults documented on the setters (freeze-bound).
   own baseline) + `auditwheel` repair; real **abi3** wheel tag (`cp310-abi3`,
   Python floor 3.10); pin `PySide6>=6.12` in wheel metadata; the `cp311`
   cosmetic tag from Phase B dies here.
+  ✔ (measured): abi3 tag is honest — the build was always abi3
+  (`Py_LIMITED_API=0x030a0000` inherited from `Shiboken6::libshiboken`);
+  repair is wired into `build_in_container.sh --wheel` (pinned
+  `--plat manylinux_2_34_x86_64`, excludes = PySide6-provided + host libglvnd)
+  and the CI `wheel` job produces the artifact from the pinned container;
+  metadata pins `PySide6-Essentials~=6.12.0` (the versioned SONAMEs
+  `*.abi3.so.6.12` + `Qt_6.12` refs demand the patch series);
+  `install.components=["python"]` keeps the C++ install tree out of the wheel.
+  The `[tool.cibuildwheel]` section is staged for a future PyPI flow — its
+  before-all must bootstrap Qt 6.12 (the PySide6 wheels ship no Qt headers).
 - **C++:** `install(TARGETS)` + exported namespace `qmn::` +
   `qmnConfig.cmake`/version-file + public-header review (re-check
   Shiboken-wrappability) + an example consumer built against the *installed*

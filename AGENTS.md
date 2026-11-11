@@ -90,6 +90,22 @@ scaffolding exists yet, so this shapes how `CodeEditor`'s API is designed *today
   resolves its `QWidget` base through shiboken's converter registry at import.
   scikit-build-core spells the option `cmake.build-type`, not top-level
   `build-type`.
+- **Wheel audit facts (measured, Phase F):** scikit-build-core 1.1.2 maps
+  `wheel.py-api = "cp310"` onto the wheel tag without touching the compile
+  (the build was ALWAYS abi3 — libshiboken's INTERFACE_COMPILE_DEFINITIONS
+  carry `Py_LIMITED_API=0x030a0000`). `auditwheel repair --plat` wants the
+  FULL tag (`manylinux_2_34_x86_64`, not the policy name — an invalid-choice
+  error otherwise) and emits a DUAL tag when the wheel also qualifies lower
+  (auto verdict here `manylinux_2_24`: the extension ELF references only
+  GLIBC ≤ 2.14 once PySide6-provided libs are `--exclude`d — excludes prune
+  whole ldd subtrees, which is how Qt's ICU deps vanish too; libGLX/libOpenGL
+  are direct DT_NEEDED but not on the 2_34 lib_whitelist, so they'd be
+  grafted unless excluded). `install.components = ["python"]` +
+  `COMPONENT python` on the extension's install rule keeps the C++ install
+  tree (`include/`, `lib64/*.a`) out of the wheel — sbc then runs
+  `cmake --install --component python`, and ONLY that component lands.
+  patchelf comes from PyPI (RHEL9 repos lack it) and both auditwheel+patchelf
+  bake into `/opt/venv` (runs execute as `--user`, cannot pip at runtime).
 
 ## Hard rule: layering is contractual
 

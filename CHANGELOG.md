@@ -6,6 +6,35 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- Phase F wheel hardening: the wheel now carries a real abi3 tag
+  (`cp310-abi3`, scikit-build-core `wheel.py-api`) — honest because it always
+  was: all 11 generated TUs compile with `Py_LIMITED_API=0x030a0000` inherited
+  from the wheel's `Shiboken6::libshiboken` interface (measured in
+  `compile_commands.json`); only the cosmetic `cp311-cp311` tag dies.
+  `build_in_container.sh --wheel` now runs `auditwheel repair --plat
+  manylinux_2_34_x86_64` (PySide6 6.12's own baseline: our extension ELF
+  references only up to GLIBC_2.14 — measured — but its `Qt_6.12` versioned
+  refs resolve only against the Qt PySide6 bundles, which needs glibc ≥ 2.34)
+  with a measured `--exclude` set for everything deliberately NOT shipped: Qt6*
+  (+ its ICU subtree, pruned) and the pyside/shiboken 6.12 SONAMEs — provided
+  by the pinned PySide6 at runtime, grafting copies would load a second Qt and
+  violate the one-Qt rule — plus libGLX/libOpenGL (host libglvnd, exactly as
+  PySide6 itself needs it). Smoke + parity run against the REPAIRED wheel
+  (installed from `dist/repaired/`; repair rewrites the extension RUNPATH from
+  the absolute build paths to `$ORIGIN`+graft dir), with tag tripwires
+  (`cp310-abi3` before repair, `manylinux_2_34_x86_64` after). Wheel metadata
+  pins `PySide6-Essentials~=6.12.0` — not fussiness, but how the extension
+  links: DT_NEEDED carries the versioned SONAMEs
+  `libpyside6.abi3.so.6.12`/`libshiboken6.abi3.so.6.12` + `Qt_6.12` versioned
+  symbol refs. The wheel no longer leaks the Phase F C++ install tree
+  (`include/qmn/`, `lib64/*.a` — measured): scikit-build-core
+  `install.components = ["python"]` + `COMPONENT python` on the `_qmn` install
+  rule. `[tool.cibuildwheel]` config added (manylinux_2_34 image, x86_64,
+  repair command mirroring the exclude set) for a future PyPI flow whose
+  before-all still needs the Qt 6.12 bootstrap; the shipping v1 path is the
+  new CI `wheel` job reusing the pinned container. auditwheel + patchelf (PyPI
+  wheel; RHEL9 has neither) are baked into the binding image, since runs
+  execute as `--user` and cannot pip at runtime.
 - Phase F parity surface (C++ doors + full Gate-1 Python binding): view
   doors `insertTextAt(TextPosition, QString)` / `deleteLineAt(int)` back
   `insert_text`/`delete_line` — riding the SAME user-edit machinery as

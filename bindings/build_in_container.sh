@@ -56,28 +56,61 @@ cat /tmp/gen/mjb_rejected_functions.log 2>/dev/null || true
 fi
 
 if [ "${1:-}" = "--wheel" ]; then
-    # scikit-build-core path: full wheel from pyproject.toml, installed into a
-    # scratch location, then smoke-tested with the repo off sys.path entirely.
+    # scikit-build-core path: wheel from pyproject.toml, auditwheel-repaired
+    # (Phase F), installed into a scratch location, then smoke-tested with the
+    # repo off sys.path entirely.
     if [ "${REBUILD_IMAGE:-0}" = "1" ]; then
         docker build -f "$REPO/bindings/Dockerfile" -t "$IMAGE" "$REPO"
     fi
     run '
 mkdir -p /work/dist && rm -f /work/dist/qmn_native-*.whl
 /opt/venv/bin/pip wheel --no-build-isolation --no-deps -w /work/dist /work
-WHL=$(ls /work/dist/qmn_native-*.whl)
+RAW=$(ls /work/dist/qmn_native-*.whl)
+echo "raw wheel:     $RAW"
+# Tripwire: the abi3 promise (wheel.py-api = "cp310" in pyproject.toml).
+case "$RAW" in
+    *-cp310-abi3-*) ;;
+    *) echo "FATAL: wheel is not cp310-abi3: $RAW" >&2; exit 1 ;;
+esac
 # Guard: a leftover from an earlier partial install would make the smoke pass
 # for the wrong reason - qmn must be unimportable until the wheel is installed.
 if /opt/venv/bin/python -c "import qmn" 2>/dev/null; then
     echo "FATAL: qmn already importable from the base venv; refusing to test" >&2
     exit 1
 fi
-echo "=== wheel contents ==="
+
+echo "=== auditwheel show (pre-repair verdict) ==="
+auditwheel show "$RAW" || true
+# Repair pinned to manylinux_2_34: PySide6 6.12 own tag (the Qt_6.12 versioned
+# refs of the wrappers only resolve against the Qt it bundles, and that Qt
+# needs glibc >= 2.34; the extension ELF itself only references up to
+# GLIBC_2.14 - measured - so the floor is the dependency, not our code).
+# Excludes: Qt + its ICU subtree (pruned), the pyside/shiboken 6.12 SONAMEs -
+# all provided by the pinned PySide6 at runtime, grafting copies would load a
+# second Qt and violate the one-Qt-at-runtime rule - plus libGLX/libOpenGL,
+# host-provided libglvnd exactly like PySide6 needs it. Keep in sync with
+# [tool.cibuildwheel.linux] repair_command in pyproject.toml.
+mkdir -p /work/dist/repaired && rm -f /work/dist/repaired/*.whl
+auditwheel repair --plat manylinux_2_34_x86_64 -w /work/dist/repaired \
+    --exclude libQt6Core.so.6 --exclude libQt6Gui.so.6 \
+    --exclude libQt6Widgets.so.6 --exclude libQt6DBus.so.6 \
+    --exclude libpyside6.abi3.so.6.12 --exclude libshiboken6.abi3.so.6.12 \
+    --exclude libGLX.so.0 --exclude libOpenGL.so.0 \
+    "$RAW"
+WHL=$(ls /work/dist/repaired/*.whl)
+echo "repaired wheel: $WHL"
+# Tripwire: abi3 python tag + the pinned manylinux baseline in the name.
+case "$WHL" in
+    *-cp310-abi3-*manylinux_2_34_x86_64.whl) ;;
+    *) echo "FATAL: repaired wheel has unexpected tag: $WHL" >&2; exit 1 ;;
+esac
+echo "=== repaired wheel contents ==="
 /opt/venv/bin/python -m zipfile -l "$WHL"
 /opt/venv/bin/pip install --target /tmp/pylibs --force-reinstall --no-deps "$WHL"
-echo "=== smoke test against installed wheel (cwd=/tmp) ==="
+echo "=== smoke test against repaired wheel (cwd=/tmp) ==="
 cd /tmp
 PYTHONPATH=/tmp/pylibs /opt/venv/bin/python /work/bindings/tests/smoke_wheel.py
-echo "=== qtmonaco parity test against installed wheel (cwd=/tmp) ==="
+echo "=== qtmonaco parity test against repaired wheel (cwd=/tmp) ==="
 PYTHONPATH=/tmp/pylibs /opt/venv/bin/python /work/bindings/tests/parity_monaco.py
 '
     exit 0

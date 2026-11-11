@@ -59,3 +59,23 @@ jobs:
                 -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/qmn-prefix"
           cmake --build build-consumer
           ./build-consumer/qmn-consumer-smoke
+
+  # Phase F: the shipping wheel pipeline is the pinned container (Qt 6.12 +
+  # PySide6 6.12 + auditwheel/patchelf baked in) - it configures, builds,
+  # abi3-tags, auditwheel-repairs to manylinux_2_34, and smoke+parity-tests
+  # the REPAIRED wheel, all inside bindings/build_in_container.sh --wheel.
+  # The [tool.cibuildwheel] config in pyproject.toml is the future PyPI flow,
+  # not this job (its before-all still needs the Qt bootstrap).
+  wheel:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build + repair + smoke the PySide6 wheel
+        env:
+          REBUILD_IMAGE: "1"
+        run: ./bindings/build_in_container.sh --wheel
+      - name: Upload repaired wheel
+        uses: actions/upload-artifact@v4
+        with:
+          name: qmn-native-wheel
+          path: dist/repaired/*.whl

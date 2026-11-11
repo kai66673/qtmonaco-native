@@ -20,13 +20,53 @@ name = "qmn-native"
 version = "0.5.0"
 description = "Native Qt6 code-editor widget exposed to PySide6 (drop-in target for qtmonaco.Monaco)"
 requires-python = ">=3.10"
-dependencies = ["PySide6-Essentials>=6.12"]
+# ~=6.12.0 is not fussiness, it is how the extension links: DT_NEEDED carries
+# the versioned SONAMEs libpyside6.abi3.so.6.12 + libshiboken6.abi3.so.6.12,
+# and the generated wrappers reference Qt_6.12 versioned symbols - only the
+# Qt/PySide6 that the 6.12 patch series bundles satisfies them (measured with
+# readelf -V on the built extension).
+dependencies = ["PySide6-Essentials~=6.12.0"]
 
 [tool.scikit-build]
 cmake.version = ">=3.22"
 cmake.build-type = "Release"
 cmake.args = ["-DQMN_BUILD_PYTHON=ON"]
+# Real abi3 (PLAN Phase F): honest because the build was always abi3 - all 11
+# generated TUs compile with Py_LIMITED_API=0x030a0000 inherited from the
+# wheel's Shiboken6::libshiboken INTERFACE_COMPILE_DEFINITIONS (measured in
+# compile_commands.json); only the cosmetic cp311-cp311 tag dies here. 3.10 =
+# our floor = the PySide6 6.12 abi3 floor.
+wheel.py-api = "cp310"
+# The wheel carries ONLY Python payloads: install.components makes scikit-
+# build-core run `cmake --install --component python`, which matches exactly
+# the COMPONENT python install rule of bindings/CMakeLists.txt (the extension
+# module). Without this filter the whole Phase F C++ install tree rode into
+# the wheel too (include/qmn/, lib64/*.a - measured).
+install.components = ["python"]
 # bindings/python/qmn is the pure-Python shim package; the compiled _qmn.abi3.so
 # is installed to the wheel root by CMake (install(TARGETS _qmn ...) in
 # bindings/CMakeLists.txt) because the module's real name is _qmn.
 wheel.packages = ["bindings/python/qmn"]
+
+# The FUTURE PyPI release flow. The shipping v1 path is the tested container
+# pipeline (bindings/build_in_container.sh --wheel, CI job `wheel`): a real
+# cibuildwheel run still needs a before-all that bootstraps the same Qt 6.12
+# (the PySide6 wheels ship no Qt headers - AGENTS.md), and PySide6's own
+# manylinux_2_34 baseline is copied below. musl/Windows/macOS/aarch64 and the
+# free-threaded interpreters stay future work.
+[tool.cibuildwheel]
+skip = ["pp*", "*-musllinux*", "*-win*", "*-macosx*", "cp3*t-*"]
+test-command = "python -c \"import qmn; assert qmn.Monaco, qmn.Monaco\""
+
+[tool.cibuildwheel.linux]
+manylinux-x86_64-image = "manylinux_2_34"
+# Mirrors build_in_container.sh --wheel; keep the two exclude lists in sync.
+# Everything excluded ships with the pinned PySide6 (Qt + its ICU subtree,
+# pruned; pyside/shiboken SONAMEs - grafting copies would break the
+# one-Qt-at-runtime rule) or comes from the host (libglvnd, exactly as
+# PySide6 itself requires it).
+repair_command = """auditwheel repair --plat manylinux_2_34_x86_64 -w {dest_dir} {wheel}
+    --exclude libQt6Core.so.6 --exclude libQt6Gui.so.6
+    --exclude libQt6Widgets.so.6 --exclude libQt6DBus.so.6
+    --exclude libpyside6.abi3.so.6.12 --exclude libshiboken6.abi3.so.6.12
+    --exclude libGLX.so.0 --exclude libOpenGL.so.0"""
