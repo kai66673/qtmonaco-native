@@ -388,6 +388,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   QDragManager's currentTarget (an accepted DragEnter first, DragLeave
   to clean up), and `QDrag::exec` returns NoAction synchronously there.
   9 new slots (161/0/2).
+- M17 code font + zoom API. `CodeEditor::setCodeFont(QFont)`/`codeFont()`
+  and `setZoomFactor(double)`/`zoomFactor()`/`zoomIn()`/`zoomOut()`/
+  `resetZoom()`, with the ladder published as public
+  `kZoomFactorStep`/`kZoomFactorMin`/`kZoomFactorMax` (1.25, clamped to
+  [0.25, 4.0]). The BASE font is what the setters store; the widget's
+  QWidget::font() always mirrors the EFFECTIVE font — base scaled to an
+  integer pixel size (pointSizeF as fallback) with PreferNoHinting imposed,
+  so the cell-width arithmetic never drifts. Changing either re-measures
+  cellWidth/lineHeight/ascent and wipes the geo-cache outright (the font
+  is NOT in the cache key); gutter, fold zone, contentLeft, scroll ranges
+  and hit testing all re-read the live metrics with no extra invalidation
+  of their own (the ambient doc-width extent deliberately stays, M14
+  precedent). Chords (VS Code's table, deliberately NOT
+  QKeySequence::ZoomIn/Out — the offscreen default table misses the
+  canonical Ctrl+=, measured): Ctrl+= / Ctrl++ (Key_Equal|Key_Plus),
+  Ctrl+- / Ctrl+_ (Key_Minus|Key_Underscore), Ctrl+0 and the numpad
+  Ctrl+. reset — Qt 6.12 has no Key_Kp* constants, the keypad delivers
+  the same codes with Qt::KeypadModifier (tolerated), Alt keeps combos
+  unclaimed. Ctrl+mouse-wheel is the FONT zoom here (no Chromium-style
+  chrome zoom exists): sub-notch trackpad deltas accumulate to whole
+  steps, at most 5 per event, and the scroll legs stay fully suppressed;
+  a plain wheel resets the accumulator. A raw QWidget::setFont from
+  foreign code REBASES: changeEvent sees a font that is not exactly
+  scaleFontForZoom(base, factor), adopts it as the new base and returns
+  the factor to 1.0, so codeFont() never lies about what is drawn.
+  Shiboken-clean (QFont/double only). 6 new slots (167/0/2).
 
 ### Changed
 - The x anchor of all text geometry (caret, selection, painting, hit

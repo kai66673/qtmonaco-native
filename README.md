@@ -118,7 +118,7 @@ Gate 1 — Code Editor v1:
       caret nav, selection, gutter, ruler and the v-scroll space)
 - [ ] E3 usability polish before the freeze: M14 Tab/auto-indent ✔ · M15 ✔
       (smart Home + double/triple-click + Ctrl+D) · M16 context menu + text
-      DnD ✔ · M17 font/zoom API · M18 auto-close pairs + long-line ruler +
+      DnD ✔ · M17 font/zoom API ✔ · M18 auto-close pairs + long-line ruler +
       current-line style · M19 CodeEditorOptions settings object
 - [ ] M11 accessibility (QAccessible), final polish (non-gating)
 - [ ] M12 PySide6 binding + wheel: expose `CodeEditor` via Shiboken6

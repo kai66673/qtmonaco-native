@@ -288,6 +288,7 @@ CodeEditor::CodeEditor(QWidget* parent)
     lineHeight_ = qCeil(fm.ascent() + fm.descent() + fm.leading());
     if (lineHeight_ <= 0)
         lineHeight_ = ascent_ + 4;
+    baseFont_ = font_; // M17: the shipped font IS the zoom-1.0 base
     setFont(font_); // keep QWidget::font() in sync with the metrics above
 
     vBar_ = new QScrollBar(Qt::Vertical, this);
@@ -4185,6 +4186,33 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         return;
     }
 
+    // M17 font-zoom chords, VS Code's table: Ctrl+= (Ctrl++ arrives as
+    // Key_Plus with Shift on, and the keypad spells the SAME key with
+    // Qt::KeypadModifier — Qt has no separate KpPlus/KpMinus/Kp0 constants,
+    // measured) zooms in; Ctrl+- (Key_Underscore spelling with Shift too)
+    // zooms out; Ctrl+0 resets. Deliberately NOT QKeySequence::ZoomIn/Out:
+    // the offscreen default table binds only "Ctrl++" and Ctrl+- (measured
+    // on 6.12) and misses the canonical Ctrl+=. Alt stays excluded so
+    // Ctrl+Alt combos remain unclaimed chrome (Meta sprinkles tolerated,
+    // same policy as the fold chords); Shift+0 arrives as Key_ParenRight
+    // on US layouts, so Ctrl+Shift+0 is naturally never a reset.
+    const bool zoomCtrl = (ctrl & Qt::ControlModifier) && !(ctrl & Qt::AltModifier);
+    if (zoomCtrl && (key == Qt::Key_Equal || key == Qt::Key_Plus)) {
+        zoomIn();
+        finish();
+        return;
+    }
+    if (zoomCtrl && (key == Qt::Key_Minus || key == Qt::Key_Underscore)) {
+        zoomOut();
+        finish();
+        return;
+    }
+    if (zoomCtrl && (key == Qt::Key_0 || key == Qt::Key_Period)) {
+        resetZoom(); // VS Code's Ctrl+Numpad0 spelling rides Key_Period
+        finish();
+        return;
+    }
+
     if (ctrl != Qt::NoModifier) {
         switch (key) {
         case Qt::Key_Home:
@@ -5393,6 +5421,28 @@ void CodeEditor::dropEvent(QDropEvent* event)
 
 void CodeEditor::wheelEvent(QWheelEvent* event)
 {
+    // M17: Ctrl+wheel is the mouse-wheel ZOOM (VS Code): it feeds the font,
+    // never the viewport, so the scroll legs below stay fully suppressed.
+    // Sub-notch (trackpad smooth-scroll) deltas ACCUMULATE — unlike the
+    // scroll legs, which the existing platform normalization pre-quantizes
+    // to whole 120s; at most 5 steps per event keeps runaway gestures sane.
+    if (event->modifiers() & Qt::ControlModifier) {
+        wheelZoomAcc_ += event->angleDelta().y();
+        int steps = 0;
+        while (wheelZoomAcc_ >= 120.0 && steps < 5) {
+            zoomIn();
+            wheelZoomAcc_ -= 120.0;
+            ++steps;
+        }
+        while (wheelZoomAcc_ <= -120.0 && steps < 5) {
+            zoomOut();
+            wheelZoomAcc_ += 120.0;
+            ++steps;
+        }
+        event->accept();
+        return;
+    }
+    wheelZoomAcc_ = 0.0; // a plain wheel restarts the zoom accumulator
     const int vLines = event->angleDelta().y() / 120 * 3;
     // M9: trackpads deliver a real angle.x; Shift+vertical wheel is the
     // classic mouse-only h-scroll gesture (3 notches*3 lines == 3 cells
@@ -5414,6 +5464,55 @@ void CodeEditor::resizeEvent(QResizeEvent*)
         static_cast<FindBar*>(findBar_)->place();
 }
 
+namespace {
+
+// M17: the effective code font = base scaled by the zoom factor. pixelSize
+// wins when set (the shipped default is a 14px font); pointSizeF is the
+// fallback for point-sized fonts. Pixel sizes round to whole numbers to
+// keep the monospace cell arithmetic (and the no-hinting design advances)
+// exact. PreferNoHinting is IMPOSED here, not at the call sites: this
+// function also produces the font changeEvent compares incoming changes
+// against, and the stripped result is exactly what the widget draws.
+QFont scaleFontForZoom(const QFont& base, double factor)
+{
+    QFont f = base;
+    f.setHintingPreference(QFont::PreferNoHinting);
+    if (factor != 1.0) {
+        if (f.pixelSize() > 0)
+            f.setPixelSize(std::max(1, qRound(f.pixelSize() * factor)));
+        else if (f.pointSizeF() > 0.0)
+            f.setPointSizeF(std::max(1.0, f.pointSizeF() * factor));
+    }
+    return f;
+}
+
+} // namespace
+
+// --- M17 code font + zoom ---------------------------------------------------
+
+void CodeEditor::setCodeFont(const QFont& font)
+{
+    baseFont_ = font;
+    applyCodeFont();
+}
+
+void CodeEditor::setZoomFactor(double factor)
+{
+    factor = std::clamp(factor, kZoomFactorMin, kZoomFactorMax);
+    if (factor == zoomFactor_)
+        return; // at the clamp (or unchanged): nothing to re-measure
+    zoomFactor_ = factor;
+    applyCodeFont();
+}
+
+void CodeEditor::applyCodeFont()
+{
+    // A step that rounds to the SAME effective font makes QWidget skip the
+    // FontChange — and there is genuinely nothing to re-measure then: the
+    // metrics already describe the font about to be drawn.
+    setFont(scaleFontForZoom(baseFont_, zoomFactor_));
+}
+
 void CodeEditor::changeEvent(QEvent* event)
 {
     QWidget::changeEvent(event);
@@ -5421,6 +5520,16 @@ void CodeEditor::changeEvent(QEvent* event)
     // re-fetched by text anyway); therefore a font change must wipe the
     // cache outright, and the derived metrics must be re-measured.
     if (event->type() == QEvent::FontChange && !(font_ == font())) {
+        // M17: our OWN changes (setCodeFont/zoom via applyCodeFont) push
+        // exactly scaleFontForZoom(baseFont_, zoomFactor_) — the base
+        // policy stands. Any FOREIGN font (a raw QWidget::setFont from app
+        // code, a style nudge) REBASES: it becomes the new base at zoom
+        // 1.0, so codeFont() never lies about what is drawn and the next
+        // zoomIn/Out scales from there.
+        if (font() != scaleFontForZoom(baseFont_, zoomFactor_)) {
+            baseFont_ = font();
+            zoomFactor_ = 1.0;
+        }
         font_ = font();
         // Same no-hinting rule as the constructor: engine advances and cell
         // width must agree exactly, or the caret drifts along the line.

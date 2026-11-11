@@ -369,6 +369,23 @@ multi-caret machinery. Bundles (one commit each, tests per bundle):
   zoom = a factor over the base font: `zoomIn()/zoomOut()/resetZoom()`
   + Ctrl+= / Ctrl+- / Ctrl+0 and Ctrl+wheel. Shiboken-clean (QFont is
   a registered PySide6 type).
+  **M17 COMPLETE (2026-11-11)** — landed as specced; effective font =
+  `scaleFontForZoom(baseFont_, zoomFactor_)` mirrored into
+  QWidget::font(), PreferNoHinting imposed inside the helper so
+  changeEvent's internal-vs-external test reproduces it exactly; a
+  FOREIGN raw setFont REBASES (new base at factor 1.0). Chords are
+  explicit gates, not QKeySequence::ZoomIn/Out (offscreen defaults
+  bind only "Ctrl++"/"Ctrl+-" and miss Ctrl+=, measured); Key_Period
+  is the Ctrl+Numpad0 reset spelling (Qt 6.12 has no Key_Kp* —
+  numpad reuses the codes + KeypadModifier, tolerated; Alt excluded).
+  Ctrl+wheel = FONT zoom (sub-notch accumulator, max 5 steps/event,
+  scroll fully suppressed, plain wheel resets the acc). Chrome
+  geometry stays live off cellWidth_ (no extra invalidation);
+  docWidthPx_ stays ambient (M14 precedent). Zoom chains are exact
+  in binary (1.25 = 5/4), tests never round-trip through 0.8.
+  Offscreen trap: QWheelEvent's Orientation ctor is GONE in 6.12
+  (single 10-arg ctor) and an explicit null device segfaults the
+  QSinglePointEvent ctor — lean on the default. 6 new slots (167/0/2).
 - **M18 auto-close pairs + long-line ruler + current line.** Typing
   `([{`'` wraps the selection, inserts the pair at a bare caret, and
   skips a typed closer when it is already there; backspace on a paired

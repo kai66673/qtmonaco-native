@@ -567,6 +567,36 @@ public:
     // cluster edge; x beyond the line's laid-out width resolves to EOL.
     TextPosition positionAt(const QPoint& widgetPos) const;
 
+    // --- M17 code font + zoom ----------------------------------------------
+    // The EFFECTIVE code font = codeFont() scaled by zoomFactor():
+    // setCodeFont() stores the BASE, the zoom multiplies it (one knob each,
+    // VS Code model). Changing either re-measures cell/line metrics and
+    // wipes the glyph cache (the font is NOT part of the geo-cache key);
+    // everything derived (gutter, fold zone, hit testing, paint baseline,
+    // scroll ranges) re-reads the live metrics, and QWidget::font() always
+    // mirrors the EFFECTIVE font (scaled to an integer pixel size, hinting
+    // stripped). A raw QWidget::setFont still works: changeEvent recognizes
+    // the FOREIGN font and REBASES it (new baseFont_ at zoom 1.0), so
+    // codeFont() never lies about what is drawn and later zoomIn/Out scale
+    // from there. codeFont() returns the BASE (as last set), not the zoomed
+    // font — zoomed geometry is observable via cellWidth()/lineHeight()/
+    // QWidget::font(). Shiboken-clean: QFont/double only, no templates.
+    void setCodeFont(const QFont& font);
+    QFont codeFont() const { return baseFont_; }
+    // Zoom factor over the base font, clamped to [kZoomFactorMin,
+    // kZoomFactorMax]; zoomIn/Out multiply/divide by kZoomFactorStep,
+    // resetZoom() == setZoomFactor(1.0). Chords (VS Code): Ctrl+= /
+    // Ctrl+- / Ctrl+0 plus Ctrl+mouse-wheel (here that is the FONT zoom —
+    // there is no Chromium-style UI chrome zoom).
+    static constexpr double kZoomFactorStep = 1.25;
+    static constexpr double kZoomFactorMin = 0.25;
+    static constexpr double kZoomFactorMax = 4.0;
+    void setZoomFactor(double factor);
+    double zoomFactor() const { return zoomFactor_; }
+    void zoomIn() { setZoomFactor(zoomFactor_ * kZoomFactorStep); }
+    void zoomOut() { setZoomFactor(zoomFactor_ / kZoomFactorStep); }
+    void resetZoom() { setZoomFactor(1.0); }
+
     PerfStats perfStats() const { return perf_; }
     void resetPerfStats() { perf_ = {}; }
 
@@ -787,6 +817,10 @@ private:
     mutable std::array<GeoSlot, kGeoSlots> geo_{};
     mutable quint64 geoClock_ = 0;
     void resetGeoCache(); // wipe slots in place (QTextLayout is uncopyable)
+    // M17: push scaleFontForZoom(baseFont_, zoomFactor_) into
+    // QWidget::setFont — the FontChange branch in changeEvent does the real
+    // re-measure + cache wipe; this call only lands the right font on it.
+    void applyCodeFont();
 
     qmn::core::TextBuffer buffer_;
     // M4 highlight engine (declared right after the model it observes).
@@ -832,7 +866,13 @@ private:
     QScrollBar* vBar_ = nullptr;
     bool scrollbarSync_ = false;
 
+    // M17 font policy (semantics: public API comments): the effective font
+    // is scaleFontForZoom(baseFont_, zoomFactor_) and widget font() mirrors
+    // it; baseFont_ itself keeps the caller's hinting/size knobs untouched.
     QFont font_;
+    QFont baseFont_;
+    double zoomFactor_ = 1.0;
+    double wheelZoomAcc_ = 0.0; // Ctrl+wheel: sub-notch trackpad deltas accrue
     double cellWidth_ = 8.0;
     int lineHeight_ = 18;
     int ascent_ = 14;

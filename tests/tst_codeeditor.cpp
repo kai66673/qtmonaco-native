@@ -159,6 +159,14 @@ private slots:
     void dropIgnoresForeignAndCopyVariants();
     void dragMoveAutoscrolls();
 
+    // Code font + zoom (M17).
+    void setCodeFontRebuildsMetricsAndGeometry();
+    void zoomFactorClampsAndSyncsWidgetFont();
+    void zoomChordsZoomAndReset();
+    void ctrlWheelZoomsAndPlainWheelScrolls();
+    void zoomScalesChromeAndHitTesting();
+    void externalSetFontRebasesBaseAndZoom();
+
     // Multiple carets (Phase D1).
     void altClickAddsCaretsInDocOrder();
     void altClickInsideSelectionFollowsRules();
@@ -2942,6 +2950,315 @@ void TestCodeEditor::dragMoveAutoscrolls()
     // target, so no stale routing state leaks into later tests.
     QDragLeaveEvent leave;
     QApplication::sendEvent(editor, &leave);
+}
+
+// --- M17 code font + zoom ----------------------------------------------------
+
+void TestCodeEditor::setCodeFontRebuildsMetricsAndGeometry()
+{
+    editor->setPlainText(QStringLiteral("hello world"));
+
+    const double cw1 = editor->cellWidth();
+    const int lh1 = editor->lineHeight();
+    QVERIFY(cw1 > 0.0);
+    QVERIFY(lh1 > 0);
+
+    // A font exactly 2x the shipped pixel size: codeFont() reports the BASE,
+    // QWidget::font() mirrors the effective font, and the no-hinting design
+    // advances make the cell width scale (essentially) linearly.
+    QFont dbl = editor->codeFont();
+    QVERIFY(dbl.pixelSize() >= 8);
+    dbl.setPixelSize(dbl.pixelSize() * 2);
+    editor->setCodeFont(dbl);
+    QCOMPARE(editor->codeFont().pixelSize(), dbl.pixelSize());
+    QCOMPARE(editor->font().pixelSize(), dbl.pixelSize());
+    const double cw2 = editor->cellWidth();
+    const int lh2 = editor->lineHeight();
+    QVERIFY(cw2 > cw1 * 1.5);
+    QVERIFY(qAbs(cw2 - 2.0 * cw1) < 0.05); // exact linear scaling of advances
+    QVERIFY(lh2 >= lh1 * 2 - 2 && lh2 <= lh1 * 2 + 2);
+
+    // Geometry proof: the caret pixel of a DEEP column round-trips through
+    // positionAt with the NEW metrics. A stale geo cache (the font is NOT in
+    // the cache key!) or skipped re-measurement lands on the wrong column.
+    const int deep = 20;
+    editor->resize(800, 400);
+    editor->setPlainText(QString(deep + 5, QLatin1Char('a')));
+    QCOMPARE(editor->positionAt(caretPixel(editor, 0, deep)).col, deep);
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier,
+                      caretPixel(editor, 0, deep));
+    QCOMPARE(editor->position().line, 0);
+    QCOMPARE(editor->position().col, deep);
+
+    // Undoing the font change restores the OLD metrics exactly — the same
+    // QFont measures deterministically, and the caches get wiped again.
+    QFont base = editor->codeFont();
+    base.setPixelSize(base.pixelSize() / 2);
+    editor->setCodeFont(base);
+    QCOMPARE(editor->cellWidth(), cw1);
+    QCOMPARE(editor->lineHeight(), lh1);
+    QCOMPARE(editor->positionAt(caretPixel(editor, 0, deep)).col, deep);
+}
+
+void TestCodeEditor::zoomFactorClampsAndSyncsWidgetFont()
+{
+    editor->setCodeFont([&] { QFont f = editor->codeFont();
+                                f.setPixelSize(20); return f; }());
+    QCOMPARE(editor->codeFont().pixelSize(), 20);
+    QCOMPARE(editor->zoomFactor(), 1.0);
+    QCOMPARE(editor->font().pixelSize(), 20);
+
+    // Steps multiply by 5/4 — exact in binary from 1.0, so these QCOMPAREs
+    // of doubles are safe (no 0.8-style round-trips in this chain).
+    editor->zoomIn();
+    QCOMPARE(editor->zoomFactor(), 1.25);
+    QCOMPARE(editor->font().pixelSize(), 25); // qRound(20*1.25)
+    editor->zoomIn();
+    QCOMPARE(editor->zoomFactor(), 1.5625);
+    QCOMPARE(editor->font().pixelSize(), 31); // qRound(31.25)
+    editor->zoomOut();
+    QCOMPARE(editor->zoomFactor(), 1.25);
+    QCOMPARE(editor->zoomFactor(), CodeEditor::kZoomFactorStep);
+    editor->resetZoom();
+    QCOMPARE(editor->zoomFactor(), 1.0);
+    QCOMPARE(editor->font().pixelSize(), 20);
+
+    // Clamping: out-of-range requests clamp to the published bounds and the
+    // single-step chords stop at them too.
+    editor->setZoomFactor(99.0);
+    QCOMPARE(editor->zoomFactor(), CodeEditor::kZoomFactorMax);
+    QCOMPARE(editor->font().pixelSize(), 80); // qRound(20*4)
+    editor->zoomIn();
+    QCOMPARE(editor->zoomFactor(), CodeEditor::kZoomFactorMax);
+    editor->setZoomFactor(0.001);
+    QCOMPARE(editor->zoomFactor(), CodeEditor::kZoomFactorMin);
+    QCOMPARE(editor->font().pixelSize(), 5); // qRound(20*0.25)
+    editor->zoomOut();
+    QCOMPARE(editor->zoomFactor(), CodeEditor::kZoomFactorMin);
+    editor->zoomIn();
+    QCOMPARE(editor->zoomFactor(), 0.3125); // 0.25*1.25, exact
+
+    // Zooming NEVER touches the base: codeFont() keeps telling the truth.
+    QCOMPARE(editor->codeFont().pixelSize(), 20);
+
+    // A font step that rounds to the SAME effective pixels lands us at the
+    // clamp boundary anyway; the early-return is about the FACTOR being
+    // unchanged, and applyCodeFont's comment documents why a same-rounded
+    // factor change is safe to skip (QWidget fires no FontChange then).
+    editor->resetZoom();
+    QCOMPARE(editor->font().pixelSize(), 20);
+    QCOMPARE(editor->zoomFactor(), 1.0);
+    QCOMPARE(editor->codeFont().pixelSize(), 20);
+}
+
+void TestCodeEditor::zoomChordsZoomAndReset()
+{
+    editor->setPlainText(QStringLiteral("plain text"));
+    editor->resetZoom();
+    const double f1 = editor->zoomFactor();
+    QCOMPARE(f1, 1.0);
+
+    // The canonical Ctrl+= ...
+    QTest::keyClick(editor, Qt::Key_Equal, Qt::ControlModifier);
+    QCOMPARE(editor->zoomFactor(), 1.25);
+    // ... the Shifted spelling Ctrl++ that real keyboards deliver ...
+    QTest::keyClick(editor, Qt::Key_Plus, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(editor->zoomFactor(), 1.5625);
+    // ... Ctrl+- down ...
+    QTest::keyClick(editor, Qt::Key_Minus, Qt::ControlModifier);
+    QCOMPARE(editor->zoomFactor(), 1.25);
+    // ... and the Shifted Ctrl+_ spelling.
+    QTest::keyClick(editor, Qt::Key_Underscore, Qt::ControlModifier | Qt::ShiftModifier);
+    QCOMPARE(editor->zoomFactor(), 1.0);
+
+    // Ctrl+0 resets from wherever the zoom stood (Key_0 and the numpad's
+    // Key_Period code — Qt has no Kp* constants, the numpad reuses these).
+    QTest::keyClick(editor, Qt::Key_Equal, Qt::ControlModifier);
+    QTest::keyClick(editor, Qt::Key_Equal, Qt::ControlModifier);
+    QVERIFY(editor->zoomFactor() > 1.0);
+    QTest::keyClick(editor, Qt::Key_0, Qt::ControlModifier);
+    QCOMPARE(editor->zoomFactor(), 1.0);
+    QTest::keyClick(editor, Qt::Key_Equal, Qt::ControlModifier);
+    QTest::keyClick(editor, Qt::Key_Period, Qt::ControlModifier);
+    QCOMPARE(editor->zoomFactor(), 1.0);
+
+    // Keypad modifier sprinkles (NumLock) must not break the chords.
+    QTest::keyClick(editor, Qt::Key_Equal, Qt::ControlModifier | Qt::KeypadModifier);
+    QCOMPARE(editor->zoomFactor(), 1.25);
+    QTest::keyClick(editor, Qt::Key_Period,
+                    Qt::ControlModifier | Qt::KeypadModifier);
+    QCOMPARE(editor->zoomFactor(), 1.0);
+
+    // Unclaimed variants fall through untouched: Ctrl+Alt combos stay free
+    // chrome, and plain Ctrl+= without Alt claims, but the bare keys keep
+    // TYPING (a lone '=' must land in the document, not zoom).
+    QTest::keyClick(editor, Qt::Key_Equal, Qt::ControlModifier | Qt::AltModifier);
+    QCOMPARE(editor->zoomFactor(), 1.0);
+    QTest::keyClick(editor, Qt::Key_Minus, Qt::ControlModifier | Qt::AltModifier);
+    QCOMPARE(editor->zoomFactor(), 1.0);
+    editor->setPlainText(QString());
+    QTest::keyClick(editor, Qt::Key_Equal); // no Ctrl: types '='
+    QCOMPARE(editor->toPlainText(), QStringLiteral("="));
+    QCOMPARE(editor->zoomFactor(), 1.0);
+}
+
+void TestCodeEditor::ctrlWheelZoomsAndPlainWheelScrolls()
+{
+    editor->resize(500, 300);
+    QString text;
+    for (int i = 0; i < 200; ++i)
+        text += QStringLiteral("line %1\n").arg(i);
+    editor->setPlainText(text);
+    editor->resetZoom();
+
+    auto wheel = [&](int dy, Qt::KeyboardModifiers mods) {
+        const QPointF p(200, 150);
+        // Qt 6.12 has ONE public ctor (the old Orientation overload is gone,
+        // measured): pass phase+inverted and let source/device default —
+        // an explicit null device SEGFAULTS the QSinglePointEvent ctor on
+        // offscreen (measured), the primary pointing device is a dummy there.
+        QWheelEvent ev(p, p, QPoint(0, 0), QPoint(0, dy), Qt::NoButton, mods,
+                       Qt::ScrollUpdate, false);
+        QApplication::sendEvent(editor, &ev);
+    };
+
+    // Ctrl+wheel UP zooms the FONT in, one notch = one step, and the
+    // viewport must not scroll (this is the whole point of the guard).
+    const int scroll0 = editor->verticalScrollOffset();
+    wheel(120, Qt::ControlModifier);
+    QCOMPARE(editor->zoomFactor(), 1.25);
+    QCOMPARE(editor->verticalScrollOffset(), scroll0);
+    wheel(120, Qt::ControlModifier);
+    QCOMPARE(editor->zoomFactor(), 1.5625);
+    QCOMPARE(editor->verticalScrollOffset(), scroll0);
+    // Ctrl+wheel DOWN mirrors it.
+    wheel(-120, Qt::ControlModifier);
+    QCOMPARE(editor->zoomFactor(), 1.25);
+    QCOMPARE(editor->verticalScrollOffset(), scroll0);
+    editor->resetZoom();
+    QCOMPARE(editor->zoomFactor(), 1.0);
+
+    // Sub-notch trackpad deltas ACCUMULATE to whole steps.
+    wheel(24, Qt::ControlModifier);
+    wheel(24, Qt::ControlModifier);
+    wheel(24, Qt::ControlModifier); // 72: no step yet
+    QCOMPARE(editor->zoomFactor(), 1.0);
+    wheel(24, Qt::ControlModifier); // 96
+    wheel(24, Qt::ControlModifier); // 120: ONE step
+    QCOMPARE(editor->zoomFactor(), 1.25);
+
+    // A plain wheel RESETS the accumulator (the leftover 0..119 must not
+    // leak across into the next ctrl gesture).
+    wheel(60, Qt::ControlModifier); // acc 60
+    wheel(-120, Qt::NoModifier);    // plain: scrolls, resets acc
+    QVERIFY(editor->verticalScrollOffset() > scroll0);
+    const double fAcc = editor->zoomFactor();
+    wheel(80, Qt::ControlModifier); // would have hit 140 without the reset
+    QCOMPARE(editor->zoomFactor(), fAcc);
+    wheel(40, Qt::ControlModifier); // 80+40 == 120: exactly one step now
+    QCOMPARE(editor->zoomFactor(), fAcc * 1.25);
+
+    // Runaway-gesture cap: one event, however many notches, steps at most 5
+    // — and the factor clamp catches it anyway (1.25^6 of this chain > 4).
+    wheel(12000, Qt::ControlModifier);
+    QCOMPARE(editor->zoomFactor(), CodeEditor::kZoomFactorMax);
+
+    // Plain wheel scrolls the view and zooms NOTHING.
+    editor->resetZoom();
+    const int before = editor->verticalScrollOffset();
+    wheel(-120, Qt::NoModifier);
+    QCOMPARE(editor->zoomFactor(), 1.0);
+    QVERIFY(editor->verticalScrollOffset() > before);
+}
+
+void TestCodeEditor::zoomScalesChromeAndHitTesting()
+{
+    // Ten lines -> the gutter's digit column is exactly 2 cells wide; all
+    // chrome geometry derives LIVE from cellWidth_, no extra invalidation.
+    QString text;
+    for (int i = 0; i < 12; ++i)
+        text += QStringLiteral("0123456789\n");
+    editor->setPlainText(text);
+    editor->resetZoom();
+    editor->resize(600, 400);
+
+    const double cw1 = editor->cellWidth();
+    const int gutter1 = editor->gutterWidth();
+    const int zone1 = editor->foldZoneWidth();
+    QCOMPARE(zone1, std::max(10, qRound(2.2 * cw1))); // the live formula
+    const int left1 = editor->contentLeft();
+    QCOMPARE(left1, editor->padding() + gutter1);
+
+    editor->zoomIn();
+    editor->zoomIn();
+    QCOMPARE(editor->zoomFactor(), 1.5625);
+    const double cw2 = editor->cellWidth();
+    QVERIFY(cw2 > cw1);
+    // The fold zone re-derives from the NEW cell width (the old constant
+    // would be a stale-geometry tripwire); the gutter and the content edge
+    // follow it, and the caret grid follows the gutter: deep-column clicks
+    // still round-trip after zoom.
+    QCOMPARE(editor->foldZoneWidth(), std::max(10, qRound(2.2 * cw2)));
+    QVERIFY(editor->gutterWidth() > gutter1);
+    QCOMPARE(editor->contentLeft(), editor->padding() + editor->gutterWidth());
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier,
+                      caretPixel(editor, 0, 9));
+    QCOMPARE(editor->position().col, 9);
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier,
+                      caretPixel(editor, 5, 3));
+    QCOMPARE(editor->position().line, 5);
+    QCOMPARE(editor->position().col, 3);
+
+    editor->resetZoom();
+    QCOMPARE(editor->cellWidth(), cw1);
+    QCOMPARE(editor->gutterWidth(), gutter1);
+    QCOMPARE(editor->foldZoneWidth(), zone1);
+}
+
+void TestCodeEditor::externalSetFontRebasesBaseAndZoom()
+{
+    editor->setPlainText(QStringLiteral("hello"));
+    editor->setCodeFont([&] { QFont f = editor->codeFont();
+                                f.setPixelSize(14); return f; }());
+    const double cw14 = editor->cellWidth();
+    editor->zoomIn();
+    editor->zoomIn();
+    QCOMPARE(editor->zoomFactor(), 1.5625);
+    QCOMPARE(editor->font().pixelSize(), qRound(14 * 1.5625)); // 22
+    const double cwZoomed = editor->cellWidth();
+
+    // Raw QWidget::setFont (app chrome code, a style nudge): the FOREIGN
+    // font wins and REBASES — codeFont() reports it, zoom returns to 1.0,
+    // and the metrics track the foreign font, not our old scaled one.
+    QFont foreign = editor->codeFont();
+    foreign.setPixelSize(20);
+    editor->setFont(foreign);
+    QCOMPARE(editor->zoomFactor(), 1.0);
+    QCOMPARE(editor->codeFont().pixelSize(), 20);
+    QCOMPARE(editor->font().pixelSize(), 20);
+    const double cw20 = editor->cellWidth();
+    QVERIFY(cw20 > cw14);
+    QVERIFY(cw20 < cwZoomed); // 20px < the old 22px effective font
+    // (the caret grid rebuilt under the foreign font):
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier,
+                      caretPixel(editor, 0, 4));
+    QCOMPARE(editor->position().col, 4);
+
+    // And the zoom ladder now scales from the NEW base:
+    editor->zoomIn();
+    QCOMPARE(editor->zoomFactor(), 1.25);
+    QCOMPARE(editor->font().pixelSize(), 25); // qRound(20*1.25), not 22*1.25
+
+    // setCodeFont re-arms the BASE while the zoom factor keeps applying
+    // (the documented one-knob-each model): 14px base under factor 1.25
+    // draws qRound(17.5) == 18px, and resetZoom lands back on EXACT cw14.
+    editor->setCodeFont([&] { QFont f = editor->codeFont();
+                                f.setPixelSize(14); return f; }());
+    QCOMPARE(editor->zoomFactor(), 1.25);
+    QCOMPARE(editor->codeFont().pixelSize(), 14);
+    QCOMPARE(editor->font().pixelSize(), 18);
+    editor->resetZoom();
+    QCOMPARE(editor->cellWidth(), cw14);
 }
 
 // --- M4 syntax highlighting (Phase D2) -------------------------------------
