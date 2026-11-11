@@ -209,6 +209,7 @@ private slots:
     void foldTriangleInkProbe();
     void rulerReflectsFoldRanges();
     void foldEditBookkeepingAndReset();
+    void grammarFoldsFollowBracketsNotIndent();
     void pythonGrammarFoldsAndCollapseAll();
     void jsonFoldHidesClosingBrace();
     void foldZoneGutterConstant();
@@ -4405,6 +4406,70 @@ void TestCodeEditor::foldZoneGutterConstant()
     editor->expandAll();
     editor->setLineNumbersMode(CodeEditor::LineNumbersMode::On);
     QCOMPARE(editor->gutterWidth(), wOn); // zone back, same constant
+}
+
+// Owner-reported M13 fallout: the indent fallback fired in GRAMMAR modes
+// too (the always-union design), so js/json got python-style pseudo-blocks
+// following leading whitespace. Fix: the indent scan is a fallback for
+// grammar-LESS modes (or a language whose fold query failed to compose);
+// in grammar modes nesting is only what the brackets/syntax say. Bracket
+// structures that js/json users expect to fold (multiline calls, python
+// literals) therefore had to JOIN the grammar node lists.
+void TestCodeEditor::grammarFoldsFollowBracketsNotIndent()
+{
+    // --- js: a deeper-indented line is NOT a block -----------------------
+    editor->setPlainText(QStringLiteral(
+        "a();\n"
+        "    b();\n"
+        "c(\n"
+        "  x\n"
+        ");\n"));
+    editor->setLanguage(QStringLiteral("javascript"));
+    editor->grab();
+    QVERIFY(!editor->isFoldable(0)); // "b();" deeper: python nests, js must not
+    // The multiline CALL still folds — now via the grammar's `arguments`
+    // node (bracket semantics, VS Code-style), not via the indent scan:
+    const auto ranges = editor->foldableRanges();
+    QCOMPARE(ranges.size(), 1);
+    QCOMPARE(ranges[0].startLine, 2);
+    QCOMPARE(ranges[0].endLine, 4);
+    QVERIFY(editor->foldLine(2));
+    QCOMPARE(editor->visibleLineTotal(), editor->lineCount() - 2);
+    editor->expandAll();
+    QCOMPARE(editor->visibleLineTotal(), editor->lineCount());
+
+    // Grammar mode: foldLine on an indent-only artifact finds nothing.
+    QVERIFY(!editor->foldLine(0));
+    QVERIFY(!editor->isFolded(0));
+
+    // --- json: jagged key indents never create depth --------------------
+    editor->setPlainText(QStringLiteral("{\n\"a\": 1,\n    \"b\": 2\n}"));
+    editor->setLanguage(QStringLiteral("json"));
+    editor->grab();
+    QVERIFY(!editor->isFoldable(1)); // the deeper key line: no pseudo-fold
+    const auto jr = editor->foldableRanges();
+    QCOMPARE(jr.size(), 1); // the grammar object {0,3} is the ONLY fold
+    QCOMPARE(jr[0].startLine, 0);
+    QCOMPARE(jr[0].endLine, 3);
+
+    // --- python: brackets own the multiline spans, the indent scan is gone
+    editor->setPlainText(QStringLiteral("d = {\n  1: 2\n}\nif d:\n    pass"));
+    editor->setLanguage(QStringLiteral("python"));
+    editor->grab();
+    const auto pr = editor->foldableRanges();
+    QCOMPARE(pr.size(), 2);
+    QCOMPARE(pr[0].startLine, 0);
+    QCOMPARE(pr[0].endLine, 2); // dictionary node
+    QCOMPARE(pr[1].startLine, 3);
+    QCOMPARE(pr[1].endLine, 4); // if_statement node
+
+    // The indent fallback stays alive exactly where the PLAN E2 spec put
+    // it: grammar-LESS modes (here: the same js text with no language).
+    editor->setLanguage(QString());
+    editor->grab();
+    QVERIFY(editor->isFoldable(0)); // plain text: the indent scan returns
+    QVERIFY(editor->foldLine(0));
+    QVERIFY(editor->isFolded(0));
 }
 
 QTEST_MAIN(TestCodeEditor)

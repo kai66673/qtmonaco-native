@@ -41,6 +41,17 @@ const char* const kFoldPython[] = {
     "if_statement",        "elif_clause",           "else_clause",
     "for_statement",       "while_statement",       "try_statement",
     "except_clause",       "with_statement",
+    // Bracket spans own multiline nesting in a grammar mode (the view's
+    // indent scan is switched off there): the literal/collection nodes
+    // below make multiline dicts, lists and call/def parens foldable
+    // like VS Code (Pylance) folds them. Single-line captures are
+    // dropped by the startLine < endLine filter, so the big lists cost
+    // nothing when the brackets fit on one line. Unknown names are
+    // filtered by composeFoldQuery (grammar renames just drop a name).
+    "dictionary",            "set",                     "list",
+    "dictionary_comprehension", "set_comprehension",    "list_comprehension",
+    "generator_expression",  "tuple",                   "parenthesized_expression",
+    "argument_list",         "parameters",              "concatenated_string",
 };
 const char* const kFoldJavascript[] = {
     "class_declaration",        "class",                "function_declaration",
@@ -51,6 +62,10 @@ const char* const kFoldJavascript[] = {
     "switch_body",              "try_statement",        "catch_clause",
     "finally_clause",           "object",               "array",
     "lexical_declaration",      "variable_declaration",
+    // Multiline calls and parameter lists fold by BRACKETS (VS Code's
+    // built-in js folding folds them too) — grammar nodes, not the
+    // indent scan the grammar mode switches off.
+    "call_expression",          "arguments",            "formal_parameters",
 };
 const char* const kFoldJson[] = {
     "object", "array",

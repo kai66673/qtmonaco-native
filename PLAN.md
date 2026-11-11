@@ -271,7 +271,10 @@ a prefix table (`HiddenRun{first,last,hiddenBefore}`), and paint, caret
 nav (arrows + Page keys step slots), selection, gutter, ruler, v-scroll
 space and hit tests all route through it. Fold sources: tree-sitter `@fold`
 captures (py/js/json, windowed at paint, whole-doc only on explicit
-actions) ∪ indent fallback. UX: 18px gutter fold zone with ▾/▸ triangles
+actions); the indent fallback runs in grammar-LESS modes only — the
+first cut unioned it everywhere and js/json got python-style
+indent pseudo-blocks (owner fix, 2026-11-11; the multiline bracket
+folds the fallback used to fake are now real grammar captures). UX: 18px gutter fold zone with ▾/▸ triangles
 (clicks toggle, caret untouched) + Ctrl+Shift+[/] and Ctrl+Alt+[/] chords;
 ONE reveal guard (programmatic moves into a hidden line open the fold;
 drags across folds never do). Fold state rides edits via the buffer

@@ -1650,6 +1650,18 @@ void CodeEditor::shiftFoldStateForEdit(const qmn::core::TextBuffer::EditEvent& e
     }
 }
 
+bool CodeEditor::indentFoldsActive() const
+{
+    // The indent heuristic is the fallback source exactly where PLAN E2
+    // put it: grammar-less modes (language() empty — plain/unknown), or a
+    // loaded language whose composed fold query could not be built (then
+    // the engine contributes nothing and folding needs some source). With
+    // a working fold grammar (js/json/python) the scan goes silent:
+    // leading whitespace alone must not fake python-style nesting there
+    // (owner-reported M13 regression — see grammarFoldsFollowBracketsNotIndent).
+    return highlight_->language().isEmpty() || !highlight_->hasFoldQuery();
+}
+
 int CodeEditor::indentOfModelLine(int line) const
 {
     if (line < 0 || line >= buffer_.lineCount())
@@ -1702,12 +1714,16 @@ int CodeEditor::foldEndForLine(int line)
     }
     if (best > line)
         return std::min(best, buffer_.lineCount() - 1);
-    // Indent source (always available, grammar modes included — the
-    // foldable set is the UNION of both sources): forward scan from the
-    // start line. Blank lines are skipped (they neither end nor extend a
-    // fold); the fold ends at the LAST line deeper than the header. This
-    // is an explicit user action, so an O(body) scan is acceptable here —
-    // paint resolves only start lines (see recomputeFoldables).
+    if (!indentFoldsActive())
+        return -1; // grammar fold mode: a line without a grammar capture is
+                   // NOT foldable — leading whitespace alone must never fake
+                   // python-style nesting in js/json/python (owner report)
+    // Indent source (grammar-LESS modes — or a language whose fold query
+    // failed to compose — only): forward scan from the start line. Blank
+    // lines are skipped (they neither end nor extend a fold); the fold ends
+    // at the LAST line deeper than the header. This is an explicit user
+    // action, so an O(body) scan is acceptable here — paint resolves only
+    // start lines (see recomputeFoldables).
     const int base = indentOfModelLine(line);
     if (base < 0)
         return -1;
@@ -1735,6 +1751,7 @@ int CodeEditor::foldEndForLine(int line)
 void CodeEditor::recomputeFoldables(int firstModel, int lastModel)
 {
     foldables_.clear();
+    const bool useIndent = indentFoldsActive(); // grammar modes: engine ONLY
     const auto& ef = highlight_->folds(); // (start asc, end desc)
     size_t i = 0;
     while (i < ef.size() && ef[i].startLine < firstModel)
@@ -1772,6 +1789,9 @@ void CodeEditor::recomputeFoldables(int firstModel, int lastModel)
                 foldables_.push_back(FoldState{line, line}); // end lazy
             continue;
         }
+        if (!useIndent)
+            continue; // grammar fold mode: deeper next line is NOT a block —
+                      // js/json/python nesting is bracket/syntax defined
         const int ind = indentOfModelLine(line);
         if (ind >= 0 && line + 1 < docLines && visibleIndexOfModelLine(line + 1) >= 0) {
             const int nextInd = indentOfModelLine(line + 1);
@@ -1985,15 +2005,17 @@ void CodeEditor::collapseAll()
         if (fr.endLine > fr.startLine)
             all.push_back(FoldState{fr.startLine, fr.endLine});
     const int docLines = buffer_.lineCount();
-    for (int L = 0; L + 1 < docLines; ++L) {
-        const int ind = indentOfModelLine(L);
-        if (ind < 0)
-            continue;
-        const int next = indentOfModelLine(L + 1);
-        if (next > ind
-            && !std::any_of(all.begin(), all.end(),
-                            [L](const FoldState& f) { return f.start == L; })) {
-            all.push_back(FoldState{L, L}); // end resolved by foldLine below
+    if (indentFoldsActive()) { // grammar fold mode: engine folds are the whole
+        for (int L = 0; L + 1 < docLines; ++L) { // story — no indent pseudo-
+            const int ind = indentOfModelLine(L); // starts to add
+            if (ind < 0)
+                continue;
+            const int next = indentOfModelLine(L + 1);
+            if (next > ind
+                && !std::any_of(all.begin(), all.end(),
+                                [L](const FoldState& f) { return f.start == L; })) {
+                all.push_back(FoldState{L, L}); // end resolved by foldLine below
+            }
         }
     }
     std::sort(all.begin(), all.end(), [](const FoldState& a, const FoldState& b) {

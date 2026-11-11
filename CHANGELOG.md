@@ -247,9 +247,10 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   captures per grammar (python/javascript/json node lists composed into one
   query by `composeFoldQuery`; every name is filtered through
   `ts_language_symbol_for_name`, so a grammar rename just drops that node
-  instead of failing the query) UNIONed with an indent fallback
-  (`indent(L+1) > indent(L)`, blank lines count as no-indent) that works in
-  every mode, grammar included. Public API: `foldableRanges()`,
+  instead of failing the query); the view's indent fallback
+  (`indent(L+1) > indent(L)`, blanks count as no-indent) runs in
+  grammar-LESS modes only — with a fold grammar active, nesting is what
+  the brackets/syntax say (see Fixed). Public API: `foldableRanges()`,
   `isFoldable(line)`, `isFolded(line)`, `foldLine/unfoldLine/toggleFold`,
   `collapseAll()/expandAll()`, and the ONE view-line map everything routes
   through: `visibleLineTotal()`, `visibleIndexOfModelLine(line)` (-1 =
@@ -293,6 +294,20 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   chrome only. Widget tests migrated to the new anchor.
 
 ### Fixed
+- M13 fold source slip (owner-reported): the first cut ran the indent
+  fallback in ALL modes, so js/json got python-style pseudo-block folds
+  following leading whitespace — a deeper-indented continuation or JSON
+  key line became a fold start, "nesting depth" tracked indentation. The
+  indent scan is now the fallback it was specced to be: grammar-less
+  modes, or a language whose fold query failed to compose. With a working
+  fold grammar the engine captures are the ONLY source. What the fallback
+  used to give grammar modes is now covered BY the grammar: kFoldPython
+  gained dictionary/list/set/comprehensions/generator/tuple/parenthesized/
+  argument_list/parameters/concatenated_string nodes, kFoldJavascript
+  gained call_expression/arguments/formal_parameters — VS Code-like
+  multiline bracket folds stay available, single-line captures are
+  filtered so one-line literals cost nothing.
+  Test: `grammarFoldsFollowBracketsNotIndent`.
 - Editing a vendored `highlights.scm` did not re-run CMake configure, so
   incremental builds silently kept the OLD embedded query text
   (`configure_file` is configure-time only). Now the three .scm files are

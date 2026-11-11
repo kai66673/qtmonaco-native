@@ -424,9 +424,11 @@ public:
     // (startLine, endLine] — the header line never disappears (js/json
     // closing braces hide with their body, python blocks end at the last
     // body line). Foldable starts come from the engine's @fold captures
-    // where a grammar exists, plus the view's indent rule (the next visible
-    // line is deeper than this one) everywhere — the union is what the
-    // gutter triangles mark.
+    // whenever a fold grammar is active; the view's indent rule (the next
+    // visible line is deeper than this one) is the fallback for
+    // grammar-LESS modes only — in js/json/python nesting is what the
+    // brackets/syntax say, and leading whitespace alone must never fake
+    // python-style blocks there (owner report; see PLAN E2).
     //
     // Fold state is VIEW state: not undoable in v1, kept index-correct
     // across edits on a best-effort sweep (a fold whose body was deleted
@@ -441,9 +443,10 @@ public:
         bool operator==(const FoldRange&) const = default;
     };
 
-    // Foldable ranges as the view currently knows them: both sources
-    // merged, sorted by start, duplicate starts resolved (engine wins —
-    // its ends are exact). Non-const because lazy indent-rule ends get
+    // Foldable ranges as the view currently knows them: the active source
+    // (grammar captures, or the indent fallback in grammar-less modes),
+    // sorted by start, duplicate starts resolved (engine wins — its ends
+    // are exact). Non-const because lazy indent-rule ends get
     // resolved exactly here (an explicit-caller cost, never a paint cost).
     // Viewport-scoped on big documents (paint keeps the cache warm; an
     // out-of-window fold is discovered exactly when scrolling reveals it).
@@ -760,13 +763,21 @@ private:
     void rebuildHiddenRuns();  // collapsed_ -> hiddenRuns_/visibleLines_
     void shiftFoldStateForEdit(const qmn::core::TextBuffer::EditEvent& ev);
     // Foldable starts known for the painted window: engine @fold captures
-    // (exact ends) union the indent rule (start-only; ends resolved lazily
-    // by foldEndForLine on the actual fold request, keeping paint O(view)).
-    // Mutable like the highlight engine: paintEvent keeps it warm.
+    // (exact ends) where a fold grammar is active, else the indent rule
+    // (start-only; ends resolved lazily by foldEndForLine on the actual
+    // fold request, keeping paint O(view)). Never both — see
+    // indentFoldsActive(). Mutable like the highlight engine: paintEvent
+    // keeps it warm.
     mutable QVector<FoldState> foldables_; // sorted by start, one per start
     void recomputeFoldables(int firstModel, int lastModel);
     int foldEndForLine(int line); // exact end (engine full query, else indent scan)
     int indentOfModelLine(int line) const; // leading ws units; -1 = blank line
+    // True when the indent heuristic is the fold source: no grammar loaded
+    // (plain/unknown language), or the language's composed fold query failed
+    // to build (then the engine contributes nothing and the fallback keeps
+    // folding alive). In grammar-fold modes (js/json/python) leading
+    // whitespace must NOT fake python-style nesting (owner report).
+    bool indentFoldsActive() const;
     // Unfold every collapsed fold strictly containing line (outermost
     // first). True if anything opened. Caret choke points use this (a
     // caret/selection target is never hidden); paint never reveals.

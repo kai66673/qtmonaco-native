@@ -137,6 +137,12 @@ public:
     // same caveat as spans()). The paint path reads this; it never pays a
     // whole-document fold query.
     const std::vector<FoldRange>& folds() const { return folds_; }
+    // True when this language has a usable composed fold query: the view
+    // then treats the grammar as the ONLY fold source (its indent scan
+    // goes silent — js/json/python nesting follows syntax, not leading
+    // whitespace). False for plain text or a fold query that failed to
+    // compose, where the view's indent scan is the only fold source.
+    bool hasFoldQuery() const { return foldQuery_ != nullptr; }
     // Exactness-forcing whole-document list (the foldsFor/spansFor pattern):
     // CodeEditor::foldLine()/collapseAll() may address a fold outside the
     // painted window, and collapseAll() needs every fold. One synchronous
