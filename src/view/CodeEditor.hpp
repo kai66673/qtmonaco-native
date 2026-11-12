@@ -2,6 +2,7 @@
 
 #include <QElapsedTimer>
 #include <QFont>
+#include <QHash>
 #include <QMetaType>
 #include <QPoint>
 #include <QScrollBar>
@@ -39,6 +40,7 @@ namespace qmn::view {
 class HighlightEngine; // M4 private seam; defined in view/HighlightEngine.hpp
 class CodeEditorOptions; // M19 settings object; view/CodeEditorOptions.hpp
 class CodeEditorAccessible; // M11 a11y bridge; view/CodeEditorAccessible.hpp
+class LanguageProperties; // M23 language overrides; view/LanguageProperties.hpp
 
 // 0-based text position. col is counted in UTF-16 code units.
 struct TextPosition {
@@ -224,6 +226,20 @@ public:
     QString language() const;
     static QStringList availableLanguages();
 
+    // M23 language-scoped property overrides (Monaco's [languageId] model):
+    // LANGUAGE override (when set) > editor options template > factory
+    // default. languageProperties(id) hands out the per-language child
+    // QObject, lazily created and OWNED by the editor (one per id); ids
+    // normalize like setLanguage's (trimmed + lowercased), so the object
+    // an IDE configures is exactly the one a later setLanguage matches.
+    // The empty id addresses the plain-text (no-grammar) state. Changes
+    // here AND language switches re-resolve every tab-width consumer live
+    // (soft-tab insert, literal '\t' render grid, autoIndent math, M21
+    // guide stops); clearTabStopWidth falls back to the template. The
+    // built-in registry starts EMPTY: nothing changes until a consumer
+    // sets an override. Full contract: view/LanguageProperties.hpp.
+    LanguageProperties* languageProperties(const QString& language);
+
     // Merged, non-overlapping token spans intersecting [startOffset,
     // endOffset) (clamped), sorted by start - document UTF-16 offsets.
     // Forces a reparse+query if dirty. Primary consumer: tests (numeric
@@ -389,8 +405,16 @@ public:
     // RENDER width of literal '\t' in the text (stops at every N cells
     // from the line start), so typed and pasted indentation line up on
     // one grid. Clamped to >= 1.
+    //
+    // M23 layering: this flat setter (and the options() mirror) set the
+    // GLOBAL TEMPLATE; tabStopWidth() reads the EFFECTIVE value — the
+    // active language's override wins while set (see languageProperties);
+    // with no override the two coincide. The options object and the demo
+    // EditorSettings round-trip keep reading/writing the TEMPLATE, so a
+    // language override can never leak a per-language value into global
+    // saved settings.
     void setTabStopWidth(int columns);
-    int tabStopWidth() const { return tabStopWidth_; }
+    int tabStopWidth() const { return tabStopWidth_; } // the EFFECTIVE stop
 
     // Enter auto-indent (default ON): the new line copies the current
     // line's leading whitespace; a trailing opener `{([:` right before the
@@ -1016,7 +1040,17 @@ private:
     int ascent_ = 14;
 
     // --- M14 indentation state (semantics: public API comments) -----------
-    int tabStopWidth_ = 4;  // soft-tab stop + literal-tab render grid
+    int tabStopWidthOption_ = 4; // GLOBAL template (M23; options mirror)
+    int tabStopWidth_ = 4;  // EFFECTIVE stop: override > template (M23);
+                            // soft-tab stop + literal-tab render grid
+    // M23 language override registry (semantics: languageProperties docs):
+    // normalized-id keyed (HighlightEngine rule: trimmed + lowercased),
+    // children of the editor, created on demand — the built-in registry
+    // starts EMPTY. Every change here re-resolves the effective stop.
+    QHash<QString, LanguageProperties*> languageProps_;
+    void refreshTabStopWidth(); // re-resolve EFFECTIVE = override > template;
+                                // on a real change: geo wipe + scroll range +
+                                // update (the existing setTabStopWidth fan-out)
     bool autoIndent_ = true; // Enter copies leading whitespace (+ stop)
     bool tabChangesFocus_ = false; // Tab rides Qt's focus chain instead
 

@@ -28,6 +28,7 @@
 
 #include "view/CodeEditor.hpp"
 #include "view/CodeEditorOptions.hpp"
+#include "view/LanguageProperties.hpp"
 
 #include <algorithm> // std::min in the ruler mapping contract
 #include <cmath> // std::ceil in the h-scroll exact-offset arithmetic
@@ -311,6 +312,13 @@ private slots:
     void foldHoverTrackingGatedByFoldStrip();
     void foldClickResolvesInnermostFold();
     void foldHoverGrammarInnermostClick();
+
+    // M23 language-scoped properties (first = tabStopWidth override).
+    void languagePropertiesTriStateAndSharedRegistry();
+    void languageTabStopOverrideFansOut();
+    void languageTabStopOverrideGuideStopsPaint();
+    void languageTabStopFollowsLanguageSwitch();
+    void languageTabStopRidesAboveTemplateAndSettings();
 
 private:
     CodeEditor* editor = nullptr;
@@ -7962,6 +7970,238 @@ void TestCodeEditor::foldHoverGrammarInnermostClick()
     QCOMPARE(editor->position().line, 5);
     QCOMPARE(editor->position().col, 0);
     QVERIFY(!editor->isFolded(5));
+}
+
+// --- M23 language-scoped properties (first: tabStopWidth override) ---------
+// DoD: tab-insert count + tab render advance + guide stops all flip with an
+// override (state/numeric), clear falls back to the template, the settings
+// object (and applyEditorSettings) stay TEMPLATE-based — the language layer
+// rides ABOVE the global settings, never inside them.
+
+void TestCodeEditor::languagePropertiesTriStateAndSharedRegistry()
+{
+    // The built-in registry starts EMPTY (DoD): every id is un-set, so the
+    // effective stop equals the template (4) everywhere.
+    qmn::view::LanguageProperties* py = editor->languageProperties(QStringLiteral("python"));
+    QVERIFY(!py->hasTabStopWidth());
+    QCOMPARE(py->tabStopWidth(), -1); // the un-set sentinel
+    QCOMPARE(editor->tabStopWidth(), 4);
+
+    // One shared object per NORMALIZED id (the HighlightEngine::setLanguage
+    // rule: trimmed + lowercased), editor-owned child; distinct ids stay
+    // distinct. availableLanguages() enumerates the GRAMMAR table only —
+    // the property registry never touches it.
+    QVERIFY(editor->languageProperties(QStringLiteral(" Python ")) == py);
+    QVERIFY(editor->languageProperties(QStringLiteral("json")) != py);
+    QVERIFY(py->parent() == editor);
+    py->setTabStopWidth(8);
+    QCOMPARE(CodeEditor::availableLanguages(),
+             (QStringList{QStringLiteral("python"), QStringLiteral("json"),
+                          QStringLiteral("javascript")}));
+
+    // Tri-state + signal contract: set carries the clamped NEW value, a
+    // clear carries -1; same-value sets and double clears stay silent.
+    QSignalSpy spy(py, &qmn::view::LanguageProperties::tabStopWidthChanged);
+    QCOMPARE(spy.count(), 0);
+    py->setTabStopWidth(8); // same value: silent
+    QCOMPARE(spy.count(), 0);
+    py->setTabStopWidth(0); // >=1 clamp, like the editor knob
+    QCOMPARE(py->tabStopWidth(), 1);
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(spy.at(0).at(0).toInt(), 1);
+    py->clearTabStopWidth();
+    QVERIFY(!py->hasTabStopWidth());
+    QCOMPARE(py->tabStopWidth(), -1);
+    QCOMPARE(spy.count(), 2);
+    QCOMPARE(spy.at(1).at(0).toInt(), -1);
+    py->clearTabStopWidth(); // clearing an un-set state: silent
+    QCOMPARE(spy.count(), 2);
+}
+
+void TestCodeEditor::languageTabStopOverrideFansOut()
+{
+    // Every tab-width consumer reads the EFFECTIVE stop live (geo-cache
+    // wipe on change is what makes the RENDER consumer numeric-provable).
+    editor->setLanguage(QStringLiteral("python"));
+    qmn::view::LanguageProperties* py = editor->languageProperties(QStringLiteral("python"));
+    py->setTabStopWidth(2);
+    QCOMPARE(editor->tabStopWidth(), 2);
+
+    // Consumer 1: soft-tab INSERT count (M14).
+    editor->setPlainText(QStringLiteral("x"));
+    QTest::keyClick(editor, Qt::Key_Tab); // col 0 -> stop at 2
+    QCOMPARE(editor->toPlainText(), QStringLiteral("  x"));
+
+    // Consumer 2: literal-tab RENDER advance — xForCol rides the line
+    // layout, so the value proves the geo cache was wiped. "\tx": the tab
+    // advances exactly `stop` cells.
+    editor->setPlainText(QStringLiteral("\tx"));
+    const int xL = editor->contentLeft();
+    const double cw = editor->cellWidth();
+    QVERIFY(qAbs(editor->xForCol(0, 1) - (xL + 2 * cw)) < 1e-9);
+
+    // Same value set is a no-op; the CLEAR falls back to the template AND
+    // the render advance flips back (cache wiped both ways).
+    py->setTabStopWidth(2);
+    QVERIFY(qAbs(editor->xForCol(0, 1) - (xL + 2 * cw)) < 1e-9);
+    py->clearTabStopWidth();
+    QCOMPARE(editor->tabStopWidth(), 4);
+    QVERIFY(qAbs(editor->xForCol(0, 1) - (xL + 4 * cw)) < 1e-9);
+    py->setTabStopWidth(2); // back ON for the next leg
+    QVERIFY(qAbs(editor->xForCol(0, 1) - (xL + 2 * cw)) < 1e-9);
+
+    // Consumer 3: autoIndent stop math (Enter after a trailing opener
+    // adds ONE stop at the NEW stop; the `{|`-at-EOL rule also conjures
+    // the closer on its own line — the stop math rides either way).
+    // Language-aware indent rules (Python colon) are the named
+    // out-of-scope hook; the stop MATH rides.
+    editor->setPlainText(QStringLiteral("a{"));
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a{\n  \n}"));
+
+    // And the same door with NO override: the template math (4) — the
+    // override is the only thing that changed between these legs.
+    py->clearTabStopWidth();
+    editor->setPlainText(QStringLiteral("a{"));
+    QTest::keyClick(editor, Qt::Key_End);
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a{\n    \n}"));
+}
+
+void TestCodeEditor::languageTabStopOverrideGuideStopsPaint()
+{
+    // Consumer 4 (numeric pixels, M21 idiom): indent-guide STOPS ride the
+    // effective stop. Document (caret parked on the EMPTY line 2):
+    //   0: "      x"  6 spaces -> stop 2: interior stops 2,4; stop 4: only 4
+    //   1: "\t  x"    tab+2sp  -> stop 2: landing at 2 (interior), grid has
+    //                             no 4 inside span 4; stop 4: tab lands on 4
+    //                             (interior in span 6) -> guide at 4 only
+    // (glyph ink sits >= 2 cells clear of every probed column, and the
+    // full-height-run guard absorbs any AA strays — the M21 pattern.)
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Off); // uniform Base
+    editor->setLanguage(QStringLiteral("python"));
+    qmn::view::LanguageProperties* py = editor->languageProperties(QStringLiteral("python"));
+    py->setTabStopWidth(2);
+    editor->setPlainText(QStringLiteral("      x\n\t  x\n"));
+    QCOMPARE(editor->lineCount(), 3);
+    editor->setPosition({2, 0});
+    QCoreApplication::processEvents(); // settle any deferred invalidation
+
+    const int pad = editor->padding();
+    const int lh = editor->lineHeight();
+    const int xL = editor->contentLeft();
+    const double cw = editor->cellWidth();
+    const QColor baseC = editor->palette().color(QPalette::Base);
+    const QColor inkC = editor->palette().color(QPalette::Text);
+    const auto blendOver = [](const QColor& under, const QColor& over, int a) {
+        const qreal f = a / 255.0;
+        return QColor(qRound(under.red() + f * (over.red() - under.red())),
+                      qRound(under.green() + f * (over.green() - under.green())),
+                      qRound(under.blue() + f * (over.blue() - under.blue())));
+    };
+    const QColor guide = blendOver(baseC, inkC, 40); // the M18/M21 ink
+    const auto guideLike = [&](const QColor& c) {
+        return qAbs(c.red() - guide.red()) <= 4 && qAbs(c.green() - guide.green()) <= 4
+            && qAbs(c.blue() - guide.blue()) <= 4;
+    };
+    const auto guideRows = [&](const QImage& img, int x, int line) {
+        const int yTop = pad + line * lh;
+        int n = 0;
+        for (int y = yTop + 2; y < yTop + lh - 2; ++y)
+            if (guideLike(img.pixelColor(x, y)))
+                ++n;
+        return n;
+    };
+    const auto hasGuide = [&](const QImage& img, int line, int stopCol) {
+        const int cx = xL + qRound(stopCol * cw);
+        for (int dx = -1; dx <= 1; ++dx) // absorb the 1px grid drift
+            if (guideRows(img, cx + dx, line) >= lh - 6)
+                return true;
+        return false;
+    };
+
+    // Frame A: python override stop 2 is live (effective getter proved it).
+    QCOMPARE(editor->tabStopWidth(), 2);
+    const QImage stopped = editor->grab().toImage();
+    QVERIFY(hasGuide(stopped, 0, 2));  // 6-space lead: interior 2…
+    QVERIFY(hasGuide(stopped, 0, 4));  // …and 4
+    QVERIFY(!hasGuide(stopped, 0, 6)); // span edge: never
+    QVERIFY(hasGuide(stopped, 1, 2));  // tab landing covers the stop it hits
+    QVERIFY(!hasGuide(stopped, 1, 4)); // span is 4 wide: 4 is the edge
+    QVERIFY(!hasGuide(stopped, 2, 2)); // empty line: no guides at all
+
+    // Frame B: clear -> template stop 4 exposes, the guide columns SHIFT.
+    py->clearTabStopWidth();
+    QCOMPARE(editor->tabStopWidth(), 4);
+    const QImage template4 = editor->grab().toImage();
+    QVERIFY(!hasGuide(template4, 0, 2)); // stop 4: 2 is not on the grid…
+    QVERIFY(hasGuide(template4, 0, 4));  // …and 4 is interior in span 6
+    QVERIFY(!hasGuide(template4, 1, 2));
+    QVERIFY(hasGuide(template4, 1, 4));  // tab lands ON stop 4 (interior)
+}
+
+void TestCodeEditor::languageTabStopFollowsLanguageSwitch()
+{
+    // Overrides are keyed per language and only ride above the template
+    // WHILE that language is active — switching editors' languages flips
+    // the effective stop without touching any override.
+    editor->languageProperties(QStringLiteral("python"))->setTabStopWidth(2);
+    editor->languageProperties(QStringLiteral("json"))->setTabStopWidth(8);
+
+    QCOMPARE(editor->tabStopWidth(), 4); // plain-text state: no language key
+    editor->setLanguage(QStringLiteral("python"));
+    QCOMPARE(editor->tabStopWidth(), 2);
+    editor->setLanguage(QStringLiteral("JSON")); // engine normalizes; the
+    QCOMPARE(editor->tabStopWidth(), 8);         // registry follows suit
+    editor->setLanguage(QStringLiteral("python ")); // trimmed too
+    QCOMPARE(editor->tabStopWidth(), 2);
+    editor->setLanguage(QString()); // back to plain text: template
+    QCOMPARE(editor->tabStopWidth(), 4);
+    editor->setLanguage(QStringLiteral("rust")); // unknown -> plain fallback,
+    QCOMPARE(editor->tabStopWidth(), 4);         // language() is empty
+
+    // The EMPTY key addresses exactly that plain-text state.
+    editor->languageProperties(QString())->setTabStopWidth(3);
+    QCOMPARE(editor->tabStopWidth(), 3);
+    editor->setLanguage(QStringLiteral("python")); // a language: the empty
+    QCOMPARE(editor->tabStopWidth(), 2);           // key's override steps down
+    editor->languageProperties(QString())->clearTabStopWidth();
+}
+
+void TestCodeEditor::languageTabStopRidesAboveTemplateAndSettings()
+{
+    // The DoD's global-settings rule: applyEditorSettings and the options
+    // mirror are TEMPLATE doors; a live override never leaks into them.
+    editor->setLanguage(QStringLiteral("python"));
+    qmn::view::LanguageProperties* py = editor->languageProperties(QStringLiteral("python"));
+    py->setTabStopWidth(2);
+
+    CodeEditorOptions* opt = editor->options();
+    QSignalSpy tmplSpy(opt, &CodeEditorOptions::tabStopWidthChanged);
+    opt->setTabStopWidth(6); // template moves UNDER the override
+    QCOMPARE(tmplSpy.count(), 1);
+    QCOMPARE(tmplSpy.at(0).at(0).toInt(), 6); // the bus carries the TEMPLATE
+    QCOMPARE(opt->tabStopWidth(), 6);         // the mirror reads the template
+    QCOMPARE(editor->tabStopWidth(), 2);      // effective untouched by the move
+    opt->setTabStopWidth(6); // same template value: silent, even masked
+    QCOMPARE(tmplSpy.count(), 1);
+
+    py->clearTabStopWidth(); // the FALL: straight onto the moved template
+    QCOMPARE(editor->tabStopWidth(), 6);
+    QCOMPARE(editor->language(), QStringLiteral("python")); // language stayed
+
+    // Both doors (flat setter + options) keep writing the template, and a
+    // settings round-trip mid-override reads the template, never 2:
+    editor->setTabStopWidth(4);
+    QCOMPARE(tmplSpy.count(), 2);
+    QCOMPARE(tmplSpy.at(1).at(0).toInt(), 4);
+    QCOMPARE(editor->tabStopWidth(), 4);
+    py->setTabStopWidth(2); // override ON again, python is still active
+    QCOMPARE(editor->tabStopWidth(), 2);
+    QCOMPARE(opt->tabStopWidth(), 4);
+    py->clearTabStopWidth();
+    QCOMPARE(editor->tabStopWidth(), 4);
 }
 
 QTEST_MAIN(TestCodeEditor)

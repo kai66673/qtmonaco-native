@@ -61,7 +61,11 @@ void CodeEditorOptions::setTabStopWidth(int columns)
 
 int CodeEditorOptions::tabStopWidth() const
 {
-    return editor_->tabStopWidth();
+    // M23: the mirror carries the GLOBAL TEMPLATE, never the effective
+    // value — a live language override must never leak a per-language
+    // number into global settings round-trips (applyEditorSettings and
+    // the demo EditorSettings save/load stay template-based).
+    return editor_->tabStopWidthOption_;
 }
 
 void CodeEditorOptions::setAutoIndentEnabled(bool enabled)

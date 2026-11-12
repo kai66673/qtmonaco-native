@@ -6,6 +6,53 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **M23 (Gate 1.5): language-scoped properties — `LanguageProperties` +
+  `CodeEditor::languageProperties(id)`.** Monaco's `[languageId]` model
+  made real: resolution is LANGUAGE override (when set) > editor options
+  template > factory default. The new public child QObject
+  (`view/LanguageProperties.hpp`, on the install allow-list) is the
+  tri-state without `std::optional` crossing the Shiboken boundary:
+  `setTabStopWidth` (clamped >= 1 like the editor knob) /
+  `clearTabStopWidth` / `hasTabStopWidth` / `tabStopWidth` (-1 = un-set
+  sentinel) + `tabStopWidthChanged(int)` carrying the new clamped value
+  or -1 on a clear (same-value sets and double clears silent). The
+  editor hands objects out lazily (`languageProperties(id)`), keyed by
+  the SAME normalization as `HighlightEngine::setLanguage` (trimmed +
+  lowercased), editor-owned children; the empty key addresses the
+  plain-text state. The built-in registry starts EMPTY: zero behavior
+  change until a consumer sets an override. Fan-out: `tabStopWidth_`
+  became the EFFECTIVE stop — every existing consumer (soft-tab insert,
+  literal-`'\t'` render grid via the geo-slot `setTabStopDistance`,
+  autoIndent stop math, M21 guide stops) reads it live, so the one seam
+  `refreshTabStopWidth()` (re-resolve + wipe geo cache + scroll range +
+  update, the pre-M23 `setTabStopWidth` body verbatim) covers all of
+  them; it runs on any override change (connect at creation), on
+  `setLanguage`, and on the template door. Layering: `setTabStopWidth`
+  and the options mirror are TEMPLATE doors — the template now lives in
+  `tabStopWidthOption_` and `CodeEditorOptions::tabStopWidth()` reads it
+  through friendship, so the settings bus keeps carrying the global
+  value and the demo `EditorSettings` round-trip can never bake a
+  per-language number into global settings (the DoD's
+  "applyEditorSettings stays global, the language layer rides ABOVE
+  it"). `availableLanguages()` untouched (grammar table only);
+  language-aware autoIndent stays the named out-of-scope hook. Tests:
+  `languagePropertiesTriStateAndSharedRegistry` (sentinel/signal
+  contract, normalization identity, editor parenting, empty built-ins +
+  the unchanged grammar list), `languageTabStopOverrideFansOut`
+  (insert count, `xForCol` literal-tab advance flipping with
+  set/clear/set — the numeric geo-invalidation proof, autoIndent stop
+  math incl. the `{|`-at-EOL conjured closer),
+  `languageTabStopOverrideGuideStopsPaint` (M21 blend-predicate pixel
+  scans: stop-2 frame lights columns 2/4 on a 6-space lead and the tab
+  landing at 2 only on `\t  x`, cleared frame shifts every guide to the
+  stop-4 grid), `languageTabStopFollowsLanguageSwitch` (per-language
+  overrides flip with the active grammar incl. both normalization sides,
+  unknown-id fallback, the empty-key = plain-text rule),
+  `languageTabStopRidesAboveTemplateAndSettings` (template moves under
+  a live override, bus carries the template, effective exposes on clear,
+  mirror reads the template mid-override). qmn-demo: no new global knob
+  to wire — `applyEditorSettings`/`EditorSettingsDialog` stay global by
+  DoD; the language layer is consumer-side API.
 - **M22 (Gate 1.5): fold-gutter hover region + innermost-fold click.**
   No new public API. The mandated probe first: Qt 6.12 REMOVED the
   QWidget hover virtuals (only a `QHoverEvent` forward decl survives),

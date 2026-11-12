@@ -706,25 +706,48 @@ State corrections against the owner's five points (measured in code,
   resolves the outer (inner group's tightest end stops short — walk
   skips it) and folding subsumes the collapsed inner; fall-through on
   the grammar path too). qmn-demo: no new knob, nothing to wire.
-- **M23 — language-scoped properties.** Generalize the id into a small
-  registry beside HighlightEngine's grammar table: per-language
-  settable properties, first = `tabStopWidth`. Resolution while a
-  language is active: LANGUAGE override (when set) > editor options >
-  factory default — exactly Monaco's `[languageId]` model, which is
-  what the owner asked ("языковые свойства перекрывают настройки
+- **M23 COMPLETE (2026-11-12): language-scoped properties.** Generalized
+  the id into a small registry beside HighlightEngine's grammar table:
+  per-language settable properties, first = `tabStopWidth`. Resolution
+  while a language is active: LANGUAGE override (when set) > editor
+  options > factory default — exactly Monaco's `[languageId]` model,
+  which is what the owner asked ("языковые свойства перекрывают настройки
   редактора"). Tri-state WITHOUT std::optional crossing the boundary
-  (Shiboken): a child QObject with set/clear + has-getters, plain Qt
-  types (exact shape decided at M23). The effective value fans out to
-  EVERY tab-width consumer: soft-tab insert (M14), literal-tab render
-  grid, autoIndent stop math, indent guides (M21). The built-in
-  registry starts EMPTY — upgrades stay behavior-identical,
+  (Shiboken): the public child QObject `view/LanguageProperties.hpp` —
+  set/clear + has-getters, -1 un-set sentinel on the getter AND the
+  `tabStopWidthChanged(int)` signal (same-value sets + double clears
+  silent), plain Qt types. `CodeEditor::languageProperties(id)` hands
+  out lazily-created editor-owned children keyed by the SAME
+  normalization HighlightEngine::setLanguage applies (trimmed +
+  lowercased; the empty key = the plain-text state), connect-on-creation
+  to the one fan-out seam. The effective value fans out to EVERY
+  tab-width consumer: `tabStopWidth_` became the EFFECTIVE stop (all
+  six live reads unchanged: soft-tab insert, the geo-slot tab-stop
+  render grid, autoIndent math x2, guide stops, outdent) and
+  `refreshTabStopWidth()` (override > template; on a real change: the
+  pre-M23 setTabStopWidth body verbatim — resetGeoCache +
+  updateScrollBarRange + update) runs from any override change, from
+  `setLanguage`, and from the template door; `setTabStopWidth` now
+  stores `tabStopWidthOption_` (the TEMPLATE; the options mirror reads
+  it through friendship, so the bus and the demo settings round-trip
+  never see a per-language number — the DoD's applyEditorSettings rule
+  holds because `EditorSettings` goes through that mirror). The
+  built-in registry starts EMPTY — upgrades stay behavior-identical,
   per-language defaults are IDE-side later. `availableLanguages()`
   unchanged; language-aware autoIndent (e.g. Python colon indent) is
-  a named future hook, NOT in scope. DoD: tab-insert count + tab
-  render advance + guide stops all flip with an override (state/
-  numeric), clear falls back to the template, `applyEditorSettings`
-  stays global (the language layer rides ABOVE it), binding re-run
-  green.
+  a named future hook, NOT in scope. DoD: met by
+  `languagePropertiesTriStateAndSharedRegistry` (sentinel/signal,
+  normalization identity, parenting, empty built-ins + unchanged
+  availableLanguages), `languageTabStopOverrideFansOut` (insert count +
+  xForCol literal-tab advance flips prove the geo wipe + autoIndent
+  stop math), `languageTabStopOverrideGuideStopsPaint` (M21 pixel idiom:
+  every guide column shifts with the override/clear),
+  `languageTabStopFollowsLanguageSwitch` (flips with the active grammar,
+  both normalization sides, unknown-id + empty-key rules) and
+  `languageTabStopRidesAboveTemplateAndSettings` (template moves under
+  the override, bus + mirror stay template-based, fall on clear).
+  qmn-demo: no new global knob to wire (the dialog stays global by DoD).
+  Binding re-run green is owner-side at tag time.
 - **M24 — themes.** One theme object (Shiboken-safe: a role enum +
   QColor get/set + a `TokenKind`→QColor map, Q_OBJECT +
   `themeChanged`): chrome roles (base, text, cursor, selection,

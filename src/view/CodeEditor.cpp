@@ -3,6 +3,7 @@
 #include "view/CodeEditorAccessible.hpp"
 #include "view/CodeEditorOptions.hpp"
 #include "view/HighlightEngine.hpp"
+#include "view/LanguageProperties.hpp"
 
 #include <QApplication>
 #include <QClipboard>
@@ -3880,6 +3881,8 @@ QVector<QTextLayout::FormatRange> CodeEditor::formatRangesForLine(int line, cons
 void CodeEditor::setLanguage(const QString& language)
 {
     highlight_->setLanguage(language);
+    refreshTabStopWidth(); // M23: the language layer rides ABOVE the
+                           // template (silent no-op with no override set)
     update(); // colors appear on the next paint (parse+query deferred there)
 }
 
@@ -4071,17 +4074,58 @@ void CodeEditor::setLongLineRulerColumn(int column)
 void CodeEditor::setTabStopWidth(int columns)
 {
     columns = std::max(1, columns);
-    if (columns == tabStopWidth_)
+    if (columns == tabStopWidthOption_)
         return;
-    tabStopWidth_ = columns;
-    // Tab stops are part of the LAYOUT (literal '\t' rendering), and the
-    // layout cache is not keyed on them: wipe it and let the visible lines
-    // re-measure their widths into docWidthPx_ the ambient way (hitLine).
+    tabStopWidthOption_ = columns;
+    // M23: this door sets the GLOBAL TEMPLATE (the options mirror and the
+    // demo settings round-trip through it). While a language override is
+    // set the effective value stays hidden under it, but the fan-out below
+    // is also the template-only path — and the options bus keeps carrying
+    // the TEMPLATE value, never a per-language one.
+    refreshTabStopWidth();
+    if (options_)
+        emit options_->tabStopWidthChanged(columns);
+}
+
+// M23 resolution: LANGUAGE override (when set) > editor template > factory
+// default (Monaco's [languageId] model). The fan-out below is the pre-M23
+// setTabStopWidth body verbatim: tab stops are part of the LAYOUT (literal
+// '\t' rendering), and the layout cache is not keyed on them — wipe it and
+// let the visible lines re-measure their widths into docWidthPx_ the
+// ambient way (hitLine). Every consumer (soft-tab insert, literal-tab
+// grid, autoIndent math, M21 guide stops) reads tabStopWidth_ LIVE, so
+// re-seating it + wiping the geo cache fans out to all of them at once.
+void CodeEditor::refreshTabStopWidth()
+{
+    int eff = tabStopWidthOption_;
+    if (const LanguageProperties* p = languageProps_.value(highlight_->language()))
+        if (p->hasTabStopWidth())
+            eff = p->tabStopWidth(); // clamped >= 1 at its own door
+    if (eff == tabStopWidth_)
+        return;
+    tabStopWidth_ = eff;
     resetGeoCache();
     updateScrollBarRange();
     update();
-    if (options_)
-        emit options_->tabStopWidthChanged(columns);
+}
+
+LanguageProperties* CodeEditor::languageProperties(const QString& language)
+{
+    // Same normalization as HighlightEngine::setLanguage (trimmed +
+    // lowercased), so the object handed out for "Python " is exactly the
+    // one a later setLanguage("Python") matches. The empty key addresses
+    // the plain-text (no-grammar) state. Children of the editor, created
+    // on demand: the built-in registry starts EMPTY, and any change here
+    // re-resolves the effective stop (the override only rides above the
+    // template while it is SET; the signal carries -1 on a clear).
+    const QString key = language.trimmed().toLower();
+    LanguageProperties*& slot = languageProps_[key];
+    if (!slot) {
+        slot = new LanguageProperties(this);
+        connect(slot, &LanguageProperties::tabStopWidthChanged,
+                this, &CodeEditor::refreshTabStopWidth);
+    }
+    return slot;
 }
 
 // M19-only knobs: stored here, exposed only through the options object

@@ -147,8 +147,11 @@ Gate 1.5 — usability interlude (post-freeze minor train, see PLAN.md):
       (marker-row-only rule widened, caret never moves); no new public API —
       hover rides setMouseTracking gated by the strip (Qt 6.12 has no widget
       hover virtuals); click-to-fold on the marker row already exists since M13)
-- [ ] M23 language-scoped properties (tab width first; overrides ride
-      above the editor settings — Monaco's `[languageId]` model)
+- [x] M23 language-scoped properties (tab width first; overrides ride
+      above the editor settings — Monaco's `[languageId]` model;
+      public `languageProperties(id)` + tri-state child QObject, built-in
+      registry starts EMPTY, settings mirror/applyEditorSettings stay
+      template-based)
 - [ ] M24 themes (chrome colors + token map; the default theme keeps
       today's pixels, all "set_theme routes it" inks finally routed)
 

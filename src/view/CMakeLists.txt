@@ -3,6 +3,8 @@ add_library(qmn_view STATIC
     CodeEditor.cpp
     CodeEditorOptions.hpp
     CodeEditorOptions.cpp
+    LanguageProperties.hpp
+    LanguageProperties.cpp
     CodeEditorAccessible.hpp
     CodeEditorAccessible.cpp
     HighlightEngine.hpp
@@ -33,4 +35,5 @@ install(TARGETS qmn_view EXPORT qmnTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_L
 install(FILES
     CodeEditor.hpp
     CodeEditorOptions.hpp
+    LanguageProperties.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qmn/view)
