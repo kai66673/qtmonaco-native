@@ -306,6 +306,11 @@ private slots:
     void foldZoneGutterConstant();
     void foldAutoExpandOnSourceDeath();
     void foldlessEditKeepsPaintSlotCache();
+    // M22 fold-gutter hover region + innermost-fold click.
+    void foldHoverRegionPaintsAndClears();
+    void foldHoverTrackingGatedByFoldStrip();
+    void foldClickResolvesInnermostFold();
+    void foldHoverGrammarInnermostClick();
 
 private:
     CodeEditor* editor = nullptr;
@@ -6984,12 +6989,28 @@ void TestCodeEditor::mouseClickFoldZoneToggles()
     QCOMPARE(editor->position().line, 5);
     QCOMPARE(editor->position().col, 2);
 
-    // A zone click on a NON-foldable row falls through to plain caret
-    // placement (col clamps to 0 inside the gutter).
+    // M22: a zone click on a NON-MARKER row INSIDE a fold resolves the
+    // innermost fold covering it and toggles THAT fold — still never
+    // moving the caret.
     QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(1)));
-    QVERIFY(!editor->isFolded(1));
-    QCOMPARE(editor->position().line, 1);
+    QVERIFY(editor->isFolded(0)); // row 1 sits inside fold [0..3]
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    QCOMPARE(editor->position().line, 5);
+    QCOMPARE(editor->position().col, 2);
+    // Unfold back through the marker row, then verify the map: mid-fold
+    // state slot 1 is model line 4 (row covered by NO fold).
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(0)));
+    QVERIFY(!editor->isFolded(0));
+
+    // A zone click on a row covered by no fold falls through to plain caret
+    // placement (col clamps to 0 inside the gutter). Fold again and click
+    // slot 1 = model line 4 for that check.
+    QVERIFY(editor->foldLine(0));
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(1)));
+    QVERIFY(editor->isFolded(0)); // caret click did NOT toggle anything
+    QCOMPARE(editor->position().line, 4);
     QCOMPARE(editor->position().col, 0);
+    QVERIFY(editor->unfoldLine(0));
 
     // Alt+Click keeps its multi-caret meaning in the zone: no fold happens.
     editor->setPosition({5, 2});
@@ -7594,6 +7615,353 @@ void TestCodeEditor::foldlessEditKeepsPaintSlotCache()
     QCOMPARE(editor->visibleLineTotal(), 100); // and the bar re-shrinks:
     QVERIFY(QApplication::sendEvent(editor, &deepDown));
     QCOMPARE(editor->verticalScrollOffset(), maxAt100);
+}
+
+// --- M22 fold-gutter hover (region paint + innermost click) ----------------
+
+// A button-less move IS the hover channel (mouse tracking delivers exactly
+// these; sendEvent reaches mouseMoveEvent regardless of tracking — the
+// widget's own NoButton branch is the real gate). sendEvent's return is
+// deliberately NOT asserted: the hover branch event->ignore()s, and
+// "ignored" is the truthful state of a move the window system would never
+// have delivered without tracking. Never wrapped in Q_ASSERT either (the
+// manual-drag lesson: release builds strip the macro, events included).
+static void sendHoverMove(CodeEditor* ed, const QPoint& p)
+{
+    const QPointF pt(p);
+    QMouseEvent mv(QEvent::MouseMove, pt, pt, Qt::NoButton, Qt::NoButton,
+                   Qt::NoModifier);
+    QApplication::sendEvent(ed, &mv);
+}
+
+// The shared blend math for the M22 fill predicate: src-over alpha blend of
+// the (150,150,150,46) foldRegionTint over the frame's actual Base (the
+// offscreen palette is DARK #323232, so the exact blend value is derived
+// from the palette, never hardcoded).
+static QColor foldBandColor(const QColor& base)
+{
+    const QColor over(150, 150, 150);
+    const qreal f = 46 / 255.0;
+    return QColor(qRound(base.red() + f * (over.red() - base.red())),
+                  qRound(base.green() + f * (over.green() - base.green())),
+                  qRound(base.blue() + f * (over.blue() - base.blue())));
+}
+
+void TestCodeEditor::foldHoverRegionPaintsAndClears()
+{
+    // Pixel/state proof (no vision): hovering the fold strip paints the
+    // foldRegionTint band over the strip cells of the INNERMOST fold
+    // covering the hovered model row, and every invalidator (an uncovered
+    // row, Leave, an edit, the fold doors, any press) wipes it.
+    // Probe column xL-fz+2 is CLEAN (measured offscreen metrics: cellW 8.4,
+    // lh 19, pad 4, contentLeft 46, fz 18): the ▾/▸ triangle spans
+    // [xL-12.2, xL-5.8], the digits end at or left of xL-pad-fz, the
+    // divider hairline sits at xL-1 — only the fill can light xL-16=30,
+    // and fillRect is an exact integer rect, so a covered slot row reads
+    // EXACTLY lh band pixels in that column, an uncovered row zero.
+    editor->setPlainText(foldDoc()); // the single fold is [0..3]
+    editor->grab();
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Off); // clean frame
+    const int lh = editor->lineHeight();
+    const int fz = editor->foldZoneWidth();
+    int xL = editor->contentLeft(); // re-derived in the scroll leg: the gutter
+    int zx = xL - fz + 2;          // widens with the digit count (lambdas
+                                   // capture these BY REFERENCE)
+    const QColor band = foldBandColor(editor->palette().color(QPalette::Base));
+    const auto bandLike = [&](const QColor& c) {
+        return qAbs(c.red() - band.red()) <= 4 && qAbs(c.green() - band.green()) <= 4
+            && qAbs(c.blue() - band.blue()) <= 4;
+    };
+    auto zoneY = [&](int slot) { return editor->padding() + slot * lh + lh / 2; };
+    auto litAtSlot = [&](const QImage& im, int slot) {
+        int lit = 0;
+        const int yTop = editor->padding() + slot * lh - editor->verticalScrollOffset();
+        for (int y = yTop; y < yTop + lh; ++y)
+            if (bandLike(im.pixelColor(zx, y)))
+                ++lit;
+        return lit;
+    };
+    auto hoverTo = [&](int slot) { sendHoverMove(editor, QPoint(zx, zoneY(slot))); };
+
+    QCOMPARE(litAtSlot(editor->grab().toImage(), 0), 0); // baseline: no region
+
+    hoverTo(1); // "child1": covered ONLY by the outer [0..3]
+    QImage lit = editor->grab().toImage();
+    for (int slot = 0; slot <= 3; ++slot)
+        QCOMPARE(litAtSlot(lit, slot), lh); // full-height fill (exact rect)
+    QCOMPARE(litAtSlot(lit, 4), 0);
+    QCOMPARE(litAtSlot(lit, 5), 0);
+
+    // Hover on a row NO fold covers clears the region (and repaints):
+    hoverTo(5);
+    lit = editor->grab().toImage();
+    for (int slot = 0; slot <= 5; ++slot)
+        QCOMPARE(litAtSlot(lit, slot), 0);
+
+    // Leaving the strip (out of the gutter, into the text) clears too —
+    // the row lookup only runs inside the strip's x-frame:
+    sendHoverMove(editor, QPoint(xL + 5, zoneY(1)));
+    lit = editor->grab().toImage();
+    QCOMPARE(litAtSlot(lit, 0), 0);
+
+    // LeaveEvent clears:
+    hoverTo(2);
+    QCOMPARE(litAtSlot(editor->grab().toImage(), 2), lh);
+    QEvent leave(QEvent::Leave);
+    QApplication::sendEvent(editor, &leave);
+    QCOMPARE(litAtSlot(editor->grab().toImage(), 2), 0);
+
+    // Any edit clears (the buffer edit observer is the universal choke —
+    // setPlainText funnels every mutation through it):
+    hoverTo(2);
+    QCOMPARE(litAtSlot(editor->grab().toImage(), 1), lh);
+    editor->setPlainText(foldDoc()); // same content, fresh edits either way
+    QCOMPARE(litAtSlot(editor->grab().toImage(), 1), 0);
+
+    // The fold doors clear: fold, then re-hover on what is now the
+    // collapsed header row — the region SHRINKS to the start row, because
+    // the fold's interior rows are hidden (visibleIndex -1) and the paint
+    // maps the model anchor through the slot map.
+    hoverTo(2);
+    QVERIFY(editor->foldLine(0));
+    QCOMPARE(litAtSlot(editor->grab().toImage(), 0), 0); // door cleared it
+    QCOMPARE(editor->visibleLineTotal(), 3);             // slots: rows 0,4,5
+    hoverTo(0);
+    lit = editor->grab().toImage();
+    QCOMPARE(litAtSlot(lit, 0), lh); // the shrunken collapsed region: one row
+    QCOMPARE(litAtSlot(lit, 1), 0);
+
+    // Any press clears (the dragLeave lesson — the clear never RELIES on a
+    // later leave/move arriving). A TEXT press first: no toggle, caret only:
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(xL + 5, zoneY(2)));
+    QVERIFY(editor->isFolded(0));
+    QCOMPARE(litAtSlot(editor->grab().toImage(), 0), 0);
+
+    // A strip press on the header row toggles the fold back open and the
+    // hover state stays cleared (the press resolved, never cached):
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zx, zoneY(0)));
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 6);
+    lit = editor->grab().toImage();
+    for (int slot = 0; slot <= 5; ++slot)
+        QCOMPARE(litAtSlot(lit, slot), 0);
+
+    // Scroll anchor (the M16 drop-caret pattern in pixels): a wheel scroll
+    // is NOT an invalidator — the model-row anchor keeps the region glued to
+    // the fold through scrolling. Long document with the deep fold [3..8]
+    // (wheelEvent fact: one notch = 3 lines = 3*lh px): the post-scroll lit
+    // set is STILL slots 3..8 — a screen-anchored region would sit on the
+    // unscrolled pixel band instead, leaving slot 3 (band top now at row 4)
+    // dark and bleeding into slot 9 (starts exactly where the fill ends).
+    QStringList rows;
+    rows << QStringLiteral("a") << QStringLiteral("b") << QStringLiteral("c")
+         << QStringLiteral("  d") << QStringLiteral("    e1")
+         << QStringLiteral("    e2") << QStringLiteral("    e3")
+         << QStringLiteral("    e4") << QStringLiteral("    e5")
+         << QStringLiteral("  f");
+    for (int i = 0; i < 20; ++i)
+        rows << QStringLiteral("p%1").arg(i);
+    editor->setPlainText(rows.join(QLatin1Char('\n')));
+    editor->grab();
+    xL = editor->contentLeft(); // "p19" widens the number column: 46 -> 55
+    zx = xL - fz + 2;           // (reference-captured lambdas follow)
+    hoverTo(5); // row 5 (indent 4, mid-fold): resolves [3..8]
+    lit = editor->grab().toImage();
+    for (int slot = 3; slot <= 8; ++slot)
+        QCOMPARE(litAtSlot(lit, slot), lh);
+    QCOMPARE(litAtSlot(lit, 9), 0);
+    QWheelEvent down(QPointF(300, 200), QPointF(300, 200), QPoint(0, 0),
+                     QPoint(0, -120), Qt::NoButton, Qt::NoModifier,
+                     Qt::NoScrollPhase, false);
+    QVERIFY(QApplication::sendEvent(editor, &down)); // one notch = 3 lines
+    QCOMPARE(editor->verticalScrollOffset(), 3 * lh);
+    lit = editor->grab().toImage();
+    for (int slot = 3; slot <= 8; ++slot) // the band TRAVELLED with the fold
+        QCOMPARE(litAtSlot(lit, slot), lh);
+    QCOMPARE(litAtSlot(lit, 2), 0); // clipped head row: dark
+    QCOMPARE(litAtSlot(lit, 9), 0);  // and not one row past the fold's end
+}
+
+void TestCodeEditor::foldHoverTrackingGatedByFoldStrip()
+{
+    // The mouse-tracking gate IS the fold-strip gate: tracking is on exactly
+    // while the strip chrome exists (the gutter Off switch kills folding,
+    // and hover with it — PLAN M22).
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    QVERIFY(editor->hasMouseTracking()); // the ctor gate: mode On ⇒ tracking
+    QVERIFY(editor->foldZoneWidth() > 0);
+
+    editor->setLineNumbersMode(CodeEditor::LineNumbersMode::Off);
+    QVERIFY(!editor->hasMouseTracking()); // Off kills tracking…
+    QCOMPARE(editor->foldZoneWidth(), 0);  // …and the strip in one gate
+    // Belt-and-braces: even a FORCED button-less move (sendEvent bypasses the
+    // window-level tracking gate) stays inert while the strip is gone — the
+    // fz==0 gate resolves no row, so no state changes and NO repaint fires:
+    const QImage before = editor->grab().toImage();
+    sendHoverMove(editor, QPoint(30, 40));
+    const QImage after = editor->grab().toImage();
+    int diff = 0;
+    for (int y = 0; y < before.height(); ++y)
+        for (int x = 0; x < before.width(); ++x)
+            if (before.pixelColor(x, y) != after.pixelColor(x, y))
+                ++diff;
+    QCOMPARE(diff, 0);
+
+    editor->setLineNumbersMode(CodeEditor::LineNumbersMode::On);
+    QVERIFY(editor->hasMouseTracking()); // back on with the chrome
+}
+
+void TestCodeEditor::foldClickResolvesInnermostFold()
+{
+    // M22 click rule (indent source): a strip click resolves the INNERMOST
+    // fold CONTAINING the row and toggles THAT fold — still never moving the
+    // caret; a row that itself starts a fold resolves to its own fold; rows
+    // covered by NO fold keep the old caret fall-through.
+    // Document grid (outer [0..4], inner [1..3]):
+    //   0 head / 1 "  a" / 2 "    d1" / 3 "    d2" / 4 "  b" / 5 tail
+    editor->setPlainText(
+        QStringLiteral("head\n  a\n    d1\n    d2\n  b\ntail"));
+    editor->grab();
+    const auto ranges = editor->foldableRanges(); // map tripwire first
+    QCOMPARE(ranges.size(), 2);
+    QCOMPARE(ranges[0].startLine, 0);
+    QCOMPARE(ranges[0].endLine, 4); // the scan stops at "tail"
+    QCOMPARE(ranges[1].startLine, 1);
+    QCOMPARE(ranges[1].endLine, 3);
+
+    const int lh = editor->lineHeight();
+    const int fz = editor->foldZoneWidth();
+    const int zoneX = editor->contentLeft() - fz / 2; // strip center
+    auto zoneY = [&](int slot) { return editor->padding() + slot * lh + lh / 2; };
+    editor->setPosition({5, 1}); // a caret the toggle clicks must never touch
+
+    // (a) mid-fold click folds the INNER covering fold, caret frozen:
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(2)));
+    QVERIFY(editor->isFolded(1)); // [1..3], NOT the outer [0..4]
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 4); // d1, d2 hidden
+    QCOMPARE(editor->position().line, 5);
+    QCOMPARE(editor->position().col, 1);
+
+    // (b) the collapsed header (slot 1 = model row 1) unfolds again:
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(1)));
+    QVERIFY(!editor->isFolded(1));
+    QCOMPARE(editor->visibleLineTotal(), 6);
+
+    // (c) the same row now: it STARTS a fold — self wins over the enclosing
+    // outer fold (the innermost rule on a start row):
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(1)));
+    QVERIFY(editor->isFolded(1));
+    QVERIFY(!editor->isFolded(0));
+
+    // (d) subsumption through the public door (the click path rides the same
+    // foldLine semantics): folding the outer drops the inner state —
+    // "unfolding [1..3]" while the outer is closed is a hidden-row state the
+    // mouse can never reach (foldLine's hidden-start contract).
+    QVERIFY(editor->foldLine(0)); // folds [0..4] over the still-open inner
+    QVERIFY(editor->isFolded(0));
+    QVERIFY(!editor->isFolded(1)); // subsumed: the run would otherwise nest
+    QCOMPARE(editor->visibleLineTotal(), 2); // head, tail
+    QVERIFY(editor->unfoldLine(0));
+    QCOMPARE(editor->visibleLineTotal(), 6);
+
+    // (e) caret fall-through: "tail" is a row covered by NO fold (the outer
+    // [0..4] stops at row 4) — the click places the caret (col clamps to 0
+    // inside the gutter) instead of toggling:
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(5)));
+    QVERIFY(!editor->isFolded(5));
+    QCOMPARE(editor->position().line, 5);
+    QCOMPARE(editor->position().col, 0); // moved: the fall-through is live
+    QCOMPARE(editor->toPlainText(),
+             QStringLiteral("head\n  a\n    d1\n    d2\n  b\ntail"));
+}
+
+void TestCodeEditor::foldHoverGrammarInnermostClick()
+{
+    // Same innermost rule on the GRAMMAR source (python fold captures), and
+    // the reverse-walk resolver: foldsFull is (start asc, end desc), the
+    // tightest end of each start-group is what foldEndForLine would fold —
+    // groups whose tightest end stops short of the row are unreachable and
+    // the walk continues upward. Fixture = pythonGrammarFoldsAndCollapseAll:
+    // captures (0,4) outer, (2,3) inner.
+    editor->setPlainText(QStringLiteral(
+        "def outer():\n"
+        "    x = 1\n"
+        "    def inner():\n"
+        "        return x\n"
+        "    return inner\n"
+        "print(outer())\n"));
+    editor->setLanguage(QStringLiteral("python"));
+    editor->grab();
+    const auto ranges = editor->foldableRanges();
+    QCOMPARE(ranges.size(), 2);
+    QCOMPARE(ranges[0].startLine, 0);
+    QCOMPARE(ranges[0].endLine, 4);
+    QCOMPARE(ranges[1].startLine, 2);
+    QCOMPARE(ranges[1].endLine, 3);
+
+    const int lh = editor->lineHeight();
+    const int fz = editor->foldZoneWidth();
+    const int xL = editor->contentLeft();
+    const int zx = xL - fz + 2; // clean probe column (test 1's comment)
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Off);
+    const QColor band = foldBandColor(editor->palette().color(QPalette::Base));
+    const auto bandLike = [&](const QColor& c) {
+        return qAbs(c.red() - band.red()) <= 4 && qAbs(c.green() - band.green()) <= 4
+            && qAbs(c.blue() - band.blue()) <= 4;
+    };
+    auto zoneY = [&](int slot) { return editor->padding() + slot * lh + lh / 2; };
+    auto litAtSlot = [&](const QImage& im, int slot) {
+        int lit = 0;
+        const int yTop = editor->padding() + slot * lh - editor->verticalScrollOffset();
+        for (int y = yTop; y < yTop + lh; ++y)
+            if (bandLike(im.pixelColor(zx, y)))
+                ++lit;
+        return lit;
+    };
+
+    // Hover row 3 ("return x"): inside BOTH captures — the INNER one wins,
+    // so the fill band is rows 2..3 only (rows 0,1,4 stay dark: this single
+    // pixel fact proves innermost-over-outer on the grammar resolver).
+    {
+        const QPointF p(zx, zoneY(3));
+        QMouseEvent mv(QEvent::MouseMove, p, p, Qt::NoButton, Qt::NoButton, Qt::NoModifier);
+        QApplication::sendEvent(editor, &mv);
+    }
+    QImage lit = editor->grab().toImage();
+    QCOMPARE(litAtSlot(lit, 0), 0);
+    QCOMPARE(litAtSlot(lit, 1), 0);
+    QCOMPARE(litAtSlot(lit, 2), lh);
+    QCOMPARE(litAtSlot(lit, 3), lh);
+    QCOMPARE(litAtSlot(lit, 4), 0);
+
+    // Click row 3 (mid-inner-fold, no marker): toggles the INNER fold only.
+    const int zoneX = xL - fz / 2;
+    editor->setPosition({5, 3}); // caret frozen by every strip toggle
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(3)));
+    QVERIFY(editor->isFolded(2));
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 6); // line 3 hidden from 7
+    QCOMPARE(editor->position().line, 5);
+    QCOMPARE(editor->position().col, 3);
+
+    // Now row 4 ("return inner", slot 3) is covered by the OUTER capture
+    // alone: its start-group tightest end is 4 >= 4 while the inner group's
+    // tightest end (3) stops short — the walk must skip it and resolve
+    // [0..4]. Clicking there folds the outer, subsuming the inner state.
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(3)));
+    QVERIFY(editor->isFolded(0)); // (the click resolved the outer)
+    QVERIFY(!editor->isFolded(2)); // subsumed while [2..3] was collapsed
+    QCOMPARE(editor->visibleLineTotal(), 3); // lines 0, 5, 6
+
+    // Slot 1 = model line 5 ("print(outer())"): no capture reaches it
+    // (outer ends at 4) — caret fall-through on the grammar path too (slot
+    // 2 would be the model's empty trailing line 6, also uncovered):
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(1)));
+    QCOMPARE(editor->position().line, 5);
+    QCOMPARE(editor->position().col, 0);
+    QVERIFY(!editor->isFolded(5));
 }
 
 QTEST_MAIN(TestCodeEditor)

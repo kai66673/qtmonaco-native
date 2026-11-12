@@ -6,6 +6,50 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **M22 (Gate 1.5): fold-gutter hover region + innermost-fold click.**
+  No new public API. The mandated probe first: Qt 6.12 REMOVED the
+  QWidget hover virtuals (only a `QHoverEvent` forward decl survives),
+  so the hover seam is `setMouseTracking` + the already-overridden
+  `mouseMoveEvent` with a `Qt::NoButton` branch; the tracking gate IS
+  the fold-strip gate (the ctor and `setLineNumbersMode` flip both with
+  one condition — gutter Off kills folding and hover together). Hovering
+  the fold strip now resolves the INNERMOST fold CONTAINING the hovered
+  row (`innermostFoldAt`: a row that itself starts a fold wins with
+  `foldEndForLine`'s tightest end; else the nearest covering start above
+  — indent mode scans model rows above under a 2048-row cap, grammar
+  mode reverse-walks the whole-tree fold table, where reverse order
+  visits each start-group end-ascending so the first hit IS the tightest
+  end — mirroring foldLine's same-start rule) and paints one
+  translucent band (`QColor(150,150,150,46)`, fixed cool ink until M24
+  routes it) over that fold's rows in the strip cells. The anchor is the
+  MODEL row range (the M16 drop-caret pattern: scrolling keeps the
+  region glued to the fold for free; hidden interior rows shrink a
+  collapsed fold's region to its start row via the view-line map
+  alone), resolution happens on hover-move and FRESH at every click —
+  never on the paint path. Invalidation: the buffer edit observer (one
+  hook covers typing/paste/undo/DnD/setPlainText), every fold door
+  (foldLine/unfoldLine/revealLine/expandAll), ANY mouse press (the
+  dragLeave lesson: the clear never relies on a leave arriving) and the
+  new `leaveEvent` override. Click semantics widened from marker-row-
+  only: a click anywhere inside a fold toggles the INNERMOST fold
+  covering that row (caret still NEVER moves); rows covered by no fold
+  keep the old caret fall-through; Alt+click, double-click and the
+  context menu are untouched. Tests: `mouseClickFoldZoneToggles`
+  rewritten for the new rule; `foldHoverRegionPaintsAndClears` (exact
+  blend-predicate pixel scans on the one clean strip column, all
+  invalidators, shrunken collapsed region, press-clear + toggle combo,
+  plus a wheel-scroll leg — one notch = 3 lines moves the frame but the
+  lit set stays glued to the fold's MODEL rows (the M16 anchor in
+  pixels; the leg also proves the probe column must be re-derived per
+  document: the gutter widens with the digit count);
+  `foldHoverTrackingGatedByFoldStrip` (tracking flips with the chrome,
+  a forced hover stays pixel-inert without it);
+  `foldClickResolvesInnermostFold` (indent nesting: inner fold from a
+  mid-fold click, start-row self-rule, subsumption) and
+  `foldHoverGrammarInnermostClick` (python captures: innermost
+  resolution proves the reverse-walk, outer folds over a collapsed
+  inner, fall-through on the grammar path too). qmn-demo: nothing to
+  wire (no new knob).
 - **M21 (Gate 1.5): indent guides.** The options-only trio grows a third
   member: `setIndentGuidesEnabled/indentGuidesEnabled` on the M19
   `CodeEditorOptions` (no flat public setter — M19 rule) plus the bus

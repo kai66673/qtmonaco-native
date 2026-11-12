@@ -280,6 +280,11 @@ CodeEditor::CodeEditor(QWidget* parent)
         // M13: keep collapsed-fold indices aligned with the model (a
         // best-effort line-index sweep; fold STATE is not undoable in v1).
         shiftFoldStateForEdit(ev);
+        // M22: every mutation invalidates the fold-hover region (the PLAN
+        // invalidation rule; the observer fires for EVERY primitive edit,
+        // so this single hook covers typing, paste, undo replay, DnD and
+        // setPlainText alike).
+        clearFoldHoverState();
         // M11: the edit half of the a11y event bus. The observer fires for
         // EVERY primitive mutation (typing, paste, undo/redo replay and
         // setPlainText's whole-doc op included), so one hook here covers
@@ -349,6 +354,12 @@ CodeEditor::CodeEditor(QWidget* parent)
         lineHeight_ = ascent_ + 4;
     baseFont_ = font_; // M17: the shipped font IS the zoom-1.0 base
     setFont(font_); // keep QWidget::font() in sync with the metrics above
+
+    // M22: button-less mouse moves must reach mouseMoveEvent for the fold
+    // strip hover; the tracking gate IS the fold strip's own gate
+    // (foldZoneWidth() > 0 ⇔ the gutter chrome is on — the gutter Off
+    // switch disables folding, and hover with it; see setLineNumbersMode).
+    setMouseTracking(lineNumbersMode_ != LineNumbersMode::Off);
 
     vBar_ = new QScrollBar(Qt::Vertical, this);
     vBar_->hide();
@@ -2201,6 +2212,7 @@ bool CodeEditor::revealLine(int line)
     if (changed) {
         rebuildHiddenRuns();
         updateScrollBarRange(); // the slot space grew back: bar follows
+        clearFoldHoverState(); // M22: fold mutations invalidate the region
     }
     return changed;
 }
@@ -2330,6 +2342,7 @@ bool CodeEditor::foldLine(int line)
     collapsed_.insert(at, FoldState{line, end});
     rebuildHiddenRuns();
     updateScrollBarRange(); // the slot space shrank: vBar + clamp follow
+    clearFoldHoverState(); // M22: fold mutations invalidate the hover region
     update();
     return true;
 }
@@ -2346,6 +2359,7 @@ bool CodeEditor::unfoldLine(int line)
         return false;
     rebuildHiddenRuns();
     updateScrollBarRange();
+    clearFoldHoverState(); // M22: fold mutations invalidate the hover region
     update();
     return true;
 }
@@ -2353,6 +2367,102 @@ bool CodeEditor::unfoldLine(int line)
 bool CodeEditor::toggleFold(int line)
 {
     return isFolded(line) ? unfoldLine(line) : foldLine(line);
+}
+
+// --- M22 fold-gutter hover helpers (member docs: CodeEditor.hpp) ----------
+
+bool CodeEditor::innermostFoldAt(int row, FoldState* out)
+{
+    if (row < 0 || row >= buffer_.lineCount())
+        return false;
+    // A row that STARTS a fold resolves to its own fold (the innermost
+    // possible), collapsed ones included — foldEndForLine's foldLine-
+    // consistent TIGHTEST end semantics keep the hover region exactly as
+    // wide as the click's toggle will be.
+    if (const int selfEnd = foldEndForLine(row); selfEnd > row) {
+        *out = FoldState{row, selfEnd};
+        return true;
+    }
+    if (indentFoldsActive()) {
+        // Indent source: walk model rows above the hovered one; the first
+        // hit (nearest start) is the innermost enclosing fold. Non-starts
+        // cost O(1) (foldEndForLine's scan breaks at the first line that
+        // does not out-indent), so a full capped hunt without a hit stays
+        // cheap; a hit scans at most its own body once. Grammar mode skips
+        // this loop: the tree table below sees every captured fold.
+        for (int l = row - 1; l >= 0 && row - l <= kFoldHoverScanCap; --l) {
+            const int e = foldEndForLine(l);
+            if (e >= row) {
+                *out = FoldState{l, e};
+                return true;
+            }
+        }
+        return false;
+    }
+    // Grammar source: reverse-walk the whole-tree fold table (start asc,
+    // end desc) from the row upward. Reverse order visits each start-group
+    // end-ascending, so the first entry of a group with end > start IS its
+    // tightest end (mirrors foldEndForLine); groups whose tightest end
+    // stops short of the row are unreachable folds (foldLine would fold
+    // exactly that tightest end) and the walk just continues upward. The
+    // parse window bounds the walk by construction (like every other fold
+    // consumer here).
+    const auto& ff = highlight_->foldsFull();
+    for (int i = int(ff.size()) - 1; i >= 0; --i) {
+        const int s = ff[size_t(i)].startLine;
+        if (s >= row)
+            continue; // starts at/after the row: the row itself is handled
+                      // above, starts below it can never contain the row
+        int tightest = -1;
+        for (int j = i; j >= 0 && ff[size_t(j)].startLine == s; --j) {
+            if (ff[size_t(j)].endLine > s) { // end-desc group → reverse visits
+                tightest = ff[size_t(j)].endLine; // the smallest ends first
+                break;
+            }
+        }
+        if (tightest >= row) {
+            *out = FoldState{s, tightest};
+            return true;
+        }
+        // Same-start siblings re-enter this loop at their own index and
+        // recompute the same tightest — idempotent, keeps the walk trivial.
+    }
+    return false;
+}
+
+void CodeEditor::updateFoldHoverState(const QPoint& pt)
+{
+    // The hover lives exactly where the click does: the strip column at the
+    // gutter's right edge (the same x-frame the press handler uses).
+    const int fz = foldZoneWidth();
+    const int row = (fz > 0 && pt.x() >= contentLeft() - fz && pt.x() < contentLeft())
+                        ? modelLineForY(pt.y())
+                        : -1;
+    if (row == hoverFoldRow_)
+        return; // same row: the region can only change with the row
+    FoldState fs;
+    const bool any = row >= 0 && innermostFoldAt(row, &fs);
+    hoverFoldRow_ = row;
+    hoverFoldStart_ = any ? fs.start : -1;
+    hoverFoldEnd_ = any ? fs.end : -1;
+    update();
+}
+
+void CodeEditor::clearFoldHoverState()
+{
+    if (hoverFoldRow_ < 0 && hoverFoldStart_ < 0)
+        return; // nothing set: no repaint to ask for
+    hoverFoldRow_ = hoverFoldStart_ = hoverFoldEnd_ = -1;
+    update();
+}
+
+void CodeEditor::leaveEvent(QEvent* event)
+{
+    // M22 leave-clears (the region must not outlive the pointer) — but the
+    // hover machinery never RELIES on this arriving: press, edit and fold
+    // mutations clear it too (the dragLeave lesson, M16).
+    clearFoldHoverState();
+    QWidget::leaveEvent(event);
 }
 
 void CodeEditor::collapseAll()
@@ -2400,6 +2510,7 @@ void CodeEditor::expandAll()
     collapsed_.clear();
     rebuildHiddenRuns();
     updateScrollBarRange();
+    clearFoldHoverState(); // M22: fold mutations invalidate the hover region
     update();
 }
 
@@ -3193,6 +3304,15 @@ QRgb foldInk()
     return qRgb(150, 150, 150);
 }
 
+// M22 fold-hover region tint: the SAME cool gray family as foldInk (R==G==B
+// by construction, so the warm/red decoration probe predicates stay green),
+// translucent over Base. Fixed until set_theme routes it (M24: the chrome
+// role list grows a fold-region entry alongside fold markers).
+QColor foldRegionTint()
+{
+    return QColor(150, 150, 150, 46);
+}
+
 } // namespace
 
 void CodeEditor::paintEvent(QPaintEvent*)
@@ -3380,6 +3500,27 @@ void CodeEditor::paintEvent(QPaintEvent*)
         // shifts, so neither does the icon, the numbers or the triangles):
         const int foldCx = textLeft - fz / 2; // zone center x
         const double fr = std::max(2.5, cellWidth_ * 0.38); // triangle half-extent
+        // M22: the hover region — one translucent band over the strip cells
+        // of the hovered fold's rows. The anchor is the MODEL row range
+        // resolved on hover, so this slot-space mapping keeps it glued to
+        // the fold through scrolling for free (the M16 drop-caret pattern).
+        // visibleIndexOfModelLine is -1 only for fold-HIDDEN rows: a
+        // collapsed fold's interior rows are hidden, so its painted region
+        // shrinks to its (always visible) start row by that -1 alone. The
+        // clamp to the slot window culls whole folds above/below the
+        // viewport and clips partially scrolled ones.
+        if (hoverFoldStart_ >= 0) {
+            const int sSlot = visibleIndexOfModelLine(hoverFoldStart_);
+            const int eSlot = visibleIndexOfModelLine(hoverFoldEnd_);
+            if (sSlot >= 0) { // fold starts are always visible rows (foldLine
+                              // contract); the guard is belt-and-braces
+                const int top = std::max(firstSlot, sSlot);
+                const int bot = std::min(lastSlot, eSlot >= 0 ? eSlot : sSlot);
+                if (top <= bot)
+                    p.fillRect(QRect(textLeft - fz, padding_ + top * lh - vScroll_,
+                                     fz, (bot - top + 1) * lh), foldRegionTint());
+            }
+        }
         // Column edge separator: a hairline against Base (VS Code style).
         QColor div = palette().color(QPalette::Text);
         div.setAlpha(45);
@@ -3839,6 +3980,9 @@ void CodeEditor::setLineNumbersMode(LineNumbersMode mode)
     if (mode == lineNumbersMode_)
         return;
     lineNumbersMode_ = mode;
+    // M22: the fold strip (and with it the hover tracking) rides this mode:
+    // Off removes the chrome that hosts folding AND hover.
+    setMouseTracking(mode != LineNumbersMode::Off);
     updateScrollBarRange(); // contentLeft moved: the h-window width (and the
                             // hBar geometry riding it) changed with the gutter
     update(); // contentLeft() shifts everything drawn at x
@@ -5204,6 +5348,9 @@ QVariant CodeEditor::inputMethodQuery(Qt::InputMethodQuery query) const
 
 void CodeEditor::mousePressEvent(QMouseEvent* event)
 {
+    // M22: any press invalidates the hover region (the dragLeave lesson:
+    // the clear must not rely on a later leave/move arriving).
+    clearFoldHoverState();
     // M7 ruler gesture FIRST (left = click/drag scroll, middle too: paste
     // in the chrome strip would surprise): the strip scrolls, the caret
     // never moves. The scrollbar child already swallows its own area.
@@ -5215,18 +5362,25 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
         return;
     }
     // M13 fold-zone hit, BEFORE any caret placement: a left click inside
-    // the strip at the gutter's right edge toggles that row's fold and
-    // NEVER moves the caret (VS Code behavior). Alt+click keeps its
-    // multi-caret meaning everywhere, so it skips this handler; rows with
-    // no fold marker (or left-gutter clicks) fall through to the regular
-    // caret placement unchanged.
+    // the strip at the gutter's right edge toggles a fold and NEVER moves
+    // the caret (VS Code behavior). M22 widened it from marker-row-only:
+    // the click resolves the INNERMOST fold CONTAINING the row (the same
+    // rule the hover region paints, resolved fresh here — the click never
+    // trusts the prior hover state), so clicking mid-fold folds it and
+    // clicking a collapsed fold's visible start row unfolds it. Rows
+    // covered by no fold fall through to caret placement unchanged;
+    // Alt+click keeps its multi-caret meaning everywhere and skips this
+    // handler; left-gutter clicks fall through too.
     if (event->button() == Qt::LeftButton && !(event->modifiers() & Qt::AltModifier)) {
         const int fz = foldZoneWidth();
         const QPoint pt = event->position().toPoint();
         if (fz > 0 && pt.x() >= contentLeft() - fz && pt.x() < contentLeft()) {
-            if (const int line = modelLineForY(pt.y()); line >= 0 && toggleFold(line)) {
-                event->accept();
-                return;
+            if (const int line = modelLineForY(pt.y()); line >= 0) {
+                FoldState fs;
+                if (innermostFoldAt(line, &fs) && toggleFold(fs.start)) {
+                    event->accept();
+                    return;
+                }
             }
         }
     }
@@ -5582,6 +5736,15 @@ void CodeEditor::mouseMoveEvent(QMouseEvent* event)
     if (rulerDrag_) {
         rulerScrollTo(int(event->position().y()));
         event->accept();
+        return;
+    }
+    // M22: a button-less move (tracking is on exactly while the fold strip
+    // is live, see the ctor gate) re-resolves the fold hover region. Only
+    // NoButton moves qualify: a pressed move below is selection drag or a
+    // ruler drag, never hover.
+    if (event->buttons() == Qt::NoButton) {
+        updateFoldHoverState(event->position().toPoint());
+        event->ignore();
         return;
     }
     if (!(event->buttons() & Qt::LeftButton)) {

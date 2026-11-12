@@ -646,23 +646,66 @@ State corrections against the owner's five points (measured in code,
   slot). qmn-demo: `EditorSettings.indentGuidesEnabled` (13th knob) +
   the "Вертикальные линии отступов" checkbox in "Текст и отступы";
   defaults tripwire + customSettings extended.
-- **M22 — fold-gutter hover region + innermost-fold click.** While the
-  fold gutter is live, setMouseTracking + hover over the strip
-  resolves the INNERMOST fold containing the hovered row (deepest
-  nesting; a row that itself starts a deeper fold resolves to that
-  one) and paints a rectangular region over that fold's rows —
-  anchored in DOCUMENT rows like the M16 drop caret (scrolling keeps
-  it correct for free; edits and fold toggles invalidate it; the next
-  hover-move re-resolves; leave clears, and per the dragLeave lesson
-  the clear must not RELY on a leave event arriving). A click anywhere
-  inside the resolved region toggles THAT fold (replaces the
-  marker-row-only semantics); rows covered by no fold keep the caret
-  fall-through; Alt+click untouched. Public surface: none, if tests
-  prove the region via `foldableRanges()` + pixel scans + post-click
-  hidden-runs state (they can); at most one read-only seam if a
-  numeric probe turns out impossible. Offscreen trap to probe FIRST:
-  synthetic `QHoverEvent` sendEvent routing (the synthetic-drag
-  precedent says Qt's internal bookkeeping can eat such events).
+- **M22 COMPLETE (2026-11-12): fold-gutter hover region + innermost-fold
+  click.** No new public API at all (the probe-free DoD held): tracking +
+  pixels + click state proved everything. The mandated offscreen probe
+  ran FIRST and re-shaped the seam: Qt 6.12 REMOVED the QWidget hover
+  virtuals (qwidget.h keeps only a `class QHoverEvent;` forward decl —
+  the override attempt fails to compile), so QHoverEvent/WA_Hover are
+  dead ends: the seam is `setMouseTracking` + the already-overridden
+  `mouseMoveEvent` with a `Qt::NoButton` branch (the tracking gate IS
+  the fold-strip gate: ctor + setLineNumbersMode flip both together).
+  Hover state is anchored in MODEL rows (`hoverFoldRow_` + resolved
+  start/end — the M16 drop-caret pattern: scrolling keeps the painted
+  region glued to the fold for free); `innermostFoldAt(row)` resolves ON
+  DEMAND at hover-move and FRESH at click-press (never on the paint
+  path, the click never trusts the prior hover): a fold STARTING at the
+  row wins (foldEndForLine's tightest end = exactly what the click will
+  fold), else the nearest start above covering the row — indent mode
+  scans model rows above (kFoldHoverScanCap 2048), grammar mode
+  reverse-walks `highlight_->foldsFull()` (start asc/end desc ⇒ reverse
+  visits each group's ends ascending, first end > start IS the tightest
+  end — mirrors foldLine's same-start rule; groups short of the row are
+  unreachable folds and the walk moves on). `foldables_` stays the
+  windowed paint cache untouched; enclosing folds above the viewport are
+  the resolver's scan's business, not the cache's. Invalidation is the
+  buffer edit observer (the universal choke: typing/paste/undo/DnD/
+  setPlainText alike) + every fold mutation door (foldLine/unfoldLine/
+  revealLine/expandAll; collapseAll/toggleFold ride them) + ANY press
+  (the dragLeave lesson: the clear never RELIES on a leave arriving) +
+  the new `leaveEvent` override. Paint fills only the hovered fold's
+  strip cells (x ∈ [textLeft−fz, textLeft), slots clamped to the window;
+  hidden interior rows (visibleIndex −1) shrink a COLLAPSED fold's
+  region to its start row by the map alone); ink is a fixed cool
+  `QColor(150,150,150,46)` next to foldInk (R==G==B keeps the warm/red
+  decoration predicates green; M24 routes it as a role). Click
+  semantics widened deliberately from marker-row-only: a mid-fold click
+  toggles the covering fold (caret NEVER moves), uncovered rows keep the
+  caret fall-through, Alt+click/dbl-click/context-menu guards untouched.
+  Tests: `mouseClickFoldZoneToggles` rewritten for the new rule (mid-
+  fold toggle w/o caret move + fall-through asserted on an uncovered
+  row); `foldHoverRegionPaintsAndClears` (single clean strip column
+  xL−fz+2 — measured metrics dodge triangle/digits/hairline — exact-
+  rect fill means covered slots read exactly lh band pixels of the
+  blendOver(Base,150,150,150,46) predicate, everything else zero; all
+  invalidators probed incl. the shrunken collapsed region and the
+  press-clears-then-strip-press-toggle combo, and a wheel leg (one
+  notch = 3*lh px) proves the MODEL-row anchor in pixels — the lit set
+  travels with the fold, slot 3 lit and slot 9 (starting exactly where
+  the fill ends) dark; the leg also caught that the probe column must
+  be RE-DERIVED per document (the gutter widens with the digit count:
+  46→55 for two-digit numbers));
+  `foldHoverTrackingGatedByFoldStrip` (hasMouseTracking flips with the
+  chrome; a FORCED sendEvent hover stays inert while the strip is gone:
+  ZERO whole-frame diff — no repaint fires);
+  `foldClickResolvesInnermostFold` (indent nest head/[0..4]/[1..3]: mid-
+  fold folds the INNER, start-row self wins, subsumption through the
+  door, fall-through caret) and `foldHoverGrammarInnermostClick`
+  (python (0,4)+(2,3): hover pixel row-2/3-only proves innermost-over-
+  outer on the reverse-walk; mid-inner click folds inner; next row
+  resolves the outer (inner group's tightest end stops short — walk
+  skips it) and folding subsumes the collapsed inner; fall-through on
+  the grammar path too). qmn-demo: no new knob, nothing to wire.
 - **M23 — language-scoped properties.** Generalize the id into a small
   registry beside HighlightEngine's grammar table: per-language
   settable properties, first = `tabStopWidth`. Resolution while a

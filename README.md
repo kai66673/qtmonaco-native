@@ -141,8 +141,12 @@ Gate 1.5 — usability interlude (post-freeze minor train, see PLAN.md):
       (default ON): per-line 1px tab-stop guides in the leading whitespace,
       tab landings included (VS Code rule); M18 ruler ink + clip recipe;
       qmn-demo 13th knob wired)
-- [ ] M22 fold-gutter hover region + innermost-fold click (click-to-fold
-      on the marker row already exists since M13)
+- [x] M22 fold-gutter hover region + innermost-fold click (hover over the
+      fold strip highlights the INNERMOST fold containing the row (model-row
+      anchored, scrolls glued); a click anywhere inside a fold now toggles it
+      (marker-row-only rule widened, caret never moves); no new public API —
+      hover rides setMouseTracking gated by the strip (Qt 6.12 has no widget
+      hover virtuals); click-to-fold on the marker row already exists since M13)
 - [ ] M23 language-scoped properties (tab width first; overrides ride
       above the editor settings — Monaco's `[languageId]` model)
 - [ ] M24 themes (chrome colors + token map; the default theme keeps

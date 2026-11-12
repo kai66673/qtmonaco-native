@@ -711,6 +711,11 @@ protected:
     void dragLeaveEvent(QDragLeaveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
+    // M22: the fold-hover region must not linger when the pointer exits the
+    // widget with no further move events to re-resolve it (leave clears —
+    // and per the dragLeave lesson the clear never RELIES on this arriving:
+    // press and every fold/edit mutation clear it too).
+    void leaveEvent(QEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
     void focusInEvent(QFocusEvent* event) override;
     void focusOutEvent(QFocusEvent* event) override;
@@ -1133,6 +1138,31 @@ private:
     int slotOfModelLine(int line) const;      // visibleIndexOfModelLine, clamped >= 0
     // Model line whose slot row contains widget y (-1 outside text rows).
     int modelLineForY(int y) const;
+
+    // --- M22 fold-gutter hover (semantics: PLAN M22) ----------------------
+    // While the fold strip is live, mouse tracking follows the pointer and
+    // resolves the INNERMOST fold containing the hovered row (a row that
+    // itself starts a fold resolves to that fold). The state is anchored in
+    // MODEL rows (the M16 drop-caret pattern: scrolling keeps the painted
+    // region on the right rows for free); every hover move re-resolves, and
+    // edits (the buffer edit observer), fold toggles (the fold mutation
+    // doors), presses (the dragLeave lesson: the clear must not RELY on a
+    // leave event) and Leave all invalidate it. Paint only maps the stored
+    // range onto slot space — no resolver runs on the paint path. No public
+    // surface: tests prove the region via pixels, click state and
+    // hasMouseTracking.
+    static constexpr int kFoldHoverScanCap = 2048; // indent-mode upward hunt
+                                                   // for a covering fold start
+    int hoverFoldRow_ = -1;   // hovered strip row (-1: pointer off the strip)
+    int hoverFoldStart_ = -1; // innermost fold covering that row…
+    int hoverFoldEnd_ = -1;   // …(-1 when the row is covered by no fold)
+    // Resolves that fold: a fold STARTING at the row wins; else the NEAREST
+    // start above the row whose (tightest, foldLine-consistent) end still
+    // covers it. Grammar mode reverse-walks the engine fold table; indent
+    // mode scans model rows above (bounded by the cap).
+    bool innermostFoldAt(int row, FoldState* out);
+    void updateFoldHoverState(const QPoint& pt); // hover move: re-resolve
+    void clearFoldHoverState();                  // invalidate (+repaint if set)
 
     QTimer blinkTimer_;
     bool caretOn_ = true;
