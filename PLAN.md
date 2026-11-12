@@ -297,6 +297,15 @@ across fold boundaries, caret jump over a fold, unfolded content unchanged,
 ruler reflects fold ranges; large file stays O(viewport) via D2's
 included-ranges story.
 
+Post-1.0 addendum (2026-11-12, owner bug): the map's cached slot total
+went stale for FOLDLESS docs — `shiftFoldStateForEdit`'s
+`collapsed_.isEmpty()` fast path never refreshed `foldVisibleTotal_`, so
+Enter at EOL painted nothing on the new last line (caret included) until
+some fold op rebuilt the runs. Fixed there; tripwired by
+`foldlessEditKeepsPaintSlotCache`. Coverage gap acknowledged: the 13
+M13 slots all exercised folds OPEN (which rebuilds on every edit), so
+the DoD never probed the foldless fast path.
+
 ### E3 — usability polish (M14–M19, pre-freeze; owner package 2026-11-11)
 
 Owner-requested usability bundle, deliberately BEFORE the Phase-F freeze:

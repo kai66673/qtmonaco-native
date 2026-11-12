@@ -1866,7 +1866,17 @@ void CodeEditor::shiftFoldStateForEdit(const qmn::core::TextBuffer::EditEvent& e
     // cached doc lineCount: delta = newlines added (net).
     const int docLines = buffer_.lineCount();
     if (collapsed_.isEmpty()) {
+        // Foldless fast path - but the vt cache MUST still track the model:
+        // with no folds the slot space IS the lineCount, and nothing else
+        // ever recomputes foldVisibleTotal_ on this path (user bug: Enter at
+        // EOL grew the buffer but paint kept walking the stale slot count -
+        // the new last line got no text and no caret; ANY fold toggle
+        // "magically" fixed it because toggleFoldAt rebuilds the runs).
+        // hiddenRuns_ is empty by definition here, so vt = max(1, docLines)
+        // is the complete refresh; the paintEvent extent probe (totalHeight
+        // routes through visibleLineTotal) then re-ranges the vBar by itself.
         foldDocLines_ = docLines;
+        foldVisibleTotal_ = std::max(1, docLines);
         return;
     }
     const int delta = docLines - foldDocLines_;

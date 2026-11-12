@@ -299,6 +299,7 @@ private slots:
     void jsonFoldHidesClosingBrace();
     void foldZoneGutterConstant();
     void foldAutoExpandOnSourceDeath();
+    void foldlessEditKeepsPaintSlotCache();
 
 private:
     CodeEditor* editor = nullptr;
@@ -7190,6 +7191,107 @@ void TestCodeEditor::foldAutoExpandOnSourceDeath()
     QCOMPARE(editor->visibleLineTotal(), 1);
     QVERIFY(editor->unfoldLine(0));
     QCOMPARE(editor->visibleLineTotal(), 3);
+}
+
+void TestCodeEditor::foldlessEditKeepsPaintSlotCache()
+{
+    // Owner-reported bug (right after v1.0): pressing Enter at the end of
+    // a FOLDLESS document grew the buffer but painted nothing - no caret
+    // on the new last line, and further typing there stayed invisible
+    // until ANY fold toggle "magically" fixed the display. Cause: with
+    // collapsed_ empty, shiftFoldStateForEdit took its fast path and
+    // returned WITHOUT refreshing foldVisibleTotal_ - the one value the
+    // paint/hit/scroll slot space walks - and rebuildHiddenRuns() (a fold
+    // op) was its only writer. Every fold test kept a fold OPEN (which
+    // routes edits through the full delta bookkeeping + rebuild), so the
+    // foldless fast path never had a tripwire. Pixels here are numeric
+    // scans of a caret-colored bar / non-Base ink on a band that is
+    // otherwise guaranteed empty (wash OFF), the proven no-vision pattern.
+    const QRgb ink = editor->palette().color(QPalette::Text).rgb();
+    const int pad = editor->padding();
+    const int lh = editor->lineHeight();
+    const int cw = editor->cellWidth();
+    const int scanL = editor->contentLeft();
+    auto bandCount = [&](const QImage& img, int y0, int y1, int xL, int xR,
+                        bool exactInk) {
+        // exact caret-colored pixels, or any non-Base ink: {count, leftX}
+        const QRgb base = img.pixel(0, 0); // padding corner = Base fill
+        int n = 0, left = -1;
+        for (int x = xL; x < xR; ++x)
+            for (int y = y0; y < y1; ++y) {
+                const QRgb c = img.pixel(x, y);
+                const bool hit = exactInk ? (c == ink) : (c != base);
+                if (hit) {
+                    ++n;
+                    if (left < 0)
+                        left = x;
+                }
+            }
+        return std::make_pair(n, left);
+    };
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Off); // clean bands
+
+    // --- numeric tripwire on the exact repro: vt must equal lineCount()
+    // on a foldless doc through EVERY line-count change, both ways -------
+    editor->setPlainText(QStringLiteral("alpha\nbeta"));
+    QCOMPARE(editor->visibleLineTotal(), 2);
+    editor->setPosition({1, 4}); // EOL of "beta" - the user's cursor spot
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->lineCount(), 3);
+    QCOMPARE(editor->visibleLineTotal(), 3); // was stale (2) in the bug
+    QCOMPARE(editor->visibleIndexOfModelLine(2), 2); // identity map holds
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier); // undo the Enter
+    QCOMPARE(editor->lineCount(), 2);
+    QCOMPARE(editor->visibleLineTotal(), 2); // decreases must re-track too
+
+    // --- pixel proof #1: the caret paints on the new (empty) last line.
+    // The edit resets caretOn_ + restarts the blink timer and grab() is
+    // synchronous, so the bar is deterministic Text ink without any
+    // blink-API surgery (there is none). In the bug vt=2 clamped the
+    // paint loop and this band never got painted at all.
+    editor->setPosition({1, 4});
+    QTest::keyClick(editor, Qt::Key_Return);
+    QImage img = editor->grab().toImage();
+    QCOMPARE(bandCount(img, pad + 2 * lh, pad + 3 * lh, scanL, scanL + 2, true),
+             std::make_pair(2 * lh, scanL)); // 2px bar at col 0, full band
+
+    // --- pixel proof #2: further typing on that line becomes visible ---
+    QTest::keyClicks(editor, QStringLiteral("xy"));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("alpha\nbeta\nxy"));
+    img = editor->grab().toImage();
+    // the two glyphs; the caret (col 2) is parked past the scan window,
+    // the trick coloredPaintKeepsGlyphGeometry uses against blink drift
+    QVERIFY(bandCount(img, pad + 2 * lh, pad + 3 * lh, scanL, scanL + 2 * cw - 2,
+                      false)
+                .first > 10);
+
+    // --- the vBar range rides vt too: on a tall foldless doc a deep
+    // wheel clamps at the slot-space max; after Enter at EOL that max
+    // grew by exactly one line (the bug left the bar one line short) ----
+    QStringList lines;
+    for (int i = 0; i < 100; ++i)
+        lines << QStringLiteral("l%1").arg(i);
+    editor->setPlainText(lines.join(QLatin1Char('\n')));
+    editor->grab(); // paint pass runs the extent probe (the bar wakes up)
+    const int maxAt100 = 2 * pad + 100 * lh - editor->height();
+    QVERIFY(maxAt100 > 0); // tall enough that the clamp is a live bound
+    QWheelEvent deepDown(QPointF(300, 200), QPointF(300, 200), QPoint(0, 0),
+                         QPoint(0, -120 * 1000), Qt::NoButton, Qt::NoModifier,
+                         Qt::NoScrollPhase, false);
+    QVERIFY(QApplication::sendEvent(editor, &deepDown)); // deep wheel: clamps
+    QCOMPARE(editor->verticalScrollOffset(), maxAt100); // start state exact
+
+    editor->setPosition({99, 3}); // EOL of "l99"
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->lineCount(), 101); // THE repro on a scrollable doc
+    QCOMPARE(editor->visibleLineTotal(), 101); // THE tripwire
+    QVERIFY(QApplication::sendEvent(editor, &deepDown)); // clamp follows:
+    QCOMPARE(editor->verticalScrollOffset(), 2 * pad + 101 * lh - editor->height());
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier); // undo the Enter
+    QCOMPARE(editor->lineCount(), 100);
+    QCOMPARE(editor->visibleLineTotal(), 100); // and the bar re-shrinks:
+    QVERIFY(QApplication::sendEvent(editor, &deepDown));
+    QCOMPARE(editor->verticalScrollOffset(), maxAt100);
 }
 
 QTEST_MAIN(TestCodeEditor)

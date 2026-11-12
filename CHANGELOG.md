@@ -49,6 +49,32 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     a defaulted `modifiers` arg riding BOTH event stages. Suite:
     186/0/2.
 
+### Fixed
+- Post-1.0 owner-reported paint bug: a line-count edit on a FOLDLESS doc
+  left the new last line unpainted - no caret there, further typing on it
+  invisible, while the buffer itself was fine; ANY fold toggle
+  "magically" restored the display. The M13 slot space caches
+  `visibleLineTotal()` (`foldVisibleTotal_`), and the ONLY writer on the
+  edit path was `rebuildHiddenRuns()` - reachable only through fold ops.
+  The edit observer's (`shiftFoldStateForEdit`) `collapsed_.isEmpty()`
+  fast path returned without touching the cache, so after Enter at EOL
+  the paint loop (`lastSlot = min(vt-1, ...)`), the caret leg, hit tests
+  and the vBar range all kept walking the stale, one-line-short count.
+  Every M13 fold-edit test kept a fold OPEN (which routes edits through
+  the full delta bookkeeping + rebuild), so the foldless fast path never
+  had a tripwire. The fast path now refreshes the cache itself
+  (`vt = max(1, lineCount())` - `hiddenRuns_` is empty by definition on
+  this path), and the paintEvent extent probe (`totalHeight()` routes
+  through `visibleLineTotal()`) re-ranges the vBar by itself. Tripwired
+  by `foldlessEditKeepsPaintSlotCache`: `visibleLineTotal() ==
+  lineCount()` numerically through Enter/undo/Ctrl+X on a foldless doc
+  (both directions), pixel scans of the new line's band (exact-Text 2px
+  x lh caret bar at `contentLeft`, then non-Base glyph ink with the
+  current-line wash OFF), and the deep-wheel vBar clamp following the
+  map on a scrollable foldless doc (grows and shrinks by exactly one
+  line). Tripwire proven: it fails against the reverted fix, passes
+  with it. Suite: 187/0/2.
+
 ## [1.0.0] — 2026-11-12
 
 ### Added
