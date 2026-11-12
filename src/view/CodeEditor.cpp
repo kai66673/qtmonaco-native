@@ -9,6 +9,7 @@
 #include <QContextMenuEvent>
 #include <QDrag>
 #include <QDragEnterEvent>
+#include <QDragLeaveEvent>
 #include <QDragMoveEvent>
 #include <QDropEvent>
 #include <QFocusEvent>
@@ -3423,6 +3424,16 @@ void CodeEditor::paintEvent(QPaintEvent*)
                     p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
             }
         }
+        if (dropCaretActive_ && line == dropCaret_.line && !scrolledPast) {
+            // Post-1.0 DnD polish: the target caret of a running text drag,
+            // the still twin of the typing caret (same 2px rule, same layout,
+            // same window culling) — but NO caretOn_/blink gate: the mark
+            // must stay readable through the whole drag while the typing
+            // caret keeps blinking.
+            const double cx = xw(xInLine(gs, dropCaret_.col));
+            if (cx + 2.0 > textLeft && cx < winRight)
+                p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
+        }
         if (gs->valid && !scrolledPast) {
             // Draw with the cached QTextLine itself, not a fresh drawText:
             // glyphs, caret and hit-testing then share one layout.
@@ -5768,15 +5779,57 @@ void CodeEditor::insertAtDrop(const QString& text, int dropOff)
     reconcileUndoMarks(pre);
 }
 
+void CodeEditor::acceptTextDrop(QDropEvent* event)
+{
+    // Post-1.0 polish: Shift under the cursor is an explicit COPY request,
+    // so when the protocol proposed Move we answer with Copy. This is NOT
+    // cosmetic: the answered action is what the source's drag.exec() sees,
+    // so answering Move at a self-drop would arm the post-exec source-side
+    // delete — exactly what holding Shift asked us to suppress. (Qt's own
+    // Shift-inversion is a source-side default-action choice; foreign
+    // drags request Move as-is and synthetic test drags are never inverted,
+    // hence the explicit target-side answer.)
+    if ((event->modifiers() & Qt::ShiftModifier) && event->proposedAction() == Qt::MoveAction) {
+        event->setDropAction(Qt::CopyAction);
+        event->accept();
+    } else {
+        event->acceptProposedAction();
+    }
+}
+
+void CodeEditor::showDropCaretAt(const QPoint& widgetPos)
+{
+    // Same positionAt mapping dropEvent re-derives from the final drop
+    // point, so the mark sits exactly where a release here would land the
+    // text (gutter/ruler overhangs clamp to the nearest text edge, just
+    // like a click). Document coordinates: edge auto-scroll moves the
+    // viewport, never the mark.
+    dropCaret_ = positionAt(widgetPos);
+    dropCaretActive_ = true;
+    update();
+}
+
+void CodeEditor::clearDropCaret()
+{
+    if (!dropCaretActive_)
+        return;
+    dropCaretActive_ = false;
+    update();
+}
+
 void CodeEditor::dragEnterEvent(QDragEnterEvent* event)
 {
     // Text in, drag on; every other payload (urls, rich text...) stays
     // refused. Chrome strips need no special case: positionAt clamps a drop
     // over the gutter/ruler to the nearest text edge, exactly like a click.
-    if (isEnabled() && !readOnly_ && event->mimeData()->hasText())
-        event->acceptProposedAction(); // M19: readOnly refuses drops at the
-    else                              // protocol door — the drag cursor
-        event->ignore();              // already says "not allowed"
+    // M19: readOnly refuses drops at the protocol door — the drag cursor
+    // already says "not allowed".
+    if (isEnabled() && !readOnly_ && event->mimeData()->hasText()) {
+        acceptTextDrop(event); // Shift already bends the drag-cursor
+        showDropCaretAt(event->position().toPoint()); // feedback at the enter
+    } else {
+        event->ignore();
+    }
 }
 
 void CodeEditor::dragMoveEvent(QDragMoveEvent* event)
@@ -5786,11 +5839,26 @@ void CodeEditor::dragMoveEvent(QDragMoveEvent* event)
         return;
     }
     edgeAutoScroll(event->position().toPoint()); // M1 autoscroll rides the
-    event->acceptProposedAction(); // drag protocol too (the drop offset is
-}                                  // re-derived from the final drop point)
+    acceptTextDrop(event);                       // drag protocol too; Shift
+    showDropCaretAt(event->position().toPoint()); // relocates the target caret
+}
+
+void CodeEditor::dragLeaveEvent(QDragLeaveEvent* event)
+{
+    // The drag moved off us (or was cancelled over us): the target caret
+    // must not linger. QWidget's default implementation IGNORES the event;
+    // accepting keeps Qt's dnd bookkeeping happy — and a Drop that ends
+    // ignored never delivers a leave, which is why dropEvent clears the
+    // mark itself too.
+    clearDropCaret();
+    event->accept();
+}
 
 void CodeEditor::dropEvent(QDropEvent* event)
 {
+    // The gesture ends here either way — an ignored drop never delivers a
+    // DragLeave on X11, so the target caret must be cleared unconditionally.
+    clearDropCaret();
     if (readOnly_) { // M19 backstop (dragEnter already refuses the drop)
         event->ignore();
         return;
@@ -5802,8 +5870,16 @@ void CodeEditor::dropEvent(QDropEvent* event)
     const TextPosition dropPos = positionAt(event->position().toPoint());
     const int dropOff = buffer_.offsetOf(dropPos.line, dropPos.col);
 
+    // Post-1.0 polish: Shift under the cursor at the moment of release is
+    // an explicit COPY request — skip the move recognition even for a live
+    // self-drag marker. (Usually the enter/move stages already answered
+    // Copy, so the dropAction gate below sees no Move; this modifier check
+    // is what also catches a Shift pressed BETWEEN the last drag-move and
+    // the release, and it keeps the decision deterministic for synthetic
+    // drags, which no platform ever inverts.)
+    const bool shiftCopy = event->modifiers() & Qt::ShiftModifier;
     int srcStart = -1, srcEnd = -1;
-    if (event->dropAction() == Qt::MoveAction
+    if (!shiftCopy && event->dropAction() == Qt::MoveAction
         && internalMoveSource(event->mimeData(), srcStart, srcEnd)) {
         dndDropHandled_ = true; // stop the drag source's post-exec delete
         if (dropOff > srcStart && dropOff < srcEnd) {
@@ -5843,15 +5919,15 @@ void CodeEditor::dropEvent(QDropEvent* event)
         return;
     }
     // Copy drop: external text, a foreign widget's marker (the id check
-    // above fails) or a Ctrl-modified internal drag. (Measured: offscreen
-    // QDrag::exec never delivers drops, so tests land here with synthetic
-    // events - which is why the marker gate above is address+offset based,
-    // never "am I mid-drag".)
+    // above fails) or a Shift/Ctrl-modified internal drag. (Measured:
+    // offscreen QDrag::exec never delivers drops, so tests land here with
+    // synthetic events - which is why the marker gate above is address+
+    // offset based, never "am I mid-drag".)
     const QString text = sanitizeLineEnds(event->mimeData()->text());
     if (!text.isEmpty()) {
         if (dndSelfDragLive_) {
-            // Our own Ctrl-copy drag: the source selection SURVIVES the
-            // drop (VS Code), so no pre-caret override - applyBlockEdits
+            // Our own Shift/Ctrl-copy drag: the source selection SURVIVES
+            // the drop (VS Code), so no pre-caret override - applyBlockEdits
             // just shifts carets at/after the insertion point right.
             const UndoMark pre = captureEditMark();
             applyBlockEdits(QVector<SlotEdit>{SlotEdit{dropOff, dropOff, text}});
@@ -5863,7 +5939,9 @@ void CodeEditor::dropEvent(QDropEvent* event)
             cb && cb->supportsSelection())
             cb->setText(text, QClipboard::Selection); // X11: dropped text is primary
     }
-    event->acceptProposedAction();
+    // Shift-bent answer (Copy even under a proposed Move) also lands in
+    // the source's exec() return value, keeping its Move-delete disarmed.
+    acceptTextDrop(event);
 }
 
 void CodeEditor::wheelEvent(QWheelEvent* event)

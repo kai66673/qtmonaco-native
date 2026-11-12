@@ -161,6 +161,8 @@ private slots:
     void dropMoveMarkerMovesSelection();
     void dropIgnoresForeignAndCopyVariants();
     void dragMoveAutoscrolls();
+    void dropCaretTracksDragTarget();
+    void shiftAtDropCopiesInsteadOfMoves();
 
     // Code font + zoom (M17).
     void setCodeFontRebuildsMetricsAndGeometry();
@@ -1666,13 +1668,16 @@ QByteArray moveMarkerFor(const CodeEditor* e, int startOff, int endOff)
 // synchronously (NoAction) and NEVER delivers a drop, so the drop side is
 // only reachable through synthetic events; sendEvent dispatches DragEnter/
 // DragMove/Drop straight into the widget overrides. Returns whether the
-// dragEnter stage was accepted (QEvent copies are not assignable).
-bool sendDropAt(CodeEditor* e, const QPoint& at, Qt::DropAction action, const QMimeData& md)
+// dragEnter stage was accepted (QEvent copies are not assignable). The
+// modifiers ride BOTH stages' events (Shift-at-drop tests need them on
+// the Drop, and the enter/move acceptance answers Shift too).
+bool sendDropAt(CodeEditor* e, const QPoint& at, Qt::DropAction action, const QMimeData& md,
+                Qt::KeyboardModifiers modifiers = Qt::NoModifier)
 {
-    QDragEnterEvent de(at, action, &md, Qt::LeftButton, Qt::NoModifier);
+    QDragEnterEvent de(at, action, &md, Qt::LeftButton, modifiers);
     QTEST_ASSERT(QApplication::sendEvent(e, &de));
     const bool entered = de.isAccepted();
-    QDropEvent dr(at, action, &md, Qt::LeftButton, Qt::NoModifier);
+    QDropEvent dr(at, action, &md, Qt::LeftButton, modifiers);
     QTEST_ASSERT(QApplication::sendEvent(e, &dr));
     return entered;
 }
@@ -2983,6 +2988,124 @@ void TestCodeEditor::dragMoveAutoscrolls()
     // target, so no stale routing state leaks into later tests.
     QDragLeaveEvent leave;
     QApplication::sendEvent(editor, &leave);
+}
+
+void TestCodeEditor::dropCaretTracksDragTarget()
+{
+    // Numeric pixel proof of the drop-target caret (no vision here): park
+    // it on an EMPTY line whose band holds zero other ink (the real caret
+    // never leaves {0,0}), and scan the band for exact-Text-color pixels:
+    // a solid 2px x lh bar, unblinking by construction, so grabs are
+    // deterministic. Lines 1+2 of the doc are empty for exactly that.
+    editor->setPlainText(QStringLiteral("abcdefgh\n\n"));
+    editor->setPosition({0, 0});
+    const int pad = editor->padding();
+    const int lh = editor->lineHeight();
+    const QRgb ink = editor->palette().color(QPalette::Text).rgb();
+    const int scanL = editor->contentLeft(); // the bar at col 0 lands here
+    const int scanR = scanL + int(6 * editor->cellWidth());
+    auto inkInBand = [&](int line) { // {count, leftmostX} over the line band
+        const QImage img = editor->grab().toImage();
+        int n = 0, left = -1;
+        for (int x = scanL; x < scanR; ++x)
+            for (int y = pad + line * lh; y < pad + (line + 1) * lh; ++y)
+                if (img.pixel(x, y) == ink) {
+                    ++n;
+                    if (left < 0)
+                        left = x;
+                }
+        return std::make_pair(n, left);
+    };
+    QCOMPARE(inkInBand(1).first, 0); // baseline: clean bands, no mark
+    QCOMPARE(inkInBand(2).first, 0);
+
+    QMimeData md;
+    md.setText(QStringLiteral("Z"));
+
+    // DragEnter already shows the mark: full-height bar at the positionAt
+    // clamp of the drag point (empty line -> col 0 -> contentLeft).
+    const QPointF at1(caretPixel(editor, 1, 0));
+    QDragEnterEvent enter(at1, Qt::CopyAction, &md, Qt::LeftButton, Qt::NoModifier);
+    QVERIFY(QApplication::sendEvent(editor, &enter));
+    QVERIFY(enter.isAccepted());
+    QCOMPARE(inkInBand(1).first, 2 * lh);
+    QCOMPARE(inkInBand(1).second, scanL);
+
+    // A drag-move RELOCATES it (never doubles it): old band clean again.
+    const QPointF at2(caretPixel(editor, 2, 0));
+    QDragMoveEvent move(at2, Qt::CopyAction, &md, Qt::LeftButton, Qt::NoModifier);
+    QVERIFY(QApplication::sendEvent(editor, &move));
+    QVERIFY(move.isAccepted());
+    QCOMPARE(inkInBand(1).first, 0);
+    QCOMPARE(inkInBand(2).first, 2 * lh);
+    QCOMPARE(inkInBand(2).second, scanL);
+
+    // Drag off: the dragLeaveEvent override clears the mark (QWidget's
+    // default impl ignored the event, and the bar would linger forever).
+    QDragLeaveEvent leave;
+    QVERIFY(QApplication::sendEvent(editor, &leave));
+    QVERIFY(leave.isAccepted());
+    QCOMPARE(inkInBand(2).first, 0);
+
+    // And the drop itself clears it too — proven with an ACCEPTED-but-
+    // EMPTY-text payload (hasText, nothing to insert) so no text ink
+    // pollutes the band and the model stays untouched for the undo check.
+    QMimeData empty;
+    empty.setText(QString());
+    QVERIFY(sendDropAt(editor, caretPixel(editor, 2, 0), Qt::CopyAction, empty));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefgh\n\n"));
+    QVERIFY(!editor->canUndo());
+    QCOMPARE(inkInBand(2).first, 0);
+}
+
+void TestCodeEditor::shiftAtDropCopiesInsteadOfMoves()
+{
+    // Shift held at drop forces a COPY even when the drop carries THIS
+    // editor's own live move marker (the marker+Move shape that
+    // dropMoveMarkerMovesSelection moves). Offscreen exec never delivers
+    // a drop, so the source-side delete can never arm in tests — the
+    // model-level copy IS the observable half of the feature.
+    editor->setPlainText(QStringLiteral("abcdefgh")); // make THIS address the marked one
+    QMimeData md;
+    md.setText(QStringLiteral("bcd"));
+    md.setData(QStringLiteral("application/x-qmn-selection"), moveMarkerFor(editor, 1, 4));
+    const auto rearm = [this] {
+        editor->setPlainText(QStringLiteral("abcdefgh"));
+        dragSelect(editor, caretPixel(editor, 0, 1), caretPixel(editor, 0, 4)); // [1,4) "bcd"
+    };
+
+    // Own marker + Move + Shift -> copy: source stays put, one undo step.
+    rearm();
+    QVERIFY(sendDropAt(editor, caretPixel(editor, 0, 6), Qt::MoveAction, md, Qt::ShiftModifier));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefbcdgh"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 9})); // caret at copied end
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefgh"));
+
+    // The very same events WITHOUT Shift: still a MOVE (the new gate must
+    // not leak into the normal path).
+    rearm();
+    sendDropAt(editor, caretPixel(editor, 0, 6), Qt::MoveAction, md);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("aefbcdgh"));
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefgh"));
+
+    // Own marker + Copy-proposed + Shift: the shape Qt's X11/Wayland
+    // sources already invert to for Shift drags — stays a plain copy.
+    rearm();
+    sendDropAt(editor, caretPixel(editor, 0, 6), Qt::CopyAction, md, Qt::ShiftModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefbcdgh"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 9}));
+
+    // Shift cannot arm a move the marker never could (foreign id -> copy
+    // with or without it).
+    rearm();
+    QMimeData foreign;
+    foreign.setText(QStringLiteral("bcd"));
+    foreign.setData(QStringLiteral("application/x-qmn-selection"),
+                    QByteArrayLiteral("deadbeef:1:4"));
+    sendDropAt(editor, caretPixel(editor, 0, 6), Qt::MoveAction, foreign, Qt::ShiftModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdefbcdgh"));
 }
 
 // --- M17 code font + zoom ----------------------------------------------------

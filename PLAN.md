@@ -363,6 +363,17 @@ multi-caret machinery. Bundles (one commit each, tests per bundle):
   Qt 6.12 `QApplication::notify` routes synthetic DragMove/Drop only to
   the QDragManager currentTarget (accepted DragEnter first), and
   `QDrag::exec` returns NoAction synchronously. 9 new slots (161/0/2).
+  **Post-1.0 DnD polish (2026-11-12)** closes two gaps with no public
+  API change: the drop-target CARET is now painted (the "drop caret
+  tracked" the spec always promised was only the re-derived drop offset —
+  enter/move park private document-coordinate state, painted with the
+  caret's 2px rule without blink gate, cleared by a new `dragLeaveEvent`
+  override and by `dropEvent` itself), and Shift-at-drop forces COPY
+  (target-side Shift-aware acceptance at all three protocol stages —
+  the answered action is what `drag.exec()` sees, so the source-side
+  Move-delete stays disarmed — plus move-recognition bypass at drop;
+  Qt's own Shift-inversion is only a source-side default choice, not
+  something the target can rely on). 2 new slots (186/0/2).
 - **M17 font/zoom API.** `setCodeFont(QFont)`/`codeFont()` recompute
   cell/line metrics + invalidate every geometry/fold cache (today
   metrics die at construction — QWidget::setFont silently desyncs);

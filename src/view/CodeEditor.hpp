@@ -25,6 +25,7 @@ QT_FORWARD_DECLARE_CLASS(QMimeData)
 QT_FORWARD_DECLARE_CLASS(QContextMenuEvent)
 QT_FORWARD_DECLARE_CLASS(QDragEnterEvent)
 QT_FORWARD_DECLARE_CLASS(QDragMoveEvent)
+QT_FORWARD_DECLARE_CLASS(QDragLeaveEvent)
 QT_FORWARD_DECLARE_CLASS(QDropEvent)
 
 // Used by a private method signature only (the paint pass lives in the .cpp).
@@ -698,6 +699,10 @@ protected:
     void contextMenuEvent(QContextMenuEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dragMoveEvent(QDragMoveEvent* event) override;
+    // Post-1.0 DnD polish: the target caret must not linger when the drag
+    // leaves or cancels over us (QWidget's default impl IGNORES the event;
+    // this one clears the mark and accepts).
+    void dragLeaveEvent(QDragLeaveEvent* event) override;
     void dropEvent(QDropEvent* event) override;
     void wheelEvent(QWheelEvent* event) override;
     void resizeEvent(QResizeEvent* event) override;
@@ -873,6 +878,17 @@ private:
     // Copy-drop insertion at an offset (not at the caret): one bracketed
     // edit, caret at the inserted end, primary mirror like pasteText.
     void insertAtDrop(const QString& text, int dropOff);
+    // Post-1.0 DnD polish. Shift-aware acceptance shared by the three drag
+    // protocol stages: a held Shift answers the protocol with COPY even
+    // when Move was proposed — and the answered action is what the source
+    // sees, which keeps a self-drop's post-exec Move-delete disarmed.
+    void acceptTextDrop(QDropEvent* event);
+    // The drop-target caret: set at the positionAt mapping of the current
+    // drag point (the same mapping dropEvent re-derives, so the mark is
+    // exactly where a release would land), cleared on drop/leave. Paint
+    // state only — the drop itself never reads it.
+    void showDropCaretAt(const QPoint& widgetPos);
+    void clearDropCaret();
     // M1 drag auto-scroll: past the viewport edges scroll and map the point
     // back inside. Shared by mouseMoveEvent and (M16) dragMoveEvent.
     QPoint edgeAutoScroll(QPoint pos);
@@ -963,6 +979,12 @@ private:
     QPoint pressPos_;
     bool dndSelfDragLive_ = false;
     bool dndDropHandled_ = false;
+    // Post-1.0 DnD polish: the target caret of the drag currently hovering
+    // over us (document coordinates — edge auto-scroll moves the viewport,
+    // never the mark). Painted with the caret's 2px rule but WITHOUT the
+    // blink/caretOn_ gate; see showDropCaretAt/clearDropCaret.
+    TextPosition dropCaret_;
+    bool dropCaretActive_ = false;
     QString preedit_; // IME composition string, display-only: never in buffer_
     QScrollBar* vBar_ = nullptr;
     bool scrollbarSync_ = false;

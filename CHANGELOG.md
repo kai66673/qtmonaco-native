@@ -3,6 +3,52 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased]
+
+### Added
+- Post-1.0 DnD polish (M16 gap, view-internal — the frozen public API
+  gains nothing):
+  - Drop-target caret during a drag: `dragEnter`/`dragMove` park it in
+    private document-coordinate state via the SAME `positionAt` mapping
+    `dropEvent` re-derives from the final drop point — the mark is where
+    a release there would land the text (gutter/ruler overhangs clamp to
+    the nearest text edge, exactly like a click). Painted in the line
+    loop with the typing caret's 2px rule + window culling but NO
+    `caretOn_`/blink gate (it must stay readable while the typing caret
+    blinks); edge auto-scroll (the M1 helper, already riding
+    `dragMoveEvent`) moves the viewport, never the document-coordinate
+    mark. Cleared by the NEW `dragLeaveEvent` override (QWidget's
+    default impl ignored the event and the bar would linger) AND at the
+    top of `dropEvent` unconditionally — an ignored drop on X11 ends the
+    gesture with no DragLeave at all. This implements the visible half
+    of what the M16 spec already promised ("drop caret tracked" was,
+    until now, only the re-derived drop offset).
+  - Shift-at-drop = COPY: a shared `acceptTextDrop` answers all three
+    protocol stages (enter/move/drop) with `CopyAction` —
+    `setDropAction` + `accept` — whenever Shift is held under a proposed
+    Move (so the drag cursor already says copy), and `dropEvent` skips
+    the internal-move recognition under Shift even for a live self-
+    marker. The answered action is NOT cosmetic: it is what the source's
+    `drag.exec()` sees, which keeps our post-exec Move source-delete
+    disarmed for synthetic drags and foreign Move requests, not only
+    for the same-app X11/Wayland shapes Qt's own Shift-inversion already
+    bends. (Source-read Qt 6.9 `qxcbdrag`, not desktop-measured: the
+    target-side `QDragMoveEvent`/`QDropEvent` carry the live keyboard
+    modifiers as handed by the event filter /
+    `queryKeyboardModifiers()` — the target-side check is the reliable
+    half; the source-side inversion is only a default-action choice.)
+  - Tests: `dropCaretTracksDragTarget` — pixel proof on EMPTY-line bands
+    (no vision, exact-`Text`-color pixels): enter shows a solid 2px×lh
+    bar at `contentLeft` (col-0 clamp), a drag-move relocates it (never
+    doubles it), `dragLeave` and an accepted-but-empty-text drop both
+    clear it, model untouched / nothing undoable.
+  `shiftAtDropCopiesInsteadOfMoves` — own live marker + Move + Shift
+    copies (source intact, one undo step), the SAME events without Shift
+    still move (the gate must not leak), Copy+Shift stays a plain copy,
+    a foreign marker + Shift still cannot arm a move. `sendDropAt` grew
+    a defaulted `modifiers` arg riding BOTH event stages. Suite:
+    186/0/2.
+
 ## [1.0.0] — 2026-11-12
 
 ### Added
