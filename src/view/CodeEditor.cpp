@@ -2,8 +2,14 @@
 
 #include "view/CodeEditorAccessible.hpp"
 #include "view/CodeEditorOptions.hpp"
+#include "view/CodeEditorTheme.hpp"
 #include "view/HighlightEngine.hpp"
 #include "view/LanguageProperties.hpp"
+
+// M24 paint shorthand: every painted ink in this file resolves through
+// theme_->ink(Role::…); the full role list + fallback contract lives in
+// view/CodeEditorTheme.hpp.
+using Role = qmn::view::CodeEditorTheme::Role;
 
 #include <QApplication>
 #include <QClipboard>
@@ -262,6 +268,18 @@ CodeEditor::CodeEditor(QWidget* parent)
     // M19: the settings object is a parented child, one per editor. Its
     // ctor only stores the pointer, so the back-link cannot misfire.
     options_ = new CodeEditorOptions(this, this);
+
+    // M24: the theme object follows the same child pattern (back-link to
+    // this editor for the LIVE palette fallbacks). Its themeChanged must
+    // WIPE THE GEO CACHE, not just repaint: token ink rides the format
+    // ranges cached per geo slot, so a plain update() would keep painting
+    // the old token colors from the cache (chrome inks are read live and
+    // need no wiping).
+    theme_ = new CodeEditorTheme(this, this);
+    connect(theme_, &CodeEditorTheme::themeChanged, this, [this] {
+        resetGeoCache();
+        update();
+    });
 
     // M11: a drop-in of Chromium-Monaco must be accessible WITHOUT the app
     // wiring anything, so the widget registers its QAccessible factory
@@ -1982,8 +2000,8 @@ void CodeEditor::paintIndentGuides(QPainter& p, int line, int yTop) const
     const int winEnd = std::min(off + kIndentWindow, buffer_.charCount());
     const QString s = buffer_.textRange(off, winEnd);
 
-    QColor guide = palette().color(QPalette::Text);
-    guide.setAlpha(40);
+    // M24: guide ink via the theme (fallback: Text@40, the pre-M24 nudge).
+    QColor guide = theme_->ink(Role::IndentGuides);
 
     int col = 0;      // rendered columns consumed so far (tabs expanded)
     int nextStop = step; // smallest not-yet-emitted stop (k*step, k >= 1)
@@ -3231,25 +3249,6 @@ void CodeEditor::deleteForward()
 
 namespace {
 
-// M5 decoration ink: hardcoded VS Code dark-leaning constants. The
-// set_theme pass (D3 theme row of the PLAN parity table) is where these
-// move behind a palette; until then they must stay distinguishable on the
-// default dark Base (#323232), which the numeric decoration tests rely on.
-QRgb severityInk(CodeEditor::Severity s)
-{
-    switch (s) {
-    case CodeEditor::Severity::Error:
-        return QColor(241, 76, 76).rgb(); // red-dominant
-    case CodeEditor::Severity::Warning:
-        return QColor(255, 204, 0).rgb(); // yellow-dominant
-    case CodeEditor::Severity::Information:
-        return QColor(117, 190, 255).rgb(); // blue-dominant
-    case CodeEditor::Severity::Hint:
-        return QColor(127, 127, 127).rgb(); // muted gray
-    }
-    return QColor(241, 76, 76).rgb();
-}
-
 // Zigzag underline: 3px half-period, 2px amplitude sitting just above
 // `yWave`. Point parity (even = baseline, odd = raised) is derived from
 // the point index, so the run always alternates consistently. Short runs
@@ -3268,59 +3267,16 @@ void drawWavyUnderline(QPainter& p, qreal x0, qreal x1, qreal yWave, QRgb ink)
     p.drawPolyline(pts.data(), int(pts.size()));
 }
 
-// M6 match-quad ink (VS Code Dark+ findMatch family, fixed until
-// set_theme): all matches muted orange, the current one bright orange.
-// Both are red-dominant over the dark Base - the numeric paint test
-// separates that band from the blue selection and the red diagnostic ink.
-QRgb findMatchInk(bool current)
-{
-    return current ? QColor(246, 169, 0).rgb() : QColor(196, 136, 30).rgb();
-}
-
-// Shared by the gutter dot (M5) and the ruler marker band (M7): one
-// fixed red constant until set_theme routes it.
-QRgb breakpointInk()
-{
-    return QColor(220, 61, 66).rgb();
-}
-
-// M7 overview ruler chrome ink: FIXED COOL constants (R==G==B) — the
-// ruler background/stripes/viewport frame must never satisfy the
-// warm-quad or red-diagnostic numeric probe predicates; only marker
-// layers reuse the warm/red inks above, by design.
-QRgb rulerBackground()
-{
-    return QColor(22, 22, 22).rgb();
-}
-QColor rulerStripe()
-{
-    return QColor(140, 140, 140, 110); // muted cool gray over the dark bg
-}
-
-// M13 fold-triangle ink: a FIXED cool gray (R==G==B by construction) so
-// the warm/red pixel predicates of the decoration probes stay green even
-// when the fold zone is inside their scan window.
-QRgb foldInk()
-{
-    return qRgb(150, 150, 150);
-}
-
-// M22 fold-hover region tint: the SAME cool gray family as foldInk (R==G==B
-// by construction, so the warm/red decoration probe predicates stay green),
-// translucent over Base. Fixed until set_theme routes it (M24: the chrome
-// role list grows a fold-region entry alongside fold markers).
-QColor foldRegionTint()
-{
-    return QColor(150, 150, 150, 46);
-}
-
 } // namespace
 
 void CodeEditor::paintEvent(QPaintEvent*)
 {
     QPainter p(this);
-    p.fillRect(rect(), palette().color(QPalette::Base));
-    p.setPen(palette().color(QPalette::Text));
+    // M24: the canvas ground + default pen ride the theme (fallbacks =
+    // QPalette::Base/Text read live, so the default theme paints exactly
+    // what the widget painted pre-M24).
+    p.fillRect(rect(), theme_->ink(Role::Base));
+    p.setPen(theme_->ink(Role::Text));
     p.setFont(font_);
 
     const int lh = lineHeight_;
@@ -3372,8 +3328,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
     // M5 layer 2: whole-line bands under selections and text (qtmonaco
     // highlighted lines + optional current-line band). Full width on
     // purpose: the band rides under the gutter too, Monaco-style.
-    QColor band = palette().color(QPalette::Highlight);
-    band.setAlpha(45);
+    const QColor band = theme_->ink(Role::HighlightedLinesBand); // fallback: Highlight@45
     if (highlightEnd_ >= 0) {
         for (int line = std::max(first, highlightStart_); line <= std::min(last, highlightEnd_); ++line)
             if (const int slot = visibleIndexOfModelLine(line); slot >= 0) // M13: hidden rows
@@ -3383,15 +3338,10 @@ void CodeEditor::paintEvent(QPaintEvent*)
         && caret_.line <= last && visibleIndexOfModelLine(caret_.line) >= 0) {
         const QRect band(0, padding_ + slotOfModelLine(caret_.line) * lh - vScroll_,
                          width(), lh);
-        QColor cur = palette().color(QPalette::Text);
-        cur.setAlpha(30); // M18: wash strengthened (was 16) — the band must
-                          // read at a glance without competing with selections
-        p.fillRect(band, cur);
+        p.fillRect(band, theme_->ink(Role::CurrentLineBackground)); // fallback: Text@30, M18-strengthened wash
         if (currentLineMode_ == CurrentLineMode::BackgroundFrame) {
-            QColor frame = palette().color(QPalette::Text);
-            frame.setAlpha(90);
             const QPen oldPen = p.pen(); // restore: later layers set their own
-            p.setPen(QPen(frame));
+            p.setPen(QPen(theme_->ink(Role::CurrentLineFrame))); // fallback: Text@90
             p.drawRect(band.adjusted(0, 0, -1, -1));
             p.setPen(oldPen);
         }
@@ -3407,9 +3357,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
         const int rx = contentLeft() + qRound(longLineRulerCol_ * cellWidth_)
                        - hScroll_;
         if (rx >= contentLeft() && rx < width() - overviewRulerWidth()) {
-            QColor guide = palette().color(QPalette::Text);
-            guide.setAlpha(40);
-            p.fillRect(QRect(rx, 0, 1, height()), guide);
+            p.fillRect(QRect(rx, 0, 1, height()), theme_->ink(Role::LongLineRuler));
         }
     }
 
@@ -3445,8 +3393,9 @@ void CodeEditor::paintEvent(QPaintEvent*)
             const double x0 = std::max(raw0, double(textLeft));
             if (x1 <= x0 || x0 >= winRight)
                 continue; // M9 cull: quad fully outside the text window
-            QColor ink = QColor::fromRgb(findMatchInk(isCur));
-            ink.setAlpha(isCur ? 130 : 80);
+            QColor ink = theme_->ink(isCur ? Role::FindCurrentMatch
+                                            : Role::FindMatch); // fallback: fixed orange family
+            ink.setAlpha(isCur ? 130 : 80); // quad wash is a paint-time fade of the role ink
             p.fillRect(QRectF(QPointF(x0, padding_ + slot * lh - vScroll_),
                               QSizeF(x1 - x0, lh)),
                        ink);
@@ -3457,8 +3406,8 @@ void CodeEditor::paintEvent(QPaintEvent*)
     // Semi-transparent highlight so text stays legible on light and dark
     // palettes alike (Monaco uses the same trick with ~40% opacity).
     // D1: every caret slot's selection is painted, not just the primary.
-    QColor selColor = palette().color(QPalette::Highlight);
-    selColor.setAlpha(90);
+    const QColor selColor = theme_->ink(Role::Selection); // fallback: Highlight@90
+    // (semi-transparent so text stays legible on light and dark grounds)
     for (const CaretSlot& slot : allCarets()) {
         if (!slot.hasSelection)
             continue;
@@ -3519,16 +3468,14 @@ void CodeEditor::paintEvent(QPaintEvent*)
                 const int bot = std::min(lastSlot, eSlot >= 0 ? eSlot : sSlot);
                 if (top <= bot)
                     p.fillRect(QRect(textLeft - fz, padding_ + top * lh - vScroll_,
-                                     fz, (bot - top + 1) * lh), foldRegionTint());
+                                     fz, (bot - top + 1) * lh), theme_->ink(Role::FoldRegion));
             }
         }
         // Column edge separator: a hairline against Base (VS Code style).
-        QColor div = palette().color(QPalette::Text);
-        div.setAlpha(45);
-        p.setPen(QPen(div, 1.0));
+        p.setPen(QPen(theme_->ink(Role::GutterSeparator), 1.0)); // fallback: Text@45
         p.drawLine(textLeft - 1, 0, textLeft - 1, height());
-        const QColor dim = palette().color(QPalette::PlaceholderText);
-        const QColor bright = palette().color(QPalette::Text);
+        const QColor dim = theme_->ink(Role::GutterDigits);        // fallback: PlaceholderText
+        const QColor bright = theme_->ink(Role::GutterActiveDigits); // fallback: Text
         auto dit = diagnostics_.begin(); // sorted by startLine: one forward walk
         for (int slot = firstSlot; slot <= lastSlot; ++slot) { // M13: SLOTS
             const int line = modelLineForVisibleIndex(slot);
@@ -3544,14 +3491,14 @@ void CodeEditor::paintEvent(QPaintEvent*)
             }
             if (std::binary_search(breakpointLines_.begin(), breakpointLines_.end(), line)) {
                 p.setPen(Qt::NoPen);
-                p.setBrush(QColor::fromRgb(breakpointInk())); // fixed red: set_theme pass routes it
+                p.setBrush(theme_->ink(Role::Breakpoint)); // fixed red until M24 routed it
                 const double r = std::max(3.0, cellWidth_ * 0.45);
                 p.drawEllipse(QPointF(qreal(bpCx), yTop + lh / 2.0), r, r);
             }
             // M13: fold triangle in the zone — ▾ (points DOWN) when the
-            // fold is open, ▸ (points RIGHT) once collapsed. Fixed cool
-            // gray (foldInk): R==G==B, so warm/red decoration probes are
-            // unaffected by zone ink.
+            // fold is open, ▸ (points RIGHT) once collapsed. Default ink is
+            // a fixed cool gray (Role::FoldMarkers): R==G==B, so warm/red
+            // decoration probes are unaffected by zone ink.
             if (fz > 0) {
                 const auto fit = std::lower_bound(
                     foldables_.begin(), foldables_.end(), line,
@@ -3566,7 +3513,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
                         tri << QPointF(foldCx - fr, cy - fr) << QPointF(foldCx + fr, cy - fr)
                             << QPointF(foldCx, cy + fr); // ▾
                     p.setPen(Qt::NoPen);
-                    p.setBrush(QColor::fromRgb(foldInk()));
+                    p.setBrush(theme_->ink(Role::FoldMarkers));
                     p.drawPolygon(tri);
                 }
             }
@@ -3577,11 +3524,11 @@ void CodeEditor::paintEvent(QPaintEvent*)
                 worst = std::min(worst, int(j->severity));
             if (worst <= int(CodeEditor::Severity::Hint)) {
                 p.setPen(Qt::NoPen);
-                p.setBrush(QColor::fromRgb(severityInk(CodeEditor::Severity(worst))));
+                p.setBrush(QColor::fromRgb(theme_->severityInk(CodeEditor::Severity(worst))));
                 p.drawEllipse(QPointF(qreal(iconCx), yTop + lh / 2.0), 2.5, 2.5);
             }
         }
-        p.setPen(palette().color(QPalette::Text));
+        p.setPen(theme_->ink(Role::Text)); // restore the default glyph pen
     }
 
     // M13: the text loop walks VISIBLE SLOTS too — a collapsed fold's
@@ -3623,7 +3570,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
             // so a scrolled-past caret never paints a bar over the gutter
             // and never bleeds under the ruler chrome.
             if (cx + 2.0 > textLeft && cx < winRight)
-                p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
+                p.fillRect(QRect(qRound(cx), yTop, 2, lh), theme_->ink(Role::Cursor));
         }
         // D1: additional carets blink in sync with the primary (one shared
         // blink timer), drawn with the same 2px rule off the same layout.
@@ -3633,7 +3580,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
                     continue;
                 const double cx = xw(xInLine(gs, slot.caret.col));
                 if (cx + 2.0 > textLeft && cx < winRight)
-                    p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
+                    p.fillRect(QRect(qRound(cx), yTop, 2, lh), theme_->ink(Role::Cursor));
             }
         }
         if (dropCaretActive_ && line == dropCaret_.line && !scrolledPast) {
@@ -3644,7 +3591,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
             // caret keeps blinking.
             const double cx = xw(xInLine(gs, dropCaret_.col));
             if (cx + 2.0 > textLeft && cx < winRight)
-                p.fillRect(QRect(qRound(cx), yTop, 2, lh), palette().color(QPalette::Text));
+                p.fillRect(QRect(qRound(cx), yTop, 2, lh), theme_->ink(Role::DropCaret));
         }
         if (gs->valid && !scrolledPast) {
             // Draw with the cached QTextLine itself, not a fresh drawText:
@@ -3687,10 +3634,10 @@ void CodeEditor::paintEvent(QPaintEvent*)
             const double px = xw(xInLine(gs, caret_.col));
             const double textBaseline = yTop + (gs->valid ? gs->line.ascent() : ascent_);
             p.drawText(QPointF(px, textBaseline), preedit_);
-            p.setPen(QPen(palette().color(QPalette::Text), 0, Qt::DotLine));
+            p.setPen(QPen(theme_->ink(Role::Text), 0, Qt::DotLine));
             const double pw = fmF.horizontalAdvance(preedit_);
             p.drawLine(QPointF(px, yTop + lh - 2), QPointF(px + pw, yTop + lh - 2));
-            p.setPen(palette().color(QPalette::Text));
+            p.setPen(theme_->ink(Role::Text));
         }
     }
 
@@ -3703,7 +3650,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
             break;
         if (d.endLine < first)
             continue;
-        const QRgb ink = severityInk(d.severity);
+        const QRgb ink = theme_->severityInk(d.severity);
         for (int line = std::max(first, d.startLine); line <= std::min(last, d.endLine); ++line) {
             const int slot = visibleIndexOfModelLine(line); // M13: multi-line diag
             if (slot < 0)                                   // spans a fold: the
@@ -3731,7 +3678,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
     // caller anchors them into existing whitespace; re-flow later is a
     // rendering refinement, not an API change).
     if (!inlayHints_.isEmpty()) {
-        p.setPen(palette().color(QPalette::PlaceholderText));
+        p.setPen(theme_->ink(Role::InlayHints)); // fallback: PlaceholderText
         for (const InlayHint& h : inlayHints_) {
             if (h.line < first)
                 continue;
@@ -3748,7 +3695,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
             const double baseline = hTop + (gs->valid ? gs->line.ascent() : ascent_);
             p.drawText(QPointF(x, baseline), h.text);
         }
-        p.setPen(palette().color(QPalette::Text));
+        p.setPen(theme_->ink(Role::Text)); // restore the default pen after the hint pass
     }
 
     // M7: the overview ruler is the LAST pass — opaque chrome that
@@ -3768,7 +3715,7 @@ void CodeEditor::paintOverviewRuler(QPainter& p) const
     const QRect g = overviewRulerGeometry();
     if (g.isNull())
         return;
-    p.fillRect(g, QColor::fromRgb(rulerBackground()));
+    p.fillRect(g, theme_->ink(Role::OverviewBackground));
 
     const int total = std::max(1, totalHeight());
     const int h = std::max(1, height());
@@ -3793,7 +3740,7 @@ void CodeEditor::paintOverviewRuler(QPainter& p) const
     const int cap = kOverviewRulerWidth - 6; // stripe-precision budget in units
 
     p.setPen(Qt::NoPen);
-    p.setBrush(rulerStripe());
+    p.setBrush(theme_->ink(Role::OverviewStripe));
     for (int slot = 0; slot < vt; slot += step) {
         const int line = modelLineForVisibleIndex(slot);
         const int off = buffer_.offsetOfLine(line);
@@ -3809,32 +3756,33 @@ void CodeEditor::paintOverviewRuler(QPainter& p) const
         const int w = qMax(1, qMin(len, cap) - qMin(indent, cap - 1));
         const int y0 = rulerY(padding_ + slot * lineHeight_);
         const int y1 = rulerY(padding_ + (slot + 1) * lineHeight_);
-        p.fillRect(QRect(x0, y0, w, qMax(1, y1 - y0)), rulerStripe());
+        p.fillRect(QRect(x0, y0, w, qMax(1, y1 - y0)), theme_->ink(Role::OverviewStripe));
     }
 
     // Marker layers, cool selection band first, then the warm/red state
-    // inks (M5/M6 constants). Huge sets are stride-subsampled to a few
-    // stripes per strip pixel — the paint never walks the whole vector.
+    // inks (M24: all four ride theme roles — FindMatch/Breakpoint/
+    // Diagnostic*). Huge sets are stride-subsampled to a few stripes per
+    // strip pixel — the paint never walks the whole vector.
     if (highlightEnd_ >= highlightStart_ && highlightStart_ >= 0) {
         const int y0 = rulerY(padding_ + highlightStart_ * lineHeight_);
         const int y1 = rulerY(padding_ + (highlightEnd_ + 1) * lineHeight_);
         p.fillRect(QRect(g.left() + 3, y0, kOverviewRulerWidth - 6, qMax(2, y1 - y0)),
-                   QColor(96, 144, 196, 90)); // cool blue: passes every probe predicate
+                   theme_->ink(Role::OverviewHighlightedBand)); // cool blue: passes every probe predicate
     }
     const auto strideFor = [h](int n) { return n > 4 * h ? n / (4 * h) + 1 : 1; };
     for (int i = 0; i < breakpointLines_.size(); i += strideFor(breakpointLines_.size()))
-        band(breakpointLines_[i], QColor::fromRgb(breakpointInk()));
+        band(breakpointLines_[i], theme_->ink(Role::Breakpoint));
     for (int i = 0; i < diagnostics_.size(); i += strideFor(diagnostics_.size()))
-        band(diagnostics_[i].startLine, QColor::fromRgb(severityInk(diagnostics_[i].severity)));
+        band(diagnostics_[i].startLine, QColor::fromRgb(theme_->severityInk(diagnostics_[i].severity)));
     for (int i = 0; i < matches_.size(); i += strideFor(matches_.size()))
-        band(matches_[i].startLine, QColor::fromRgb(findMatchInk(false)), 1);
+        band(matches_[i].startLine, theme_->ink(Role::FindMatch), 1);
     if (currentMatch_ >= 0 && currentMatch_ < matches_.size())
-        band(matches_[currentMatch_].startLine, QColor::fromRgb(findMatchInk(true)), 1);
+        band(matches_[currentMatch_].startLine, theme_->ink(Role::FindCurrentMatch), 1);
 
     // Viewport frame last (the strip's own scroll state: state, not ink).
     const QRect vp = overviewRulerViewportRect();
-    p.setBrush(QColor(210, 210, 210, 26)); // faint cool fill (R==G==B)
-    p.setPen(QPen(QColor(190, 190, 190, 110), 1.0));
+    p.setBrush(theme_->ink(Role::OverviewViewportFill)); // faint cool fill (R==G==B)
+    p.setPen(QPen(theme_->ink(Role::OverviewViewportFrame), 1.0));
     p.drawRect(vp.marginsRemoved({0, 0, 1, 1}));
 }
 
@@ -3857,7 +3805,13 @@ QVector<QTextLayout::FormatRange> CodeEditor::formatRangesForLine(int line, cons
                                [](int v, const HighlightEngine::Span& s) { return v < s.end; });
     const int laidOut = static_cast<int>(gs->text.size()); // truncation-aware
     for (; it != hs.end() && it->start < lineEnd; ++it) {
-        const QColor color = HighlightEngine::colorFor(it->kind);
+        // M24: the theme's token map first (explicit override, VERBATIM);
+        // unset kinds fall back to HighlightEngine::colorFor's fixed table,
+        // and the "invalid color -> skip the span" rule (the default-pen
+        // behavior for Text and unmapped kinds) is unchanged.
+        QColor color = theme_->tokenColor(it->kind);
+        if (!color.isValid())
+            color = HighlightEngine::colorFor(it->kind);
         if (!color.isValid())
             continue;
         int a = std::max(it->start, lineStart) - lineStart;
@@ -4258,6 +4212,9 @@ public:
         // can locate the bar via findChild without exposing the class.
         setObjectName(QStringLiteral("qmn-find-bar"));
         setAutoFillBackground(true);
+        // M24 scope note: the bar is a SEPARATE widget — its chrome keeps
+        // riding plain QPalette, it is deliberately NOT painted by the
+        // editor's CodeEditorTheme (same for the DnD drag chip).
         QPalette pal = palette();
         pal.setColor(QPalette::Window, pal.color(QPalette::Window).lighter(108));
         setPalette(pal);
@@ -5997,7 +5954,8 @@ void CodeEditor::startSelectionDrag()
     QDrag drag(this);
     // Drag chip: the elided first payload line in the editor's own font.
     // (No vision here, but the X11 drag feedback deserves the pixels, and
-    // QPixmap painting works identically offscreen.)
+    // QPixmap painting works identically offscreen.) M24 scope: the chip
+    // rides WindowText, NOT the canvas theme — it is external drag chrome.
     const QString firstLine = payload.section(QLatin1Char('\n'), 0, 0).left(32);
     const QFontMetricsF fm(font_);
     const QString label = fm.elidedText(firstLine, Qt::ElideRight, 240);

@@ -38,6 +38,19 @@ const char* const kCurrentLineLabels[] = {
     "Нет", "Фон", "Фон и рамка",
 };
 
+// M24 theme rows. Custom is deliberately NOT a row: a live editor can
+// only reach it through manual role edits the demo never offers, and
+// indexOfMode below clamps such a seed to the Default row (the same
+// defensive clamp the M19 enum arrays use).
+constexpr CodeEditorTheme::Preset kThemePresets[] = {
+    CodeEditorTheme::Preset::Default,
+    CodeEditorTheme::Preset::Light,
+    CodeEditorTheme::Preset::Dark,
+};
+const char* const kThemeLabels[] = {
+    "Палитра (по умолчанию)", "Светлая", "Тёмная",
+};
+
 template <typename Mode, int N>
 int indexOfMode(const Mode (&values)[N], Mode mode)
 {
@@ -60,6 +73,9 @@ EditorSettingsDialog::EditorSettingsDialog(QWidget* parent, const EditorSettings
     currentLineCombo_ = new QComboBox(this);
     for (const char* label : kCurrentLineLabels)
         currentLineCombo_->addItem(QString::fromUtf8(label));
+    themeCombo_ = new QComboBox(this); // M24 (14th knob)
+    for (const char* label : kThemeLabels)
+        themeCombo_->addItem(QString::fromUtf8(label));
 
     rulerSpin_ = new QSpinBox(this);
     rulerSpin_->setRange(0, 999);
@@ -96,6 +112,7 @@ EditorSettingsDialog::EditorSettingsDialog(QWidget* parent, const EditorSettings
     appearanceForm->addRow(QStringLiteral("Номера строк:"), lineNumbersCombo_);
     appearanceForm->addRow(QStringLiteral("Подсветка текущей строки:"), currentLineCombo_);
     appearanceForm->addRow(QStringLiteral("Линия-ограничитель (столбец):"), rulerSpin_);
+    appearanceForm->addRow(QStringLiteral("Тема:"), themeCombo_); // M24
 
     auto* font = new QGroupBox(QStringLiteral("Шрифт и масштаб"), this);
     auto* fontForm = new QFormLayout(font);
@@ -148,6 +165,9 @@ void EditorSettingsDialog::setSettings(const EditorSettings& s)
     autoCloseCheck_->setChecked(s.autoCloseEnabled);
     readOnlyCheck_->setChecked(s.readOnly);
     indentGuidesCheck_->setChecked(s.indentGuidesEnabled); // M21
+    // M24: a Custom kind seed (only manual role edits can leave one on a
+    // live editor) clamps to the Default row via indexOfMode.
+    themeCombo_->setCurrentIndex(indexOfMode(kThemePresets, s.themePreset));
 
     // M20: remember the WHOLE seed (see the seedFont_ note in the header).
     // Deliberately NO setCurrentFont: a family like fontconfig's
@@ -184,6 +204,7 @@ EditorSettings EditorSettingsDialog::settings() const
     s.autoCloseEnabled = autoCloseCheck_->isChecked();
     s.readOnly = readOnlyCheck_->isChecked();
     s.indentGuidesEnabled = indentGuidesCheck_->isChecked(); // M21
+    s.themePreset = kThemePresets[themeCombo_->currentIndex()]; // M24
     // M20: the seed font patched, never rebuilt — weight/style/hinting
     // ride through, only the two edited fields move (round-trip QFont
     // equality lives or dies here). "Still on the seed family's row"

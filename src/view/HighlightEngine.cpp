@@ -843,10 +843,11 @@ const std::vector<HighlightEngine::FoldRange>& HighlightEngine::foldsFull()
 
 QColor HighlightEngine::colorFor(CodeEditor::TokenKind kind)
 {
-    // v1 fixed colors in the VS Code Dark+ family; they stay legible on
+    // Fixed colors in the VS Code Dark+ family; they stay legible on
     // light backgrounds too (monospace spike defaults to the platform
-    // Base). A real theme bridge (Monaco palette / set_theme parity) is a
-    // later milestone - until then this table is the ONLY color source.
+    // Base). M24 made this table the FALLBACK under the theme object's
+    // token map (unset kinds land here; the Dark preset keeps it value-
+    // identical — tripwire test), not the only color source anymore.
     switch (kind) {
     case CodeEditor::TokenKind::Comment: return QColor(0x6A, 0x99, 0x55);
     case CodeEditor::TokenKind::Keyword: return QColor(0x56, 0x9C, 0xD6);

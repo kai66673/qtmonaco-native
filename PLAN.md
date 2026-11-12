@@ -748,22 +748,56 @@ State corrections against the owner's five points (measured in code,
   the override, bus + mirror stay template-based, fall on clear).
   qmn-demo: no new global knob to wire (the dialog stays global by DoD).
   Binding re-run green is owner-side at tag time.
-- **M24 — themes.** One theme object (Shiboken-safe: a role enum +
-  QColor get/set + a `TokenKind`→QColor map, Q_OBJECT +
-  `themeChanged`): chrome roles (base, text, cursor, selection,
-  current-line bg/frame, gutter digits + separator, fold markers,
-  indent guides, long-line ruler, find match/current, breakpoint,
-  severity×4, overview stripe, drop caret) + a token map replacing
-  `HighlightEngine::colorFor` (the "invalid kind → default pen" rule
-  survives). Built-ins: default "palette" = today's live-QPalette
-  behavior (upgrades MUST be pixel-identical — regression tripwire)
-  plus explicit Light/Dark pairs (Dark's token map = today's fixed
-  one). Every "set_theme routes it" comment resolves by sweeping the
-  fixed inks behind role lookups. qmn-demo's dialog grows a theme
-  combo. Metrics (the 44px ruler) stay constants. DoD: numeric pixel
-  scans prove a swap (Base/Text flip, a known span's token ink per
-  map, fold/breakpoint/severity/find-quad inks change), themeChanged
-  fires, the default theme reproduces the current suite's pixels.
+- **M24 COMPLETE (2026-11-12): themes.** One theme object landed exactly
+  as specced: the public child QObject `view/CodeEditorTheme.hpp` (on
+  the install allow-list, CodeEditorOptions/M23 pattern: back-pointer to
+  the editor, ctor only stores it). Shiboken-safe surface: a 28-value
+  `Role` enum + QColor get/set/clear/has + a `TokenKind`→QColor map +
+  Q_OBJECT `themeChanged()`. Tri-state maps: an explicit QColor paints
+  VERBATIM, an un-set entry falls back to the historical table — live
+  QPalette nudges (Selection=Highlight@90, band=Highlight@45, wash=
+  Text@30, frame=Text@90, sep/guides/ruler=Text@45/40/40, gutter digits
+  =PlaceholderText) AND the fixed constants (fold gray 150, fold-region
+  tint 150@46, find oranges, the severity family via `severityInk
+  (Severity)`, ruler chrome + viewport frame). `Preset {Default,Light,
+  Dark,Custom}` is a KIND TRACKER: any manual set/clear moves it to
+  Custom, `applyPreset` replaces the whole map and announces exactly
+  once (default "palette" = the empty map = today's live-QPalette
+  behavior; Light/Dark are explicit pinned pairs, Dark's token map =
+  today's fixed one — a test asserts value-equality with
+  `HighlightEngine::colorFor` per kind). The editor gained the
+  `theme()` door; its `themeChanged` connection wipes the GEO CACHE
+  before repainting (token ink rides the cached format ranges — chrome
+  reads live and needs no wiping), and `formatRangesForLine` consults
+  `theme_->tokenColor(kind)` before `HighlightEngine::colorFor` (the
+  invalid→skip-span rule unchanged). Every "set_theme routes it"
+  comment resolved: the anonymous-namespace fixed-ink helpers (severity/
+  find/breakpoint/ruler/fold/fold-region) are GONE, all paint sites read
+  `theme_->ink(Role::…)`; the find QUAD wash layers its own paint-time
+  alpha 80/130 on top of the role ink (documented). Deliberate scope
+  note: the find bar and the DnD drag chip are separate widgets — they
+  keep riding plain QPalette (documented in code). Metrics:
+  `kOverviewRulerWidth` stays a constant (chrome geometry is not a
+  theme knob). qmn-demo: 14th knob `EditorSettings.themePreset`, dialog
+  "Тема:" combo (Default/Light/Dark rows — Custom is never a row; a
+  Custom seed clamps to Default), applySettings SKIPS `applyPreset`
+  when the kind already matches (no map-wipe/repaint per dialog accept),
+  collectSettings reads the live `kind()`. DoD met: six new slots —
+  `themeObjectTriStateSignalsAndKindTracker` (signal discipline + kind
+  tracker + map namespaces), `themePresetSwapsGroundAndDarkTableMatches
+  Engine` (ground probe BEFORE any preset + Light/Dark ground flips +
+  Dark==engine table per kind), `themeRoleSwapFlipsBaseAndTextInk`
+  (Base/Text swap), `themeTokenOverrideFlipsCommentInkAndRestores`
+  (known-span token ink moves + only Comment moves + clear restores —
+  no manual invalidation, so this also proves the geo wipe),
+  `themeSeverityOverrideMovesDiagnosticInk` and
+  `themeChromeRoleOverridesFlipFoldBreakpointFindProbes` (fold/breakpoint/
+  severity/find-quad inks invert their M5/M6/M7/M13 probe predicates
+  under role overrides and restore live on clear) — and the upgrade
+  tripwire: the DEFAULT (empty-map) theme reproduces the pre-M24
+  suite's pixels, proven by every untouched paint test passing
+  unchanged (206 passed / 2 skipped, ctest 3/3).
+  Binding re-run green is owner-side at tag time.
 
 Phase DoD: each M2x tagged with ctest green + wheel rebuilt from the
 pinned container (the binding picks up the options-mirror/theme/

@@ -28,6 +28,8 @@
 
 #include "view/CodeEditor.hpp"
 #include "view/CodeEditorOptions.hpp"
+#include "view/CodeEditorTheme.hpp"
+#include "view/HighlightEngine.hpp"
 #include "view/LanguageProperties.hpp"
 
 #include <algorithm> // std::min in the ruler mapping contract
@@ -36,6 +38,7 @@
 
 using qmn::view::CodeEditor;
 using qmn::view::CodeEditorOptions;
+using qmn::view::HighlightEngine; // M24: the Dark-preset token table tripwire
 
 // Human-readable TextPosition dumps: QCOMPARE failures then show the
 // offending {line,col} values instead of <null> (QTest streams elements,
@@ -319,6 +322,14 @@ private slots:
     void languageTabStopOverrideGuideStopsPaint();
     void languageTabStopFollowsLanguageSwitch();
     void languageTabStopRidesAboveTemplateAndSettings();
+
+    // ---- M24 themes (the last Gate 1.5 car) ----
+    void themeObjectTriStateSignalsAndKindTracker();
+    void themePresetSwapsGroundAndDarkTableMatchesEngine();
+    void themeRoleSwapFlipsBaseAndTextInk();
+    void themeTokenOverrideFlipsCommentInkAndRestores();
+    void themeSeverityOverrideMovesDiagnosticInk();
+    void themeChromeRoleOverridesFlipFoldBreakpointFindProbes();
 
 private:
     CodeEditor* editor = nullptr;
@@ -8202,6 +8213,341 @@ void TestCodeEditor::languageTabStopRidesAboveTemplateAndSettings()
     QCOMPARE(opt->tabStopWidth(), 4);
     py->clearTabStopWidth();
     QCOMPARE(editor->tabStopWidth(), 4);
+}
+
+// ---- M24 themes ----------------------------------------------------------
+//
+// The DEFAULT (empty-map) theme reproducing the pre-M24 suite's pixels is
+// tripwired by every untouched paint test above. The slots below prove the
+// NEW surfaces: tri-state map discipline + signals, the presets (Dark's
+// token map == HighlightEngine::colorFor per kind), and overrides actually
+// REACHING the canvas (role flips invert the M5/M6/M13 probe predicates;
+// token flips ride the themeChanged geo-cache wipe).
+
+void TestCodeEditor::themeObjectTriStateSignalsAndKindTracker()
+{
+    using Theme = qmn::view::CodeEditorTheme;
+    Theme* th = editor->theme();
+    QVERIFY(th);
+    QCOMPARE(th->parent(), static_cast<QObject*>(editor)); // child, like options_
+    QCOMPARE(th->kind(), Theme::Preset::Default);
+    QVERIFY(!th->hasColor(Theme::Role::Base));
+    QVERIFY(!th->color(Theme::Role::Base).isValid()); // unset = INVALID QColor
+    QVERIFY(!th->hasTokenColor(CodeEditor::TokenKind::Comment));
+
+    QSignalSpy spy(th, &Theme::themeChanged);
+    th->setColor(Theme::Role::Base, QColor()); // invalid over un-set: silent
+    QCOMPARE(spy.count(), 0);
+    th->clearColor(Theme::Role::Base);         // clear of un-set: silent
+    QCOMPARE(spy.count(), 0);
+
+    th->setColor(Theme::Role::Base, QColor(1, 2, 3));
+    QCOMPARE(spy.count(), 1);
+    QCOMPARE(th->kind(), Theme::Preset::Custom); // a manual edit leaves the preset
+    QVERIFY(th->hasColor(Theme::Role::Base));
+    QCOMPARE(th->color(Theme::Role::Base), QColor(1, 2, 3)); // VERBATIM read-back
+    th->setColor(Theme::Role::Base, QColor(1, 2, 3));        // same-value: silent
+    QCOMPARE(spy.count(), 1);
+    th->setColor(Theme::Role::Base, QColor()); // invalid = the OFF switch
+    QCOMPARE(spy.count(), 2);
+    QVERIFY(!th->hasColor(Theme::Role::Base));
+    th->clearColor(Theme::Role::Base); // un-set again: silent
+    QCOMPARE(spy.count(), 2);
+
+    // Token map: a SEPARATE tri-state namespace, kind() tracker included.
+    th->setTokenColor(CodeEditor::TokenKind::Comment, QColor(9, 9, 9));
+    QCOMPARE(spy.count(), 3);
+    QVERIFY(!th->hasColor(Theme::Role::Base)); // maps never cross
+
+    // applyPreset replaces the WHOLE map and announces exactly once.
+    th->applyPreset(Theme::Preset::Dark);
+    QCOMPARE(spy.count(), 4);
+    QCOMPARE(th->kind(), Theme::Preset::Dark);
+    QVERIFY(th->hasColor(Theme::Role::Base));   // preset fills the map
+    QVERIFY(th->hasTokenColor(CodeEditor::TokenKind::Comment));
+    th->setTokenColor(CodeEditor::TokenKind::Comment, QColor(1, 1, 1));
+    QCOMPARE(th->kind(), Theme::Preset::Custom); // manual edit off the preset
+    QCOMPARE(spy.count(), 5);
+    th->applyPreset(Theme::Preset::Default);     // even Default re-announces
+    QCOMPARE(spy.count(), 6);
+    QCOMPARE(th->kind(), Theme::Preset::Default);
+    QVERIFY(!th->hasColor(Theme::Role::Base));
+    QVERIFY(!th->hasTokenColor(CodeEditor::TokenKind::Comment));
+}
+
+void TestCodeEditor::themePresetSwapsGroundAndDarkTableMatchesEngine()
+{
+    using Theme = qmn::view::CodeEditorTheme;
+    Theme* th = editor->theme();
+    editor->setPlainText(QStringLiteral("alpha\n"));
+
+    // Ground swap proven numerically: a patch BELOW the text line and LEFT
+    // of the overview strip is pure Base. Default theme = live QPalette
+    // (the pre-M24 behavior); Light = white; Dark = the pinned ground;
+    // back to Default restores the palette ground (LIVE, no repaint hacks).
+    // Sampled BEFORE any preset touches the map.
+    const int probeX = 300; // < width - 44 ruler strip
+    const int probeY = editor->height() - 3;
+    auto groundAt = [&] { return editor->grab().toImage().pixelColor(probeX, probeY); };
+    QCOMPARE(groundAt(), editor->palette().color(QPalette::Base));
+
+    // M24 spec tripwire: Dark's TOKEN map is the very table the engine
+    // ships — equality per kind, drift fails CI (token ink itself is then
+    // identical Default vs Dark; the preset only PINS the chrome ground).
+    th->applyPreset(Theme::Preset::Dark);
+    QCOMPARE(th->kind(), Theme::Preset::Dark);
+    static const CodeEditor::TokenKind kAllKinds[] = {
+        CodeEditor::TokenKind::Comment, CodeEditor::TokenKind::Keyword,
+        CodeEditor::TokenKind::Number, CodeEditor::TokenKind::String,
+        CodeEditor::TokenKind::StringSpecial, CodeEditor::TokenKind::StringSpecialKey,
+        CodeEditor::TokenKind::Escape, CodeEditor::TokenKind::Embedded,
+        CodeEditor::TokenKind::Constant, CodeEditor::TokenKind::ConstantBuiltin,
+        CodeEditor::TokenKind::Constructor, CodeEditor::TokenKind::Function,
+        CodeEditor::TokenKind::FunctionBuiltin, CodeEditor::TokenKind::FunctionMethod,
+        CodeEditor::TokenKind::Type, CodeEditor::TokenKind::Variable,
+        CodeEditor::TokenKind::VariableBuiltin, CodeEditor::TokenKind::Property,
+        CodeEditor::TokenKind::Operator, CodeEditor::TokenKind::Punctuation,
+        CodeEditor::TokenKind::PunctuationBracket, CodeEditor::TokenKind::PunctuationDelimiter,
+        CodeEditor::TokenKind::PunctuationSpecial,
+    };
+    for (CodeEditor::TokenKind k : kAllKinds) {
+        QVERIFY2(th->hasTokenColor(k),
+                 qPrintable(QStringLiteral("Dark preset leaves kind %1 un-mapped").arg(int(k))));
+        QCOMPARE(th->tokenColor(k), HighlightEngine::colorFor(k));
+    }
+    // Text is never a themed token (invalid-QColor = default-pen rule).
+    QVERIFY(!th->hasTokenColor(CodeEditor::TokenKind::Text));
+
+    // The pinned grounds now swap the SAME probe pixel (LIVE repaints):
+    th->applyPreset(Theme::Preset::Light);
+    QCOMPARE(th->kind(), Theme::Preset::Light);
+    QCOMPARE(groundAt(), QColor(255, 255, 255));
+    th->applyPreset(Theme::Preset::Dark);
+    QCOMPARE(groundAt(), QColor(0x1E, 0x1E, 0x1E));
+    th->applyPreset(Theme::Preset::Default);
+    QCOMPARE(groundAt(), editor->palette().color(QPalette::Base));
+}
+
+void TestCodeEditor::themeRoleSwapFlipsBaseAndTextInk()
+{
+    // DoD swap proof #1: the Base/Text pair. Offscreen controls: glyph ink
+    // (palette Text) is neutral gray-white, never green-dominant; the
+    // canvas ground equals palette Base. Both overrides REACH the canvas
+    // and both clears restore the palette behavior LIVE.
+    using Theme = qmn::view::CodeEditorTheme;
+    Theme* th = editor->theme();
+    editor->setPlainText(QStringLiteral("hello world"));
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const int x0 = editor->contentLeft();
+    const int x1 = x0 + qRound(11 * editor->cellWidth());
+    const auto greenish = [](const QColor& c) {
+        return c.green() > c.red() + 30 && c.green() > c.blue() + 30;
+    };
+    auto countGreenLine0 = [&] {
+        const QImage img = editor->grab().toImage();
+        int n = 0;
+        for (int x = x0; x < x1 && x < img.width(); ++x)
+            for (int y = pad; y < pad + lh && y < img.height(); ++y)
+                if (greenish(img.pixelColor(x, y)))
+                    ++n;
+        return n;
+    };
+    QCOMPARE(countGreenLine0(), 0); // control: nothing green-dominant
+
+    th->setColor(Theme::Role::Text, QColor(30, 220, 60)); // default PEN flips
+    QVERIFY(countGreenLine0() >= 10);
+    th->clearColor(Theme::Role::Text);
+    QCOMPARE(countGreenLine0(), 0); // palette ink back (chrome reads live)
+
+    // Base ground flip (opaque fill -> exact-color scan):
+    const QPoint probe(300, editor->height() - 3);
+    QCOMPARE(editor->grab().toImage().pixelColor(probe), editor->palette().color(QPalette::Base));
+    th->setColor(Theme::Role::Base, QColor(250, 250, 250));
+    QCOMPARE(editor->grab().toImage().pixelColor(probe), QColor(250, 250, 250));
+    th->clearColor(Theme::Role::Base);
+    QCOMPARE(editor->grab().toImage().pixelColor(probe), editor->palette().color(QPalette::Base));
+}
+
+void TestCodeEditor::themeTokenOverrideFlipsCommentInkAndRestores()
+{
+    // DoD swap proof #2: a known span's token ink per map. Fixture = the
+    // coloredPaint one (green-dominant ink on line 1 comes ONLY from
+    // Comment + Number). Overriding JUST Comment moves the comment run to
+    // a red+blue-dominant ink; NO manual invalidation happens in between —
+    // the themeChanged connection must be wiping the geo cache (token ink
+    // rides the cached format ranges) for the pixel scan to move.
+    using Theme = qmn::view::CodeEditorTheme;
+    editor->setPlainText(QStringLiteral("def f(x):\n    return 1  # add\n"));
+    editor->setLanguage(QStringLiteral("python"));
+    Theme* th = editor->theme();
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const int yTop = pad + lh; // line 1 band
+    auto countIf = [&](std::function<bool(const QColor&)> pred) {
+        const QImage img = editor->grab().toImage();
+        int n = 0;
+        for (int x = 0; x < img.width(); ++x)
+            for (int y = yTop; y < yTop + lh && y < img.height(); ++y)
+                if (pred(img.pixelColor(x, y)))
+                    ++n;
+        return n;
+    };
+    const std::function<bool(const QColor&)> greenish = [](const QColor& c) {
+        return c.green() > c.red() + 10 && c.green() > c.blue() + 10;
+    };
+    const std::function<bool(const QColor&)> pinkish = [](const QColor& c) {
+        return c.red() > c.green() + 40 && c.blue() > c.green() + 40;
+    };
+    QVERIFY(countIf(greenish) >= 20); // Comment + Number ink (measured fact)
+    QCOMPARE(countIf(pinkish), 0);    // no red+blue ink on these rows
+
+    QSignalSpy spy(th, &Theme::themeChanged);
+    th->setTokenColor(CodeEditor::TokenKind::Comment, QColor(230, 30, 230));
+    QCOMPARE(spy.count(), 1);
+    QVERIFY(countIf(pinkish) >= 20);  // comment run now magenta (geo wipe WORKED)
+    QVERIFY(countIf(greenish) >= 5);  // Number "1" stays green: only Comment moved
+
+    th->clearTokenColor(CodeEditor::TokenKind::Comment);
+    QCOMPARE(countIf(pinkish), 0);    // clear also wipes + repaints
+    QVERIFY(countIf(greenish) >= 20); // engine-table Comment ink is back LIVE
+}
+
+void TestCodeEditor::themeSeverityOverrideMovesDiagnosticInk()
+{
+    // DoD swap proof #3a: the severity family routes through the theme.
+    // Same probe window as diagnosticUnderlinePaintsSeverityInk: Error
+    // wavy ink is red-dominant; overriding the DiagnosticError ROLE makes
+    // that ink green-dominant instead (wavy line, gutter dot and ruler
+    // band all ride severityInk — one lookup proved here).
+    using Theme = qmn::view::CodeEditorTheme;
+    editor->setPlainText(QStringLiteral("plain\nmarked up\n"));
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const int yTop = pad + lh;
+    const int x0 = editor->contentLeft();
+    const int x1 = x0 + int(9 * editor->cellWidth());
+    auto countIf = [&](std::function<bool(const QColor&)> pred) {
+        const QImage img = editor->grab().toImage();
+        int n = 0;
+        for (int x = x0; x < x1 && x < img.width(); ++x)
+            for (int y = yTop; y < yTop + lh && y < img.height(); ++y)
+                if (pred(img.pixelColor(x, y)))
+                    ++n;
+        return n;
+    };
+    const std::function<bool(const QColor&)> reddish = [](const QColor& c) {
+        return c.red() > c.green() + 60 && c.red() > c.blue() + 60;
+    };
+    const std::function<bool(const QColor&)> greenish = [](const QColor& c) {
+        return c.green() > c.red() + 30 && c.green() > c.blue() + 30;
+    };
+
+    using Diag = CodeEditor::Diagnostic;
+    editor->setDiagnostics({Diag{1, 0, 1, 9, CodeEditor::Severity::Error, QStringLiteral("boom")}});
+    QVERIFY(countIf(reddish) >= 10); // the fixed red constant paints (Default theme)
+    QCOMPARE(countIf(greenish), 0);
+
+    editor->theme()->setColor(Theme::Role::DiagnosticError, QColor(40, 210, 90));
+    QCOMPARE(countIf(reddish), 0);   // the role override REPLACED the fixed ink
+    QVERIFY(countIf(greenish) >= 10);
+    editor->theme()->clearColor(Theme::Role::DiagnosticError);
+    QVERIFY(countIf(reddish) >= 10); // fallback restored LIVE
+    QCOMPARE(countIf(greenish), 0);
+}
+
+void TestCodeEditor::themeChromeRoleOverridesFlipFoldBreakpointFindProbes()
+{
+    // DoD swap proof #3b: the fixed-constant chrome family (M13 fold
+    // markers, M5/M7 breakpoint, M6 find quads) all left their hardcoded
+    // helpers behind role lookups — each override inverts the probe
+    // predicate that milestone established, each clear restores it live.
+    using Theme = qmn::view::CodeEditorTheme;
+    Theme* th = editor->theme();
+
+    // (a) fold triangles: the M13 probe scans EXACT (150,150,150) inside
+    // the zone; an override leaves zero exact gray and paints exact green
+    // (brush polygon, same geometry — only the ink moved).
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    editor->setPosition({5, 2}); // current-line band off row 0
+    const int lh = editor->lineHeight();
+    const int fz = editor->foldZoneWidth();
+    const int zx0 = editor->contentLeft() - fz;
+    const int zx1 = editor->contentLeft();
+    auto countInZone = [&](const QColor& ink) {
+        const QImage img = editor->grab().toImage();
+        int n = 0;
+        for (int y = editor->padding(); y < editor->padding() + lh; ++y)
+            for (int x = zx0; x < zx1; ++x)
+                if (img.pixelColor(x, y) == ink)
+                    ++n;
+        return n;
+    };
+    QVERIFY(countInZone(QColor(150, 150, 150)) > 0); // ▾ gray present
+    th->setColor(Theme::Role::FoldMarkers, QColor(20, 210, 40));
+    QCOMPARE(countInZone(QColor(150, 150, 150)), 0); // routed through the role
+    QVERIFY(countInZone(QColor(20, 210, 40)) >= 5);
+    th->clearColor(Theme::Role::FoldMarkers);
+    QVERIFY(countInZone(QColor(150, 150, 150)) > 0); // fixed fallback restored
+
+    // (b) breakpoint: the M7 strip probe (ruler window only — chrome is
+    // cool, so red-dominant ink means the marker band). The band and the
+    // gutter dot share the Breakpoint role; the strip scan proves routing.
+    editor->setPlainText(QStringLiteral("alpha\nbeta gamma\ndelta"));
+    editor->setBreakpointLines({1});
+    const int w = editor->width();
+    const int xs = w - CodeEditor::kOverviewRulerWidth;
+    auto countInStrip = [&](std::function<bool(const QColor&)> pred) {
+        const QImage img = editor->grab().toImage();
+        int n = 0;
+        for (int y = 0; y < img.height(); ++y)
+            for (int x = xs; x < w; ++x)
+                if (pred(img.pixelColor(x, y)))
+                    ++n;
+        return n;
+    };
+    const std::function<bool(const QColor&)> reddish = [](const QColor& c) {
+        return c.red() > c.green() + 60 && c.red() > c.blue() + 60;
+    };
+    const std::function<bool(const QColor&)> greenish = [](const QColor& c) {
+        return c.green() > c.red() + 60 && c.green() > c.blue() + 60;
+    };
+    QVERIFY(countInStrip(reddish) >= 50); // the fixed red band paints
+    th->setColor(Theme::Role::Breakpoint, QColor(60, 220, 80));
+    QCOMPARE(countInStrip(reddish), 0);   // no fixed red left in the strip
+    QVERIFY(countInStrip(greenish) >= 50);
+    th->clearColor(Theme::Role::Breakpoint);
+    QVERIFY(countInStrip(reddish) >= 50); // restored
+    editor->setBreakpointLines({});
+
+    // (c) find quads: the M6 warm predicate flips off under green role
+    // overrides (the quad wash keeps its 80/130 paint-time fade on top —
+    // the RGB override is what moves the dominance predicate).
+    editor->setPlainText(QStringLiteral("foo bar foo baz foo"));
+    editor->setFindText(QStringLiteral("foo"));
+    QVERIFY(editor->matchCount() == 3);
+    const int x0 = editor->contentLeft();
+    const int yTop = editor->padding();
+    QVERIFY(warmQuadPixels(editor->grab().toImage(), x0, yTop, yTop + lh) >= 60);
+    th->setColor(Theme::Role::FindMatch, QColor(60, 220, 80));
+    th->setColor(Theme::Role::FindCurrentMatch, QColor(20, 250, 60));
+    QCOMPARE(warmQuadPixels(editor->grab().toImage(), x0, yTop, yTop + lh), 0);
+    const std::function<bool(const QColor&)> gdom = [](const QColor& c) {
+        return c.green() > c.red() + 10 && c.green() > c.blue() + 10;
+    };
+    int greenQuads = 0;
+    {
+        const QImage img = editor->grab().toImage();
+        for (int x = x0; x < img.width(); ++x)
+            for (int y = yTop; y < yTop + lh; ++y)
+                if (gdom(img.pixelColor(x, y)))
+                    ++greenQuads;
+    }
+    QVERIFY2(greenQuads >= 30, qPrintable(QStringLiteral("green quads only %1").arg(greenQuads)));
+    th->clearColor(Theme::Role::FindMatch);
+    th->clearColor(Theme::Role::FindCurrentMatch);
+    QVERIFY(warmQuadPixels(editor->grab().toImage(), x0, yTop, yTop + lh) >= 60); // live restore
 }
 
 QTEST_MAIN(TestCodeEditor)

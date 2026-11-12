@@ -30,6 +30,7 @@ public:
 private:
     QComboBox* lineNumbersCombo_;
     QComboBox* currentLineCombo_;
+    QComboBox* themeCombo_; // M24 (14th knob): theme preset rows
     QSpinBox* rulerSpin_;
     QSpinBox* tabStopSpin_;
     QCheckBox* autoIndentCheck_;

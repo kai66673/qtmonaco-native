@@ -2,20 +2,22 @@
 
 // qmn-demo (the post-1.0 full demo app): the settings the "Настройки"
 // dialog edits, as ONE plain struct — the demo-side template of the M19
-// CodeEditorOptions surface (its twelve knobs since M20 added the M17
-// code font and zoom; the dialog gained a "Шрифт и масштаб" group for
-// them: family + pixel size + a zoom factor clamped by the editor).
+// CodeEditorOptions surface (its thirteen knobs since M21; M20 added the
+// M17 font/zoom pair with a "Шрифт и масштаб" group, M24 grew the
+// fourteenth: the theme preset riding the CodeEditorTheme door).
 // The defaults below MUST mirror the CodeEditor's own documented ones;
 // the demo test suite tripwires that against a fresh editor's live
-// options(), so drift fails CI rather than surprising a user.
+// options()/theme(), so drift fails CI rather than surprising a user.
 
 #include <QFont>
 
 #include "view/CodeEditor.hpp"
+#include "view/CodeEditorTheme.hpp"
 
 namespace qmn::app {
 
 using qmn::view::CodeEditor;
+using qmn::view::CodeEditorTheme; // M24: the theme preset knob's type
 
 // The CodeEditor ctor's exact shipped font recipe (fixed system font,
 // 14px, no hinting). ONE definition shared by the template default and
@@ -42,6 +44,12 @@ struct EditorSettings {
     // editor's clamps are its own, the dialog spin just pre-nudges).
     QFont codeFont = demoDefaultCodeFont();
     double zoomFactor = 1.0;
+    // M24 (14th knob): the theme PRESET riding the CodeEditorTheme door
+    // (not an options knob). Default = the live-palette theme (today's
+    // behavior); a manual role edit on a live editor reports kind Custom,
+    // which the dialog combo clamps back to the Default row (the demo
+    // itself never produces Custom).
+    CodeEditorTheme::Preset themePreset = CodeEditorTheme::Preset::Default;
 
     bool operator==(const EditorSettings&) const = default;
 };

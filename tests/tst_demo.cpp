@@ -11,6 +11,7 @@
 
 #include "view/CodeEditor.hpp"
 #include "view/CodeEditorOptions.hpp"
+#include "view/CodeEditorTheme.hpp"
 
 #include <QByteArray>
 #include <QFile>
@@ -28,6 +29,7 @@ using qmn::app::EditorSettingsDialog;
 using qmn::app::MainWindow;
 using qmn::view::CodeEditor;
 using qmn::view::CodeEditorOptions;
+using qmn::view::CodeEditorTheme; // M24: the 14th knob's type
 
 class TestDemo : public QObject
 {
@@ -80,6 +82,7 @@ private:
         s.autoCloseEnabled = false;
         s.readOnly = true;
         s.indentGuidesEnabled = false; // M21 (13th knob)
+        s.themePreset = CodeEditorTheme::Preset::Dark; // M24 (14th knob)
         QFont font = demoDefaultCodeFont(); // same family/strategy (the
         font.setPixelSize(20);              // NO-hinting rule survives)
         s.codeFont = font;
@@ -153,6 +156,8 @@ private slots:
         QCOMPARE(def.autoCloseEnabled, o->autoCloseEnabled());
         QCOMPARE(def.readOnly, o->isReadOnly());
         QCOMPARE(def.indentGuidesEnabled, o->indentGuidesEnabled()); // M21
+        QVERIFY(def.themePreset == fresh.theme()->kind()); // M24: default
+                                                           // preset = fresh kind
         // M20: the font tripwire is STRICTER than a pixel check — the
         // whole demo recipe (family, size, no-hinting strategy) must
         // equal the library ctor's font definition, or the drift test
@@ -228,6 +233,28 @@ private slots:
             s.currentLineMode = mode;
             dialog.setSettings(s);
             QVERIFY(dialog.settings().currentLineMode == mode);
+        }
+
+        // M24: theme rows walk both ways. Custom is NOT a row (the demo
+        // has no manual role edits), and a Custom seed — reachable only
+        // if somebody edits a live editor's theme by hand — clamps to
+        // the Default row and reads back as Default.
+        static constexpr CodeEditorTheme::Preset kThemePresets[] = {
+            CodeEditorTheme::Preset::Default,
+            CodeEditorTheme::Preset::Light,
+            CodeEditorTheme::Preset::Dark,
+        };
+        for (const CodeEditorTheme::Preset preset : kThemePresets) {
+            EditorSettings s = customSettings();
+            s.themePreset = preset;
+            dialog.setSettings(s);
+            QVERIFY(dialog.settings().themePreset == preset);
+        }
+        {
+            EditorSettings s = customSettings();
+            s.themePreset = CodeEditorTheme::Preset::Custom;
+            dialog.setSettings(s);
+            QVERIFY(dialog.settings().themePreset == CodeEditorTheme::Preset::Default);
         }
 
         // Spin edges: the ruler special-value text ("нет") still reads

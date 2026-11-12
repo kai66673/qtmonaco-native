@@ -37,6 +37,13 @@ void applySettings(CodeEditor* editor, const EditorSettings& s)
     o->setIndentGuidesEnabled(s.indentGuidesEnabled); // M21 (13th knob)
     o->setCodeFont(s.codeFont); // M20: the M17 pair rides the same bus
     o->setZoomFactor(s.zoomFactor); // (the editor clamps it to its bounds)
+
+    // M24 (14th knob): the theme door mirrors the options discipline —
+    // same-kind seeds skip entirely (applyPreset would otherwise WIPE the
+    // map and repaint on every dialog accept), while ANY other kind
+    // (including a Custom left by manual edits) applies the preset whole.
+    if (editor->theme()->kind() != s.themePreset)
+        editor->theme()->applyPreset(s.themePreset);
 }
 
 EditorSettings collectSettings(CodeEditor* editor)
@@ -58,6 +65,7 @@ EditorSettings collectSettings(CodeEditor* editor)
     s.indentGuidesEnabled = o->indentGuidesEnabled(); // M21
     s.codeFont = o->codeFont();     // the BASE, exactly as stored
     s.zoomFactor = o->zoomFactor(); // the live (already clamped) factor
+    s.themePreset = editor->theme()->kind(); // M24: live kind, Custom included
     return s;
 }
 

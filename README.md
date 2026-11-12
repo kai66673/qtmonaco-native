@@ -152,8 +152,12 @@ Gate 1.5 — usability interlude (post-freeze minor train, see PLAN.md):
       public `languageProperties(id)` + tri-state child QObject, built-in
       registry starts EMPTY, settings mirror/applyEditorSettings stay
       template-based)
-- [ ] M24 themes (chrome colors + token map; the default theme keeps
-      today's pixels, all "set_theme routes it" inks finally routed)
+- [x] M24 themes (chrome colors + token map on the `CodeEditorTheme`
+      child QObject — 28 ink roles + a `TokenKind`→QColor map, tri-state
+      with palette fallbacks so the default theme keeps today's pixels
+      (upgrade-identical, tripwired by the untouched paint suite) plus
+      explicit Light/Dark presets and a kind tracker; all "set_theme
+      routes it" inks finally routed; demo dialog theme combo)
 
 Gate 2 — IDE surface (after the freeze):
 

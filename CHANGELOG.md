@@ -6,6 +6,67 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **M24 (Gate 1.5): themes — `CodeEditorTheme` + `CodeEditor::theme()`.**
+  The last Gate 1.5 car. The public child QObject
+  (`view/CodeEditorTheme.hpp`, on the install allow-list; the
+  CodeEditorOptions/M23 back-pointer pattern) carries TWO tri-state
+  maps behind a Shiboken-safe surface: a 28-value `Role` enum for
+  chrome ink (base/text/cursor/selection/highlighted-line band/
+  current-line background+frame/gutter digits+separator/fold markers+
+  hover region/indent guides/long-line ruler/find match+current/
+  breakpoint/severity×4/inlay hints/drop caret/overview-ruler chrome×5)
+  with `setColor/clearColor/hasColor/color`, a `TokenKind`→QColor map
+  (`setTokenColor/clearTokenColor/hasTokenColor/tokenColor`), and one
+  `themeChanged()` (one emit per real change: same-value sets and
+  clear-of-unset silent, invalid QColor = the OFF switch). Paint-time
+  contract: an explicit QColor wins VERBATIM, an un-set role falls back
+  to the historical table — LIVE QPalette nudges (Selection=Highlight@90,
+  band@45, wash=Text@30, frame@90, sep/guides/ruler=Text@45/40/40) and
+  the fixed constants (fold gray 150, fold-region 150@46, find
+  oranges, severity family, ruler chrome) — so the DEFAULT (empty-map)
+  theme reproduces today's pixels: the untouched pre-M24 paint tests
+  ARE the upgrade tripwire. `severityInk(Severity)` is a theme method
+  (wavy underline + gutter dot + ruler band = one lookup). The
+  `Preset {Default,Light,Dark,Custom}` kind tracker: any manual edit
+  moves kind to Custom, `applyPreset` replaces the whole map and
+  announces exactly once; Default = the empty map (live palette),
+  Light/Dark pin the grounds (Dark's token map asserted
+  value-identical to `HighlightEngine::colorFor` per kind — the engine
+  table became the documented FALLBACK under the theme map, the
+  "invalid → default pen / skip span" rule unchanged). The editor's
+  `themeChanged` connection wipes the GEO CACHE before repainting —
+  token ink rides the cached format ranges (chrome reads live). Every
+  "set_theme routes it" comment resolved: the fixed-ink helpers
+  (severity/find/breakpoint/ruler/fold/fold-region) were deleted, all
+  canvas paint sites read `theme_->ink(Role::…)`; the find QUAD wash
+  layers its own paint-time alpha 80/130 over the role ink. Deliberate
+  scope: the find bar and the DnD drag chip are separate widgets and
+  keep riding plain QPalette (documented in code); the 44px ruler
+  METRIC stays a constant — chrome geometry is not a theme knob.
+  qmn-demo: 14th knob `EditorSettings.themePreset`, a "Тема:" combo in
+  the appearance group (Default/Light/Dark rows — Custom is never a
+  row, a Custom seed clamps to Default), `applySettings` skips
+  `applyPreset` when the kind already matches (no map-wipe/repaint per
+  dialog accept), `collectSettings` reads the live `kind()`. Tests:
+  `themeObjectTriStateSignalsAndKindTracker` (signal discipline, kind
+  tracker, the two maps never cross),
+  `themePresetSwapsGroundAndDarkTableMatchesEngine` (palette ground
+  sampled BEFORE any preset, Light/Dark ground flips, Dark == the
+  engine table per kind, Text never a themed token),
+  `themeRoleSwapFlipsBaseAndTextInk` (DoD swap #1: default-pen ink and
+  the opaque ground both flip and restore LIVE),
+  `themeTokenOverrideFlipsCommentInkAndRestores` (DoD swap #2: the
+  python fixture's comment run goes magenta under a Comment override —
+  no manual invalidation, proving the geo wipe — while Number stays
+  green; clear restores), `themeSeverityOverrideMovesDiagnosticInk`
+  (DoD swap #3a: the DiagnosticError role override replaces the fixed
+  red wavy/dot ink probe predicate) and
+  `themeChromeRoleOverridesFlipFoldBreakpointFindProbes` (DoD swap #3b:
+  fold-triangle exact-gray, ruler breakpoint-band red and find-quad
+  warm predicates each invert under their role override and restore
+  live). Suite: 206 passed / 2 skipped, ctest 3/3. Gate 1.5's train
+  (M20–M24) is complete; Gate 2 may open. Binding re-run green is
+  owner-side at tag time.
 - **M23 (Gate 1.5): language-scoped properties — `LanguageProperties` +
   `CodeEditor::languageProperties(id)`.** Monaco's `[languageId]` model
   made real: resolution is LANGUAGE override (when set) > editor options

@@ -153,8 +153,11 @@ public:
     // the document offset of line L. Only populated while active().
     const std::vector<int>& lineStarts() const { return lineStarts_; }
 
-    // v1 fixed theme (a set_theme/Monaco-palette bridge is a later
-    // milestone). An invalid return means "use the default text pen".
+    // Fixed token colors in the VS Code Dark+ family. Since M24 this is
+    // the FALLBACK under the theme's token map (CodeEditorTheme::
+    // setTokenColor overrides per kind; the Dark preset is value-identical
+    // to this table — a test tripwires that). An invalid return means
+    // "use the default text pen"; that rule is unchanged.
     static QColor colorFor(CodeEditor::TokenKind kind);
 
 private:

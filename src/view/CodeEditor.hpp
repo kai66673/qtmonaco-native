@@ -41,6 +41,7 @@ class HighlightEngine; // M4 private seam; defined in view/HighlightEngine.hpp
 class CodeEditorOptions; // M19 settings object; view/CodeEditorOptions.hpp
 class CodeEditorAccessible; // M11 a11y bridge; view/CodeEditorAccessible.hpp
 class LanguageProperties; // M23 language overrides; view/LanguageProperties.hpp
+class CodeEditorTheme; // M24 ink themes; view/CodeEditorTheme.hpp
 
 // 0-based text position. col is counted in UTF-16 code units.
 struct TextPosition {
@@ -391,6 +392,18 @@ public:
     // Full contract: view/CodeEditorOptions.hpp.
     CodeEditorOptions* options() const { return options_; }
 
+    // M24 theme object: ONE child QObject holding every painted ink of
+    // this canvas — an explicit QColor per chrome Role and per TokenKind,
+    // unset keys falling back LIVE to the pre-M24 sources (QPalette roles
+    // with their historical alpha nudges, and the fixed chrome constants;
+    // token fallback stays HighlightEngine::colorFor's table, invalid kind
+    // = default pen, unchanged). Presets Default/Light/Dark swap whole
+    // maps (applyPreset); any manual edit moves kind() to Custom. Every
+    // real change emits themeChanged, and the editor repaints on it with
+    // a geo-cache wipe (token ink rides the cached format ranges). Full
+    // contract: view/CodeEditorTheme.hpp.
+    CodeEditorTheme* theme() const { return theme_; }
+
     // Indentation + auto-indent (M14). SOFT TABS ONLY: Tab typing never
     // puts literal '\t' into the buffer; literal tabs (paste, setPlainText)
     // stay in the text and RENDER on the same stop grid. All three knobs
@@ -533,7 +546,10 @@ public:
     // overlays the strip's right edge, VS Code-style. The Python binding
     // maps qtmonaco's set_minimap_enabled here — never onto a
     // Chromium-style token minimap.
-    static constexpr int kOverviewRulerWidth = 44; // px, fixed until set_theme
+    static constexpr int kOverviewRulerWidth = 44; // px; M24 themes paint its
+                                                   // inks, the METRIC stays a
+                                                   // constant (chrome geometry
+                                                   // is not a theme knob)
     void setOverviewRulerEnabled(bool enabled);
     bool overviewRulerEnabled() const { return rulerEnabled_; }
     int overviewRulerWidth() const { return rulerEnabled_ ? kOverviewRulerWidth : 0; }
@@ -1070,6 +1086,7 @@ private:
     bool readOnly_ = false; // M19 (options-only knob): user edits refused
     bool indentGuidesEnabled_ = true; // M21 (options-only knob)
     CodeEditorOptions* options_ = nullptr; // M19; ctor parents it to this
+    CodeEditorTheme* theme_ = nullptr;     // M24; ctor parents it to this
     int gutterInnerPad() const; // gutter digit/glyph padding (M5)
 
     // --- M6 find/replace state (semantics: public API comments) ---
