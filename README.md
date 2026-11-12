@@ -132,6 +132,18 @@ Gate 1 — Code Editor v1:
       (scikit-build-core + cibuildwheel), production abi3 wheel +
       C++ install/export — the v1 API freeze (see PLAN.md Phase F)
 
+Gate 1.5 — usability interlude (post-freeze minor train, see PLAN.md):
+
+- [ ] M20 font/zoom onto the settings surface (the M17 knobs exist in the
+      library; the options() mirror + demo wiring are what's missing)
+- [ ] M21 indent guides (indent lines)
+- [ ] M22 fold-gutter hover region + innermost-fold click (click-to-fold
+      on the marker row already exists since M13)
+- [ ] M23 language-scoped properties (tab width first; overrides ride
+      above the editor settings — Monaco's `[languageId]` model)
+- [ ] M24 themes (chrome colors + token map; the default theme keeps
+      today's pixels, all "set_theme routes it" inks finally routed)
+
 Gate 2 — IDE surface (after the freeze):
 
 - [ ] M8 LSP client (stdio JSON-RPC via QProcess) — completion, diagnostics, hover

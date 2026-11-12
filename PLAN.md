@@ -14,7 +14,7 @@ tool, **Phase B** thin binding spine (wheel + single-QtCore ABI proof),
 **M4 engine decision** (vendored tree-sitter). Next up: **Phase A — M1b
 clipboard**, then Phase C.
 
-## Product model — two gates (decided 2026-11-09)
+## Product model — two gates + interlude (decided 2026-11-09; 1.5 added 2026-11-12)
 
 **Gate 1 — Code Editor v1.** A complete, self-sufficient native editor
 widget: graphemes/IME, undo/redo + multiple carets, syntax highlighting,
@@ -29,6 +29,14 @@ no soft wrap inside Gate 1.
 after the v1 API freeze. Design-forward requirement: the Gate-1
 decoration/inline API (Phase D3) must already cover diagnostics,
 breakpoints and inlay hints — Gate 2 must never re-operate on the view.
+
+**Gate 1.5 — usability interlude** (owner decision, 2026-11-12): a
+post-freeze MINOR train (M20–M24: font/zoom on the settings surface,
+indent guides, fold-gutter hover region, language-scoped properties,
+themes) runs BETWEEN the two gates; Gate 2 opens only when 1.5 closes.
+It widens the frozen v1 surface strictly additively (settings mirror,
+theme object, language overrides — v1.x minors on the release train);
+view *mapping/geometry* primitives stay exactly as frozen.
 
 Why this shape: the editor alone is a shippable product (writing code
 without an IDE is most of real usage), while IDE integration carries its own
@@ -540,7 +548,130 @@ API gained nothing. Offscreen-tested via the menu slots' programmatic
 doors (`tests/tst_demo`, ctest now 3/3) — the dialog/QFileDialog exec
 path is never entered by tests by design.
 
-# GATE 2 — IDE surface (after v1 freeze)
+# GATE 1.5 — usability interlude (M20–M24; owner proposal 2026-11-12)
+
+Owner-requested usability round BETWEEN the gates; the list order below
+is the owner's and the dependency chain runs the same way. Post-freeze
+discipline: every item EXTENDS the frozen v1 surface, so each milestone
+ships as a minor (`v1.1.0`, `v1.2.0`, …) under the release train —
+ctest green + wheel rebuilt from the pinned container + qmn-demo wired
+is the tag gate. What stays inviolate: NO new view mapping/geometry
+primitives — 1.5 adds settings/theme/behavior surface only.
+
+State corrections against the owner's five points (measured in code,
+2026-11-12):
+- (1) font/size/zoom — the LIBRARY knobs are DONE (M17):
+  `setCodeFont`/`codeFont` (the size rides inside the QFont, not a
+  separate knob), `setZoomFactor`/`zoomFactor`/`zoomIn`/`zoomOut`/
+  `resetZoom` + Ctrl+= / Ctrl+- / Ctrl+0 + Ctrl+wheel. Missing ONLY:
+  the M19 mirror (`options()` carries neither knob, so the *Changed
+  bus is blind to font/zoom changes) and the qmn-demo wiring (font/
+  zoom were deliberately left out of the demo template). M20 = pure
+  wiring, no new library machinery.
+- (2) indent lines — absent; the only vertical guide today is the M18
+  long-line ruler (Text@alpha40, h-scroll-clip recipe). Fully new.
+- (3) fold gutter — click-to-fold EXISTS (M13): a left click inside the
+  strip toggles the fold STARTING on that row, caret never moves,
+  Alt+click keeps its multi-caret meaning, marker-less rows fall
+  through to caret placement. What does NOT exist: any hover state (no
+  setMouseTracking, no QHoverEvent handling) and no deepest-fold
+  targeting. M22 builds hover + innermost targeting on top of the
+  existing hit handler.
+- (4) language — today a bare grammar id: `setLanguage`/
+  `availableLanguages()` over HighlightEngine's configure-time
+  parser+.scm table; ZERO per-language properties. The suspected
+  HighlightEngine connection is real — the id IS its key — so the
+  property registry belongs beside that table.
+- (5) theme — absent but pre-claimed everywhere: chrome paints mostly
+  from live QPalette roles (Base/Text/Highlight/PlaceholderText), and
+  every hardcoded ink (fold triangles, breakpoints, severities, find
+  quads, overview stripes, `HighlightEngine::colorFor` = "v1 fixed
+  theme") carries a "set_theme routes it" tripwire comment;
+  `kOverviewRulerWidth` is "fixed until set_theme". Themes cover
+  COLORS only — metrics stay constants.
+
+- **M20 — font/zoom onto the settings surface.** Mirror the two M17
+  knobs onto `CodeEditorOptions` (pure M19 pattern: the store stays in
+  the editor, the options object mirrors, the editor emits
+  `optionsFontChanged`/`optionsZoomChanged` so the bus never stays
+  blind); qmn-demo's template grows QFont + zoom fields, its dialog
+  QFontComboBox + size spin + zoom spin (all offscreen-safe). DoD:
+  mirrors read LIVE editor state — including the foreign
+  `QWidget::setFont` rebase path (baseFont_ moves + zoom resets to 1.0;
+  the mirror must show the truth afterwards); demo apply/template tests
+  extend the existing shape. Metric recompute is M17-proven, no pixel
+  re-proof needed.
+- **M21 — indent guides.** Options-only knob `indentGuidesEnabled`
+  (M19 rule: new settings live ONLY on the options object). Painted
+  inside the existing line loop: one 1px vertical guide per tab-stop
+  strictly inside a line's leading-whitespace span; a literal tab
+  covers every stop it crosses (VS Code rule); ambient decoration —
+  no cache-key change, no scroll-range change, h-scroll-clipped like
+  the M18 ruler, collapsed interiors paint nothing because the
+  view-line map already routes them. Ink Text@alpha40; joins M24's
+  role sweep with its own role. DoD: pixel band scans at known stop
+  columns (ink at every interior stop for BOTH tab- and space-indented
+  leads, none past the first non-ws char, none on empty lines), OFF
+  kills all ink, negative-h-scroll clamp.
+- **M22 — fold-gutter hover region + innermost-fold click.** While the
+  fold gutter is live, setMouseTracking + hover over the strip
+  resolves the INNERMOST fold containing the hovered row (deepest
+  nesting; a row that itself starts a deeper fold resolves to that
+  one) and paints a rectangular region over that fold's rows —
+  anchored in DOCUMENT rows like the M16 drop caret (scrolling keeps
+  it correct for free; edits and fold toggles invalidate it; the next
+  hover-move re-resolves; leave clears, and per the dragLeave lesson
+  the clear must not RELY on a leave event arriving). A click anywhere
+  inside the resolved region toggles THAT fold (replaces the
+  marker-row-only semantics); rows covered by no fold keep the caret
+  fall-through; Alt+click untouched. Public surface: none, if tests
+  prove the region via `foldableRanges()` + pixel scans + post-click
+  hidden-runs state (they can); at most one read-only seam if a
+  numeric probe turns out impossible. Offscreen trap to probe FIRST:
+  synthetic `QHoverEvent` sendEvent routing (the synthetic-drag
+  precedent says Qt's internal bookkeeping can eat such events).
+- **M23 — language-scoped properties.** Generalize the id into a small
+  registry beside HighlightEngine's grammar table: per-language
+  settable properties, first = `tabStopWidth`. Resolution while a
+  language is active: LANGUAGE override (when set) > editor options >
+  factory default — exactly Monaco's `[languageId]` model, which is
+  what the owner asked ("языковые свойства перекрывают настройки
+  редактора"). Tri-state WITHOUT std::optional crossing the boundary
+  (Shiboken): a child QObject with set/clear + has-getters, plain Qt
+  types (exact shape decided at M23). The effective value fans out to
+  EVERY tab-width consumer: soft-tab insert (M14), literal-tab render
+  grid, autoIndent stop math, indent guides (M21). The built-in
+  registry starts EMPTY — upgrades stay behavior-identical,
+  per-language defaults are IDE-side later. `availableLanguages()`
+  unchanged; language-aware autoIndent (e.g. Python colon indent) is
+  a named future hook, NOT in scope. DoD: tab-insert count + tab
+  render advance + guide stops all flip with an override (state/
+  numeric), clear falls back to the template, `applyEditorSettings`
+  stays global (the language layer rides ABOVE it), binding re-run
+  green.
+- **M24 — themes.** One theme object (Shiboken-safe: a role enum +
+  QColor get/set + a `TokenKind`→QColor map, Q_OBJECT +
+  `themeChanged`): chrome roles (base, text, cursor, selection,
+  current-line bg/frame, gutter digits + separator, fold markers,
+  indent guides, long-line ruler, find match/current, breakpoint,
+  severity×4, overview stripe, drop caret) + a token map replacing
+  `HighlightEngine::colorFor` (the "invalid kind → default pen" rule
+  survives). Built-ins: default "palette" = today's live-QPalette
+  behavior (upgrades MUST be pixel-identical — regression tripwire)
+  plus explicit Light/Dark pairs (Dark's token map = today's fixed
+  one). Every "set_theme routes it" comment resolves by sweeping the
+  fixed inks behind role lookups. qmn-demo's dialog grows a theme
+  combo. Metrics (the 44px ruler) stay constants. DoD: numeric pixel
+  scans prove a swap (Base/Text flip, a known span's token ink per
+  map, fold/breakpoint/severity/find-quad inks change), themeChanged
+  fires, the default theme reproduces the current suite's pixels.
+
+Phase DoD: each M2x tagged with ctest green + wheel rebuilt from the
+pinned container (the binding picks up the options-mirror/theme/
+language doors); qmn-demo wired per milestone; README/AGENTS gate
+wording kept honest. Gate 2 opens when M20–M24 close.
+
+# GATE 2 — IDE surface (opens after Gate 1.5 closes)
 
 Everything here is a *consumer* of the frozen v1 widget API; none of it may
 require new view primitives (if it does, that is a Gate-1 design bug to fix,
@@ -589,6 +720,13 @@ not a Gate-2 workaround).
 7. **Gate 1 is long** — the two-gate model's one real downside; the release
    train (alpha wheel + `v0.x` tag per milestone) is the agreed mitigation
    for hobby-scale motivation accounting.
+8. **Gate 1.5 widens a FROZEN surface** — the one sanctioned exception;
+   discipline: additive-only minors (`v1.1.0`, `v1.2.0`, …), the built-in
+   language registry starts EMPTY and the default theme reproduces
+   today's pixels exactly, so every upgrade is behavior/pixel-identical
+   until the user opts in; binding + wheel re-run per milestone; the
+   synthetic-hover offscreen routing is probed BEFORE M22's tests are
+   trusted.
 
 Out of scope by design: vim mode (setter exists and warns). Soft wrap is
 *deferred* to Gate 2, not out of scope.
