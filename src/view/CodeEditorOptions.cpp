@@ -144,4 +144,14 @@ bool CodeEditorOptions::isReadOnly() const
     return editor_->isReadOnly();
 }
 
+void CodeEditorOptions::setIndentGuidesEnabled(bool enabled)
+{
+    editor_->setIndentGuidesEnabled(enabled);
+}
+
+bool CodeEditorOptions::indentGuidesEnabled() const
+{
+    return editor_->indentGuidesEnabled();
+}
+
 } // namespace qmn::view

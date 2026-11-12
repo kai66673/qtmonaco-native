@@ -13,12 +13,13 @@
 // CodeEditor setter, which stay one-line-compatible delegates). Getters
 // always read live editor state; the options can never go stale.
 //
-// Two knobs exist ONLY here (they have no flat setter — M19 rule: new
+// Three knobs exist ONLY here (they have no flat setter — M19 rule: new
 // settings live only on the options object): autoCloseEnabled (the M18
-// pair-typing toggle) and readOnly (blocks every USER edit gesture:
-// typing, backspace/delete, Enter, Tab indentation, paste, cut, drops,
-// find/replace actions and undo/redo; programmatic setPlainText,
-// navigation, selection and copy stay fully alive).
+// pair-typing toggle), readOnly (blocks every USER edit gesture: typing,
+// backspace/delete, Enter, Tab indentation, paste, cut, drops, find/replace
+// actions and undo/redo; programmatic setPlainText, navigation, selection
+// and copy stay fully alive) and indentGuidesEnabled (the M21 ambient
+// tab-stop guides in the leading whitespace; default ON).
 //
 // The editor owns the object (child of the widget); CodeEditor::options()
 // returns it. One instance per editor, created in the editor constructor.
@@ -105,6 +106,15 @@ public:
     void setReadOnly(bool readOnly);
     bool isReadOnly() const;
 
+    // M21 indent guides (default ON): one 1px vertical guide per tab-stop
+    // strictly inside a line's rendered leading-whitespace span; a literal
+    // tab additionally covers the stop it lands on (VS Code's rule). Ink =
+    // the M18 ruler's Text@alpha40, per-line segments only; ambient — no
+    // cache-key, no scroll-range and no hit-test changes, and the guides
+    // ride h-scroll with the same gutter/ruler clip.
+    void setIndentGuidesEnabled(bool enabled);
+    bool indentGuidesEnabled() const;
+
 Q_SIGNALS:
     // Emitted by the editor's setters (NOT here) after the change has
     // been applied — so handlers can read the NEW value through this
@@ -120,6 +130,7 @@ Q_SIGNALS:
     void scrollBeyondLastLineEnabledChanged(bool enabled);
     void autoCloseEnabledChanged(bool enabled);
     void readOnlyChanged(bool readOnly);
+    void indentGuidesEnabledChanged(bool enabled); // M21
     void codeFontChanged(const QFont& font);     // M20 (M17 knob)
     void zoomFactorChanged(double factor);       // M20 (clamped value)
 

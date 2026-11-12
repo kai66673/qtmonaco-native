@@ -79,6 +79,7 @@ private:
         s.scrollBeyondLastLineEnabled = true;
         s.autoCloseEnabled = false;
         s.readOnly = true;
+        s.indentGuidesEnabled = false; // M21 (13th knob)
         QFont font = demoDefaultCodeFont(); // same family/strategy (the
         font.setPixelSize(20);              // NO-hinting rule survives)
         s.codeFont = font;
@@ -151,6 +152,7 @@ private slots:
         QCOMPARE(def.scrollBeyondLastLineEnabled, o->scrollBeyondLastLineEnabled());
         QCOMPARE(def.autoCloseEnabled, o->autoCloseEnabled());
         QCOMPARE(def.readOnly, o->isReadOnly());
+        QCOMPARE(def.indentGuidesEnabled, o->indentGuidesEnabled()); // M21
         // M20: the font tripwire is STRICTER than a pixel check — the
         // whole demo recipe (family, size, no-hinting strategy) must
         // equal the library ctor's font definition, or the drift test

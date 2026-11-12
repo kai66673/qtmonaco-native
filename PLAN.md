@@ -570,6 +570,7 @@ State corrections against the owner's five points (measured in code,
   wiring, no new library machinery. (CLOSED by M20 below, 2026-11-12.)
 - (2) indent lines — absent; the only vertical guide today is the M18
   long-line ruler (Text@alpha40, h-scroll-clip recipe). Fully new.
+  (CLOSED by M21 below, 2026-11-12.)
 - (3) fold gutter — click-to-fold EXISTS (M13): a left click inside the
   strip toggles the fold STARTING on that row, caret never moves,
   Alt+click keeps its multi-caret meaning, marker-less rows fall
@@ -610,18 +611,41 @@ State corrections against the owner's five points (measured in code,
   `setCurrentFont` deliberately avoided — fontconfig rewrites alias
   families like "monospace"). Offscreen-safe; DoD met: mirror shows the
   post-rebase truth, demo tests extended in the existing shape.
-- **M21 — indent guides.** Options-only knob `indentGuidesEnabled`
-  (M19 rule: new settings live ONLY on the options object). Painted
-  inside the existing line loop: one 1px vertical guide per tab-stop
-  strictly inside a line's leading-whitespace span; a literal tab
-  covers every stop it crosses (VS Code rule); ambient decoration —
-  no cache-key change, no scroll-range change, h-scroll-clipped like
-  the M18 ruler, collapsed interiors paint nothing because the
-  view-line map already routes them. Ink Text@alpha40; joins M24's
+- **M21 COMPLETE (2026-11-12): indent guides.** Options-only knob
+  `indentGuidesEnabled` (M19 rule: new settings live ONLY on the options
+  object). Painted inside the existing line loop: one 1px vertical guide
+  per tab-stop strictly inside a line's leading-whitespace span; a
+  literal tab covers every stop it crosses (VS Code rule); ambient
+  decoration — no cache-key change, no scroll-range change, h-scroll-
+  clipped like the M18 ruler, collapsed interiors paint nothing because
+  the view-line map already routes them. Ink Text@alpha40; joins M24's
   role sweep with its own role. DoD: pixel band scans at known stop
   columns (ink at every interior stop for BOTH tab- and space-indented
   leads, none past the first non-ws char, none on empty lines), OFF
-  kills all ink, negative-h-scroll clamp.
+  kills all ink, negative-h-scroll clamp. Landed as specced: the guide
+  set per line is {k·stop : k·stop < W} ∪ {the stops literal tabs land
+  on}, W = the tab-EXPANDED rendered leading-ws width — so "\tx" lights
+  column 4 while the same-width "    x" lights nothing (the VS Code
+  asymmetry the tab clause carries); guides are per-line 1px segments
+  (band height, unlike the full-height ruler) painted in the text slot
+  loop UNDER the caret/glyphs, ink + gutter/ruler clip copied verbatim
+  from M18, and the leading-ws scan is windowed + early-exiting like
+  indentOfModelLine (kIndentWindow cap; stops past the window's right
+  edge never computed). tabStopWidth_ is read LIVE each paint — the M23
+  fan-out seam. Tests: `indentGuidesKnobOnOptions` (default ON, one
+  emit per real change, same-value silence) +
+  `indentGuidesPaintBandsAndHScroll` (pixel band scans over the
+  tab/space/mixed/empty grid, OFF frame kills every lit column, ON-vs-
+  OFF diff frames at h=60 show the shifted columns and ZERO diff left
+  of contentLeft — the negative clamp — and a −100 public-door set
+  clamps to 0 with the grid back at its unscrolled columns);
+  `optionsMirrorsKnobsAndNotifies` grew the third options-only spy.
+  One existing probe needed a pin: `paintClusterWindowXOffsetProbe`
+  asserts its 200-space lead stays EXACTLY base, so it now pins the
+  decoration OFF next to the M18 wash pin (same spirit, same comment
+  slot). qmn-demo: `EditorSettings.indentGuidesEnabled` (13th knob) +
+  the "Вертикальные линии отступов" checkbox in "Текст и отступы";
+  defaults tripwire + customSettings extended.
 - **M22 — fold-gutter hover region + innermost-fold click.** While the
   fold gutter is live, setMouseTracking + hover over the strip
   resolves the INNERMOST fold containing the hovered row (deepest

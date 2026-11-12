@@ -1946,6 +1946,58 @@ int CodeEditor::indentOfModelLine(int line) const
                : kIndentWindow;
 }
 
+// M21 indent guides: the guide set of ONE visible line, painted as per-line
+// 1px segments (unlike the full-height M18 ruler these stop at the line
+// band). Spaces put a guide at every tab stop STRICTLY inside the rendered
+// (tab-expanded) leading-whitespace span; a literal tab additionally covers
+// the stop it lands on — VS Code's rule, so a "\t"-indented line shows its
+// guide at the text edge while a same-width run of spaces does not. The
+// stop grid is read LIVE per paint (tabStopWidth_; M23 fans the width out
+// to its consumers). Windowed read + early exit like indentOfModelLine:
+// paint calls this per visible line, a long line is never materialized,
+// and stops past the window's right edge are never even computed. Ink and
+// the gutter/ruler clip follow the M18 ruler verbatim (Text@alpha40,
+// x never left of contentLeft(), never under the overview strip).
+void CodeEditor::paintIndentGuides(QPainter& p, int line, int yTop) const
+{
+    if (line < 0 || line >= buffer_.lineCount())
+        return;
+    const int step = std::max(1, tabStopWidth_);
+    const int textLeft = contentLeft();
+    const double winRight = textLeft + std::max(1, horizontalViewportWidth());
+
+    const int off = buffer_.offsetOfLine(line);
+    const int winEnd = std::min(off + kIndentWindow, buffer_.charCount());
+    const QString s = buffer_.textRange(off, winEnd);
+
+    QColor guide = palette().color(QPalette::Text);
+    guide.setAlpha(40);
+
+    int col = 0;      // rendered columns consumed so far (tabs expanded)
+    int nextStop = step; // smallest not-yet-emitted stop (k*step, k >= 1)
+    for (int i = 0; i < s.size(); ++i) {
+        if (textLeft + qRound(nextStop * cellWidth_) - hScroll_ >= winRight)
+            break; // later stops only march further right: all culled
+        const QChar ch = s.at(i);
+        int end = col;
+        if (ch == QLatin1Char(' '))
+            end = col + 1;
+        else if (ch == QLatin1Char('\t'))
+            end = col + step - (col % step); // march to the NEXT stop
+        else
+            break; // first non-ws char ('\n' included): the span ends here
+        // The ws char spans [col, end): it lights every stop it ENDS past,
+        // and — being a tab — also the stop it lands on (== end).
+        const bool tab = ch == QLatin1Char('\t');
+        for (; nextStop < end || (tab && nextStop == end); nextStop += step) {
+            const int gx = textLeft + qRound(nextStop * cellWidth_) - hScroll_;
+            if (gx >= textLeft) // h-scroll clamp: never into the gutter
+                p.fillRect(QRect(gx, yTop, 1, lineHeight_), guide);
+        }
+        col = end;
+    }
+}
+
 bool CodeEditor::indentFoldSourceAlive(int header) const
 {
     // A fold's own hidden body is the usual next line — and hidden lines
@@ -3409,6 +3461,14 @@ void CodeEditor::paintEvent(QPaintEvent*)
         // visits the line.
         const bool scrolledPast = gs->valid && xInLine(gs, lineLength(line)) <= hShift;
 
+        // M21 indent guides: ambient per-line tab-stop guides inside the
+        // line's leading whitespace (semantics on paintIndentGuides). They
+        // paint UNDER the caret and the glyphs of this same pass; folded-
+        // away lines never reach this loop, so collapsed interiors paint
+        // nothing for free (the PLAN's view-line-map argument).
+        if (indentGuidesEnabled_ && !scrolledPast)
+            paintIndentGuides(p, line, yTop);
+
         if (line == caret_.line && caretOn_ && !scrolledPast) {
             // The caret follows the very cluster advances the line below is
             // drawn with (same QTextLine), so emoji ZWJ sequences no longer
@@ -3900,6 +3960,16 @@ void CodeEditor::setReadOnly(bool readOnly)
         emit options_->readOnlyChanged(readOnly);
     // No repaint: the read-only state refuses edits, it does not restyle
     // (Gate-1 minimal surface; a themed lock badge is Gate-2 territory).
+}
+
+void CodeEditor::setIndentGuidesEnabled(bool enabled)
+{
+    if (enabled == indentGuidesEnabled_)
+        return;
+    indentGuidesEnabled_ = enabled;
+    update(); // ambient decoration: repaint only, no cache/scroll-range touch
+    if (options_)
+        emit options_->indentGuidesEnabledChanged(enabled);
 }
 
 void CodeEditor::setAutoIndentEnabled(bool enabled)

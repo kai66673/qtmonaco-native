@@ -89,6 +89,7 @@ EditorSettingsDialog::EditorSettingsDialog(QWidget* parent, const EditorSettings
     scrollPastEndCheck_ = new QCheckBox(QStringLiteral("Прокрутка за последней строкой"), this);
     autoCloseCheck_ = new QCheckBox(QStringLiteral("Автозакрытие скобок и кавычек"), this);
     readOnlyCheck_ = new QCheckBox(QStringLiteral("Только чтение"), this);
+    indentGuidesCheck_ = new QCheckBox(QStringLiteral("Вертикальные линии отступов"), this);
 
     auto* appearance = new QGroupBox(QStringLiteral("Внешний вид"), this);
     auto* appearanceForm = new QFormLayout(appearance);
@@ -107,6 +108,7 @@ EditorSettingsDialog::EditorSettingsDialog(QWidget* parent, const EditorSettings
     textForm->addRow(QStringLiteral("Ширина табуляции:"), tabStopSpin_);
     textForm->addRow(autoIndentCheck_);
     textForm->addRow(autoCloseCheck_);
+    textForm->addRow(indentGuidesCheck_); // M21 (13th knob)
 
     auto* behavior = new QGroupBox(QStringLiteral("Поведение"), this);
     auto* behaviorForm = new QFormLayout(behavior);
@@ -145,6 +147,7 @@ void EditorSettingsDialog::setSettings(const EditorSettings& s)
     scrollPastEndCheck_->setChecked(s.scrollBeyondLastLineEnabled);
     autoCloseCheck_->setChecked(s.autoCloseEnabled);
     readOnlyCheck_->setChecked(s.readOnly);
+    indentGuidesCheck_->setChecked(s.indentGuidesEnabled); // M21
 
     // M20: remember the WHOLE seed (see the seedFont_ note in the header).
     // Deliberately NO setCurrentFont: a family like fontconfig's
@@ -180,6 +183,7 @@ EditorSettings EditorSettingsDialog::settings() const
     s.scrollBeyondLastLineEnabled = scrollPastEndCheck_->isChecked();
     s.autoCloseEnabled = autoCloseCheck_->isChecked();
     s.readOnly = readOnlyCheck_->isChecked();
+    s.indentGuidesEnabled = indentGuidesCheck_->isChecked(); // M21
     // M20: the seed font patched, never rebuilt — weight/style/hinting
     // ride through, only the two edited fields move (round-trip QFont
     // equality lives or dies here). "Still on the seed family's row"

@@ -6,6 +6,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **M21 (Gate 1.5): indent guides.** The options-only trio grows a third
+  member: `setIndentGuidesEnabled/indentGuidesEnabled` on the M19
+  `CodeEditorOptions` (no flat public setter — M19 rule) plus the bus
+  signal `indentGuidesEnabledChanged(bool)`; DEFAULT ON, state stored in
+  the editor like every other knob. Painting: `paintIndentGuides` per
+  visible line INSIDE the text slot loop — one 1px vertical guide per
+  tab-stop strictly inside the line's tab-EXPANDED leading-whitespace
+  span, plus every stop a literal tab lands on (VS Code's rule: "\tx"
+  lights column 4, the same-width "    x" lights nothing; "  \tx" lights
+  its tab landing too). Guides are per-line segments (band height —
+  unlike the full-height M18 ruler), ink and h-scroll clip copied
+  verbatim from that ruler (Text@alpha40, x never left of contentLeft(),
+  never reaching the overview strip), painted UNDER the caret and the
+  glyphs of the same pass. Ambient like the ruler: no cache key, no
+  scroll-range, no hit-test change; folded-away lines never reach the
+  loop (collapsed interiors paint nothing for free). The stop grid is
+  read LIVE per paint (tabStopWidth_ — the M23 fan-out seam); the
+  leading-ws scan is windowed + early-exiting like indentOfModelLine
+  (kIndentWindow cap, stops past the window's right edge never even
+  computed). Tests: `indentGuidesKnobOnOptions` (default ON, one emit
+  per real change, same-value silence), `indentGuidesPaintBandsAndHScroll`
+  (pixel band scans at exact Text@40-blend columns across space-, tab-
+  and mixed-indented leads + an empty line: ink at every interior stop,
+  tab landings at the text edge, nothing past the first non-ws char,
+  the OFF frame kills every lit column, ON-vs-OFF diff frames at h=60
+  show the shifted guides and ZERO diff in the gutter strip, and the
+  public −100 door clamps to 0 with the grid back at its unscrolled
+  columns) and the extended `optionsMirrorsKnobsAndNotifies` trio-spy.
+  `paintClusterWindowXOffsetProbe` pins the decoration OFF (its
+  200-space lead must stay EXACTLY base — same pre-pinning as the M18
+  wash).
+- `qmn-demo` M21 half: `EditorSettings.indentGuidesEnabled` joins the
+  template as the 13th knob (struct `==` covers the round-trip), the
+  dialog gains the "Вертикальные линии отступов" checkbox in "Текст и
+  отступы", and the defaults tripwire + `customSettings()` carry it.
 - **M20 (Gate 1.5): font/zoom onto the settings surface.** The M17 code
   font + zoom factor join the M19 `CodeEditorOptions` mirror (pure M19
   pattern: the store and all validation stay in the editor, the options

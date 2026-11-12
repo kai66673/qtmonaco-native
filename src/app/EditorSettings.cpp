@@ -34,6 +34,7 @@ void applySettings(CodeEditor* editor, const EditorSettings& s)
     o->setScrollBeyondLastLineEnabled(s.scrollBeyondLastLineEnabled);
     o->setAutoCloseEnabled(s.autoCloseEnabled);
     o->setReadOnly(s.readOnly);
+    o->setIndentGuidesEnabled(s.indentGuidesEnabled); // M21 (13th knob)
     o->setCodeFont(s.codeFont); // M20: the M17 pair rides the same bus
     o->setZoomFactor(s.zoomFactor); // (the editor clamps it to its bounds)
 }
@@ -54,6 +55,7 @@ EditorSettings collectSettings(CodeEditor* editor)
     s.scrollBeyondLastLineEnabled = o->scrollBeyondLastLineEnabled();
     s.autoCloseEnabled = o->autoCloseEnabled();
     s.readOnly = o->isReadOnly();
+    s.indentGuidesEnabled = o->indentGuidesEnabled(); // M21
     s.codeFont = o->codeFont();     // the BASE, exactly as stored
     s.zoomFactor = o->zoomFactor(); // the live (already clamped) factor
     return s;

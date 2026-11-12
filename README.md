@@ -137,7 +137,10 @@ Gate 1.5 — usability interlude (post-freeze minor train, see PLAN.md):
 - [x] M20 font/zoom onto the settings surface (the M17 knobs mirrored
       onto options() with the bus covering every door incl. the
       foreign-setFont rebase; qmn-demo template + dialog wired)
-- [ ] M21 indent guides (indent lines)
+- [x] M21 indent guides (indent lines — options-only `indentGuidesEnabled`
+      (default ON): per-line 1px tab-stop guides in the leading whitespace,
+      tab landings included (VS Code rule); M18 ruler ink + clip recipe;
+      qmn-demo 13th knob wired)
 - [ ] M22 fold-gutter hover region + innermost-fold click (click-to-fold
       on the marker row already exists since M13)
 - [ ] M23 language-scoped properties (tab width first; overrides ride

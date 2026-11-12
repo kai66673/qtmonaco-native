@@ -35,6 +35,7 @@ struct EditorSettings {
     bool scrollBeyondLastLineEnabled = false;
     bool autoCloseEnabled = true;     // M18 pair typing
     bool readOnly = false;            // refuse USER edits (M19-only knob)
+    bool indentGuidesEnabled = true;  // M21 ambient tab-stop guides (options-only)
     // M20: the M17 pair. codeFont is the zoom-1.0 BASE exactly as the
     // editor stores it (pixel-sized by the demo recipe — see
     // demoDefaultCodeFont); zoomFactor is the live editor factor (the

@@ -830,6 +830,10 @@ private:
     bool autoCloseEnabled() const { return autoCloseEnabled_; }
     void setReadOnly(bool readOnly);
     bool isReadOnly() const { return readOnly_; }
+    // M21 indent guides (default ON): ambient per-line tab-stop guides in
+    // the leading whitespace; semantics on paintIndentGuides below.
+    void setIndentGuidesEnabled(bool enabled);
+    bool indentGuidesEnabled() const { return indentGuidesEnabled_; }
     friend class CodeEditorOptions;
     friend class CodeEditorAccessible; // M11: the a11y bridge reads the live
                                        // model/caret/geometry state directly
@@ -1025,6 +1029,7 @@ private:
     int longLineRulerCol_ = 0; // M18 long-line ruler column; 0 = off
     bool autoCloseEnabled_ = true; // M19 (options-only knob)
     bool readOnly_ = false; // M19 (options-only knob): user edits refused
+    bool indentGuidesEnabled_ = true; // M21 (options-only knob)
     CodeEditorOptions* options_ = nullptr; // M19; ctor parents it to this
     int gutterInnerPad() const; // gutter digit/glyph padding (M5)
 
@@ -1103,6 +1108,9 @@ private:
     void recomputeFoldables(int firstModel, int lastModel);
     int foldEndForLine(int line); // exact end (engine full query, else indent scan)
     int indentOfModelLine(int line) const; // leading ws units; -1 = blank line
+    // M21: one visible line's indent guides, painted in the text slot loop
+    // (semantics on the definition). Reads the knob flag at call site only.
+    void paintIndentGuides(QPainter& p, int line, int yTop) const;
     // True when the indent heuristic is the fold source: no grammar loaded
     // (plain/unknown language), or the language's composed fold query failed
     // to build (then the engine contributes nothing and the fallback keeps

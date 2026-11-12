@@ -181,6 +181,10 @@ private slots:
     void longLineRulerMapsToColumnAndRidesHScroll();
     void currentLineModeWashFrameAndDelegates();
 
+    // Indent guides (M21).
+    void indentGuidesKnobOnOptions();
+    void indentGuidesPaintBandsAndHScroll();
+
     // Settings object (M19).
     void optionsMirrorsKnobsAndNotifies();
     void fontZoomKnobsOnOptions();           // M20: the M17 knobs join the bus
@@ -3797,6 +3801,178 @@ void TestCodeEditor::currentLineModeWashFrameAndDelegates()
     QVERIFY(!editor->currentLineHighlight());
 }
 
+// --- M21 indent guides -------------------------------------------------------
+
+// The knob is M19-options-only (no flat CodeEditor setter on purpose):
+// default ON, one bus signal per real change, silent on same-value sets.
+// The pixel half of the contract lives in indentGuidesPaintBandsAndHScroll.
+void TestCodeEditor::indentGuidesKnobOnOptions()
+{
+    CodeEditorOptions* opt = editor->options();
+    QVERIFY(opt->indentGuidesEnabled()); // default ON = the shipped look
+
+    QSignalSpy spy(opt, &CodeEditorOptions::indentGuidesEnabledChanged);
+    opt->setIndentGuidesEnabled(false);
+    QVERIFY(!opt->indentGuidesEnabled());
+    QCOMPARE(spy.count(), 1);
+    QVERIFY(!spy.at(0).at(0).toBool());
+    opt->setIndentGuidesEnabled(false); // same value: silent
+    QCOMPARE(spy.count(), 1);
+    opt->setIndentGuidesEnabled(true);
+    QCOMPARE(spy.count(), 2);
+    QVERIFY(opt->indentGuidesEnabled());
+}
+
+void TestCodeEditor::indentGuidesPaintBandsAndHScroll()
+{
+    // Pixel-differential (no vision): guides are 1px vertical segments, one
+    // per tab-stop strictly inside the RENDERED leading-whitespace span,
+    // drawn in exact Text@alpha40 over Base (the M18 ruler ink) — but only
+    // for this line's band (height = one line box). A literal tab also
+    // covers the stop it lands on (VS Code's rule): "\tx" lights column 4
+    // while "    x" (the same rendered width) lights nothing.
+    //
+    // Document grid (default stop 4, one line each, caret parked on the
+    // EMPTY line 4 so no caret block ever reaches the scanned x window):
+    //   0: "        x"  8 spaces -> ink at 4, none at 8 (== span edge)
+    //   1: "\t\tx"                -> ink at 4 AND 8 (both tab landings)
+    //   2: "    x"                -> none at 4 (spaces only reach the edge)
+    //   3: "\tx"                  -> ink at 4 (tab landing), none at 8+
+    //   4: ""                caret here; no guides anywhere on the line
+    //   5: "  \tx"          2 spaces + tab -> ink at 4 (landing), none at 8
+    editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Off); // uniform Base
+    QVERIFY(editor->options()->indentGuidesEnabled()); // default ON
+    editor->setPlainText(QStringLiteral("        x\n\t\tx\n    x\n\tx\n\n  \tx"));
+    QCOMPARE(editor->lineCount(), 6);
+    editor->setPosition({4, 0});
+    QCoreApplication::processEvents(); // settle any deferred invalidation
+
+    const int pad = editor->padding();
+    const int lh = editor->lineHeight();
+    const int xL = editor->contentLeft();
+    const double cw = editor->cellWidth();
+    const QColor baseC = editor->palette().color(QPalette::Base);
+    const QColor inkC = editor->palette().color(QPalette::Text);
+    const auto blendOver = [](const QColor& under, const QColor& over, int a) {
+        const qreal f = a / 255.0;
+        return QColor(qRound(under.red() + f * (over.red() - under.red())),
+                      qRound(under.green() + f * (over.green() - under.green())),
+                      qRound(under.blue() + f * (over.blue() - under.blue())));
+    };
+    const QColor guide = blendOver(baseC, inkC, 40); // the exact M18 ruler ink
+    const auto guideLike = [&](const QColor& c) {
+        return qAbs(c.red() - guide.red()) <= 4 && qAbs(c.green() - guide.green()) <= 4
+            && qAbs(c.blue() - guide.blue()) <= 4;
+    };
+    // Rows of exact guide ink in one column of one line band (inner rows,
+    // away from band edges where nothing else paints anyway). A guide is
+    // a FULL-height run; glyph ink ('x' diagonals, AA tails) can never
+    // stack a guide-like run this tall in one column.
+    const auto guideRows = [&](const QImage& img, int x, int line) {
+        const int yTop = pad + line * lh;
+        int n = 0;
+        for (int y = yTop + 2; y < yTop + lh - 2; ++y)
+            if (guideLike(img.pixelColor(x, y)))
+                ++n;
+        return n;
+    };
+    const auto hasGuide = [&](const QImage& img, int line, int stopCol) {
+        const int cx = xL + qRound(stopCol * cw);
+        for (int dx = -1; dx <= 1; ++dx) // absorb the 1px grid drift
+            if (guideRows(img, cx + dx, line) >= lh - 6)
+                return true;
+        return false;
+    };
+
+    const QImage on = editor->grab().toImage();
+    QVERIFY(hasGuide(on, 0, 4));  // space lead: every STRICTLY interior stop
+    QVERIFY(!hasGuide(on, 0, 8)); // …and none at the span edge / text start
+    QVERIFY(!hasGuide(on, 0, 12));
+    QVERIFY(hasGuide(on, 1, 4));  // tab lead: interior stop…
+    QVERIFY(hasGuide(on, 1, 8));  // …plus the tab landing at the text edge
+    QVERIFY(!hasGuide(on, 1, 12));
+    QVERIFY(!hasGuide(on, 2, 4)); // space lead reaching only the edge: nothing
+    QVERIFY(!hasGuide(on, 2, 8)); // nothing past the first non-ws char
+    QVERIFY(hasGuide(on, 3, 4));  // "\tx": the tab covers the stop it crosses
+    QVERIFY(!hasGuide(on, 3, 8));
+    QVERIFY(!hasGuide(on, 4, 4)); // the empty line paints no guides at all
+    QVERIFY(!hasGuide(on, 4, 8));
+    QVERIFY(hasGuide(on, 5, 4));  // "  \tx": tab landing inside the span
+    QVERIFY(!hasGuide(on, 5, 8));
+
+    // OFF kills all ink (DoD): same frame, every lit column goes dark.
+    editor->options()->setIndentGuidesEnabled(false);
+    const QImage off = editor->grab().toImage();
+    QVERIFY(!hasGuide(off, 0, 4));
+    QVERIFY(!hasGuide(off, 1, 4));
+    QVERIFY(!hasGuide(off, 1, 8));
+    QVERIFY(!hasGuide(off, 3, 4));
+    QVERIFY(!hasGuide(off, 5, 4));
+    editor->options()->setIndentGuidesEnabled(true);
+
+    // Rides h-scroll like the M18 ruler, and the negative clamp means it:
+    // with the window scrolled 60px right, guides that would land LEFT of
+    // contentLeft() are culled — NOTHING changes in the gutter strip —
+    // while the surviving ones sit at exactly contentLeft + qRound(stop*cw)
+    // - 60. Diff frames (guides ON vs OFF at the same scroll) so line
+    // numbers and static chrome cancel; the caret is culled at this scroll.
+    editor->setPlainText(QString(200, QLatin1Char(' ')) + QLatin1Char('x'));
+    editor->setPosition({0, 0});
+    editor->grab(); // paint pass seeds the ambient doc-width extent
+    editor->setHorizontalScrollOffset(60);
+    QCOMPARE(editor->horizontalScrollOffset(), 60);
+    const QImage scrolled = editor->grab().toImage();
+    editor->options()->setIndentGuidesEnabled(false);
+    const QImage control = editor->grab().toImage();
+    editor->options()->setIndentGuidesEnabled(true); // leave the default ON
+
+    int gutterStrays = 0;
+    for (int y = 0; y < scrolled.height(); ++y)
+        for (int x = 0; x < xL; ++x)
+            if (scrolled.pixelColor(x, y) != control.pixelColor(x, y))
+                ++gutterStrays;
+    QCOMPARE(gutterStrays, 0); // the clip never lets a guide bleed into the gutter
+
+    const auto diffGuideRows = [&](int x) { // rows where ONLY the ON frame is guide ink
+        const int yTop = pad; // line 0 band, no v-scroll
+        int n = 0;
+        for (int y = yTop + 2; y < yTop + lh - 2; ++y)
+            if (scrolled.pixelColor(x, y) != control.pixelColor(x, y)
+                && guideLike(scrolled.pixelColor(x, y)))
+                ++n;
+        return n;
+    };
+    const double winRight = editor->width() - editor->overviewRulerWidth();
+    int lit = 0, culled = 0;
+    for (int stop = 4; stop <= 40; stop += 4) {
+        const int gx = xL + qRound(stop * cw) - 60;
+        if (gx < xL + 2) {
+            ++culled; // it would sit in/near the gutter: must be dark there
+            continue;
+        }
+        if (gx >= winRight - 2)
+            break; // further stops march out of the window
+        ++lit;
+        bool found = false;
+        for (int dx = -1; dx <= 1; ++dx)
+            if (diffGuideRows(gx + dx) >= lh - 6)
+                found = true;
+        QVERIFY2(found, qPrintable(QStringLiteral("stop %1 must paint its guide at %2")
+                                       .arg(stop).arg(gx)));
+    }
+    QVERIFY(culled > 0 && lit > 0); // the frame actually exercised both halves
+
+    // Negative offsets clamp to 0 through the public door — the guide grid
+    // stays at its unscrolled columns (no left-lean into the gutter).
+    editor->setHorizontalScrollOffset(-100);
+    QCOMPARE(editor->horizontalScrollOffset(), 0);
+    const QImage clamped = editor->grab().toImage();
+    QVERIFY(hasGuide(clamped, 0, 4));
+    const int deepX = xL + qRound(40 * cw);
+    if (deepX < editor->width() - CodeEditor::kOverviewRulerWidth)
+        QVERIFY(hasGuide(clamped, 0, 40));
+}
+
 // --- M19 settings object ----------------------------------------------------
 
 void TestCodeEditor::optionsMirrorsKnobsAndNotifies()
@@ -3822,6 +3998,7 @@ void TestCodeEditor::optionsMirrorsKnobsAndNotifies()
              editor->scrollBeyondLastLineEnabled());
     QVERIFY(opt->autoCloseEnabled()); // M19-only knobs: default ON…
     QVERIFY(!opt->isReadOnly());      // …and OFF
+    QVERIFY(opt->indentGuidesEnabled()); // M21 joins the options-only trio ON
 
     // Change through options -> editor sees it, ONE signal with the new
     // value; same-value sets are silent; the flat door fires the SAME spy.
@@ -3899,22 +4076,31 @@ void TestCodeEditor::optionsMirrorsKnobsAndNotifies()
     opt->setScrollBeyondLastLineEnabled(opt->scrollBeyondLastLineEnabled()); // same: silent
     QCOMPARE(sbSpy.count(), 2);
 
-    // The two options-only knobs also notify; the behavioral half of the
-    // contract is exercised by autoCloseToggleOnOptions/readOnlyBlocksUserEdits.
+    // The options-only knobs also notify; the behavioral half of the
+    // contract is exercised by autoCloseToggleOnOptions/readOnlyBlocksUserEdits
+    // and (M21) indentGuidesPaintBandsAndHScroll.
     QSignalSpy acSpy(opt, &CodeEditorOptions::autoCloseEnabledChanged);
     QSignalSpy roSpy(opt, &CodeEditorOptions::readOnlyChanged);
+    QSignalSpy igSpy(opt, &CodeEditorOptions::indentGuidesEnabledChanged);
     opt->setAutoCloseEnabled(false);
     opt->setReadOnly(true);
+    opt->setIndentGuidesEnabled(false); // M21 (back ON at the end)
     QCOMPARE(acSpy.count(), 1);
     QVERIFY(!acSpy.at(0).at(0).toBool());
     QCOMPARE(roSpy.count(), 1);
     QVERIFY(roSpy.at(0).at(0).toBool());
-    opt->setReadOnly(true); // same: silent
+    QCOMPARE(igSpy.count(), 1);
+    QVERIFY(!igSpy.at(0).at(0).toBool());
+    opt->setReadOnly(true);         // same: silent
+    opt->setIndentGuidesEnabled(false); // same: silent
     QCOMPARE(roSpy.count(), 1);
+    QCOMPARE(igSpy.count(), 1);
     opt->setAutoCloseEnabled(true); // leave the room as we found it
     opt->setReadOnly(false);
+    opt->setIndentGuidesEnabled(true);
     QCOMPARE(acSpy.count(), 2);
     QCOMPARE(roSpy.count(), 2);
+    QCOMPARE(igSpy.count(), 2);
 }
 
 void TestCodeEditor::fontZoomKnobsOnOptions()
@@ -6397,6 +6583,10 @@ void TestCodeEditor::paintClusterWindowXOffsetProbe()
     // against an exact Base backdrop; the current-line wash (ON by default
     // since M18) would blend under them, so pin the wash off.
     editor->setCurrentLineMode(CodeEditor::CurrentLineMode::Off);
+    // M21: same spirit — the default-ON indent guides paint their gray in
+    // the 200-space lead this probe asserts stays EXACTLY base. The probe
+    // is about cluster window culling, not the ambient decoration.
+    editor->options()->setIndentGuidesEnabled(false);
     editor->setPlainText(QStringLiteral("ab\n") + QString(200, QLatin1Char(' '))
                         + QStringLiteral("QQ") + QString(200, QLatin1Char(' ')));
     editor->setPosition({0, 0});
