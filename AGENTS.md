@@ -241,9 +241,11 @@ g++ -O3 -std=c++20 tools/bench_model.cpp -Isrc/core/.. \
   fold-gutter hover region, language-scoped properties, themes; the frozen
   surface widens only additively — no new view mapping/geometry
   primitives); Gate 2 = IDE surface, opened only after Gate 1.5 closes.
-  Never start Gate-2 work while Gate 1.5 is open; the M5 decoration API
-  must already cover diagnostics, breakpoints and inlay hints so Gate 2
-  needs no view surgery.
+  **Gate 1.5 CLOSED 2026-11-12 at tag `v1.5.0`** (all five cars shipped as
+  one minor; wheel rebuild at the tag is the owner's step) — Gate 2 work
+  may now start. Never start Gate-2 work while a gate is open; the M5
+  decoration API must already cover diagnostics, breakpoints and inlay
+  hints so Gate 2 needs no view surgery.
 - CI is the source of truth for the supported build: `.github/workflows/ci.yml`
   (archlinux container + ubuntu-24.04, both `-DCMAKE_BUILD_TYPE=Release`).
 - Deliberately out of scope: vim mode.

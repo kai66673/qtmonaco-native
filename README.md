@@ -132,7 +132,8 @@ Gate 1 — Code Editor v1:
       (scikit-build-core + cibuildwheel), production abi3 wheel +
       C++ install/export — the v1 API freeze (see PLAN.md Phase F)
 
-Gate 1.5 — usability interlude (post-freeze minor train, see PLAN.md):
+Gate 1.5 — usability interlude (post-freeze minor train, see PLAN.md;
+✔ closed with M24 — released as one minor `v1.5.0` covering M20–M24):
 
 - [x] M20 font/zoom onto the settings surface (the M17 knobs mirrored
       onto options() with the bus covering every door incl. the

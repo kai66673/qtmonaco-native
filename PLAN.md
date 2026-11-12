@@ -548,7 +548,7 @@ API gained nothing. Offscreen-tested via the menu slots' programmatic
 doors (`tests/tst_demo`, ctest now 3/3) — the dialog/QFileDialog exec
 path is never entered by tests by design.
 
-# GATE 1.5 — usability interlude (M20–M24; owner proposal 2026-11-12)
+# GATE 1.5 — usability interlude (M20–M24; owner proposal 2026-11-12) — ✔ CLOSED (v1.5.0, 2026-11-12)
 
 Owner-requested usability round BETWEEN the gates; the list order below
 is the owner's and the dependency chain runs the same way. Post-freeze
@@ -803,6 +803,13 @@ Phase DoD: each M2x tagged with ctest green + wheel rebuilt from the
 pinned container (the binding picks up the options-mirror/theme/
 language doors); qmn-demo wired per milestone; README/AGENTS gate
 wording kept honest. Gate 2 opens when M20–M24 close.
+✔ CLOSED 2026-11-12: all five cars landed (M20 06bf7b3, M21 7f4b8b8,
+M22 3fbf574, M23 3291e4e, M24 7370598) and the untagged train ships as
+ONE minor — tag `v1.5.0` (package VERSION 1.5.0, CHANGELOG cut, ctest
+3/3 at HEAD: 206 passed / 2 skipped). The wheel rebuilt from the pinned
+container AT the tag is the owner's release step; it carries the
+options-mirror/theme/language doors into Python for the first time.
+**Gate 1.5 CLOSED — Gate 2 may open.**
 
 # GATE 2 — IDE surface (opens after Gate 1.5 closes)
 
