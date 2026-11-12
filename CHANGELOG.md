@@ -48,6 +48,41 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
     a foreign marker + Shift still cannot arm a move. `sendDropAt` grew
     a defaulted `modifiers` arg riding BOTH event stages. Suite:
     186/0/2.
+- `qmn-demo`, a full C++ demo application (post-1.0 owner request; app
+  layer only — the frozen view API gains nothing): a QMainWindow whose
+  central widget is a closable QTabWidget. Файл→Открыть… (Ctrl+O,
+  multi-select) appends one tab per file (UTF-8 loader with CRLF/CR
+  normalized to LF — the spike's stance; encoding detection stays a
+  future milestone); grammar is guessed from the suffix (.py/.json/
+  .js/mjs/cjs, unmapped suffixes stay plain text — setLanguage's ""
+  fallback); tab title = file name, tabData keeps the full path, the
+  window title tracks the current tab, and the status bar shows the
+  current editor's 1-based caret + selection length riding
+  cursorMoved/selectionChanged. Tab close buttons + Файл→Закрыть
+  вкладку (Ctrl+W); out-of-range closes are no-ops. Настройки→
+  Параметры редактора… (Ctrl+,) opens a Russian-language
+  EditorSettingsDialog over the ten M19 knobs (line numbers mode,
+  current-line highlight, long-line ruler column, tab stop, auto-indent,
+  tab-changes-focus, overview ruler, scroll-beyond-last-line, auto-close
+  pairs, read-only) — font/zoom deliberately stay editor chords, not
+  template material. The dialog seeds from the FOCUSED editor (stored
+  template when no tab is open); on ACCEPT its values go through every
+  open editor's `options()` object (so the M19 *Changed signal bus
+  fires like any other change door) AND become the template future tabs
+  inherit. Open failures are non-modal status-bar messages on purpose —
+  nothing can block the harness. Window+dialog compile into the static
+  lib `qmn_demo_app` so `tests/tst_demo` drives the exact doors the menu
+  slots call (`openPath`/`applyEditorSettings`/`closeTabAt`,
+  `setSettings`/`settings`) fully offscreen — no QFileDialog/QDialog
+  exec anywhere. The demo's settings defaults mirror the library's,
+  tripwired against a fresh editor's live `options()`
+  (`defaultSettingsMirrorFreshEditorDefaults`). 9 new slots: tab
+  open/activate/tabData/close bookkeeping, the non-modal failure gate
+  (missing file + directory), apply-to-every-editor + template
+  inheritance by later tabs, dialog↔struct round-trip across every enum
+  row and spin clamp, suffix→grammar (with CRLF normalization). Suite:
+  11/0/0; ctest is now 3/3 (textbuffer + codeeditor + demo).
+  `qmn-spike` untouched.
 
 ### Fixed
 - Post-1.0 owner-reported paint bug: a line-count edit on a FOLDLESS doc

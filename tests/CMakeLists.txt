@@ -6,3 +6,11 @@ qt_add_executable(tst_codeeditor tst_codeeditor.cpp)
 target_link_libraries(tst_codeeditor PRIVATE qmn_view Qt6::Test)
 add_test(NAME codeeditor COMMAND tst_codeeditor)
 set_tests_properties(codeeditor PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# Drives the qmn-demo app surface (MainWindow + dialog) through the same
+# programmatic doors its menu slots call - no QFileDialog/QDialog exec,
+# so it runs fully offscreen.
+qt_add_executable(tst_demo tst_demo.cpp)
+target_link_libraries(tst_demo PRIVATE qmn_demo_app Qt6::Test)
+add_test(NAME demo COMMAND tst_demo)
+set_tests_properties(demo PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

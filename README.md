@@ -56,6 +56,7 @@ past the end.
 src/core/   TextBuffer — pure Qt-based C++ (QtCore ONLY), headless, testable
 src/view/   CodeEditor — the raw QWidget canvas (QPainter), depends on core
 src/app/    qmn-spike  — demo/bench harness, depends on view
+            qmn-demo   — full demo app: tabbed editors + settings dialog
 tests/      property tests (core) + keyboard smoke tests (view)
 tools/      standalone micro-benches (model, highlight latency tree split)
 third_party/ vendored tree-sitter runtime + generated grammars (M4; the
@@ -75,12 +76,14 @@ cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
 ninja -C build
 ctest --test-dir build          # core tests need no display
 ./build/src/app/qmn-spike [file]
+./build/src/app/qmn-demo [files...]   # tabbed demo: Файл->Открыть…, Настройки
 ```
 
 Headless smoke/bench run:
 
 ```bash
 QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-spike --exit-after-ms 2000 bigfile.py
+QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo --exit-after-ms 300 bigfile.py
 ```
 
 Highlighting demos, one per grammar (`.py`/`.json`/`.js` suffixes pick the

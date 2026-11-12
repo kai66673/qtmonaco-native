@@ -531,6 +531,15 @@ caught M3's undo-capture walk at 37 µs/op and that regression was fixed
 (`72fd735`, pruned `textRange` walk + deque undo stack) before the freeze.
 The v1 API is FROZEN: Gate-2 work may not require new view primitives.
 
+Post-1.0 addendum (2026-11-12, owner request): **qmn-demo**, the full C++
+demo app — tabbed QTabWidget main window, Файл->Открыть… per-file tabs
+(suffix->grammar guess), Настройки->dialog applying ten M19 knobs to
+EVERY open editor on accept (+ template for later tabs). Lives entirely
+in `src/app/` (static lib `qmn_demo_app` + executable); the frozen view
+API gained nothing. Offscreen-tested via the menu slots' programmatic
+doors (`tests/tst_demo`, ctest now 3/3) — the dialog/QFileDialog exec
+path is never entered by tests by design.
+
 # GATE 2 — IDE surface (after v1 freeze)
 
 Everything here is a *consumer* of the frozen v1 widget API; none of it may
