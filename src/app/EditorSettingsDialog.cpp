@@ -3,6 +3,8 @@
 #include <QCheckBox>
 #include <QComboBox>
 #include <QDialogButtonBox>
+#include <QDoubleSpinBox>
+#include <QFontComboBox>
 #include <QFormLayout>
 #include <QGroupBox>
 #include <QLabel>
@@ -66,6 +68,21 @@ EditorSettingsDialog::EditorSettingsDialog(QWidget* parent, const EditorSettings
     tabStopSpin_ = new QSpinBox(this);
     tabStopSpin_->setRange(1, 32); // the editor clamps >= 1; 32 is demo sanity
 
+    // M20: the "Шрифт и масштаб" trio. The zoom spin's range IS the
+    // editor's documented clamp window, so the control never fights the
+    // setter; decimals 2 + step 0.05 keep values readable (any double
+    // in range applies verbatim; the editor clamps defensively anyway).
+    // The px spin caps at 128: beyond that the demo window cannot show
+    // even one line and the number stops meaning anything.
+    fontCombo_ = new QFontComboBox(this);
+    fontPxSpin_ = new QSpinBox(this);
+    fontPxSpin_->setRange(1, 128);
+    fontPxSpin_->setSuffix(QStringLiteral(" px"));
+    zoomSpin_ = new QDoubleSpinBox(this);
+    zoomSpin_->setRange(CodeEditor::kZoomFactorMin, CodeEditor::kZoomFactorMax);
+    zoomSpin_->setDecimals(2);
+    zoomSpin_->setSingleStep(0.05);
+
     autoIndentCheck_ = new QCheckBox(QStringLiteral("Автоотступ при Enter"), this);
     tabFocusCheck_ = new QCheckBox(QStringLiteral("Tab переводит фокус (не отступ)"), this);
     overviewRulerCheck_ = new QCheckBox(QStringLiteral("Линейка обзора справа"), this);
@@ -78,6 +95,12 @@ EditorSettingsDialog::EditorSettingsDialog(QWidget* parent, const EditorSettings
     appearanceForm->addRow(QStringLiteral("Номера строк:"), lineNumbersCombo_);
     appearanceForm->addRow(QStringLiteral("Подсветка текущей строки:"), currentLineCombo_);
     appearanceForm->addRow(QStringLiteral("Линия-ограничитель (столбец):"), rulerSpin_);
+
+    auto* font = new QGroupBox(QStringLiteral("Шрифт и масштаб"), this);
+    auto* fontForm = new QFormLayout(font);
+    fontForm->addRow(QStringLiteral("Шрифт:"), fontCombo_);
+    fontForm->addRow(QStringLiteral("Размер:"), fontPxSpin_);
+    fontForm->addRow(QStringLiteral("Масштаб:"), zoomSpin_);
 
     auto* text = new QGroupBox(QStringLiteral("Текст и отступы"), this);
     auto* textForm = new QFormLayout(text);
@@ -101,6 +124,7 @@ EditorSettingsDialog::EditorSettingsDialog(QWidget* parent, const EditorSettings
     connect(buttons, &QDialogButtonBox::rejected, this, &QDialog::reject);
 
     auto* layout = new QVBoxLayout(this);
+    layout->addWidget(font);
     layout->addWidget(appearance);
     layout->addWidget(text);
     layout->addWidget(behavior);
@@ -121,6 +145,26 @@ void EditorSettingsDialog::setSettings(const EditorSettings& s)
     scrollPastEndCheck_->setChecked(s.scrollBeyondLastLineEnabled);
     autoCloseCheck_->setChecked(s.autoCloseEnabled);
     readOnlyCheck_->setChecked(s.readOnly);
+
+    // M20: remember the WHOLE seed (see the seedFont_ note in the header).
+    // Deliberately NO setCurrentFont: a family like fontconfig's
+    // "monospace" ALIAS resolves (inside QFontComboBox's own lookup) to
+    // some concrete family, silently REWRITING the seed on the way back
+    // out. So the row selection works on the model's TEXT rows: exact
+    // hit, else the seed's own text is added as a row and selected.
+    // settings() then distinguishes "still on the seed's row" (family
+    // untouched) from a user switch (family taken from currentFont()).
+    seedFont_ = s.codeFont;
+    const QString family = s.codeFont.family();
+    int fontRow = fontCombo_->findText(family);
+    if (fontRow < 0) {
+        fontCombo_->addItem(family);
+        fontRow = fontCombo_->count() - 1;
+    }
+    fontCombo_->setCurrentIndex(fontRow);
+    fontPxSpin_->setValue(s.codeFont.pixelSize()); // the demo contract is
+                                                   // pixel-sized fonts
+    zoomSpin_->setValue(s.zoomFactor);             // clamped to the range
 }
 
 EditorSettings EditorSettingsDialog::settings() const
@@ -136,6 +180,23 @@ EditorSettings EditorSettingsDialog::settings() const
     s.scrollBeyondLastLineEnabled = scrollPastEndCheck_->isChecked();
     s.autoCloseEnabled = autoCloseCheck_->isChecked();
     s.readOnly = readOnlyCheck_->isChecked();
+    // M20: the seed font patched, never rebuilt — weight/style/hinting
+    // ride through, only the two edited fields move (round-trip QFont
+    // equality lives or dies here). "Still on the seed family's row"
+    // keeps the seed family VERBATIM (aliases like "monospace" must not
+    // be rewritten); only a row switch pulls a new family, and even
+    // then via currentFont(), which for real list rows carries it.
+    QFont font = seedFont_;
+    const int row = fontCombo_->currentIndex();
+    const QString rowText = row >= 0 ? fontCombo_->itemText(row) : QString();
+    if (!rowText.isEmpty() && rowText != seedFont_.family()) {
+        const QString chosen = fontCombo_->currentFont().family();
+        if (!chosen.isEmpty())
+            font.setFamily(chosen);
+    }
+    font.setPixelSize(fontPxSpin_->value()); // the spin always has a value
+    s.codeFont = font;
+    s.zoomFactor = zoomSpin_->value();
     return s;
 }
 

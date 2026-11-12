@@ -567,7 +567,7 @@ State corrections against the owner's five points (measured in code,
   the M19 mirror (`options()` carries neither knob, so the *Changed
   bus is blind to font/zoom changes) and the qmn-demo wiring (font/
   zoom were deliberately left out of the demo template). M20 = pure
-  wiring, no new library machinery.
+  wiring, no new library machinery. (CLOSED by M20 below, 2026-11-12.)
 - (2) indent lines — absent; the only vertical guide today is the M18
   long-line ruler (Text@alpha40, h-scroll-clip recipe). Fully new.
 - (3) fold gutter — click-to-fold EXISTS (M13): a left click inside the
@@ -590,17 +590,26 @@ State corrections against the owner's five points (measured in code,
   `kOverviewRulerWidth` is "fixed until set_theme". Themes cover
   COLORS only — metrics stay constants.
 
-- **M20 — font/zoom onto the settings surface.** Mirror the two M17
-  knobs onto `CodeEditorOptions` (pure M19 pattern: the store stays in
-  the editor, the options object mirrors, the editor emits
-  `optionsFontChanged`/`optionsZoomChanged` so the bus never stays
-  blind); qmn-demo's template grows QFont + zoom fields, its dialog
-  QFontComboBox + size spin + zoom spin (all offscreen-safe). DoD:
-  mirrors read LIVE editor state — including the foreign
-  `QWidget::setFont` rebase path (baseFont_ moves + zoom resets to 1.0;
-  the mirror must show the truth afterwards); demo apply/template tests
-  extend the existing shape. Metric recompute is M17-proven, no pixel
-  re-proof needed.
+- **M20 COMPLETE (2026-11-12): font/zoom onto the settings surface.**
+  Mirrored the two M17 knobs onto `CodeEditorOptions` exactly as
+  specced (the store stays in the editor, the options object mirrors,
+  the editor emits so the bus is never blind) — final signal names are
+  `codeFontChanged`/`zoomFactorChanged`, getter-named like the rest of
+  the M19 bus, replacing the tentative `optionsFontChanged/
+  optionsZoomChanged` spellings of the plan. Emission covers ALL doors:
+  both flat setters, the chords riding `setZoomFactor` (the emitted
+  value is the CLAMPED truth), and the foreign `QWidget::setFont`
+  REBASE path in `changeEvent` (per-half emits: base/zoom each
+  announced only if it moved; the self-doors' FontChange lands in the
+  non-rebasing path and stays silent there, so nothing double-fires).
+  qmn-demo's template grew QFont + zoom fields (defaults via a shared
+  `demoDefaultCodeFont()` recipe copy — the drift tripwire now compares
+  whole QFont definitions), the dialog grew the QFontComboBox + px
+  spin + zoom double-spin group, editing only family/px/factor while
+  the seed font carries the rest through (round-trip QFont equality;
+  `setCurrentFont` deliberately avoided — fontconfig rewrites alias
+  families like "monospace"). Offscreen-safe; DoD met: mirror shows the
+  post-rebase truth, demo tests extended in the existing shape.
 - **M21 — indent guides.** Options-only knob `indentGuidesEnabled`
   (M19 rule: new settings live ONLY on the options object). Painted
   inside the existing line loop: one 1px vertical guide per tab-stop

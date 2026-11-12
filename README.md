@@ -134,8 +134,9 @@ Gate 1 — Code Editor v1:
 
 Gate 1.5 — usability interlude (post-freeze minor train, see PLAN.md):
 
-- [ ] M20 font/zoom onto the settings surface (the M17 knobs exist in the
-      library; the options() mirror + demo wiring are what's missing)
+- [x] M20 font/zoom onto the settings surface (the M17 knobs mirrored
+      onto options() with the bus covering every door incl. the
+      foreign-setFont rebase; qmn-demo template + dialog wired)
 - [ ] M21 indent guides (indent lines)
 - [ ] M22 fold-gutter hover region + innermost-fold click (click-to-fold
       on the marker row already exists since M13)

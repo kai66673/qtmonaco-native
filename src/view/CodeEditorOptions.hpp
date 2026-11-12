@@ -23,10 +23,16 @@
 // The editor owns the object (child of the widget); CodeEditor::options()
 // returns it. One instance per editor, created in the editor constructor.
 //
+// M20 closed the two blind knobs: the M17 code font and zoom factor are
+// mirrored here too, so the *Changed bus now covers EVERY editor setting
+// (a font/zoom change made at any door - options, flat setter, zoom
+// chords, or a foreign QWidget::setFont rebase - is announced).
+//
 // Shiboken contract: plain QObject, plain Qt types only (bool/int + the
 // editor's own Q_ENUM enums by nested name); no templates, no STL, no
 // overloads. Signals carry the changed VALUE (Qt6 syntax).
 
+#include <QFont>
 #include <QObject>
 
 #include "view/CodeEditor.hpp" // the nested Q_ENUM enums this object speaks
@@ -70,6 +76,18 @@ public:
     void setScrollBeyondLastLineEnabled(bool enabled);
     bool scrollBeyondLastLineEnabled() const;
 
+    // --- M20: the M17 font/zoom knobs join the mirror ---------------------
+    // Semantics live ENTIRELY on the editor's M17 setters (base-vs-zoom
+    // model, clamps, metric re-measure, foreign-setFont rebase); these are
+    // the same doors plus the notify bus, which used to be blind to font
+    // and zoom. QFont/double keep it Shiboken-clean.
+
+    void setCodeFont(const QFont& font); // the zoom-1.0 BASE (M17)
+    QFont codeFont() const;              // the BASE, not the zoomed font
+
+    void setZoomFactor(double factor); // clamped to the editor's bounds
+    double zoomFactor() const;
+
     // --- M19-only knobs (no flat CodeEditor setter) ----------------------
 
     // M18 pair typing on/off (default ON). OFF, the pair chars behave as
@@ -102,6 +120,8 @@ Q_SIGNALS:
     void scrollBeyondLastLineEnabledChanged(bool enabled);
     void autoCloseEnabledChanged(bool enabled);
     void readOnlyChanged(bool readOnly);
+    void codeFontChanged(const QFont& font);     // M20 (M17 knob)
+    void zoomFactorChanged(double factor);       // M20 (clamped value)
 
 private:
     CodeEditor* editor_; // owned elsewhere: the editor outlives its child

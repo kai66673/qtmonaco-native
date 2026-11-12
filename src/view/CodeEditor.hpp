@@ -658,6 +658,12 @@ public:
     // from there. codeFont() returns the BASE (as last set), not the zoomed
     // font — zoomed geometry is observable via cellWidth()/lineHeight()/
     // QWidget::font(). Shiboken-clean: QFont/double only, no templates.
+    // M20: both knobs also mirror on CodeEditorOptions (setCodeFont/
+    // setZoomFactor/codeFont/zoomFactor + codeFontChanged/zoomFactorChanged
+    // on the notify bus); the editor emits from EVERY door — the flat
+    // setters, the zoom chords riding setZoomFactor, and the foreign
+    // QWidget::setFont rebase (each changed half announced once, same-
+    // value sets stay silent per the M19 no-op rule).
     void setCodeFont(const QFont& font);
     QFont codeFont() const { return baseFont_; }
     // Zoom factor over the base font, clamped to [kZoomFactorMin,

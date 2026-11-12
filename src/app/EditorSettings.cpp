@@ -1,10 +1,22 @@
 #include "EditorSettings.hpp"
 
+#include <QFontDatabase>
+
 #include "view/CodeEditorOptions.hpp"
 
 namespace qmn::app {
 
 using qmn::view::CodeEditorOptions;
+
+QFont demoDefaultCodeFont()
+{
+    // Bit-for-bit the CodeEditor ctor's shipped recipe (a drift tripwire
+    // test compares this against a fresh editor's live codeFont()).
+    QFont font = QFontDatabase::systemFont(QFontDatabase::FixedFont);
+    font.setPixelSize(14);
+    font.setHintingPreference(QFont::PreferNoHinting);
+    return font;
+}
 
 void applySettings(CodeEditor* editor, const EditorSettings& s)
 {
@@ -22,6 +34,8 @@ void applySettings(CodeEditor* editor, const EditorSettings& s)
     o->setScrollBeyondLastLineEnabled(s.scrollBeyondLastLineEnabled);
     o->setAutoCloseEnabled(s.autoCloseEnabled);
     o->setReadOnly(s.readOnly);
+    o->setCodeFont(s.codeFont); // M20: the M17 pair rides the same bus
+    o->setZoomFactor(s.zoomFactor); // (the editor clamps it to its bounds)
 }
 
 EditorSettings collectSettings(CodeEditor* editor)
@@ -40,6 +54,8 @@ EditorSettings collectSettings(CodeEditor* editor)
     s.scrollBeyondLastLineEnabled = o->scrollBeyondLastLineEnabled();
     s.autoCloseEnabled = o->autoCloseEnabled();
     s.readOnly = o->isReadOnly();
+    s.codeFont = o->codeFont();     // the BASE, exactly as stored
+    s.zoomFactor = o->zoomFactor(); // the live (already clamped) factor
     return s;
 }
 

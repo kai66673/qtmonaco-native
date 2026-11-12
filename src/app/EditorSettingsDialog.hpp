@@ -13,6 +13,8 @@
 
 class QCheckBox;
 class QComboBox;
+class QDoubleSpinBox;
+class QFontComboBox;
 class QSpinBox;
 
 namespace qmn::app {
@@ -36,6 +38,18 @@ private:
     QCheckBox* scrollPastEndCheck_;
     QCheckBox* autoCloseCheck_;
     QCheckBox* readOnlyCheck_;
+    // M20 font/zoom trio. The dialog edits only family + pixel size +
+    // factor; seedFont_ (pushed by setSettings) carries the font's REST
+    // (weight, style, the no-hinting strategy the editor's metrics rule
+    // depends on) through settings(), so a seed->controls->collect round
+    // trip yields a QFont EQUAL to the seed, not merely similar. (A
+    // QFontComboBox currentFont() is not usable wholesale: it carries
+    // its own size and style.) The template's fonts are pixel-sized by
+    // the demo contract (the library default recipe is too).
+    QFontComboBox* fontCombo_;
+    QSpinBox* fontPxSpin_;
+    QDoubleSpinBox* zoomSpin_;
+    QFont seedFont_;
 };
 
 } // namespace qmn::app

@@ -6,6 +6,53 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Added
+- **M20 (Gate 1.5): font/zoom onto the settings surface.** The M17 code
+  font + zoom factor join the M19 `CodeEditorOptions` mirror (pure M19
+  pattern: the store and all validation stay in the editor, the options
+  object mirrors, getters read LIVE editor state): `setCodeFont/
+  codeFont` (the zoom-1.0 BASE) and `setZoomFactor/zoomFactor`, plus
+  the bus signals `codeFontChanged(QFont)` / `zoomFactorChanged(double)`
+  — named after the getters like every other M19 signal, not the
+  tentative `options*` names from the plan. The editor now emits from
+  EVERY font/zoom door: `setCodeFont` (silent on a same-definition set,
+  `QFont::operator==` on the as-last-set base), `setZoomFactor` (the
+  early-return no-op covers same-value; the emitted value is always the
+  CLAMPED truth; the zoomIn/Out/resetZoom chords and Ctrl+=/-/0 and
+  Ctrl+wheel ride this door), and the M17 FOREIGN `QWidget::setFont`
+  REBASE path in `changeEvent` (base and zoom halves captured before
+  the branch, each announced after the re-measure only if it actually
+  moved; the self-doors' own FontChange lands in the non-rebasing path
+  where both halves are already the current values, so nothing ever
+  double-fires). Shiboken-clean as ever (QFont/double, no templates).
+  Tests: `fontZoomKnobsOnOptions` (options door + flat door + chords on
+  ONE spy each, same-value silence, clamp-emits-then-silent, 1.5→1.875
+  exact binary chord, cellWidth growth as the numeric no-vision proof)
+  and `foreignFontRebaseRidesOptionsBus` (rebase announces both halves
+  once; re-pushing the effective font is a Qt no-op and stays silent;
+  a foreign font equal to the base but under a live zoom resets ONLY
+  the zoom half).
+- `qmn-demo` M20 half: `EditorSettings` grows `codeFont` + `zoomFactor`
+  fields (struct `==` covers them for free), defaulted by a new shared
+  `demoDefaultCodeFont()` that replicates the library ctor's font
+  recipe — the drift tripwire (`defaultSettingsMirrorFreshEditorDefaults`)
+  now compares WHOLE QFont definitions, not pixels. `applySettings/
+  collectSettings` route the pair through the options doors like every
+  other knob. The dialog gains a "Шрифт и масштаб" group:
+  QFontComboBox + px spin (1–128) + zoom `QDoubleSpinBox` whose range
+  IS the editor's documented [0.25,4.0] clamp window (2 decimals, step
+  0.05). The dialog edits only family + px size + factor; the rest of
+  the font definition (weight/style/the no-hinting strategy the metric
+  rule depends on) rides through from the seed, so seed→controls→
+  collect round-trips compare EQUAL as QFonts. Deliberately avoided:
+  `QFontComboBox::setCurrentFont` — fontconfig resolves an ALIAS family
+  like the shipped recipe's "monospace" to some concrete family and
+  silently REWRITES it on collect (measured); the row selection works
+  on model TEXT rows instead, and "still on the seed family's row"
+  keeps the seed family verbatim. Tests: `customSettings()` now carries
+  the pair, `applySettingsHitsEveryEditor` asserts the caret grid grew
+  (numeric), the dialog round-trip walks the clamp edges (99→max,
+  −5→min, 9999px→128) and a real family switch through
+  `QFontDatabase::families()`.
 - Post-1.0 DnD polish (M16 gap, view-internal — the frozen public API
   gains nothing):
   - Drop-target caret during a drag: `dragEnter`/`dragMove` park it in

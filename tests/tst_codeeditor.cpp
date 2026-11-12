@@ -183,6 +183,8 @@ private slots:
 
     // Settings object (M19).
     void optionsMirrorsKnobsAndNotifies();
+    void fontZoomKnobsOnOptions();           // M20: the M17 knobs join the bus
+    void foreignFontRebaseRidesOptionsBus(); // M20: the changeEvent door emits
     void autoCloseToggleOnOptions();
     void readOnlyBlocksUserEdits();
 
@@ -3913,6 +3915,116 @@ void TestCodeEditor::optionsMirrorsKnobsAndNotifies()
     opt->setReadOnly(false);
     QCOMPARE(acSpy.count(), 2);
     QCOMPARE(roSpy.count(), 2);
+}
+
+void TestCodeEditor::fontZoomKnobsOnOptions()
+{
+    // M20: the M17 font/zoom pair joins the M19 mirror. Semantics stay
+    // ENTIRELY on the editor (base-vs-zoom model, clamps, re-measure);
+    // options is the second door into the same room plus the notify bus,
+    // which used to be blind to font and zoom.
+    CodeEditorOptions* opt = editor->options();
+    QVERIFY(opt->codeFont() == editor->codeFont()); // getters mirror live state
+    QCOMPARE(opt->zoomFactor(), editor->zoomFactor());
+    QCOMPARE(opt->zoomFactor(), 1.0); // the M17 default
+
+    QSignalSpy fontSpy(opt, &CodeEditorOptions::codeFontChanged);
+    QSignalSpy zoomSpy(opt, &CodeEditorOptions::zoomFactorChanged);
+
+    // Options door: ONE signal with the new definition; the numeric
+    // proof (no vision) that the change is REAL is the grown cell width.
+    const double cwBefore = editor->cellWidth();
+    QFont big = opt->codeFont();
+    big.setPixelSize(big.pixelSize() * 2);
+    opt->setCodeFont(big);
+    QCOMPARE(fontSpy.count(), 1);
+    QVERIFY(fontSpy.at(0).at(0).value<QFont>() == big);
+    QVERIFY(opt->codeFont() == big);
+    QVERIFY(editor->codeFont() == big); // the flat door sees the same truth
+    QVERIFY(editor->cellWidth() > cwBefore);
+
+    opt->setCodeFont(big); // same definition: silent (M19 no-op rule)
+    QCOMPARE(fontSpy.count(), 1);
+
+    // The FLAT setter door rides the SAME spy (two doors, one room).
+    const QFont halved = [&] { QFont f = editor->codeFont();
+                               f.setPixelSize(f.pixelSize() / 2);
+                               return f; }();
+    editor->setCodeFont(halved);
+    QCOMPARE(fontSpy.count(), 2);
+    QVERIFY(fontSpy.at(1).at(0).value<QFont>() == halved);
+
+    // Zoom: the bus announces the CLAMPED truth; same-value sets are
+    // silent, and at the clamp even a fresh out-of-range value is the
+    // same-value no-op.
+    opt->setZoomFactor(1.5);
+    QCOMPARE(zoomSpy.count(), 1);
+    QCOMPARE(zoomSpy.at(0).at(0).toDouble(), 1.5);
+    opt->setZoomFactor(1.5); // same: silent
+    QCOMPARE(zoomSpy.count(), 1);
+    opt->setZoomFactor(99.0); // clamped: the clamp value is the change…
+    QCOMPARE(zoomSpy.count(), 2);
+    QCOMPARE(zoomSpy.at(1).at(0).toDouble(), CodeEditor::kZoomFactorMax);
+    opt->setZoomFactor(99.0); // …now at the clamp: silent
+    QCOMPARE(zoomSpy.count(), 2);
+
+    // The chords (zoomIn/Out/resetZoom, also the Ctrl+= / Ctrl+0 keys and
+    // Ctrl+wheel) ride setZoomFactor, so they emit too. 1.5 and 1.875
+    // (1.5 * 1.25) are exact in binary: the spy argument is comparable.
+    editor->setZoomFactor(1.5);
+    QCOMPARE(zoomSpy.count(), 3);
+    editor->zoomIn();
+    QCOMPARE(zoomSpy.count(), 4);
+    QCOMPARE(zoomSpy.at(3).at(0).toDouble(), 1.875);
+    editor->resetZoom();
+    QCOMPARE(zoomSpy.count(), 5);
+    QCOMPARE(zoomSpy.at(4).at(0).toDouble(), 1.0);
+}
+
+void TestCodeEditor::foreignFontRebaseRidesOptionsBus()
+{
+    // A raw QWidget::setFont from app code is a REAL change door as well:
+    // the M17 REBASE must speak on the bus or the mirror lies. Each
+    // changed HALF emits exactly once (the self-doors already emitted
+    // around their applyCodeFont; their self-pushed FontChange lands in
+    // the non-rebasing path, so nothing ever double-fires here).
+    CodeEditorOptions* opt = editor->options();
+    QSignalSpy fontSpy(opt, &CodeEditorOptions::codeFontChanged);
+    QSignalSpy zoomSpy(opt, &CodeEditorOptions::zoomFactorChanged);
+
+    editor->setZoomFactor(1.5); // our own zoom door
+    QCOMPARE(zoomSpy.count(), 1);
+    QCOMPARE(fontSpy.count(), 0); // zoom never touches the BASE
+
+    // FOREIGN font (differs from the scaled effective): full rebase —
+    // the base AND the zoom reset each announce once.
+    QFont foreign = editor->codeFont();
+    foreign.setPixelSize(20);
+    editor->setFont(foreign);
+    QCOMPARE(fontSpy.count(), 1);
+    QVERIFY(fontSpy.at(0).at(0).value<QFont>() == editor->codeFont());
+    QVERIFY(opt->codeFont() == editor->codeFont()); // mirror never lies
+    QCOMPARE(zoomSpy.count(), 2);
+    QCOMPARE(zoomSpy.at(1).at(0).toDouble(), 1.0);
+    QCOMPARE(opt->zoomFactor(), 1.0);
+
+    // Pushing the CURRENTLY effective font back through the raw door:
+    // Qt resolves it to the same definition, the change is a no-op and
+    // the bus stays silent (and the self-doors above proved no double
+    // emissions exist).
+    editor->setFont(editor->font());
+    QCOMPARE(fontSpy.count(), 1);
+    QCOMPARE(zoomSpy.count(), 2);
+
+    // Foreign font EQUAL to the base (but the zoom is off 1.0, so the
+    // effective font differs and the FontChange still arrives): only the
+    // zoom HALF changes — the base announcement stays silent.
+    opt->setZoomFactor(2.0);
+    QCOMPARE(zoomSpy.count(), 3);
+    editor->setFont(editor->codeFont()); // base 20px vs the drawn 40px
+    QCOMPARE(fontSpy.count(), 1); // base unchanged: silent
+    QCOMPARE(zoomSpy.count(), 4); // reset half:
+    QCOMPARE(zoomSpy.at(3).at(0).toDouble(), 1.0);
 }
 
 // The auto-close toggle is M19-options-only (no flat setter on purpose):

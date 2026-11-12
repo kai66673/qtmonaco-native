@@ -14,6 +14,7 @@
 
 #include <QByteArray>
 #include <QFile>
+#include <QFontDatabase>
 #include <QTabBar>
 #include <QTemporaryDir>
 #include <QtTest>
@@ -21,6 +22,7 @@
 #include <memory>
 
 using qmn::app::collectSettings;
+using qmn::app::demoDefaultCodeFont;
 using qmn::app::EditorSettings;
 using qmn::app::EditorSettingsDialog;
 using qmn::app::MainWindow;
@@ -35,6 +37,20 @@ private:
     std::unique_ptr<QTemporaryDir> dir_;
     MainWindow* window_ = nullptr;
 
+    // A real family to switch the QFontComboBox through: ANY installed
+    // family other than the demo recipe's own. Empty on a fontless box
+    // (then the family-switch probe is skipped, the rest still asserts).
+    static QStringList fontFamiliesToProbe()
+    {
+        QStringList out;
+        const QString avoid = demoDefaultCodeFont().family();
+        const QStringList all = QFontDatabase::families(); // static in Qt 6.4+
+        for (const QString& family : all)
+            if (family != avoid)
+                out << family;
+        return out;
+    }
+
     // Plain if/return helper: QVERIFY-style macros cannot be used here
     // (they would `return` with the wrong type).
     QString writeFile(const QString& name, const QByteArray& content)
@@ -48,8 +64,8 @@ private:
         return path;
     }
 
-    // Everything except the font/zoom pair (deliberately not in the
-    // template) flipped away from the defaults.
+    // Every knob flipped away from the defaults (M20 grew the template
+    // with the font/zoom pair; customSettings exercises it too).
     static EditorSettings customSettings()
     {
         EditorSettings s;
@@ -63,6 +79,10 @@ private:
         s.scrollBeyondLastLineEnabled = true;
         s.autoCloseEnabled = false;
         s.readOnly = true;
+        QFont font = demoDefaultCodeFont(); // same family/strategy (the
+        font.setPixelSize(20);              // NO-hinting rule survives)
+        s.codeFont = font;
+        s.zoomFactor = 1.5;
         return s;
     }
 
@@ -131,12 +151,24 @@ private slots:
         QCOMPARE(def.scrollBeyondLastLineEnabled, o->scrollBeyondLastLineEnabled());
         QCOMPARE(def.autoCloseEnabled, o->autoCloseEnabled());
         QCOMPARE(def.readOnly, o->isReadOnly());
+        // M20: the font tripwire is STRICTER than a pixel check — the
+        // whole demo recipe (family, size, no-hinting strategy) must
+        // equal the library ctor's font definition, or the drift test
+        // would be decorative.
+        QVERIFY(def.codeFont == o->codeFont());
+        QCOMPARE(def.zoomFactor, o->zoomFactor());
     }
 
     void applySettingsHitsEveryEditor()
     {
         QVERIFY(window_->openPath(writeFile(QStringLiteral("a.txt"), "a\n")));
         QVERIFY(window_->openPath(writeFile(QStringLiteral("b.txt"), "b\n")));
+
+        // M20 numeric proof the font/zoom half APPLIES for real (not just
+        // round-trips through the struct): the 20px/1.5 custom pair must
+        // grow the caret grid over the shipped 14px/1.0 default.
+        const double cellBefore = window_->editorAt(0)->cellWidth();
+        QVERIFY(cellBefore > 0.0);
 
         const EditorSettings custom = customSettings();
         window_->applyEditorSettings(custom);
@@ -145,6 +177,8 @@ private slots:
         QVERIFY(collectSettings(window_->editorAt(0)) == custom);
         QVERIFY(collectSettings(window_->editorAt(1)) == custom);
         QVERIFY(window_->editorSettings() == custom); // the stored template
+        QVERIFY(window_->editorAt(0)->cellWidth() > cellBefore);
+        QVERIFY(window_->editorAt(1)->cellWidth() > cellBefore);
     }
 
     void laterTabsInheritTheTemplate()
@@ -203,6 +237,41 @@ private slots:
         dialog.setSettings(s);
         QCOMPARE(dialog.settings().longLineRulerColumn, 0);
         QCOMPARE(dialog.settings().tabStopWidth, 32);
+
+        // M20 edges: out-of-range font px / zoom land on the spins'
+        // caps — and the zoom cap is the EDITOR's documented clamp, so
+        // the control can never offer a value the setter would refuse.
+        s = customSettings();
+        QFont huge = demoDefaultCodeFont();
+        huge.setPixelSize(9999);
+        s.codeFont = huge;
+        s.zoomFactor = 99.0;
+        dialog.setSettings(s);
+        QCOMPARE(dialog.settings().codeFont.pixelSize(), 128); // the spin cap
+        QCOMPARE(dialog.settings().zoomFactor, CodeEditor::kZoomFactorMax);
+        s.zoomFactor = -5.0;
+        dialog.setSettings(s);
+        QCOMPARE(dialog.settings().zoomFactor, CodeEditor::kZoomFactorMin);
+
+        // M20 seed carry-through: the dialog edits ONLY family + pixel
+        // size, so weight/style/hinting must ride through untouched
+        // (QFont equality on the struct's ==), while a family switch
+        // lands exactly.
+        s = customSettings();
+        dialog.setSettings(s);
+        QVERIFY(dialog.settings().codeFont == s.codeFont);
+        const QStringList families = fontFamiliesToProbe();
+        if (!families.isEmpty()) {
+            s.codeFont.setFamily(families.first());
+            dialog.setSettings(s);
+            QCOMPARE(dialog.settings().codeFont.family(), families.first());
+            QCOMPARE(dialog.settings().codeFont.pixelSize(), 20);
+            QCOMPARE(dialog.settings().zoomFactor, 1.5); // untouched pair
+            // And the switched family really reaches the editor door:
+            CodeEditor target;
+            applySettings(&target, dialog.settings());
+            QCOMPARE(collectSettings(&target).codeFont.family(), families.first());
+        }
     }
 
     void settingsDialogAppliesThroughAcceptDoor()

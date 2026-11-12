@@ -6027,8 +6027,14 @@ QFont scaleFontForZoom(const QFont& base, double factor)
 
 void CodeEditor::setCodeFont(const QFont& font)
 {
+    // M20 bus rule (M19 semantics): a same-definition set is a no-op and
+    // stays silent; QFont::operator== compares the definition, which is
+    // exactly what baseFont_ keeps verbatim ("as last set").
+    const QFont baseBefore = baseFont_;
     baseFont_ = font;
     applyCodeFont();
+    if (options_ && !(baseBefore == font))
+        emit options_->codeFontChanged(font);
 }
 
 void CodeEditor::setZoomFactor(double factor)
@@ -6038,6 +6044,8 @@ void CodeEditor::setZoomFactor(double factor)
         return; // at the clamp (or unchanged): nothing to re-measure
     zoomFactor_ = factor;
     applyCodeFont();
+    if (options_)
+        emit options_->zoomFactorChanged(zoomFactor_); // the CLAMPED truth
 }
 
 void CodeEditor::applyCodeFont()
@@ -6061,6 +6069,8 @@ void CodeEditor::changeEvent(QEvent* event)
         // code, a style nudge) REBASES: it becomes the new base at zoom
         // 1.0, so codeFont() never lies about what is drawn and the next
         // zoomIn/Out scales from there.
+        const QFont baseBefore = baseFont_;
+        const double zoomBefore = zoomFactor_;
         if (font() != scaleFontForZoom(baseFont_, zoomFactor_)) {
             baseFont_ = font();
             zoomFactor_ = 1.0;
@@ -6083,6 +6093,19 @@ void CodeEditor::changeEvent(QEvent* event)
         updateScrollBarRange();
         ensureCaretVisible();
         update();
+        // M20: the rebase is a real change too — the mirror must never
+        // lie after an app-level setFont, so the bus speaks from THIS
+        // door as well (our own doors already emitted around their
+        // applyCodeFont, and their self-pushed FontChange lands in the
+        // non-rebasing path above, so nothing double-fires). Same-value
+        // halves stay silent per the M19 no-op rule (a foreign font that
+        // equals the base merely resets the zoom: only zoomChanged).
+        if (options_) {
+            if (!(baseBefore == baseFont_))
+                emit options_->codeFontChanged(baseFont_);
+            if (zoomBefore != zoomFactor_)
+                emit options_->zoomFactorChanged(zoomFactor_);
+        }
     }
 }
 

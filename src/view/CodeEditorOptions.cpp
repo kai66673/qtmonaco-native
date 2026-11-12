@@ -104,6 +104,26 @@ bool CodeEditorOptions::scrollBeyondLastLineEnabled() const
     return editor_->scrollBeyondLastLineEnabled();
 }
 
+void CodeEditorOptions::setCodeFont(const QFont& font)
+{
+    editor_->setCodeFont(font);
+}
+
+QFont CodeEditorOptions::codeFont() const
+{
+    return editor_->codeFont();
+}
+
+void CodeEditorOptions::setZoomFactor(double factor)
+{
+    editor_->setZoomFactor(factor);
+}
+
+double CodeEditorOptions::zoomFactor() const
+{
+    return editor_->zoomFactor();
+}
+
 void CodeEditorOptions::setAutoCloseEnabled(bool enabled)
 {
     editor_->setAutoCloseEnabled(enabled);
