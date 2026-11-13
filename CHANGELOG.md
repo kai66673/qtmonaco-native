@@ -3,27 +3,6 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased]
-
-### Fixed
-- **Folding in big documents collapsed only the lines that fit in the
-  viewport** (owner report, python-shaped docs past the adaptive-parse
-  threshold). On those documents the engine switches to viewport-RANGE
-  parsing (the 8ms full-reparse budget), and the range-clamped tree ends
-  every fold node at the window seam — `foldsFull()` forced the whole
-  fold QUERY but queried the clamp, so `foldLine(0)` on a 30k-line def
-  hid ~20 rows. `foldsFull()` now escalates the PARSE exactly like
-  `spansFor()` does: a tree-coverage shortfall (`covStart_/covEnd_`
-  short of the document) pays one synchronous full reparse before the
-  whole-tree fold query — the documented single-hit cost, the adaptive
-  rule flips Viewport back on the next reparse. `foldableRanges()`
-  resolves EVERY end through `foldEndForLine` now (cached grammar ends
-  were exact only under a full tree, seam-truncated under a windowed
-  parse; the paint still never comes through that door). Fix test:
-  `foldEndEscapesViewportParseClamp` (600KB/30k-line python: visible
-  total must be 1 after `foldLine(0)`, the exact door must report
-  endLine 30000 — pre-fix it reported the seam).
-
 ## [1.5.0] — 2026-11-12
 
 ### Added
@@ -364,6 +343,24 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   map on a scrollable foldless doc (grows and shrinks by exactly one
   line). Tripwire proven: it fails against the reverted fix, passes
   with it. Suite: 187/0/2.
+- **Folding in big documents collapsed only the lines that fit in the
+  viewport** (owner report, python-shaped docs past the adaptive-parse
+  threshold). On those documents the engine switches to viewport-RANGE
+  parsing (the 8ms full-reparse budget), and the range-clamped tree ends
+  every fold node at the window seam — `foldsFull()` forced the whole
+  fold QUERY but queried the clamp, so `foldLine(0)` on a 30k-line def
+  hid ~20 rows. `foldsFull()` now escalates the PARSE exactly like
+  `spansFor()` does: a tree-coverage shortfall (`covStart_/covEnd_`
+  short of the document) pays one synchronous full reparse before the
+  whole-tree fold query — the documented single-hit cost, the adaptive
+  rule flips Viewport back on the next reparse. `foldableRanges()`
+  resolves EVERY end through `foldEndForLine` now (cached grammar ends
+  were exact only under a full tree, seam-truncated under a windowed
+  parse; the paint still never comes through that door). Fix test:
+  `foldEndEscapesViewportParseClamp` (600KB/30k-line python: visible
+  total must be 1 after `foldLine(0)`, the exact door must report
+  endLine 30000 — pre-fix it reported the seam). Suite: 207 passed /
+  2 skipped, ctest 3/3.
 
 ## [1.0.0] — 2026-11-12
 
