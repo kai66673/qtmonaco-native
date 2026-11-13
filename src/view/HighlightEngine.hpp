@@ -143,11 +143,15 @@ public:
     // whitespace). False for plain text or a fold query that failed to
     // compose, where the view's indent scan is the only fold source.
     bool hasFoldQuery() const { return foldQuery_ != nullptr; }
-    // Exactness-forcing whole-document list (the foldsFor/spansFor pattern):
-    // CodeEditor::foldLine()/collapseAll() may address a fold outside the
-    // painted window, and collapseAll() needs every fold. One synchronous
-    // whole-tree fold query on the CURRENT tree, cached until the next
-    // scoped rebuild. Never called from paint.
+    // Exactness-forcing whole-document list (the spansFor escalation
+    // pattern): CodeEditor::foldLine()/collapseAll()/foldableRanges()/M22
+    // hover may address a fold outside the painted window, and
+    // collapseAll() needs every fold. Guarantees EXACT ends: a
+    // viewport-range-PARSED tree truncates folds at the parse seam, so a
+    // coverage shortfall pays one synchronous full reparse (single-hit
+    // cost, the spansFor rule); otherwise one whole-tree fold query on
+    // the CURRENT tree, cached until the next scoped rebuild. Never
+    // called from paint.
     const std::vector<FoldRange>& foldsFull();
     // Consistent with spans() after refreshIfNeeded(): lineStarts_[L] is
     // the document offset of line L. Only populated while active().
@@ -225,8 +229,9 @@ private:
     // python). Threading stays deferred: M13 folding turned out NOT to
     // need whole trees on the paint path (fold captures ride the same
     // viewport window as highlight captures; only the explicit
-    // collapseAll()/foldLine-outside-the-window path pays one whole-tree
-    // fold query, see foldsFull()).
+    // collapseAll()/foldLine/M22-hover path pays one whole-tree fold
+    // pass — the fold query, plus one full reparse when the PARSE itself
+    // was window-clamped, see foldsFull()).
     enum class Mode { Full, Viewport };
     Mode mode_ = Mode::Full; // parse strategy of the NEXT reparse
     Mode spansMode_ = Mode::Full; // query scope that produced spans_

@@ -618,11 +618,12 @@ public:
 
     // Foldable ranges as the view currently knows them: the active source
     // (grammar captures, or the indent fallback in grammar-less modes),
-    // sorted by start, duplicate starts resolved (engine wins — its ends
-    // are exact). Non-const because lazy indent-rule ends get
-    // resolved exactly here (an explicit-caller cost, never a paint cost).
-    // Viewport-scoped on big documents (paint keeps the cache warm; an
-    // out-of-window fold is discovered exactly when scrolling reveals it).
+    // sorted by start, duplicate starts resolved. Starts ride the paint
+    // cache (viewport-scoped on big documents: an out-of-window fold is
+    // discovered exactly when scrolling reveals it) but the ENDS are
+    // always re-resolved exactly at call time — same tightest end
+    // foldLine uses, paying whatever parse escalation foldsFull() needs
+    // (an explicit-caller cost, never a paint cost). Non-const for that.
     QVector<FoldRange> foldableRanges();
     bool isFoldable(int line) const; // would foldLine(line) find a fold?
     bool isFolded(int line) const;   // line starts a currently collapsed fold

@@ -2095,10 +2095,13 @@ int CodeEditor::foldEndForLine(int line)
     return last > line ? last : -1;
 }
 
-// Paint-window foldable starts: engine @fold captures (exact ends, from
-// the refresh that produced THIS paint's spans — and, after an explicit
-// foldsFull() call, possibly a whole-document superset: filtering by the
-// window here is what keeps that harmless) union the local indent rule.
+// Paint-window foldable starts: engine @fold captures (from the refresh
+// that produced THIS paint's spans — after an explicit foldsFull() call
+// possibly a whole-document superset: filtering by the window here is
+// what keeps that harmless) union the local indent rule. The cached
+// grammar END is trusted by no consumer (exact under a full tree, seam-
+// truncated under a viewport-clamped parse — foldableRanges re-resolves
+// every end exactly, foldLine via foldEndForLine).
 // Indent ends stay UNRESOLVED at paint time (end = start: the triangle
 // only needs the start line; foldEndForLine resolves the end on the
 // actual fold request) — paint stays O(viewport), even on a 5k-line
@@ -2303,14 +2306,16 @@ int CodeEditor::foldZoneWidth() const
 
 QVector<CodeEditor::FoldRange> CodeEditor::foldableRanges()
 {
-    // Exact public view of the paint cache: entries whose end the paint
-    // left lazy (indent-rule starts) get their real end resolved here —
-    // explicit callers (tests, bindings) pay that, the paint path never
+    // Exact public view of the paint cache: ends are ALWAYS re-resolved
+    // through foldEndForLine — the cached ones may be lazy sentinels
+    // (indent-rule starts) or grammar ends a viewport-clamped parse
+    // truncated at the window seam (see foldsFull()'s coverage escalation).
+    // Explicit callers (tests, bindings) pay that; the paint path never
     // comes through this function.
     QVector<FoldRange> out;
     out.reserve(foldables_.size());
     for (const FoldState& f : foldables_) {
-        const int end = f.end > f.start ? f.end : foldEndForLine(f.start);
+        const int end = foldEndForLine(f.start);
         if (end > f.start)
             out.push_back(FoldRange{f.start, end});
     }
@@ -2424,8 +2429,9 @@ bool CodeEditor::innermostFoldAt(int row, FoldState* out)
     // tightest end (mirrors foldEndForLine); groups whose tightest end
     // stops short of the row are unreachable folds (foldLine would fold
     // exactly that tightest end) and the walk just continues upward. The
-    // parse window bounds the walk by construction (like every other fold
-    // consumer here).
+    // table is whole-document (the exactness door escalates a viewport-
+    // clamped parse to a full tree — see foldsFull()), so enclosing folds
+    // starting above the window are visible to the walk too.
     const auto& ff = highlight_->foldsFull();
     for (int i = int(ff.size()) - 1; i >= 0; --i) {
         const int s = ff[size_t(i)].startLine;

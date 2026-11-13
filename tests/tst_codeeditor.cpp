@@ -306,6 +306,7 @@ private slots:
     void foldEditBookkeepingAndReset();
     void grammarFoldsFollowBracketsNotIndent();
     void pythonGrammarFoldsAndCollapseAll();
+    void foldEndEscapesViewportParseClamp();
     void jsonFoldHidesClosingBrace();
     void foldZoneGutterConstant();
     void foldAutoExpandOnSourceDeath();
@@ -7322,6 +7323,59 @@ void TestCodeEditor::pythonGrammarFoldsAndCollapseAll()
     editor->expandAll();
     QCOMPARE(editor->visibleLineTotal(), 7);
     QCOMPARE(editor->lineCount(), 7);
+}
+
+// Owner-reported bug: folding a big python document collapsed ONLY the
+// lines that fit in the viewport. Root cause: on such documents the
+// adaptive engine switches to viewport-RANGE parsing (kParseBudgetMs), and
+// the range-clamped tree ends every fold node at the window seam, so
+// foldEndForLine resolved the giant def to ~20 body lines. foldsFull() is
+// the documented exactness door and had to escalate the PARSE like
+// spansFor() does — forcing the whole tree, not just the whole query.
+void TestCodeEditor::foldEndEscapesViewportParseClamp()
+{
+    // Timing note (second timing-sensitive test, see also
+    // textRangeWalkStaysPrunedWithManyPieces): the mode flip needs the
+    // cold full parse to bust the engine's 8ms budget. This doc (~600KB,
+    // 30k lines) parses in ~70-110ms locally — an ~9x margin over the
+    // budget, and a machine faster than the flip can only leave the doc
+    // in Full mode, where this test passes vacuously (it never flakes
+    // red, at worst it weakens).
+    QStringList lines;
+    lines.reserve(30001);
+    lines << QStringLiteral("def outer():");
+    for (int i = 0; i < 30000; ++i)
+        lines << QStringLiteral("    a%1 = %1").arg(i);
+    editor->setPlainText(lines.join(QLatin1Char('\n'))); // no trailing NL
+    editor->setLanguage(QStringLiteral("python"));
+    editor->grab(); // paint 1: cold full parse busts the budget => the
+                    // engine flips to Viewport parse for the NEXT reparse
+
+    // Dirty the buffer so paint 2 actually runs the viewport reparse (the
+    // edit rides inside the header line, the caret stays on row 0 and the
+    // window never scrolls; insertTextAt itself never repaints).
+    editor->insertTextAt({0, 4}, QStringLiteral("q")); // "def qouter():"
+    editor->grab(); // paint 2: window-tree — fold ends now truncated at
+                    // the parse window seam (~line 20, not ~line 30000)
+
+    const int docLines = editor->lineCount(); // 30001
+    QVERIFY2(docLines > 30000, "doc must stay far taller than the viewport");
+    QVERIFY(editor->isFoldable(0)); // header inside the painted window
+
+    // The user symptom: foldLine(0) must hide the WHOLE body. Pre-fix it
+    // returned true but hid only the seam-clamped ~window of lines.
+    QVERIFY(editor->foldLine(0));
+    QVERIFY(editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 1); // ONLY the header row remains
+    QVERIFY(editor->unfoldLine(0));
+    QCOMPARE(editor->visibleLineTotal(), docLines);
+
+    // The exact public door reports the exact end too (its cached end came
+    // from the clamped paint pass; foldEndForLine re-resolves exactly).
+    const auto ranges = editor->foldableRanges();
+    QCOMPARE(ranges.size(), 1);
+    QCOMPARE(ranges[0].startLine, 0);
+    QCOMPARE(ranges[0].endLine, docLines - 1);
 }
 
 void TestCodeEditor::jsonFoldHidesClosingBrace()

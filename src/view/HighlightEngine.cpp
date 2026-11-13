@@ -784,7 +784,10 @@ void HighlightEngine::rebuildFolds(int qStart, int qEnd)
         // opened on a visible line, body running below the viewport). A
         // fold starting above the window is not emitted — and never needed:
         // its header line is off screen, and a collapsed fold's own state
-        // lives in the view (collapsed_), not here.
+        // lives in the view (collapsed_), not here. NOTE: "reaches past the
+        // window" presumes a FULL tree — when the parse itself is range-
+        // clamped (Viewport mode) the node ends at the parse seam instead;
+        // the exactness consumers escalate via foldsFull()'s coverage check.
         ts_query_cursor_set_byte_range(foldCursor_, uint32_t(qStart) * 2, uint32_t(qEnd) * 2);
     } else {
         ts_query_cursor_set_byte_range(foldCursor_, 0, UINT32_MAX); // reset a previous scope
@@ -824,16 +827,34 @@ void HighlightEngine::rebuildFolds(int qStart, int qEnd)
                  folds_.end());
 }
 
-// Whole-document fold list on the CURRENT tree (explicit user actions only:
-// collapseAll, or foldLine addressed outside the painted window). No tree
-// reparse here — only the query walk — and the result stays cached until the
-// next scoped rebuild replaces it (foldsWhole_ back to false).
+// Whole-document fold list with EXACT ends (the spansFor escalation
+// pattern; explicit user actions only: collapseAll, foldEndForLine/
+// foldLine, foldableRanges, M22 hover). Unscoping the fold query is NOT
+// enough when the adaptive parse itself is range-clamped: on a
+// viewport-window tree every fold crossing the bottom seam ENDS AT THE
+// SEAM and folds starting above the parse anchor are not in the tree at
+// all, so a whole-tree query there still reports truncated/missing folds
+// (owner-reported bug: big python docs — foldLine(0) hid only the lines
+// that fit in the viewport). Check the tree's coverage and pay one
+// synchronous full reparse when it falls short; the adaptive rule flips
+// Viewport back on the next reparse, so the escalation costs a single
+// hit. Otherwise no tree reparse here — only the query walk — and the
+// result stays cached until the next scoped rebuild replaces it
+// (foldsWhole_ back to false).
 const std::vector<HighlightEngine::FoldRange>& HighlightEngine::foldsFull()
 {
     refreshIfNeeded();
     if (!tree_) {
         folds_.clear();
         foldsWhole_ = true;
+        return folds_;
+    }
+    if (covStart_ != 0 || covEnd_ != buffer_->charCount()) {
+        // The PARSE never saw the rest of the document (Viewport mode):
+        // querying the window-tree whole would just report its clamp.
+        mode_ = Mode::Full;
+        reparseFull();
+        rebuildFolds(-1, -1); // tree replaced: any cached fold list is stale
         return folds_;
     }
     if (!foldsWhole_)
