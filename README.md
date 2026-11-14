@@ -90,6 +90,23 @@ Highlighting demos, one per grammar (`.py`/`.json`/`.js`/`.c`/`.cpp` suffixes
 pick the grammar automatically — `.h`-family headers go cpp; `--language
 python|json|javascript|c|cpp` overrides): see `examples/README.md`.
 
+### Editor setup (VS Code / Code OSS)
+
+`.vscode/` is gitignored, so each dev configures their editor locally; the
+house style for it (the setup used against the Arch `code` OSS build):
+
+- **IntelliSense: clangd** extension + `/usr/bin/clangd`, reading the
+  `compile_commands.json` the root CMake always exports (`build/`). MS
+  cpptools is not installable on Code OSS — keep its IntelliSense disabled
+  if the extension ever shows up.
+- **CMake Tools**: generator Ninja, build dir `build/`, `CMAKE_BUILD_TYPE`
+  Release, test environment `QT_QPA_PLATFORM=offscreen` — i.e. the extension
+  drives exactly the canonical CLI commands above.
+- **Debug: CodeLLDB** (`lldb` from the Arch `clang` package; cpptools' debug
+  adapter is not installable on OSS) — launch configs for `qmn-spike`,
+  `qmn-demo` (headless + visible) and the two widget-test binaries, all
+  offscreen by the ctest convention.
+
 ## Roadmap (hobby-scale, see estimates in the qtmonaco discussion)
 
 Milestones, in build order. **Gate 1** (editor v1: M1b…M13 + M12 completion)
