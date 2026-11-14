@@ -1,0 +1,27 @@
+# clangd config (IntelliSense only; the GCC build and compile_commands.json
+# themselves are untouched).
+#
+# Arch's GCC 16 injects -mno-direct-extern-access into every compile line it
+# drives and CMake bakes it into compile_commands.json; clang's driver does
+# not know the flag. Measured at LSP publishDiagnostics level (A/B/case C):
+# - upstream clangd 23 only logs "detected unsupported options" and publishes
+#   NO diagnostic;
+# - the kylin-clangd extension's bundled clangd (23.0.0git) DOES publish
+#   sev=1 "Unknown argument: '-mno-direct-extern-access'" (code
+#   drv_unknown_argument, line 0) - that is the Problems-panel squiggle.
+# CompileFlags.Remove alone does NOT clear it there: the diagnostic is
+# produced while the compile DB is ingested, before per-file config is
+# applied. Diagnostics.Suppress (measured, case C) is what actually kills it.
+# Keep both: Remove cleans the parse command itself (cc1 args stay clean),
+# Suppress covers servers that report driver errors at DB-ingest time.
+#
+# The same Arch trap once hit the wheel build from the opposite side: SYSTEM
+# libtree-sitter headers absorbed a missing vendored include (AGENTS.md,
+# "System-tree-sitter trap") - that one was a real bug fixed in CMake; this
+# one is cosmetic and lives here on purpose.
+CompileFlags:
+  Remove:
+    - mno-direct-extern-access
+Diagnostics:
+  Suppress:
+    - drv_unknown_argument

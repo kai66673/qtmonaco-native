@@ -95,10 +95,18 @@ python|json|javascript|c|cpp` overrides): see `examples/README.md`.
 `.vscode/` is gitignored, so each dev configures their editor locally; the
 house style for it (the setup used against the Arch `code` OSS build):
 
-- **IntelliSense: clangd** extension + `/usr/bin/clangd`, reading the
-  `compile_commands.json` the root CMake always exports (`build/`). MS
-  cpptools is not installable on Code OSS — keep its IntelliSense disabled
-  if the extension ever shows up.
+- **IntelliSense: clangd**, reading the `compile_commands.json` the root
+  CMake always exports (`build/`). The server actually serving this workspace
+  is the **kylin-clangd** extension's bundled clangd (its own fork); the
+  official clangd extension (`clangd.path: /usr/bin/clangd`) is configured as
+  the alternative — never run both servers at once. MS cpptools is not
+  installable on Code OSS — keep its IntelliSense disabled if it shows up.
+- **`.clangd`** (tracked): every clangd server reads it. Arch GCC 16 injects
+  `-mno-direct-extern-access` into every compile line and CMake bakes it into
+  the compile db; clang drivers don't know it, and the kylin-bundled clangd
+  publishes it as a bogus line-0 error. The config removes the flag from the
+  parse command and suppresses that `drv_unknown_argument` diagnostic —
+  IntelliSense only, the GCC build itself stays untouched.
 - **CMake Tools**: generator Ninja, build dir `build/`, `CMAKE_BUILD_TYPE`
   Release, test environment `QT_QPA_PLATFORM=offscreen` — i.e. the extension
   drives exactly the canonical CLI commands above.
