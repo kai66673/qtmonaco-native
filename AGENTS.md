@@ -2,110 +2,26 @@
 
 Native code editor widget for Qt6, built from scratch on a raw `QWidget`
 (own piece-table model, own QPainter rendering). No Scintilla, no
-QPlainTextEdit, no Chromium. Long-term hobby project; see `README.md` Roadmap.
+QPlainTextEdit, no Chromium. Long-term hobby project; roadmap in `README.md`,
+phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
 
-## End goal & artifacts (not built yet — design the C++ API for it now)
+## Current state (v1.6.0) — gates and the frozen surface
 
-Two deliverables: a **Qt6 C++ library** and a **PySide6 binding packaged as a
-`.whl`**, to be generated with **Shiboken6** (`shiboken6_generator` is pip
-installable; build with scikit-build-core — PySide6's own CMake helper names are
-still unverified, confirm them from the installed package). No Python/binding
-scaffolding exists yet, so this shapes how `CodeEditor`'s API is designed *today*:
-
-- **Consumed by** the sibling `qtmonaco` (GitHub `bec-project/qtmonaco`; local
-  sibling `/home/kai/kaigit/qtmonaco`). Its `Monaco` class is a `QWebEngineView`
-  (Chromium) subclass; this widget is the native drop-in meant to replace it.
-  Parity target = `qtmonaco`'s public `Monaco` API (`set_text`, `get_text`,
-  `set_language`, `open_diffs`, `set_cursor`/`current_cursor`, highlight lines,
-  LSP hooks…). The Python-facing binding should mirror those names.
-  **qtmonaco is 1-based** (`set_cursor`, `delete_line`, `set_highlighted_lines`,
-  `insert_text`'s default column) while `TextPosition` is 0-based — the binding
-  must convert deliberately, not implicitly.
-  **Deliberate exception: no vim mode** — never implement it, but the binding
-  exposes `set_vim_mode_enabled` and **warns** (so drop-in callers don't hit
-  `AttributeError`). Same pattern for `set_minimap_enabled`: it maps to the
-  overview ruler, never to a Chromium-style minimap.
-- **Keep `CodeEditor`'s public API Shiboken-wrappable.** Shiboken can't wrap
-  templates or many exotic/overloaded signatures, so keep the public surface
-  Qt-native: `Q_OBJECT`, plain Qt types in params/returns, no C++ templates or
-  STL types crossing the API boundary (internals are unconstrained). The binding
-  wraps the **view** widget; `core` stays QtCore-only and needs no Python type.
-- **Qt-version trap:** PySide6 wheels ship their *own* Qt6 (`qtmonaco` pins
-  PySide6≥6.8). Build the extension against that Qt, not the distro's system Qt,
-  or it ABI-mismatches PySide6 at import. Portable wheels ⇒ cibuildwheel on
-  manylinux/musllinux, not against Arch's rolling system Qt.
-- **Shiboken codegen does not run on the Arch host.** The pip generator binary
-  needs `libxml2.so.2` and `libxslt.so.1`; Arch ships `libxml2.so.16`
-  (incompatible ABI — do not symlink). Run binding codegen in a manylinux/
-  RHEL9-base container (`bindings/Dockerfile`), which also supplies `clang-libs`
-  — the wheel's libclang is statically linked but has no resource dir of its
-  own, so point `CLANG_INSTALL_DIR=/usr` at clang-libs' `/usr/lib/clang/<v>/
-  include` or ApiExtractor fails on builtin headers. Keep C++ dev + CTest on
-  the host.
-- **The PySide6 wheel ships no Qt headers and no `Qt6Config.cmake`** — only
-  `PySide6Config`/`Shiboken6Config`, PySide6's own wrapper headers, and Qt
-  *runtime* libs under `PySide6/Qt/lib`. There is no `qwidget.h`/`qglobal.h`
-  anywhere in it. So an extension build always needs a real Qt install for
-  headers, `moc` and link libraries; `bindings/Dockerfile` pins Qt **6.12.0**
-  (exact match for the Qt PySide6 6.12.0 bundles). Configure also needs
-  `libglvnd-devel` or `Qt6Gui` fails via `WrapOpenGL`.
-- **Qt download:** `download.qt.io` and `master.qt.io` connect-timeout from this
-  network; `mirror.yandex.ru/mirrors/qt.io` answers in 0.32 s from inside the
-  container (`ftp.fau.de/qtproject` 0.40 s works too). RHEL9 has no Qt6 dev
-  packages, so Qt is unpacked from the repository's own archives.
-- **Qt ≥ 6.9 Linux desktop is one package** (`qt.qt6.6120.linux_gcc_64`), and
-  aqt 3.3.0 **cannot parse it** ("The packages ['qt_base', 'qtbase'] were not
-  found", with or without `-m qtbase`) — `bindings/Dockerfile` instead curls the
-  pinned archive pair straight from the mirror's rev directory and verifies the
-  mirror's `.7z.sha1` sidecars. Only `qtbase-…-RHEL_9_6-GCC-….7z` + the **ICU**
-  bundle are needed; the archives are `RHEL_9_6` based, which lines up with our
-  manylinux_2_34 target. In these new archives there are **no flat forwarding
-  headers at `include/` top level** (unlike old `gcc_64`): only per-module dirs,
-  so a bare `#include <QWidget>`/`<QElapsedTimer>` needs that module's
-  `include/Qt<Module>` dir on the search path.
-- **Single-Qt-at-runtime rule (measured on glibc):** a `DT_NEEDED
-  libQt6Core.so.6` is satisfied by an **already-loaded object of that SONAME**, so
-  the extension binds to the Qt bundled in the PySide6 wheel even though it was
-  *linked* against a different Qt 6.12.0 build and carries a RUNPATH to it (two
-  builds, one `liba.so.1` SONAME probe: the dependent lib resolved to the
-  first-loaded instance). But `dlopen()` **by path** of a same-SONAME library
-  loads a **second copy**. So never load Qt by absolute path and never ship Qt
-  libs beside the extension; the smoke test asserts one `libQt6Core` in
-  `/proc/self/maps` — it passes for both the build-tree and installed-wheel
-  smokes. PySide6's wheel Qt has SONAME `libQt6Core.so.6` and bundles **ICU 73**;
-  Qt's exported CMake interface mentions no `ICU::` targets, so no `libicu-devel`
-  is needed (RHEL9's ICU 67 headers would only poison the link interface).
-- **Binding macro gotchas (Shiboken 6.12.0, measured):** `shiboken_generator_
-  create_binding()` forwards `-I` only for the *listed* `QT_MODULES` targets'
-  own interface dirs (`Qt6::Widgets` = `[include, include/QtWidgets]`), so
-  Core/Gui dirs must be added via `SHIBOKEN_EXTRA_OPTIONS` (one `-I` per dir —
-  a multi-dir property expands into bare positional args otherwise). Compiling
-  the generated code needs `PySide6/include/PySide6/Qt{Core,Gui}` subdirs for
-  the `pyside6_qtgui_python.h` include chain. `typesystem_widgets.xml` comes
-  from `PySide6/typesystems` (`PYSIDE_TYPESYSTEMS` is set only by the abi3
-  config flavour). `PySide6::pyside6` links no Qt — our CMake links Qt6 itself.
-- **Wheel layout:** `_qmn.abi3.so` sits at site-packages root (a `qmn/`
-  subpackage does NOT put `_qmn` on `sys.path`), with the pure-Python `qmn/`
-  shim importing `PySide6.QtWidgets` **before** `_qmn` — the generated wrapper
-  resolves its `QWidget` base through shiboken's converter registry at import.
-  scikit-build-core spells the option `cmake.build-type`, not top-level
-  `build-type`.
-- **Wheel audit facts (measured, Phase F):** scikit-build-core 1.1.2 maps
-  `wheel.py-api = "cp310"` onto the wheel tag without touching the compile
-  (the build was ALWAYS abi3 — libshiboken's INTERFACE_COMPILE_DEFINITIONS
-  carry `Py_LIMITED_API=0x030a0000`). `auditwheel repair --plat` wants the
-  FULL tag (`manylinux_2_34_x86_64`, not the policy name — an invalid-choice
-  error otherwise) and emits a DUAL tag when the wheel also qualifies lower
-  (auto verdict here `manylinux_2_24`: the extension ELF references only
-  GLIBC ≤ 2.14 once PySide6-provided libs are `--exclude`d — excludes prune
-  whole ldd subtrees, which is how Qt's ICU deps vanish too; libGLX/libOpenGL
-  are direct DT_NEEDED but not on the 2_34 lib_whitelist, so they'd be
-  grafted unless excluded). `install.components = ["python"]` +
-  `COMPONENT python` on the extension's install rule keeps the C++ install
-  tree (`include/`, `lib64/*.a`) out of the wheel — sbc then runs
-  `cmake --install --component python`, and ONLY that component lands.
-  patchelf comes from PyPI (RHEL9 repos lack it) and both auditwheel+patchelf
-  bake into `/opt/venv` (runs execute as `--user`, cannot pip at runtime).
+- Gate 1 (editor v1) froze the public API at tag `v1.0`; Gate 1.5 (usability
+  train M20–M24) closed 2026-11-12 at tag `v1.5.0`. **Gate 2 is the open
+  train**: M8 LSP, M10 diff view, soft wrap, DAP-via-decorations. Never start
+  work for a later gate while an earlier one is open.
+- The frozen surface widens **only additively** (Gate 1.5 precedent): no new
+  view mapping/geometry primitives. The M5 decoration API already covers
+  diagnostics, breakpoints and inlay hints, so Gate 2 must need no view
+  surgery.
+- Both deliverables ship: a C++ static package (export set `qmn::core` /
+  `qmn::view`, plus internal `qmn::internal_tree_sitter`) and a PySide6 wheel
+  `qmn-native` (cp310-abi3, manylinux_2_34). See "Python bindings" below.
+- **Keep public view API Shiboken-wrappable**: `Q_OBJECT`, plain Qt types in
+  params/returns, no C++ templates or STL types crossing the API boundary
+  (internals are unconstrained). The binding wraps only the **view** widget;
+  `core` stays QtCore-only and needs no Python type.
 
 ## Hard rule: layering is contractual
 
@@ -113,8 +29,13 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
 
 - `src/core/` (`TextBuffer`) — **QtCore ONLY**. Never include QtGui/QtWidgets.
   This is what keeps the model headless, benchmarkable and fuzzable.
-- `src/view/` (`CodeEditor`) — core + QtWidgets (the raw QWidget canvas).
-- `src/app/` (`qmn-spike`) — view only. Demo/bench harness.
+- `src/view/` (`CodeEditor` + `CodeEditorOptions`/`Theme`/`LanguageProperties`
+  child QObjects, `HighlightEngine`) — core + QtWidgets + PRIVATE vendored
+  tree-sitter (it never crosses core or the public view API).
+- `src/app/` — view only. `qmn-spike` (bench/spike harness) and `qmn-demo`
+  (tabbed demo app). `qmn-demo`'s window/dialog logic lives in the
+  `qmn_demo_app` STATIC lib (`demo_main.cpp` is a thin main) because
+  `tst_demo` links the lib and drives it offscreen.
 
 Include headers relative to `src/` (CMake adds `src/` as a PUBLIC include dir):
 `#include "core/TextBuffer.hpp"`, `#include "view/CodeEditor.hpp"`.
@@ -130,35 +51,54 @@ Include headers relative to `src/` (CMake adds `src/` as a PUBLIC include dir):
   backspace/delete are surrogate-safe). Don't add that safety to core.
 - `lineCount()` is always `>= 1`, even for an empty document.
 - `lineColAt(offset)` pointing at a `'\n'` resolves to the position *before* it.
-- **M4 engine is vendored tree-sitter** (pinned v0.27.2, ABI 15). Fed
-  `TSInputEncodingUTF16LE` straight from piece-table chunks — never transcode.
-  A tree-sitter byte offset (and `TSPoint.column`, which is byte-based too) is
-  **exactly 2×** our UTF-16-code-unit offset; the `get_column()` scanner
-  callback counts code points instead, but that never crosses our boundary.
-- **Highlight merge convention (M4.1, user decision): tree-sitter master's
-  LATER pattern wins** for identical spans (sort tie-break pattern_index
-  ascending in `rebuildSpans`). The pinned py/js queries rely on it
-  (catch-all `(identifier) @variable` first). Consequences: the runtime does
-  NOT evaluate query predicates — its cursor emits every syntactically
-  matching capture (probe-proven) — so the engine evaluates `#eq?`/`#match?`
-  itself (`buildQueryPredicates`; predicate capture ids are GLOBAL
-  name-table ids, shared across patterns in v0.27.2, same namespace as
-  cursor indices — no remapping; directives/#is-not? pass as satisfied;
-  a QRegularExpression compile failure drops the PREDICATE, fail-open,
-  so the role survives unfiltered rather than being lost). And vendored
-  json highlights.scm is LOCALLY REORDERED (pair-key capture last —
-  recorded in VENDORED.md); py/js scm stay byte-upstream. Tripwire tests:
-  `jsonKeyQueryPatternWinsOverPlainString`, `queryPredicatesFilterRefinedRoles`.
+- **Highlighting engine is vendored tree-sitter** (pinned v0.27.2, ABI 15,
+  in `third_party/tree-sitter/`). Fed `TSInputEncodingUTF16LE` straight from
+  piece-table chunks — never transcode. A tree-sitter byte offset (and
+  `TSPoint.column`, byte-based too) is **exactly 2×** our UTF-16-code-unit
+  offset; the `get_column()` scanner callback counts code points instead, but
+  that never crosses our boundary.
+- **Highlight merge convention (user decision): tree-sitter master's LATER
+  pattern wins** for identical spans (sort tie-break pattern_index ascending
+  in `rebuildSpans`). The pinned py/js/c queries rely on it (catch-all
+  `(identifier) @variable` first); the cpp scm's LOCAL APPEND block is
+  designed around it — upstream's 70 lines stay byte-identical FIRST and the
+  added patterns only REFINES upstream captures; the `@function` re-asserts
+  sit deliberately LAST (`VENDORED.md` records the append). The runtime does
+  NOT evaluate query
+  predicates — its cursor emits every syntactically matching capture — so the
+  engine evaluates `#eq?`/`#match?` itself (`buildQueryPredicates`; predicate
+  capture ids are GLOBAL name-table ids in v0.27.2, same namespace as cursor
+  indices — no remapping; directives pass as satisfied; a QRegularExpression
+  compile failure drops the PREDICATE, fail-open). Vendored json
+  highlights.scm is LOCALLY REORDERED (pair-key capture moved to END) and
+  cpp's is REORDERED-BY-APPEND — both recorded in `VENDORED.md`; py/js/c scm
+  stay byte-upstream. A span painted over by a LATER capture fully inside it
+  keeps remnants on BOTH sides (string tail after an `@escape` stays inked) —
+  never let the split keep only the left one; and never compute the insert
+  position as `i = spans_.insert(...) - spans_.begin()`: the operands are
+  indeterminately sequenced, a realloc'ing insert plus an early-evaluated
+  `begin()` yields a garbage index and heap corruption (the v1.6.0 crash —
+  comment at that site records the trap). Tripwire tests:
+  `jsonKeyQueryPatternWinsOverPlainString`, `queryPredicatesFilterRefinedRoles`,
+  `cSpansMapToModelOffsets`, `cppSpansMapToModelOffsets`.
+- **System-tree-sitter trap (build portability):** on the Arch host the
+  SYSTEM libtree-sitter headers (`/usr/include/tree_sitter/`) silently absorb
+  any missing-vendored-include mistake - `tst_codeeditor` compiled against
+  them instead of the pinned v0.27.2 `api.h` until the clean wheel container
+  exposed it (the v1.6.0 fix: an explicit vendored include dir on the test
+  target; `qmn_view`'s qmn_ts link is PRIVATE and never propagates). Any
+  consumer of `view/HighlightEngine.hpp` outside `qmn_view` (tests, bench
+  tools) must add `third_party/tree-sitter/runtime/include` itself.
 - **`.scm` queries are embedded at CMake CONFIGURE time** (`configure_file`
-  in `third_party/tree-sitter/CMakeLists.txt`); the three query files are
-  `CMAKE_CONFIGURE_DEPENDS` of that dir, so a query edit re-runs configure
-  on the next `ninja` automatically (before that fix, incremental builds
-  silently kept the OLD embedded query).
+  in `third_party/tree-sitter/CMakeLists.txt`); the query files are
+  `CMAKE_CONFIGURE_DEPENDS` of that dir, so a query edit re-runs configure on
+  the next `ninja` automatically.
 
-## Build & test
+## Build & test (C++ host path)
 
 Requirements: CMake ≥ 3.22, C++20, Qt6 ≥ 6.6 (Core/Gui/Widgets/Test). Ninja is
-what CI/README use.
+what CI/README use. CI is the source of truth: `.github/workflows/ci.yml`
+(archlinux container + ubuntu-24.04, both Release).
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
@@ -166,9 +106,10 @@ ninja -C build
 ctest --test-dir build --output-on-failure
 ```
 
-Two ctest tests: `textbuffer` (core property tests) and `codeeditor`
-(widget tests). ctest already sets `QT_QPA_PLATFORM=offscreen` for `codeeditor`
-(via `set_tests_properties`). Run one test:
+Three ctest tests: `textbuffer` (core property tests), `codeeditor` (widget
+tests), `demo` (drives the qmn-demo surface programmatically). ctest already
+sets `QT_QPA_PLATFORM=offscreen` for `codeeditor` and `demo` (via
+`set_tests_properties`). Run one test:
 
 ```bash
 ctest --test-dir build -R codeeditor --output-on-failure
@@ -182,14 +123,26 @@ QT_QPA_PLATFORM=offscreen ./build/tests/tst_codeeditor cellWidthMatchesGlyphEngi
 ./build/tests/tst_textbuffer randomOpsVsReference          # guiless, no display needed
 ```
 
-Headless smoke/bench run of the app:
+Headless smoke/bench runs of the apps (grammar comes from the file suffix;
+`--language python|json|javascript` overrides on qmn-spike):
 
 ```bash
-QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-spike --exit-after-ms 2000 <bigfile>
+QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-spike --exit-after-ms 2000 bigfile.py
+QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.py
 ```
 
-There is **no lint, formatter, or typecheck config** in this repo (no
-clang-format / pre-commit). Match surrounding style; don't invent a formatter.
+- **Never enable the Python extension on an Arch host.** The root option
+  `QMN_BUILD_PYTHON` is OFF by default and CI stays Python-free; ON needs the
+  container env (`bindings/Dockerfile`).
+- Root CMake enables `CMAKE_POSITION_INDEPENDENT_CODE` **only** under
+  `QMN_BUILD_PYTHON`, on purpose: the per-keystroke perf budgets were measured
+  on non-PIC archives. Don't set PIC globally.
+- C++ packaging smoke (both CI jobs run it): `cmake --install build --prefix
+  <p>`, then configure `examples/consumer` with
+  `-DCMAKE_PREFIX_PATH=<p>` — an external `find_package(qmn)` project.
+  `qmn::internal_tree_sitter` is internal; consumers never link it themselves.
+- There is **no lint, formatter, or typecheck config** in this repo (no
+  clang-format / pre-commit). Match surrounding style; don't invent a formatter.
 
 ## Testing quirks
 
@@ -197,23 +150,70 @@ clang-format / pre-commit). Match surrounding style; don't invent a formatter.
   checked against a naive `QString` reference with a **full treap-invariant
   check after every op**. Fixed seed (`0xC0FFEE`) — deterministic, so a failure
   is reproducible. Uses `QTEST_GUILESS_MAIN` (no display).
-- `textRangeWalkStaysPrunedWithManyPieces` is the suite's ONLY
-  timing-dependent test (budget: 1,000 end-of-document probes on a 20k-piece
-  document, best-of-3 rounds, < 10 ms). It guards the Gate-1 bench gate
-  (pruned O(log n) walk vs the M3 regression, 7 -> 37 µs/op); on a timing
-  failure re-measure the bench before touching the budget — the margin is
-  ~100x, so a legitimate pass never comes close.
-- `tst_codeeditor.cpp` drives keyboard/mouse via `QTest`, asserts on model state
-  (not pixels). It builds with `QTEST_MAIN` and needs offscreen.
-- **No vision here.** Image/screenshot input is unavailable to the agent in this
-  repo in principle — never try to verify rendering by reading PNG/screenshot
-  files or by "looking" at anything. This is a QPainter renderer, so pixel bugs
-  (caret drift, cell metrics) are caught only by state/numeric assertions like
-  `cellWidthMatchesGlyphEngineAdvance`, never visually.
+- Two tests are **timing-sensitive by design, and their failure mode is a
+  vacuous pass, never a false fail**: `textRangeWalkStaysPrunedWithManyPieces`
+  (guards the Gate-1 perf gate: 1,000 end-of-document probes on a 20k-piece
+  doc, best-of-3, < 10 ms, ~100x margin) and `foldEndEscapesViewportParseClamp`
+  (guards fold-vs-viewport-parse coverage). On a timing failure re-measure the
+  bench before touching the budget.
+- `tst_codeeditor.cpp` drives keyboard/mouse via `QTest`, asserts on model
+  state (not pixels). It builds with `QTEST_MAIN` and needs offscreen.
+- **No vision here.** Image/screenshot input is unavailable to the agent in
+  this repo in principle — never try to verify rendering by reading
+  PNG/screenshot files or "looking" at anything. This is a QPainter renderer,
+  so pixel bugs (caret drift, cell metrics) are caught only by state/numeric
+  assertions like `cellWidthMatchesGlyphEngineAdvance`. `examples/demo.{py,
+  json,js}` double as fixtures for the exact-span role tables asserted there.
 - When synthesizing a mouse drag, build press/move/release `QMouseEvent`s
   manually (`QTest::mouseMove` won't carry button state) and **never wrap the
   `sendEvent` calls in `Q_ASSERT`** — in release builds the macro strips the
   whole expression, events included.
+
+## Python bindings (Shiboken6 wheel) — container-only pipeline
+
+`./bindings/build_in_container.sh` (docker, mounts the repo):
+
+- (no flag) — configure `-DQMN_BUILD_PYTHON=ON` + build + build-tree smoke and
+  qtmonaco parity test; `--wheel` — **the shipping pipeline** (also the CI
+  `wheel` job): `pip wheel` → `auditwheel repair --plat manylinux_2_34_x86_64`
+  → smoke + parity against the *repaired* wheel with the repo off `sys.path`;
+  `--codegen` — run the generator alone and print the generated files plus
+  `mjb_rejected_functions.log`. **After adding public view API, run
+  `--codegen` and check the rejected log** — silently dropped functions never
+  reach Python. Set `REBUILD_IMAGE=1` to rebuild the (slow) image.
+- **Pins are load-bearing:** `PySide6-Essentials==6.12.0` /
+  `shiboken6_generator==6.12.0` at build time, `~=6.12.0` at runtime — the
+  generated wrappers reference Qt_6.12 versioned symbols and versioned
+  libpyside/libshiboken SONAMEs. Don't loosen.
+- Codegen cannot run on the Arch host (the pip generator binary needs
+  `libxml2.so.2`; Arch ships `libxml2.so.16` — do not symlink). The PySide6
+  wheel ships **no Qt headers and no `Qt6Config.cmake`**, so `Dockerfile`
+  unpacks a real Qt **6.12.0** — fetched from `mirror.yandex.ru/mirrors/qt.io`
+  (`download.qt.io` connect-times out from this network, and aqt 3.3.0 can't
+  parse the Qt≥6.9 one-package layout — don't try it).
+- **One Qt at runtime:** a `DT_NEEDED libQt6Core.so.6` resolves to the
+  already-loaded PySide6-bundled Qt, but `dlopen()` *by path* would load a
+  second copy. Never load Qt by absolute path, never ship Qt libs beside the
+  extension; the wheel smoke asserts one `libQt6Core` in `/proc/self/maps`.
+- **Auditwheel exclude lists live in two places and must stay in sync:**
+  `build_in_container.sh --wheel` and `[tool.cibuildwheel.linux]
+  repair_command` in `pyproject.toml`. The cibuildwheel config is the *future*
+  PyPI flow (its before-all Qt bootstrap is missing); the container pipeline
+  is what ships.
+- Wheel layout: `_qmn.abi3.so` at site-packages root + pure-Python `qmn/`
+  shim (`bindings/python/qmn/__init__.py`) which **imports `PySide6.QtWidgets`
+  before `_qmn`** (the wrapper resolves its `QWidget` base through shiboken's
+  converter registry at import).
+- The qtmonaco drop-in class `qmn.Monaco` lives **in the Python shim only**:
+  qtmonaco is **1-based** (`set_cursor`, `delete_line`, `set_highlighted_lines`,
+  `insert_text`) while C++ `TextPosition` is 0-based — the conversion is done
+  in Python, never in C++. Read-only edit doors raise `ValueError` Python-side
+  (the C++ doors stay silent).
+- Deliberate divergences: `set_vim_mode_enabled` exists and only **warns**
+  (vim mode is out of scope forever — never implement it);
+  `set_minimap_enabled` maps to the overview ruler, never a Chromium-style
+  minimap; `open_diffs` and LSP hooks are absent until Gate 2 — an honest
+  `AttributeError` beats a silent no-op.
 
 ## Model micro-benchmark (`tools/bench_model.cpp`)
 
@@ -227,25 +227,19 @@ g++ -O3 -std=c++20 tools/bench_model.cpp -Isrc/core/.. \
     -lQt6Core -o bench_model && ./bench_model <big-file>
 ```
 
+The perf-table document (61 MiB / 1,000,001 lines) is regenerable
+deterministically — recipe in `README.md` "Model micro-benchmark".
+`tools/` also has `bench_highlight.cpp` and `bench_ts_split.cpp`.
+
 ## Reference points
 
-- Layering + roadmap + perf targets: `README.md`.
-- Phased plan with DoD and risks (binding spike ordering, parity mapping):
-  `PLAN.md`.
-- Consumer + parity target: `qtmonaco` (GitHub `bec-project/qtmonaco`) — the
-  PySide6/`QWebEngineView`-based editor this project aims to replace natively.
-- Changelog for what shipped per milestone (M1 selections are in): `CHANGELOG.md`.
-- **Three product gates (PLAN.md):** Gate 1 = editor v1 (no LSP/DAP/diff/soft
-  wrap); Gate 1.5 = usability interlude between the gates (M20–M24 post-
-  freeze MINOR train: font/zoom on the settings surface, indent guides,
-  fold-gutter hover region, language-scoped properties, themes; the frozen
-  surface widens only additively — no new view mapping/geometry
-  primitives); Gate 2 = IDE surface, opened only after Gate 1.5 closes.
-  **Gate 1.5 CLOSED 2026-11-12 at tag `v1.5.0`** (all five cars shipped as
-  one minor; wheel rebuild at the tag is the owner's step) — Gate 2 work
-  may now start. Never start Gate-2 work while a gate is open; the M5
-  decoration API must already cover diagnostics, breakpoints and inlay
-  hints so Gate 2 needs no view surgery.
-- CI is the source of truth for the supported build: `.github/workflows/ci.yml`
-  (archlinux container + ubuntu-24.04, both `-DCMAKE_BUILD_TYPE=Release`).
-- Deliberately out of scope: vim mode.
+- Layering + roadmap + perf targets: `README.md`. Phased plan with DoD and
+  risks (gate definitions, parity mapping, decided divergences): `PLAN.md`.
+- What shipped per milestone (through v1.5.0): `CHANGELOG.md`.
+- Vendored tree-sitter pins + query provenance + the json scm deviation:
+  `third_party/tree-sitter/VENDORED.md`.
+- Consumer + parity target: `qtmonaco` (GitHub `bec-project/qtmonaco`; local
+  sibling `/home/kai/kaigit/qtmonaco`) — the PySide6/`QWebEngineView` editor
+  this widget replaces. Its Python API is mirrored by `qmn.Monaco`; parity is
+  checked by `bindings/tests/parity_monaco.py`.
+- Highlight demo documents and measured span tallies: `examples/README.md`.

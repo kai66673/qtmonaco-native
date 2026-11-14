@@ -15,40 +15,50 @@ comment in its `CMakeLists.txt`; both CI jobs run it).
 ./build/src/app/qmn-spike examples/demo.py        # python
 ./build/src/app/qmn-spike examples/demo.json      # json
 ./build/src/app/qmn-spike examples/demo.js        # javascript
+./build/src/app/qmn-spike examples/demo.c         # c
+./build/src/app/qmn-spike examples/demo.cpp       # cpp
 ```
 
 `qmn-spike` guesses the grammar from the file suffix (`.py`, `.json`,
-`.js`/`.mjs`/`.cjs`); `--language python|json|javascript` overrides the
-guess (an unknown id falls back to plain text, by the `setLanguage`
-contract). These files double as fixtures for the exact-span tests' role
-table — the engine's colors are asserted numerically in
-`tests/tst_codeeditor.cpp`, never visually.
+`.js`/`.mjs`/`.cjs`, `.c`; `.h`/`.cpp`/`.cc`/`.cxx`/`.hpp`/`.hh`/`.hxx` →
+cpp); `--language python|json|javascript|c|cpp` overrides the guess (an
+unknown id falls back to plain text, by the `setLanguage` contract). These
+files double as fixtures for the exact-span tests' role table — the
+engine's colors are asserted numerically in `tests/tst_codeeditor.cpp`,
+never visually.
 
 ## What each demo actually produces (measured spans per merged TokenKind)
 
-| Role | demo.py | demo.json | demo.js |
-|---|---|---|---|
-| Comment | 8 | — | 9 |
-| Keyword | 26 | — | 32 |
-| Number | 9 | 7 | 7 |
-| String | 11 | 16 | 13 |
-| StringSpecial (regex) | — | — | 1 |
-| StringSpecialKey (object keys) | — | 30 | — |
-| Escape | 1 | 1 | — |
-| Embedded (f-string / template expr) | 4 | — | 3 |
-| Constant / ConstantBuiltin | 1 + — | — + 6 | 5 + 3 |
-| Constructor | 6 | — | 4 |
-| Function | 10 | — | 2 |
-| FunctionBuiltin | 1 | — | — (`require` only) |
-| FunctionMethod | — | — | 11 |
-| Type (py annotations) | 11 | — | — |
-| Variable | 54 | — | 38 (+6 builtin) |
-| Property | 14 | — | 16 |
-| Operator | 26 | — | 26 |
-| PunctuationSpecial | 4 | — | 3 |
-| PunctuationBracket / Delimiter | — | — | 66 / 62 |
+| Role | demo.py | demo.json | demo.js | demo.c | demo.cpp |
+|---|---|---|---|---|---|
+| Comment | 8 | — | 9 | 15 | 31 |
+| Keyword | 26 | — | 32 | 26 | 36 |
+| Number | 9 | 7 | 7 | 11 | 21 |
+| String | 16 | 17 | 16 | 8 | 11 |
+| StringSpecial (regex) | — | — | 2 | — | — |
+| StringSpecialKey (object keys) | — | 30 | — | — | — |
+| Escape | 1 | 1 | — | — | 4 |
+| Embedded (f-string / template expr) | 7 | — | 2 | — | — |
+| Constant / ConstantBuiltin | 1 + — | — + 6 | 5 + 3 | 10 + — | 8 + — |
+| Constructor | 6 | — | 4 | — | — |
+| Function | 10 | — | 2 | 10 | 12 |
+| FunctionBuiltin | 1 | — | — (`require` only) | — | — |
+| FunctionMethod | — | — | 11 | — | — |
+| Type | 11 | — | — | 14 | 24 |
+| Variable | 54 | — | 38 (+6 builtin) | 29 | 42 |
+| Property | 14 | — | 16 | 9 | 4 |
+| Operator | 26 | — | 26 | 27 | — |
+| PunctuationSpecial | 6 | — | 3 | — | — |
+| PunctuationBracket / Delimiter | — | — | 66 / 62 | — / 21 | — / — |
 
-Totals: 186 / 60 / 307 spans. The refined roles (`@function`,
+Totals: 196 / 61 / 310 / 180 / 193 spans. (These numbers post-date the
+mid-span repaint fix in `rebuildSpans`: an earlier pattern's span now
+survives on BOTH sides of a later inner capture, so a string re-inked by
+an `@escape`/f-string `{…}`/template `${…}` capture keeps its tail and
+counts as two String spans — the pre-fix tables undercounted String /
+Embedded / PunctuationSpecial.)
+
+The refined roles (`@function`,
 `@constructor`, `@constant`, `@type`, …) fire because the merge follows
 tree-sitter master's *later matching pattern wins* convention AND the
 engine evaluates the queries' `#match?`/`#eq?` predicates itself — the
@@ -94,3 +104,31 @@ bugs — worth knowing before anyone "fixes" a demo:
   `readFile`, that stays `Function` via the call pattern), in py it is
   the builtins list (`#match?`): demo.py's lone `FunctionBuiltin` is
   `print(...)`, demo.js has none.
+* **C is byte-upstream (no local adaptation at all)** and carries its
+  grammar's quirks: the c pin has no external scanner, so `#define`
+  BODIES are monolithic `preproc_arg` tokens — no ink inside them (the
+  macro name + parameter are ordinary nodes: demo.c's 10 `Function`
+  spans include the macro name `SQ` via `@function.special` plus its
+  call site);
+  enumerators like `RED` ride the ALL_CAPS `@constant` rule; `goto` and
+  the label colon are uncaptured upstream (plain ink), while both label
+  identifier sites take `@label` → function ink; `printf`/`puts` calls
+  are `Function` — the c query has no builtin list; `char_literal` is
+  one Number span (upstream never captures escapes inside it, so demo.c
+  has zero `Escape` spans); punctuation captures are only `.`/`;`
+  (`@delimiter`), everything else plain.
+* **C++ is the appended-query demo** (the upstream v0.23.4 file colors
+  almost nothing — VENDORED.md records the append block): comments,
+  numbers, plain strings, primitive types, `true`/`false` and control
+  keywords come from the append. `std` fails the upstream
+  `namespace_identifier` `^[A-Z]` predicate (plain ink) while the
+  `string` in `std::string` is a `type_identifier` in type position
+  already (Type ink, no extra pattern needed). The cpp query captures
+  NO punctuation at all: `;`, `::`, parens stay plain. Destructors get
+  function ink from the added `destructor_name` pattern (it has no
+  `declarator` field in this pin). UPPER_CASE macro guards like
+  `DEMO_H_` are `Constant` via the ALL_CAPS rule — but a
+  `#define SQ(x)`-style name re-takes its span as `Function` from the
+  `preproc_function_def` pattern appended after it. Do not put
+  `#pragma`/`#error`/`#undef` or range-for loops in the fixture: those
+  are not tokens/nodes of the v0.23.4 pin.

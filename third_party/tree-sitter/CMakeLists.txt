@@ -17,7 +17,9 @@ enable_language(C)
 file(READ ${CMAKE_CURRENT_LIST_DIR}/grammars/python/queries/highlights.scm QMN_SCM_PYTHON)
 file(READ ${CMAKE_CURRENT_LIST_DIR}/grammars/json/queries/highlights.scm QMN_SCM_JSON)
 file(READ ${CMAKE_CURRENT_LIST_DIR}/grammars/javascript/queries/highlights.scm QMN_SCM_JAVASCRIPT)
-foreach(scm QMN_SCM_PYTHON QMN_SCM_JSON QMN_SCM_JAVASCRIPT)
+file(READ ${CMAKE_CURRENT_LIST_DIR}/grammars/c/queries/highlights.scm QMN_SCM_C)
+file(READ ${CMAKE_CURRENT_LIST_DIR}/grammars/cpp/queries/highlights.scm QMN_SCM_CPP)
+foreach(scm QMN_SCM_PYTHON QMN_SCM_JSON QMN_SCM_JAVASCRIPT QMN_SCM_C QMN_SCM_CPP)
     if("${${scm}}" MATCHES [[\)QMN"]])
         message(FATAL_ERROR "query contains the raw-string delimiter )QMN\"")
     endif()
@@ -27,7 +29,9 @@ endforeach()
 set_property(DIRECTORY APPEND PROPERTY CMAKE_CONFIGURE_DEPENDS
     ${CMAKE_CURRENT_LIST_DIR}/grammars/python/queries/highlights.scm
     ${CMAKE_CURRENT_LIST_DIR}/grammars/json/queries/highlights.scm
-    ${CMAKE_CURRENT_LIST_DIR}/grammars/javascript/queries/highlights.scm)
+    ${CMAKE_CURRENT_LIST_DIR}/grammars/javascript/queries/highlights.scm
+    ${CMAKE_CURRENT_LIST_DIR}/grammars/c/queries/highlights.scm
+    ${CMAKE_CURRENT_LIST_DIR}/grammars/cpp/queries/highlights.scm)
 configure_file(query_data.cpp.in ${CMAKE_CURRENT_BINARY_DIR}/query_data.cpp @ONLY)
 
 add_library(qmn_ts STATIC
@@ -37,6 +41,10 @@ add_library(qmn_ts STATIC
     grammars/json/src/parser.c
     grammars/javascript/src/parser.c
     grammars/javascript/src/scanner.c
+    # c v0.24.2 dropped upstream's external scanner: parser.c only (like json)
+    grammars/c/src/parser.c
+    grammars/cpp/src/parser.c
+    grammars/cpp/src/scanner.c
     ${CMAKE_CURRENT_BINARY_DIR}/query_data.cpp)
 
 set_target_properties(qmn_ts PROPERTIES C_STANDARD 11 C_EXTENSIONS ON)
@@ -61,6 +69,8 @@ target_include_directories(qmn_ts
         ${CMAKE_CURRENT_LIST_DIR}/grammars/python/src
         ${CMAKE_CURRENT_LIST_DIR}/grammars/json/src
         ${CMAKE_CURRENT_LIST_DIR}/grammars/javascript/src
+        ${CMAKE_CURRENT_LIST_DIR}/grammars/c/src
+        ${CMAKE_CURRENT_LIST_DIR}/grammars/cpp/src
         ${CMAKE_CURRENT_LIST_DIR}/../../src)
 
 # Vendored third-party + generated parser code: keep the noise out of our

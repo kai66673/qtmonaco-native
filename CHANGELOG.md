@@ -3,6 +3,83 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.6.0] — 2026-11-14
+
+### Added
+- **M4 extension: C and C++ grammars highlighted.** `third_party/
+  tree-sitter/grammars/{c,cpp}/` vendors tree-sitter-c v0.24.2 (no
+  external scanner — its preprocessor lives in the LR tables) and
+  tree-sitter-cpp v0.23.4 (has `scanner.c`; its `parser.c` is ABI 14,
+  same as json's, accepted by the v0.27.2 runtime; tarball sha256s +
+  keep-vs-dropped notes in `VENDORED.md`). Registry ids `"c"`/`"cpp"`,
+  registry order python, json, javascript, c, cpp — `availableLanguages()`
+  now returns the five (the two full-list assertions in
+  `languagePropertiesTriStateAndSharedRegistry` /
+  `availableLanguagesShipsPinnedGrammars` pin it). Both apps' suffix
+  picks: `.c` -> c; `.h`/`.cpp`/`.cc`/`.cxx`/`.hpp`/`.hh`/`.hxx` -> cpp
+  (`.h` is a C++ header first on this widget's home turf; the cpp grammar
+  parses plain C headers near identically). No frozen-surface change: the
+  24-value `TokenKind` already covered every capture role (three plain
+  name-table additions — `delimiter` -> PunctuationDelimiter,
+  `function.special` -> Function, `label` -> Function, mirroring the c
+  query's short legacy capture names), no new view API, bindings surface
+  untouched (the python parity test only checks membership). Fold lists
+  `kFoldC`/`kFoldCpp` ride the M13 machinery with only node names
+  verified present in these pins' `parser.c` (`switch_body`,
+  `for_each_statement`, `handler` are NOT nodes of the cpp pin — an
+  unresolvable fold-query name would be silently dropped, so
+  `cAndCppGrammarFoldsResolve` is the tripwire that they resolve).
+  The c `highlights.scm` is byte-upstream — and with it its grammar
+  facts: no ink inside `#define` bodies (no scanner -> `preproc_arg`
+  monolithic tokens), `goto` + label colon plain, `@label` maps to
+  function ink, char literals one Number span (escapes uncaptured). The
+  cpp query is the SECOND recorded local adaptation (after the json
+  reorder): upstream v0.23.4's 70 lines stay byte-identical FIRST, a
+  documented APPEND block at the END adds the basics upstream never
+  colors (comment, the 8 preprocessor tokens this pin lexes —
+  `#pragma`/`#error`/`#undef` are not tokens here, number/char/string/
+  escape/system_lib_string, `true`/`false`, control/storage keywords,
+  the `(identifier) @variable` catch-all mirroring c's line 1, types,
+  `@property`, ALL_CAPS `@constant`) and RE-ASSERTS the `@function`
+  patterns last (bare-name declarators, `destructor_name` — no
+  `declarator` field in this pin, `obj.member()` calls,
+  `preproc_function_def` names). Appending is load-bearing under the
+  later-wins merge: appended patterns only ever refine the upstream
+  ones, never stomp them. New fixtures `examples/demo.c`/`examples/
+  demo.cpp` with measured tallies (180/193 spans) in `examples/
+  README.md`; tests `cSpansMapToModelOffsets`/`cppSpansMapToModelOffsets`
+  assert the exact merged role tables in model offsets.
+- (Same release, see Fixed:) the py/json/js demo tallies in `examples/
+  README.md` re-measured after the merge fix: 186/60/307 -> 196/61/310
+  spans — the fixed merge keeps the string TAIL after a mid-string
+  `@escape`/f-string/`${}` capture, which the old code silently dropped.
+
+### Fixed
+- **`rebuildSpans` paint-over kept only the LEFT remnant of a straddled
+  span.** A later capture fully INSIDE an earlier one (the `@escape`
+  capture inside `(string_literal) @string` is the standing case) now
+  splits the earlier span on BOTH sides — before this the string's tail
+  reverted to plain ink after every escape/embedded-expression, for
+  python/json/javascript too (no test had ever covered a mid-string
+  inner capture; `cSpansMapToModelOffsets`/`cppSpansMapToModelOffsets`
+  now pin the both-remnants contract). The first fix attempt introduced
+  a second bug, caught while tallying demo.cpp (heap corruption,
+  SIGSEGV in `ts_tree_delete`): `i = insert(...) - spans_.begin()` has
+  indeterminately sequenced operands, and when the insert reallocates,
+  a `spans_.begin()` evaluated BEFORE the call makes the difference —
+  and every index derived from it — garbage, so the next paint inserted
+  spans through a wild iterator. The insert position is now recomputed
+  in its own statement (comment in `src/view/HighlightEngine.cpp`
+  records the trap).
+- **Build portability: `tst_codeeditor` only compiled by accident.** Its
+  `view/HighlightEngine.hpp` include chains to the vendored
+  `<tree_sitter/api.h>`, but `qmn_view`'s `qmn_ts` link is PRIVATE (layering
+  rule) and never propagates - on the Arch host the SYSTEM libtree-sitter
+  headers (`/usr/include/tree_sitter/`) absorbed the gap; the clean wheel
+  container (which builds tests too) fails there. The test target now names
+  the vendored include dir explicitly; the same note was added to
+  `tools/bench_highlight.cpp`'s standalone g++ recipe.
+
 ## [1.5.0] — 2026-11-12
 
 ### Added

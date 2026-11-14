@@ -37,6 +37,13 @@ QString languageForSuffix(const QString& suffix)
         return QStringLiteral("json");
     if (suffix == u"js" || suffix == u"mjs" || suffix == u"cjs")
         return QStringLiteral("javascript");
+    // .h is a cpp header first (this widget's home is C++/Qt IDEs; the cpp
+    // grammar also parses plain C headers near identically). .c gets c.
+    if (suffix == u"c")
+        return QStringLiteral("c");
+    if (suffix == u"h" || suffix == u"cpp" || suffix == u"cc" || suffix == u"cxx"
+        || suffix == u"hpp" || suffix == u"hh" || suffix == u"hxx")
+        return QStringLiteral("cpp");
     return {};
 }
 
@@ -58,7 +65,7 @@ int main(int argc, char* argv[])
                       QStringLiteral("Quit automatically after the given delay (smoke/bench)"),
                       QStringLiteral("ms")});
     parser.addOption({QStringLiteral("language"),
-                      QStringLiteral("Highlight grammar (python|json|javascript); "
+                      QStringLiteral("Highlight grammar (python|json|javascript|c|cpp); "
                                      "default: guessed from the file suffix"),
                       QStringLiteral("id")});
     parser.process(app);

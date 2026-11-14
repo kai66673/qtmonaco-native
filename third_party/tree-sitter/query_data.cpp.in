@@ -23,4 +23,16 @@ const char* javascriptHighlights()
     return kSource;
 }
 
+const char* cHighlights()
+{
+    static const char kSource[] = R"QMN(@QMN_SCM_C@)QMN";
+    return kSource;
+}
+
+const char* cppHighlights()
+{
+    static const char kSource[] = R"QMN(@QMN_SCM_CPP@)QMN";
+    return kSource;
+}
+
 } // namespace qmn::view::queries

@@ -86,8 +86,9 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-spike --exit-after-ms 2000 bigfile
 QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo --exit-after-ms 300 bigfile.py
 ```
 
-Highlighting demos, one per grammar (`.py`/`.json`/`.js` suffixes pick the
-grammar automatically; `--language` overrides): see `examples/README.md`.
+Highlighting demos, one per grammar (`.py`/`.json`/`.js`/`.c`/`.cpp` suffixes
+pick the grammar automatically — `.h`-family headers go cpp; `--language
+python|json|javascript|c|cpp` overrides): see `examples/README.md`.
 
 ## Roadmap (hobby-scale, see estimates in the qtmonaco discussion)
 

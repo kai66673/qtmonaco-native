@@ -30,6 +30,13 @@ QString languageForSuffix(const QString& suffix)
         return QStringLiteral("json");
     if (suffix == u"js" || suffix == u"mjs" || suffix == u"cjs")
         return QStringLiteral("javascript");
+    // Same c/cpp split as the spike: .c -> c, .h/.hpp/... -> cpp (C++/Qt
+    // headers first; the cpp grammar parses plain C near identically too).
+    if (suffix == u"c")
+        return QStringLiteral("c");
+    if (suffix == u"h" || suffix == u"cpp" || suffix == u"cc" || suffix == u"cxx"
+        || suffix == u"hpp" || suffix == u"hh" || suffix == u"hxx")
+        return QStringLiteral("cpp");
     return {};
 }
 

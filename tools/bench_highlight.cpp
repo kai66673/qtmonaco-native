@@ -9,6 +9,7 @@
 //   g++ -O3 -std=c++20 tools/bench_highlight.cpp -Isrc \
 //       build/src/view/libqmn_view.a build/src/core/libqmn_core.a \
 //       build/third_party/tree-sitter/libqmn_ts.a \
+//       -isystem third_party/tree-sitter/runtime/include \
 //       -isystem /usr/include/qt6 -isystem /usr/include/qt6/QtCore \
 //       -isystem /usr/include/qt6/QtGui -isystem /usr/include/qt6/QtWidgets \
 //       -lQt6Widgets -lQt6Gui -lQt6Core -o bench_highlight

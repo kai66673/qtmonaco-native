@@ -15,6 +15,8 @@ extern "C" {
 const TSLanguage* tree_sitter_python(void);
 const TSLanguage* tree_sitter_json(void);
 const TSLanguage* tree_sitter_javascript(void);
+const TSLanguage* tree_sitter_c(void);
+const TSLanguage* tree_sitter_cpp(void);
 }
 
 namespace qmn::view {
@@ -70,6 +72,29 @@ const char* const kFoldJavascript[] = {
 const char* const kFoldJson[] = {
     "object", "array",
 };
+// Node names below verified against the pins' node-types.json; unknown
+// names would be filtered by composeFoldQuery anyway.
+const char* const kFoldC[] = {
+    "compound_statement",    "function_definition",  "if_statement",
+    "else_clause",           "for_statement",        "while_statement",
+    "do_statement",          "switch_statement",     "case_statement",
+    "labeled_statement",     "struct_specifier",     "enum_specifier",
+    "union_specifier",       "initializer_list",
+    // Preprocessor conditionals/macros fold like VS Code's #region-ish
+    // blocks (multi-line '\' macros own their rows).
+    "preproc_if",            "preproc_ifdef",        "preproc_def",
+    "preproc_function_def",
+};
+const char* const kFoldCpp[] = {
+    "compound_statement",    "function_definition",  "class_specifier",
+    "struct_specifier",      "union_specifier",      "enum_specifier",
+    "if_statement",          "else_clause",          "for_statement",
+    "while_statement",       "do_statement",         "case_statement",
+    "lambda_expression",     "namespace_definition", "template_declaration",
+    "try_statement",         "field_initializer_list", "initializer_list",
+    "preproc_if",            "preproc_ifdef",        "preproc_def",
+    "preproc_function_def",
+};
 
 struct LangEntry {
     const char* id;
@@ -87,11 +112,15 @@ const LangEntry kRegistry[] = {
      uint32_t(sizeof kFoldJson / sizeof kFoldJson[0])},
     {"javascript", &tree_sitter_javascript, &queries::javascriptHighlights, kFoldJavascript,
      uint32_t(sizeof kFoldJavascript / sizeof kFoldJavascript[0])},
+    {"c", &tree_sitter_c, &queries::cHighlights, kFoldC,
+     uint32_t(sizeof kFoldC / sizeof kFoldC[0])},
+    {"cpp", &tree_sitter_cpp, &queries::cppHighlights, kFoldCpp,
+     uint32_t(sizeof kFoldCpp / sizeof kFoldCpp[0])},
 };
 
 // Capture name -> TokenKind: the union of the capture names used by the
-// three vendored highlights.scm files (VENDORED.md: upstream copies, the
-// one json local adaptation is pattern ORDER only; filtering unknown
+// five vendored highlights.scm files (VENDORED.md: upstream copies, the
+// json ORDER adaptation and the cpp APPEND adaptation; filtering unknown
 // names is this table's job). Names outside the table map to -1 and
 // their captures are dropped.
 int kindForCapture(const char* name, uint32_t len)
@@ -112,6 +141,13 @@ int kindForCapture(const char* name, uint32_t len)
         {"punctuation.bracket", int(TokenKind::PunctuationBracket)},
         {"punctuation.delimiter", int(TokenKind::PunctuationDelimiter)},
         {"punctuation.special", int(TokenKind::PunctuationSpecial)},
+        // c scm's short legacy names (tree-sitter master spells these
+        // punctuation.delimiter / function.builtin-style): same roles.
+        {"delimiter", int(TokenKind::PunctuationDelimiter)},
+        {"function.special", int(TokenKind::Function)},
+        // goto/switch labels ride the function ink (VS Code maps
+        // entity.name.label to the same color).
+        {"label", int(TokenKind::Function)},
         {"function", int(TokenKind::Function)},
         {"function.builtin", int(TokenKind::FunctionBuiltin)},
         {"function.method", int(TokenKind::FunctionMethod)},
@@ -751,8 +787,26 @@ void HighlightEngine::rebuildSpans(int qStart, int qEnd)
             [](int v, const Span& s) { return v < s.end; });
         size_t i = size_t(first - spans_.begin());
         if (i < spans_.size() && spans_[i].start < c.start) {
-            spans_[i].end = c.start; // keep the left remnant visible
-            ++i;
+            if (spans_[i].end > c.end) {
+                // The straddling span survives on BOTH sides of the repaint:
+                // the earlier pattern keeps everything except exactly c's
+                // units (e.g. a string whose middle escape is re-inked by a
+                // later pattern keeps its tail). The right remnant starts at
+                // c.end, so the loop below skips it and c inserts before it.
+                // NOTE: the insert position must be recomputed in its OWN
+                // statement: in `it - spans_.begin()` the second begin() may
+                // be evaluated BEFORE the insert call (indeterminately
+                // sequenced operands), and an insert that reallocates leaves
+                // that stale pointer behind - the difference (and every index
+                // derived from it) is garbage, corrupting later inserts.
+                Span right{c.end, spans_[i].end, spans_[i].kind};
+                spans_[i].end = c.start;
+                spans_.insert(spans_.begin() + long(i) + 1, right);
+                ++i; // i indexes the right remnant now
+            } else {
+                spans_[i].end = c.start; // keep the left remnant visible
+                ++i;
+            }
         }
         while (i < spans_.size() && spans_[i].start < c.end) {
             if (spans_[i].end <= c.end)

@@ -235,6 +235,9 @@ private slots:
     void pythonSpansMapToModelOffsets();
     void jsonSpansMapToModelOffsets();
     void javascriptSpansMapToModelOffsets();
+    void cSpansMapToModelOffsets();
+    void cppSpansMapToModelOffsets();
+    void cAndCppGrammarFoldsResolve();
     void jsonKeyQueryPatternWinsOverPlainString();
     void queryPredicatesFilterRefinedRoles();
     void spansClipToRequestedWindow();
@@ -4999,7 +5002,8 @@ void TestCodeEditor::availableLanguagesShipsPinnedGrammars()
     // grammars must be appended here (VENDORED.md lists the upstream pins).
     QCOMPARE(CodeEditor::availableLanguages(),
              QStringList({QStringLiteral("python"), QStringLiteral("json"),
-                          QStringLiteral("javascript")}));
+                          QStringLiteral("javascript"), QStringLiteral("c"),
+                          QStringLiteral("cpp")}));
 }
 
 void TestCodeEditor::pythonSpansMapToModelOffsets()
@@ -5071,6 +5075,141 @@ void TestCodeEditor::javascriptSpansMapToModelOffsets()
         {32, 36, TK::Comment},                // // c
     };
     QVERIFY(allSpans(editor) == expected);
+}
+
+void TestCodeEditor::cSpansMapToModelOffsets()
+{
+    const QString text =
+        QStringLiteral("#define SQ(x) ((x)*(x))\n"
+                       "int f(void) { struct P p; p.x = 1; goto end; end: return 0; }\n");
+    editor->setPlainText(text);
+    editor->setLanguage(QStringLiteral("c"));
+
+    // Line 0 = 23 units (+\n at 23), line 1 starts at 24. Every role below
+    // traces to the byte-upstream c highlights.scm (VENDORED.md):
+    const QVector<Span> expected = {
+        {0, 7, TK::Keyword},               // #define ("#define" token capture)
+        {8, 10, TK::Function},             // SQ: preproc_function_def name wins
+                                           // the identical-span @constant ALL_CAPS
+                                           // pattern (later-pattern-wins merge)
+        {11, 12, TK::Variable},            // x (macro parameter; the parameter
+                                           // list IS parsed as ordinary nodes)
+                                           // ... but the macro BODY ((x)*(x))
+                                           // stays entirely plain: without the
+                                           // old external scanner, c v0.24.2
+                                           // lexes it as `preproc_arg` named
+                                           // tokens, which the query captures
+                                           // nothing of. Do not "fix" the
+                                           // query around a grammar property.
+        {24, 27, TK::Type},                // int
+        {28, 29, TK::Function},            // f: function_declarator pattern refines
+        {30, 34, TK::Type},                // void
+        {38, 44, TK::Keyword},             // struct
+        {45, 46, TK::Type},                // P: type_identifier wins the ALL_CAPS
+                                           // @constant conflict (single capital letter)
+        {47, 48, TK::Variable},            // p
+        {48, 49, TK::PunctuationDelimiter},// ; (";" @delimiter)
+        {50, 51, TK::Variable},            // p (field_expression argument)
+        {51, 52, TK::PunctuationDelimiter},// . ("." @delimiter)
+        {52, 53, TK::Property},            // x (field_identifier)
+        {54, 55, TK::Operator},            // =
+        {56, 57, TK::Number},              // 1
+        {57, 58, TK::PunctuationDelimiter},// ;
+                                           // "goto" and the label colon stay plain:
+                                           // the upstream c query captures neither.
+        {64, 67, TK::Function},            // end (statement_identifier @label; the
+                                           // table maps label -> function ink)
+        {67, 68, TK::PunctuationDelimiter},// ;
+        {69, 72, TK::Function},            // end: (labeled_statement's identifier)
+        {74, 80, TK::Keyword},             // return
+        {81, 82, TK::Number},              // 0
+        {82, 83, TK::PunctuationDelimiter},// ;
+    };
+    QVERIFY(allSpans(editor) == expected);
+}
+
+void TestCodeEditor::cppSpansMapToModelOffsets()
+{
+    // `int main` (not `void main`): the cpp grammar parses `void main` as an
+    // ERROR node and a fixture must not lean on error recovery.
+    const QString text =
+        QStringLiteral("int main() { if (x) return FOO; return 0; }\n"
+                       "std::string s = \"a\\nb\"; obj.f(1); true;\n");
+    editor->setPlainText(text);
+    editor->setLanguage(QStringLiteral("cpp"));
+
+    // Line 0 = 43 units, line 1 starts at 44. The upstream cpp query colors
+    // none of the basics (comments/numbers/strings/control keywords); those
+    // roles come from the documented append block (VENDORED.md).
+    const QVector<Span> expected = {
+        {0, 3, TK::Type},                  // int (primitive_type, append block)
+        {4, 8, TK::Function},              // main: the added bare-name
+                                           // function_declarator pattern (upstream
+                                           // only covers qualified/field declarators)
+        {13, 15, TK::Keyword},             // if (append keyword list)
+        {17, 18, TK::Variable},            // x (identifier catch-all, append block)
+        {20, 26, TK::Keyword},             // return (append keyword list)
+        {27, 30, TK::Constant},            // FOO (#match? ALL_CAPS; the engine
+                                           // evaluates the predicate itself)
+        {32, 38, TK::Keyword},             // return
+        {39, 40, TK::Number},              // 0
+        {49, 55, TK::Type},                // string (type_identifier in std::string)
+                                           // "std" stays plain - the upstream
+                                           // namespace_identifier #match? "^[A-Z]"
+                                           // predicate filters it out; punctuation
+                                           // ("::" "=" "." ";" parens) stays plain:
+                                           // the cpp query captures no punctuation.
+        {56, 57, TK::Variable},            // s
+        {60, 62, TK::String},              // "a   (string_literal; the escape splits)
+        {62, 64, TK::Escape},              // \n  (escape_sequence is a LATER pattern
+                                           // than string_literal and wins exactly its
+                                           // 2 units...)
+        {64, 66, TK::String},              // b"  (...and the string keeps BOTH side
+                                           // remnants - mid-span repaint contract)
+        {68, 71, TK::Variable},            // obj
+        {72, 73, TK::Function},            // f: call_expression field_expression
+                                           // pattern (appended LAST) beats the earlier
+                                           // (field_identifier) @property capture
+        {74, 75, TK::Number},              // 1
+        {78, 82, TK::Constant},            // true ((true) node, append block)
+    };
+    QVERIFY(allSpans(editor) == expected);
+}
+
+void TestCodeEditor::cAndCppGrammarFoldsResolve()
+{
+    // M13 fold nodes are composed into a query name-by-name, and unknown
+    // names are dropped silently (composeFoldQuery). This is the tripwire
+    // that kFoldC/kFoldCpp names actually resolve in the pinned grammars:
+    // a typo'd or renamed node type would leave the line unfoldable.
+    editor->setPlainText(QStringLiteral(
+        "int main(void) {\n"
+        "    if (x) {\n"
+        "        return 0;\n"
+        "    }\n"
+        "    return 1;\n"
+        "}\n"));
+    editor->setLanguage(QStringLiteral("c"));
+    editor->grab();
+    QVERIFY(editor->isFoldable(0)); // function_definition
+    QVERIFY(editor->isFoldable(1)); // if_statement
+    QVERIFY(editor->foldLine(0));
+    QVERIFY(editor->visibleLineTotal() < editor->lineCount());
+    editor->expandAll();
+
+    editor->setPlainText(QStringLiteral(
+        "class C {\n"
+        "    void f() {\n"
+        "        g();\n"
+        "    }\n"
+        "};\n"));
+    editor->setLanguage(QStringLiteral("cpp"));
+    editor->grab();
+    QVERIFY(editor->isFoldable(0)); // class_specifier
+    QVERIFY(editor->isFoldable(1)); // in-class function_definition
+    QVERIFY(editor->foldLine(0));
+    QVERIFY(editor->visibleLineTotal() < editor->lineCount());
+    editor->expandAll();
 }
 
 void TestCodeEditor::jsonKeyQueryPatternWinsOverPlainString()
@@ -8062,7 +8201,8 @@ void TestCodeEditor::languagePropertiesTriStateAndSharedRegistry()
     py->setTabStopWidth(8);
     QCOMPARE(CodeEditor::availableLanguages(),
              (QStringList{QStringLiteral("python"), QStringLiteral("json"),
-                          QStringLiteral("javascript")}));
+                          QStringLiteral("javascript"), QStringLiteral("c"),
+                          QStringLiteral("cpp")}));
 
     // Tri-state + signal contract: set carries the clamped NEW value, a
     // clear carries -1; same-value sets and double clears stay silent.

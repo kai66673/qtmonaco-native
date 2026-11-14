@@ -9,5 +9,7 @@ namespace qmn::view::queries {
 const char* pythonHighlights();
 const char* jsonHighlights();
 const char* javascriptHighlights();
+const char* cHighlights();
+const char* cppHighlights();
 
 } // namespace qmn::view::queries
