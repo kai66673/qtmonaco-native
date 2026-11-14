@@ -17,7 +17,7 @@ requires = [
 
 [project]
 name = "qmn-native"
-version = "1.5.0"
+version = "1.6.0"
 description = "Native Qt6 code-editor widget exposed to PySide6 (drop-in target for qtmonaco.Monaco)"
 requires-python = ">=3.10"
 # ~=6.12.0 is not fussiness, it is how the extension links: DT_NEEDED carries
