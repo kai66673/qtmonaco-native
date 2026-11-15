@@ -90,6 +90,19 @@ Highlighting demos, one per grammar (`.py`/`.json`/`.js`/`.c`/`.cpp` suffixes
 pick the grammar automatically — `.h`-family headers go cpp; `--language
 python|json|javascript|c|cpp` overrides): see `examples/README.md`.
 
+### Python demo (pydemo/)
+
+`pydemo/` is a `uv` project mirroring `qmn-demo` door-for-door in Python on
+top of the shipped wheel (the same tabbed UI, the same settings-template
+semantics, the same `--exit-after-ms` headless contract). Build the wheel
+first (`./bindings/build_in_container.sh --wheel`), then:
+
+```bash
+cd pydemo
+QT_QPA_PLATFORM=offscreen uv run main.py ../examples/demo.py --exit-after-ms 400
+uv run main.py [files...]                    # the visible app
+```
+
 ### Editor setup (VS Code / Code OSS)
 
 `.vscode/` is gitignored, so each dev configures their editor locally; the

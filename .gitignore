@@ -5,6 +5,10 @@ __pycache__/
 .venv/
 *.egg-info/
 dist/
+# pydemo's uv.lock is NOT committed on purpose: its qmn-native path source
+# points into gitignored dist/ (the wheel is a release artifact), so a
+# committed lock would dangle for anyone without a local wheel build.
+pydemo/uv.lock
 .ninja_log
 CMakeCache.txt
 *.user

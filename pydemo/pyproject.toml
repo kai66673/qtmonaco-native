@@ -1,0 +1,19 @@
+[project]
+name = "qmn-pydemo"
+version = "1.0.0" # mirrors qmn-demo's applicationVersion; the wheel's own
+                  # version is read at runtime via qmn-native's metadata
+description = "Python analog of the C++ qmn-demo, driven from the shipped qmn_native wheel"
+requires-python = ">=3.10" # the wheel is cp310-abi3
+dependencies = [
+    # The runtime pins of the bindings (AGENTS.md): the wheel METADATA pulls
+    # Essentials anyway, but the demo imports PySide6 directly - say so.
+    "PySide6-Essentials~=6.12.0",
+    "qmn-native",
+]
+
+[tool.uv.sources]
+# The repaired wheel IS the release artifact: built by the container pipeline
+# (./bindings/build_in_container.sh --wheel, AGENTS.md). dist/ is gitignored -
+# build the wheel first, then `uv run main.py`. The path bumps at each
+# release (no glob in uv sources; that also keeps uv.lock out of git).
+qmn-native = { path = "../dist/repaired/qmn_native-1.6.0-cp310-abi3-manylinux_2_34_x86_64.whl" }
