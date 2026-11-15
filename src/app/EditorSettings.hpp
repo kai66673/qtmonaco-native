@@ -2,9 +2,9 @@
 
 // qmn-demo (the post-1.0 full demo app): the settings the "Настройки"
 // dialog edits, as ONE plain struct — the demo-side template of the M19
-// CodeEditorOptions surface (its thirteen knobs since M21; M20 added the
+// CodeEditorOptions surface (its fourteen knobs since M25; M20 added the
 // M17 font/zoom pair with a "Шрифт и масштаб" group, M24 grew the
-// fourteenth: the theme preset riding the CodeEditorTheme door).
+// fifteenth: the theme preset riding the CodeEditorTheme door).
 // The defaults below MUST mirror the CodeEditor's own documented ones;
 // the demo test suite tripwires that against a fresh editor's live
 // options()/theme(), so drift fails CI rather than surprising a user.
@@ -38,6 +38,9 @@ struct EditorSettings {
     bool autoCloseEnabled = true;     // M18 pair typing
     bool readOnly = false;            // refuse USER edits (M19-only knob)
     bool indentGuidesEnabled = true;  // M21 ambient tab-stop guides (options-only)
+    bool softWrapEnabled = false;     // M25 word wrap: lines ink as visual slots
+                                      // (the 14th options knob; default OFF,
+                                      // mirroring CodeEditorOptions)
     // M20: the M17 pair. codeFont is the zoom-1.0 BASE exactly as the
     // editor stores it (pixel-sized by the demo recipe — see
     // demoDefaultCodeFont); zoomFactor is the live editor factor (the

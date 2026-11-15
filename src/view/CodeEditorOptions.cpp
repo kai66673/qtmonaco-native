@@ -158,4 +158,14 @@ bool CodeEditorOptions::indentGuidesEnabled() const
     return editor_->indentGuidesEnabled();
 }
 
+void CodeEditorOptions::setSoftWrapEnabled(bool enabled)
+{
+    editor_->setSoftWrapEnabled(enabled);
+}
+
+bool CodeEditorOptions::softWrapEnabled() const
+{
+    return editor_->softWrapEnabled();
+}
+
 } // namespace qmn::view

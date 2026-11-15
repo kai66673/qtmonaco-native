@@ -834,6 +834,19 @@ space, so a late wrap would force a full revalidation round on diff tests.
 The wheel-parity leftovers ride their owning cars, they are not a car of
 their own.
 
+**Known pre-existing bug (recorded 2026-11-15, deferred to its own small
+car):** bracketed type-over-selection in `insertTextAtCaret` (the
+`beginEditGroup` bracket around `deleteSelection` + insert, found via a
+typeover through the accessible `replaceText` door) pushes TWO undo groups
+(serial +2, depth +2) for ONE `reconcileUndoMarks` call, so `undoMarks_`
+lags the core's history by one entry. Debug-only symptom: the
+`Q_ASSERT(undoMarks_.size() == buffer_.undoDepth())` trips in
+`accessibleTextOffsetsMapDocumentAndDriveCaret`; it REPRODUCES ON CLEAN v1.6.1
+main (verified by stash), release builds stay silent but caret marks drift
+(undo restores a stale caret position). This is frozen Gate-1 undo mechanics —
+fixing it is deliberately NOT folded into an M25 car; it gets its own fix car
+with its own tripwire.
+
 ### CodeDocument (new public view QObject; lands first inside M25)
 
 Decided 2026-11-15 (owner proposal). `src/view/CodeDocument.{hpp,cpp}`: a

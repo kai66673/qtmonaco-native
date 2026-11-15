@@ -304,7 +304,16 @@ CodeEditor::CodeEditor(QWidget* parent)
                            // the next paint (or find action) refreshes it
         // M13: keep collapsed-fold indices aligned with the model (a
         // best-effort line-index sweep; fold STATE is not undoable in v1).
-        shiftFoldStateForEdit(ev);
+        const bool foldMapRebuilt = shiftFoldStateForEdit(ev);
+        // M25: the wrap layer rides the SAME seam, after the fold half (its
+        // weight rule reads hiddenRuns_, which the fold half just made
+        // current). Wrap OFF this is one branch test: the frozen per-
+        // keystroke cost of v1.6.1 is untouched (PLAN §M25's cost rule).
+        if (softWrapEnabled_) {
+            shiftWrapStateForEdit(ev);
+            if (foldMapRebuilt)
+                retuneWrapForFolds();
+        }
         // M22: every mutation invalidates the fold-hover region (the PLAN
         // invalidation rule; the observer fires for EVERY primitive edit,
         // so this single hook covers typing, paste, undo replay, DnD and
@@ -458,6 +467,18 @@ void CodeEditor::setPlainText(const QString& text)
     hiddenRuns_.clear(); // EditEvent the core emits would otherwise shift
     foldVisibleTotal_ = buffer_.lineCount(); // stale folds across the replace)
     foldDocLines_ = buffer_.lineCount();
+    if (softWrapEnabled_) {
+        // M25: the replace invalidates every plan (the observer's seam shift
+        // above is meaningless here, this is the re-seed that replaces it):
+        // no plans, every weight back to the fold-truth 1 (hiddenRuns_ is
+        // empty now), the walker restarts at the top.
+        wrap_.clear();
+        wrapZeroed_ = hiddenRuns_; // empty: the fold half was just cleared
+        wrapDocLines_ = buffer_.lineCount();
+        wrapCursor_ = 0;
+        wrapWeight_.assign(wrapDocLines_, 1);
+        rebuildPrefixFrom(0);
+    }
     updateScrollBarRange();
     emit selectionChanged();
     update();
@@ -1535,6 +1556,9 @@ void CodeEditor::revealAt(TextPosition pos, RevealMode mode)
 {
     const TextPosition p = clampPos(pos);
     revealLine(p.line); // M13: a folded-away line is unfolded before reveal
+    if (softWrapEnabled_)
+        ensureWrapLinesCovered(p.line, p.line); // M25: exact caret row, same
+                                                // eager rule as ensureCaretVisible
     const int top = slotOfModelLine(p.line) * lineHeight_; // pad-offset frame:
     const int bot = top + lineHeight_;                     // y = padding+top-vScroll
     int target = vScroll_;
@@ -1602,6 +1626,12 @@ void CodeEditor::ensureCaretVisible()
     // pre-M13 formula exactly).
     if (visibleIndexOfModelLine(caret_.line) < 0)
         revealLine(caret_.line);
+    if (softWrapEnabled_)
+        // M25: the caret's row drives the scroll target, so its line is
+        // measured EAGERLY - a provisional count would scroll to the wrong
+        // row. (Measuring is the same line materialization hitLine already
+        // pays for the caret line, plus the break scan.)
+        ensureWrapLinesCovered(caret_.line, caret_.line);
     const int caretTop = slotOfModelLine(caret_.line) * lineHeight_;
     const int caretBottom = caretTop + lineHeight_;
     int target = vScroll_;
@@ -1683,6 +1713,14 @@ int CodeEditor::horizontalViewportWidth() const
 
 int CodeEditor::maxHorizontalScroll() const
 {
+    // M25: with soft wrap ON there is NO horizontal scroll space — every row
+    // ends at the wrap edge, and an oversized unbreakable token OVERFLOWS
+    // its row rather than opening a scrollable axis. This one guard covers
+    // the setter, the bar, the wheel handlers and the caret-reveal clamp: the
+    // h-scroll doors stay present and degrade (the frozen surface keeps its
+    // shape, PLAN §M25's "h-scroll doors no-op when wrap is on").
+    if (softWrapEnabled_)
+        return 0;
     return std::max(0, docWidthPx_ + padding_ - horizontalViewportWidth());
 }
 
@@ -1718,6 +1756,20 @@ void CodeEditor::setScrollBeyondLastLineEnabled(bool enabled)
 
 void CodeEditor::updateScrollBarRange()
 {
+    // M25 width watcher: the wrap width IS this widget's text window
+    // (horizontalViewportWidth), so every chrome move that lands here —
+    // resize, gutter width, ruler toggle, line-number mode — is caught
+    // BEFORE totalHeight() consults the row space below. Plans keyed to the
+    // old width die in one retune sweep (proportional to the measured
+    // window, never the document) and the walker restarts from the top.
+    if (softWrapEnabled_) {
+        const int width = horizontalViewportWidth();
+        if (width != appliedWrapWidth_) {
+            appliedWrapWidth_ = width;
+            wrapCursor_ = 0;
+            retuneWrapForFolds();
+        }
+    }
     if (!vBar_)
         return;
     const int maxScroll = std::max(0, totalHeight() - height());
@@ -1822,11 +1874,18 @@ void CodeEditor::rulerScrollTo(int y)
 
 int CodeEditor::visibleLineTotal() const
 {
-    return foldVisibleTotal_;
+    // M25's sanctioned unit change (PLAN §M25): with wrap ON this counts
+    // VISUAL SLOTS, with wrap OFF the M13 line space. Exactly one row space
+    // is live at a time — foldVisibleTotal_ never holds a slot sum, so
+    // turning the knob OFF restores the v1.6.1 map byte-for-byte.
+    return softWrapEnabled_ ? std::max(1, wrapTotal_) : foldVisibleTotal_;
 }
 
 int CodeEditor::visibleIndexOfModelLine(int line) const
 {
+    if (softWrapEnabled_)
+        return wrapIndexOfLine(line); // the slot map (it re-checks bounds and
+                                      // keeps hidden lines at -1)
     const int docLines = buffer_.lineCount();
     if (line < 0 || line >= docLines)
         return -1;
@@ -1847,6 +1906,10 @@ int CodeEditor::visibleIndexOfModelLine(int line) const
 
 int CodeEditor::modelLineForVisibleIndex(int visibleIndex) const
 {
+    if (softWrapEnabled_)
+        return wrapLineForSlot(visibleIndex); // slot -> model line (the prefix
+                                              // table's inverse; total by
+                                              // construction, like this door)
     const int vt = visibleLineTotal();
     if (vt <= 0)
         return 0; // only reachable on an inconsistent cache; keep it total
@@ -1900,7 +1963,7 @@ void CodeEditor::rebuildHiddenRuns()
     foldVisibleTotal_ = docLines - hidden; // runs never cover line 0, so >= 1
 }
 
-void CodeEditor::shiftFoldStateForEdit(const qmn::core::TextBuffer::EditEvent& ev)
+bool CodeEditor::shiftFoldStateForEdit(const qmn::core::TextBuffer::EditEvent& ev)
 {
     // The observer fires POST-mutation, but EditEvent offsets are in the
     // PRE-op frame: ev.start itself survives every edit path (inserts land
@@ -1921,7 +1984,8 @@ void CodeEditor::shiftFoldStateForEdit(const qmn::core::TextBuffer::EditEvent& e
         // routes through visibleLineTotal) then re-ranges the vBar by itself.
         foldDocLines_ = docLines;
         foldVisibleTotal_ = std::max(1, docLines);
-        return;
+        return false; // no runs before, none now: the wrap layer's zero block
+                      // (wrapZeroed_, seeded from hiddenRuns_) is empty too
     }
     const int delta = docLines - foldDocLines_;
     foldDocLines_ = docLines;
@@ -1944,7 +2008,9 @@ void CodeEditor::shiftFoldStateForEdit(const qmn::core::TextBuffer::EditEvent& e
     if (dirty || kept.size() != collapsed_.size() || delta != 0) {
         collapsed_ = std::move(kept);
         rebuildHiddenRuns(); // clamp ends into the new doc shape too
+        return true; // the run indices moved: the wrap layer resyncs weights
     }
+    return false;
 }
 
 bool CodeEditor::indentFoldsActive() const
@@ -2220,6 +2286,9 @@ void CodeEditor::recomputeFoldables(int firstModel, int lastModel)
                 at = collapsed_.erase(at);
         }
         rebuildHiddenRuns();
+        if (softWrapEnabled_)
+            retuneWrapForFolds(); // M25: the returned lines bring their rows
+                                  // back (plan or provisional 1) in one pass
         updateScrollBarRange(); // the slot space grew back: bar follows
         update();
     }
@@ -2247,6 +2316,9 @@ bool CodeEditor::revealLine(int line)
     }
     if (changed) {
         rebuildHiddenRuns();
+        if (softWrapEnabled_)
+            retuneWrapForFolds(); // M25: newly visible lines restore their
+                                  // plans, one batched prefix rebuild
         updateScrollBarRange(); // the slot space grew back: bar follows
         clearFoldHoverState(); // M22: fold mutations invalidate the region
     }
@@ -2308,6 +2380,478 @@ int CodeEditor::modelLineForY(int y) const
     if (y < padding_)
         return -1;
     return modelLineForVisibleIndex((y - padding_ + vScroll_) / lineHeight_);
+}
+
+// --- M25 soft wrap (Gate 2; the unit-change machinery, PLAN §M25) -----------
+// With wrap OFF nothing here runs: the row doors keep their M13 fold
+// bodies and the fold cache stays byte-identical. With wrap ON the map is
+// ONE formula:
+//   weight(line) = hidden ? 0 : wrapSlotCount(line),  slot(line) = Σ weight
+// folded lines are exactly the zero-weight block of the fold machinery's
+// hidden runs (line-space, merged, untouched), so fold × wrap shares one
+// table and every line boundary is also a slot boundary. wrap_ is a pure
+// cache keyed (line -> plan(len, width, epoch)): structural edits shift or
+// drop keys at the fold seam's anchor line; plans measured against a stale
+// wrap width or a wiped glyph cache (the font/tab-stop epoch) are dead and
+// the retune sweep drops them while restoring the weight of every line the
+// fold map just un-hid. Costs wrap-ON only: huge documents pay the visible
+// window plus the budgeted walker headroom, never an O(document) sweep
+// beyond the linear table maintenance the arrays force (v1, documented).
+
+bool CodeEditor::lineIsHiddenByFold(int line) const
+{
+    auto it = std::upper_bound(hiddenRuns_.begin(), hiddenRuns_.end(), line,
+                               [](int l, const HiddenRun& r) { return l < r.first; });
+    if (it != hiddenRuns_.begin()) {
+        --it;
+        return line <= it->last;
+    }
+    return false;
+}
+
+const CodeEditor::WrapInfo* CodeEditor::liveWrapPlan(int line) const
+{
+    const auto it = wrap_.constFind(line);
+    if (it == wrap_.constEnd())
+        return nullptr;
+    // A plan dies with the glyph cache (the font/tab-stop epoch), with the
+    // wrap width, or with the line's own length. No text hash is needed to
+    // keep that honest: every one of those is a structural event this layer
+    // already sees (resetGeoCache bumps the epoch, the updateScrollBarRange
+    // width watcher retunes, the edit observer shifts/drops keys at the
+    // seam). A dead plan is ERASED by retuneWrapForFolds, so the weight
+    // arrays can never carry a dead plan's row count.
+    if (it->epoch != wrapPlanEpoch_ || it->widthKey != horizontalViewportWidth()
+        || int(it->textLen) != lineLength(line))
+        return nullptr;
+    return &it.value();
+}
+
+int CodeEditor::wrapSlotCount(int line) const
+{
+    const WrapInfo* plan = liveWrapPlan(line);
+    return plan ? int(plan->starts.size()) + 1 : 1; // unmeasured (or dead):
+                                                    // the honest wrap-off row
+                                                    // count
+}
+
+int CodeEditor::measureWrap(int line)
+{
+    const int width = horizontalViewportWidth();
+    const QString text = buffer_.lineText(line); // full units: the break
+    // boundaries stay exact across the WHOLE line while the x positions
+    // ride the geo cache's laid-out prefix plus the phantom cell tail —
+    // past geoMaxUnits() breaks compute on the monospace grid, the same
+    // honest geometry-only region the v1 far-right trade documents.
+    WrapInfo info;
+    info.textLen = quint32(text.size());
+    info.widthKey = width;
+    info.epoch = wrapPlanEpoch_;
+    if (!text.isEmpty() && width > 0) {
+        const GeoSlot* gs = hitLine(line); // warms the layout (geoMaxUnits
+        // budget); the visit also feeds docWidthPx_ ambiently, like every
+        // other hitLine consumer
+        const double wrapW = double(width);
+        const auto isBreakChar = [](QChar ch) {
+            return ch == QLatin1Char(' ') || ch == QLatin1Char('\t');
+        }; // v1 break set: the honest ASCII word boundary; NBSP/CJK-aware
+           // breaking is a later knob (like visual indent)
+        const auto xAt = [&](int col) { return xInLine(gs, col); };
+        int rowStart = 0;
+        double ox = 0.0; // current row's x origin (line space)
+        int col = 0;
+        while (col < text.size()) {
+            const int chunkStart = col;
+            if (isBreakChar(text.at(col))) {
+                do
+                    ++col;
+                while (col < text.size() && isBreakChar(text.at(col)));
+            } else {
+                do {
+                    ++col; // a surrogate pair is one atom: never split
+                    if (text.at(col - 1).isHighSurrogate() && col < text.size()
+                        && text.at(col).isLowSurrogate())
+                        ++col;
+                } while (col < text.size() && !isBreakChar(text.at(col)));
+            }
+            if (xAt(chunkStart) > ox && xAt(col) - ox > wrapW) {
+                // The chunk does not fit and the row is not empty: break.
+                // Trailing whitespace STICKS to the row it ends (the
+                // continuation starts at the first non-ws column; the
+                // continuation rows get the full width — visual indent is
+                // a later knob).
+                int newStart = chunkStart;
+                if (isBreakChar(text.at(chunkStart)))
+                    newStart = col; // a ws run never starts a break row
+                else
+                    col = chunkStart; // the oversized token re-enters on a
+                                      // fresh EMPTY row and OVERFLOWS it:
+                                      // unbreakable tokens are never split
+                if (newStart > rowStart && newStart < text.size()) {
+                    info.starts.push_back(newStart);
+                    rowStart = newStart;
+                    ox = xAt(rowStart);
+                }
+            }
+        }
+    }
+    wrap_.insert(line, std::move(info));
+    return int(wrap_.constFind(line)->starts.size()) + 1;
+}
+
+double CodeEditor::xInWrapped(const GeoSlot* gs, int segStart, int col) const
+{
+    // Segment-space x on the SAME engine/phantom source as xInLine (at
+    // segStart == 0 this is the v1.6.1 form exactly — the wrap-off
+    // identity rides the geometry helpers, not a parallel implementation).
+    if (!gs)
+        return 0.0;
+    return xInLine(gs, col) - xInLine(gs, segStart);
+}
+
+int CodeEditor::wrapIndexOfLine(int line) const
+{
+    const int docLines = buffer_.lineCount();
+    if (line < 0 || line >= docLines)
+        return -1;
+    if (lineIsHiddenByFold(line))
+        return -1; // the fold authority is unchanged: hidden stays -1
+    return wrapPrefix_[line]; // Σ weights strictly above: the line's FIRST slot
+}
+
+int CodeEditor::wrapLineForSlot(int slot) const
+{
+    const int vt = visibleLineTotal();
+    if (vt <= 0 || wrapPrefix_.size() < 2)
+        return 0;
+    slot = std::clamp(slot, 0, vt - 1);
+    // First line whose exclusive prefix EXCEEDS the slot: the slot lands
+    // inside line-1's span (a zero-weight line never straddles a slot).
+    const auto it = std::upper_bound(wrapPrefix_.begin() + 1, wrapPrefix_.end(), slot);
+    const int line = int(it - wrapPrefix_.begin()) - 1;
+    return std::clamp(line, 0, buffer_.lineCount() - 1);
+}
+
+// --- table bookkeeping ------------------------------------------------------
+// wrapWeight_/wrapPrefix_ are the materialized map (prefix[L] = Σ weights of
+// lines below L = slot(L)); every mutation batch-rebuilds the prefix from
+// the lowest changed line ONCE, so band measurement never pays a suffix
+// rebuild per line. wrapTotal_ mirrors prefix.back() after every rebuild.
+
+void CodeEditor::rebuildPrefixFrom(int from)
+{
+    const int docLines = int(wrapWeight_.size());
+    if (wrapPrefix_.size() != docLines + 1)
+        wrapPrefix_.resize(docLines + 1); // appended entries are 0-stale,
+                                          // the loop below rewrites them all
+    for (int i = std::max(0, from); i < docLines; ++i)
+        wrapPrefix_[i + 1] = wrapPrefix_[i] + wrapWeight_[i];
+    wrapTotal_ = wrapPrefix_[docLines];
+}
+
+void CodeEditor::syncWrapTables()
+{
+    const int docLines = buffer_.lineCount();
+    const int old = int(wrapWeight_.size());
+    if (old == docLines && int(wrapPrefix_.size()) == docLines + 1)
+        return;
+    wrapWeight_.resize(docLines, 1); // appended lines: provisional (1)
+    rebuildPrefixFrom(std::min(old, docLines));
+}
+
+void CodeEditor::retuneWrapForFolds()
+{
+    syncWrapTables();
+    const int docLines = buffer_.lineCount();
+    const int width = horizontalViewportWidth();
+    int minChanged = docLines;
+    // (a) Dead plans stop counting and leave the cache: a plan keyed to a
+    // stale width (resize watcher), a wiped glyph-cache epoch (font /
+    // tab-stop) or a changed line length is dropped, its weight falls back
+    // to the provisional 1 until the window/walker remeasures.
+    for (auto it = wrap_.begin(); it != wrap_.end();) {
+        const int l = it.key();
+        if (l >= docLines || it->epoch != wrapPlanEpoch_
+            || it->widthKey != width || int(it->textLen) != lineLength(l)) {
+            if (l < docLines && wrapWeight_[l] != 1) {
+                wrapWeight_[l] = 1;
+                minChanged = std::min(minChanged, l);
+            }
+            it = wrap_.erase(it);
+        } else {
+            ++it;
+        }
+    }
+    // (b) Lines the fold map just un-hid come back to their plan (or 1 if
+    // unmeasured): the snapshot of the previous run mask is what makes
+    // this walk proportional to the fold, not to the document.
+    for (const HiddenRun& z : wrapZeroed_) {
+        for (int l = z.first; l <= z.last && l < docLines; ++l) {
+            if (lineIsHiddenByFold(l))
+                continue; // still hidden: stays in the new mask below
+            const int w = wrapSlotCount(l);
+            if (wrapWeight_[l] != w) {
+                wrapWeight_[l] = w;
+                minChanged = std::min(minChanged, l);
+            }
+        }
+    }
+    // (c) The current runs zero out (fold hides (start, end] — the header's
+    // rows keep their full plan: the hidden block is line-aligned, so the
+    // header line is NEVER partially hidden; "partial" shows the other way
+    // around: slot-space ranges cut BETWEEN lines' slots, never inside a
+    // line's own span, and the ellipsis rides the header's LAST row).
+    for (const HiddenRun& r : hiddenRuns_) {
+        for (int l = r.first; l <= r.last; ++l) {
+            if (wrapWeight_[l] != 0) {
+                wrapWeight_[l] = 0;
+                minChanged = std::min(minChanged, l);
+            }
+        }
+    }
+    wrapZeroed_ = hiddenRuns_; // the snapshot for the next retune's restore
+    if (minChanged < docLines)
+        rebuildPrefixFrom(minChanged);
+}
+
+void CodeEditor::shiftWrapStateForEdit(const qmn::core::TextBuffer::EditEvent& ev)
+{
+    // The anchor identity is the fold seam's rule (see shiftFoldStateForEdit):
+    // ev.start's post-op line IS its pre-op line, so both layers ride the
+    // same anchor. The touched content then spans from that anchor to the
+    // line the INSERTED text ends on (post-op frame): every plan inside is
+    // stale by construction and leaves the cache, everything below shifts by
+    // the line delta. Wrap-ON v1 cost model (PLAN §M25): one cache walk, one
+    // array shift and ONE batched prefix rebuild per primitive op — never a
+    // per-line sweep. Wrap-OFF never reaches this function at all.
+    const int docLines = buffer_.lineCount();
+    const int delta = docLines - wrapDocLines_;
+    wrapDocLines_ = docLines;
+    const int anchor = buffer_.lineColAt(ev.start).line;
+    const int lastTouched =
+        std::max(anchor, buffer_.lineColAt(ev.start + ev.inserted.size()).line);
+    // Keys below the anchor describe untouched content and stay; the rest
+    // shift by delta, and a shifted key landing inside the touched span
+    // names merged/split content: dropped. (Keys and array entries both move
+    // in the POST-op space, so the drop window is the same for both.)
+    QHash<int, WrapInfo> next;
+    next.reserve(wrap_.size());
+    for (auto it = wrap_.cbegin(); it != wrap_.cend(); ++it) {
+        const int k = it.key();
+        if (k < anchor)
+            next.insert(k, it.value()); // untouched above
+        else if (const int nk = k + delta; nk > lastTouched)
+            next.insert(nk, it.value()); // untouched below, shifted
+    }
+    wrap_ = std::move(next);
+    // The weight array keeps the PRE-op length until this shift (the arrays
+    // describe wrapDocLines_, which the function just consumed). A mismatch
+    // (a layer seeded mid-flight) degrades to a plain resync instead of a
+    // bogus shift; the touched-span reset below then fixes the seam.
+    const int weightLines = int(wrapWeight_.size());
+    const bool arraysInSync = weightLines == docLines - delta;
+    if (!arraysInSync)
+        syncWrapTables();
+    else if (delta > 0)
+        wrapWeight_.insert(wrapWeight_.begin() + std::min(anchor + 1, weightLines), delta, 1);
+    else if (delta < 0)
+        wrapWeight_.remove(std::min(anchor + 1, weightLines),
+                           std::min(-delta, weightLines - std::min(anchor + 1, weightLines)));
+    // The touched lines and every new line fall back to the provisional
+    // fold-truth value (1, or 0 while a fold keeps it hidden) until the
+    // window remeasures. Without folds hiddenRuns_ is empty, so 1 IS the
+    // truth; when the fold map rebuilt, the observer's retuneWrapForFolds
+    // re-applies the zero block right after this.
+    int minChanged = docLines;
+    for (int l = anchor; l <= lastTouched && l < docLines; ++l) {
+        const int w = lineIsHiddenByFold(l) ? 0 : 1;
+        if (wrapWeight_[l] != w) {
+            wrapWeight_[l] = w;
+            minChanged = std::min(minChanged, l);
+        }
+    }
+    if (delta != 0)
+        minChanged = std::min(minChanged, anchor); // the tail moved: rebuild
+    if (minChanged < docLines)
+        rebuildPrefixFrom(minChanged);
+    if (wrapCursor_ > anchor)
+        wrapCursor_ = anchor; // re-walk from the seam (live plans are O(1))
+    if (wrapZeroed_.isEmpty())
+        return;
+    // Fold masks cross the edit seam: shift the snapshot like the fold
+    // states do; touching or overlapping neighbors merge (the same rule
+    // rebuildHiddenRuns applies to the live runs).
+    QVector<HiddenRun> kept;
+    kept.reserve(wrapZeroed_.size());
+    for (const HiddenRun& z : wrapZeroed_) {
+        HiddenRun s = z;
+        if (s.first > anchor)
+            s.first += delta; // entirely below the seam: whole mask shifts
+        if (s.last >= anchor)
+            s.last += delta;  // straddles (or starts at) the seam: tail moves
+        if (s.first < 0)
+            s.first = 0;
+        if (s.last >= docLines)
+            s.last = docLines - 1; // slid off the end: clamp into the doc
+        if (s.first > s.last)
+            continue;              // the run's lines merged away entirely
+        // Same superset rule retuneWrapForFolds documents: an extra entry
+        // costs one no-op restore, a missing one deletes visible rows.
+        if (!kept.isEmpty() && s.first <= kept.back().last + 1) {
+            kept.back().last = std::max(kept.back().last, s.last);
+            continue; // merge touching neighbors (sorted input)
+        }
+        kept.push_back(s);
+    }
+    wrapZeroed_ = std::move(kept);
+}
+
+// --- coverage: eager window + budgeted forward walker ----------------------
+// The measurement cost of wrap is bounded by the viewport, never the
+// document (PLAN §M25's lazy rule, the HighlightEngine viewport-parse lesson
+// in row shape): a paint/scroll entry measures the rows it is about to show,
+// then escalates a little further down inside a latency budget. Unmeasured
+// visible lines count as exactly one row meanwhile, so every mapping stays
+// total and monotone and the next pass corrects the totals - a transient,
+// never a stale state.
+
+void CodeEditor::advanceWrapFrontier(int capModelLine)
+{
+    const int docLines = buffer_.lineCount();
+    if (wrapCursor_ >= docLines)
+        return; // fully walked: nothing pending until an edit or a retune
+    const int cap = std::min(capModelLine, docLines - 1);
+    QElapsedTimer timer;
+    timer.start();
+    static const qint64 kBudgetNs = qint64(kWrapBudgetMs * 1'000'000.0);
+    int minChanged = docLines;
+    while (wrapCursor_ <= cap && timer.nsecsElapsed() <= kBudgetNs) {
+        const int line = wrapCursor_++;
+        if (lineIsHiddenByFold(line))
+            continue; // folded away: no rows to measure (weight is 0)
+        const int w = measureWrap(line);
+        if (wrapWeight_[line] != w) {
+            wrapWeight_[line] = w;
+            minChanged = std::min(minChanged, line);
+        }
+    }
+    // One suffix pass for the whole batch (per-line rebuilds would make a
+    // 40-row window cost 40 suffix sweeps on a big document).
+    if (minChanged < docLines)
+        rebuildPrefixFrom(minChanged);
+}
+
+void CodeEditor::ensureWrapLinesCovered(int fromLine, int toLine)
+{
+    if (!softWrapEnabled_)
+        return; // the wrap-off row math is the v1.6.1 fold map, untouched
+    syncWrapTables();
+    const int docLines = buffer_.lineCount();
+    if (docLines <= 0)
+        return;
+    fromLine = std::clamp(fromLine, 0, docLines - 1);
+    toLine = std::max(fromLine, std::min(toLine, docLines - 1));
+    int minChanged = docLines;
+    for (int line = fromLine; line <= toLine; ++line) {
+        if (lineIsHiddenByFold(line))
+            continue;
+        const int w = measureWrap(line);
+        if (wrapWeight_[line] != w) {
+            wrapWeight_[line] = w;
+            minChanged = std::min(minChanged, line);
+        }
+    }
+    if (minChanged < docLines)
+        rebuildPrefixFrom(minChanged);
+    // The walker frontier does NOT come back: rows below it were already
+    // measured, and a caret line measured early simply joins the cache.
+}
+
+void CodeEditor::prepareWrapViewport(int firstSlot, int rows)
+{
+    if (!softWrapEnabled_)
+        return; // wrap OFF: zero wrap code in paint (the frozen cost rule)
+    syncWrapTables();
+    const int vt = std::max(1, wrapTotal_);
+    const int lastSlot = std::clamp(firstSlot + std::max(1, rows), 0, vt - 1);
+    // Eager coverage of the rows about to be painted...
+    const int firstModel = wrapLineForSlot(std::max(0, firstSlot));
+    const int lastModel = wrapLineForSlot(lastSlot);
+    ensureWrapLinesCovered(firstModel, lastModel);
+    // ...then the budgeted escalation: two viewports of headroom, so a
+    // wheel-down near the bottom edge never paints blind rows.
+    advanceWrapFrontier(lastModel + 2 * std::max(1, rows) + 8);
+}
+
+CodeEditor::RowPlan CodeEditor::rowPlan(int slot) const
+{
+    // Invalid (slot < 0) whenever wrap is OFF: the v1.6.1 paint/hit/caret
+    // geometry keeps its own line-space math and must never branch here.
+    RowPlan p;
+    if (!softWrapEnabled_)
+        return p;
+    const int line = wrapLineForSlot(slot);
+    if (line < 0 || lineIsHiddenByFold(line))
+        return p; // a slot outside the map, or inside a fold's hole
+    const int firstSlot = wrapIndexOfLine(line);
+    if (slot < firstSlot)
+        return p; // defensive: the inverse map said this line, the prefix says no
+    const WrapInfo* plan = liveWrapPlan(line);
+    const int len = lineLength(line);
+    p.slot = slot;
+    p.line = line;
+    p.segIdx = slot - firstSlot;
+    if (!plan || p.segIdx >= int(plan->starts.size()) + 1) {
+        p.segs = 1; // unmeasured (or the map grew past the plan mid-frame):
+        p.segIdx = 0; // render the whole line on this row, the wrap-off form
+        p.segStart = 0;
+        p.segEnd = len;
+        return p;
+    }
+    p.segs = int(plan->starts.size()) + 1;
+    // starts holds ONLY the continuation starts (row i>0 begins at
+    // starts[i-1]; row 0 always starts at 0) - indexing starts[segIdx]
+    // would shift every row's span by one break (and crash on the
+    // no-break single-row case):
+    p.segStart = p.segIdx == 0 ? 0 : plan->starts[p.segIdx - 1];
+    p.segEnd = p.segIdx < int(plan->starts.size()) ? plan->starts[p.segIdx] : len;
+    return p;
+}
+
+// --- the 14th knob ----------------------------------------------------------
+
+void CodeEditor::setSoftWrapEnabled(bool enabled)
+{
+    if (enabled == softWrapEnabled_)
+        return; // M19 no-op rule: same-value sets stay silent
+    softWrapEnabled_ = enabled;
+    if (enabled) {
+        // Seed the layer from the fold map (the map's zero block is exactly
+        // what the fold machinery already hides) and drop the horizontal
+        // scroll: wrap ON has no horizontal scroll space, and the door
+        // guards themselves degrade rather than disappear.
+        appliedWrapWidth_ = horizontalViewportWidth();
+        wrapDocLines_ = buffer_.lineCount();
+        wrapZeroed_ = hiddenRuns_;
+        wrapCursor_ = 0;
+        syncWrapTables();
+        retuneWrapForFolds();
+        setHScroll(0); // maxHorizontalScroll() is 0 now: the offset parks
+    } else {
+        // OFF: free every wrap structure so the wrap-OFF memory footprint is
+        // the v1.6.1 footprint, and let the fold map own the row space again.
+        wrap_.clear();
+        wrapWeight_.clear();
+        wrapPrefix_.clear();
+        wrapZeroed_.clear();
+        wrapCursor_ = 0;
+        wrapTotal_ = 0;
+        appliedWrapWidth_ = 0;
+    }
+    updateScrollBarRange(); // the row space changed units: vBar range follows
+    update();
+    if (options_)
+        emit options_->softWrapEnabledChanged(enabled);
 }
 
 int CodeEditor::foldZoneWidth() const
@@ -2379,6 +2923,9 @@ bool CodeEditor::foldLine(int line)
                                });
     collapsed_.insert(at, FoldState{line, end});
     rebuildHiddenRuns();
+    if (softWrapEnabled_)
+        retuneWrapForFolds(); // M25: the fold's hidden block becomes a run of
+                              // zero-weight lines (header rows keep their plan)
     updateScrollBarRange(); // the slot space shrank: vBar + clamp follow
     clearFoldHoverState(); // M22: fold mutations invalidate the hover region
     update();
@@ -2396,6 +2943,9 @@ bool CodeEditor::unfoldLine(int line)
     if (!changed)
         return false;
     rebuildHiddenRuns();
+    if (softWrapEnabled_)
+        retuneWrapForFolds(); // M25: the freed block comes back with its
+                              // plans (or the provisional 1), one rebuild
     updateScrollBarRange();
     clearFoldHoverState(); // M22: fold mutations invalidate the hover region
     update();
@@ -2548,6 +3098,8 @@ void CodeEditor::expandAll()
         return;
     collapsed_.clear();
     rebuildHiddenRuns();
+    if (softWrapEnabled_)
+        retuneWrapForFolds(); // M25: every hidden line returns to the map
     updateScrollBarRange();
     clearFoldHoverState(); // M22: fold mutations invalidate the hover region
     update();
@@ -3306,9 +3858,20 @@ void CodeEditor::paintEvent(QPaintEvent*)
     // model-contiguous semantics and simply skip hidden rows (their
     // visible index is -1). No folds: runs empty, slot == model line, and
     // every expression below reduces to its pre-M13 form.
-    const int vt = std::max(1, visibleLineTotal()); // scroll-past-end can push
-    const int firstSlot = std::clamp((vScroll_ - padding_) / lh, 0, vt - 1); // the slot past
-    const int lastSlot = std::min(vt - 1, firstSlot + visibleLineCount());   // the last line
+    // M25: the viewport entry covers the rows about to be painted (eager
+    // measurement) and escalates the walker inside the wrap budget. That can
+    // move the slot totals, so the window is re-derived right after it.
+    // Wrap OFF the entry returns at once and the values below are untouched:
+    // the v1.6.1 frame, untouched cost (PLAN §M25's cost rule).
+    int vt = std::max(1, visibleLineTotal()); // scroll-past-end can push
+    int firstSlot = std::clamp((vScroll_ - padding_) / lh, 0, vt - 1); // the slot past
+    int lastSlot = std::min(vt - 1, firstSlot + visibleLineCount());   // the last line
+    if (softWrapEnabled_) {
+        prepareWrapViewport(firstSlot, lastSlot - firstSlot + 1);
+        vt = std::max(1, visibleLineTotal());
+        firstSlot = std::clamp((vScroll_ - padding_) / lh, 0, vt - 1);
+        lastSlot = std::min(vt - 1, firstSlot + visibleLineCount());
+    }
     const int first = modelLineForVisibleIndex(firstSlot);
     const int last = modelLineForVisibleIndex(lastSlot);
     const QFontMetricsF fmF(font_); // preedit advance measurement
@@ -3498,6 +4061,12 @@ void CodeEditor::paintEvent(QPaintEvent*)
         const QColor bright = theme_->ink(Role::GutterActiveDigits); // fallback: Text
         auto dit = diagnostics_.begin(); // sorted by startLine: one forward walk
         for (int slot = firstSlot; slot <= lastSlot; ++slot) { // M13: SLOTS
+            // M25 machine-1 interim: the row's ink is still whole-line, so a
+            // wrapped line paints ONCE, on its first slot (gutter number and
+            // fold marker ride that row too); the continuation rows stay
+            // blank until machine 2 gives them their segments (RowPlan).
+            if (softWrapEnabled_ && rowPlan(slot).segIdx > 0)
+                continue;
             const int line = modelLineForVisibleIndex(slot);
             const int yTop = padding_ + slot * lh - vScroll_;
             const GeoSlot* gs = hitLine(line);
@@ -3556,6 +4125,10 @@ void CodeEditor::paintEvent(QPaintEvent*)
     // never painted (hidden lines cost nothing; that IS the fold's
     // performance story on top of the slot-shrunk scroll space).
     for (int slot = firstSlot; slot <= lastSlot; ++slot) {
+        // M25 machine-1 interim (see the gutter loop): continuation rows get
+        // no ink yet; the line paints on its first slot only.
+        if (softWrapEnabled_ && rowPlan(slot).segIdx > 0)
+            continue;
         const int line = modelLineForVisibleIndex(slot);
         const int yTop = padding_ + slot * lh - vScroll_;
         const GeoSlot* gs = hitLine(line);
@@ -6375,6 +6948,14 @@ void CodeEditor::resetGeoCache()
         s.stamp = 0;
     }
     geoClock_ = 0; // fresh LRU epoch
+    // M25: every measured wrap break came out of THIS layout engine, so a
+    // glyph-cache wipe (font, zoom, tab-stop) kills every plan: the epoch
+    // bump makes them all stale, the retune sweep drops them and their
+    // weights fall back to the provisional 1 until the window remeasures.
+    ++wrapPlanEpoch_;
+    wrapCursor_ = 0;
+    if (softWrapEnabled_)
+        retuneWrapForFolds();
 }
 
 void CodeEditor::focusInEvent(QFocusEvent*)

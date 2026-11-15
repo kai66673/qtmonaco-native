@@ -82,6 +82,7 @@ private:
         s.autoCloseEnabled = false;
         s.readOnly = true;
         s.indentGuidesEnabled = false; // M21 (13th knob)
+        s.softWrapEnabled = true;      // M25 (14th options knob)
         s.themePreset = CodeEditorTheme::Preset::Dark; // M24 (14th knob)
         QFont font = demoDefaultCodeFont(); // same family/strategy (the
         font.setPixelSize(20);              // NO-hinting rule survives)
@@ -156,6 +157,7 @@ private slots:
         QCOMPARE(def.autoCloseEnabled, o->autoCloseEnabled());
         QCOMPARE(def.readOnly, o->isReadOnly());
         QCOMPARE(def.indentGuidesEnabled, o->indentGuidesEnabled()); // M21
+        QCOMPARE(def.softWrapEnabled, o->softWrapEnabled());         // M25
         QVERIFY(def.themePreset == fresh.theme()->kind()); // M24: default
                                                            // preset = fresh kind
         // M20: the font tripwire is STRICTER than a pixel check — the

@@ -35,6 +35,7 @@ void applySettings(CodeEditor* editor, const EditorSettings& s)
     o->setAutoCloseEnabled(s.autoCloseEnabled);
     o->setReadOnly(s.readOnly);
     o->setIndentGuidesEnabled(s.indentGuidesEnabled); // M21 (13th knob)
+    o->setSoftWrapEnabled(s.softWrapEnabled);         // M25 (14th knob)
     o->setCodeFont(s.codeFont); // M20: the M17 pair rides the same bus
     o->setZoomFactor(s.zoomFactor); // (the editor clamps it to its bounds)
 
@@ -63,6 +64,7 @@ EditorSettings collectSettings(CodeEditor* editor)
     s.autoCloseEnabled = o->autoCloseEnabled();
     s.readOnly = o->isReadOnly();
     s.indentGuidesEnabled = o->indentGuidesEnabled(); // M21
+    s.softWrapEnabled = o->softWrapEnabled();         // M25
     s.codeFont = o->codeFont();     // the BASE, exactly as stored
     s.zoomFactor = o->zoomFactor(); // the live (already clamped) factor
     s.themePreset = editor->theme()->kind(); // M24: live kind, Custom included

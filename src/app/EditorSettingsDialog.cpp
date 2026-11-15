@@ -106,6 +106,7 @@ EditorSettingsDialog::EditorSettingsDialog(QWidget* parent, const EditorSettings
     autoCloseCheck_ = new QCheckBox(QStringLiteral("Автозакрытие скобок и кавычек"), this);
     readOnlyCheck_ = new QCheckBox(QStringLiteral("Только чтение"), this);
     indentGuidesCheck_ = new QCheckBox(QStringLiteral("Вертикальные линии отступов"), this);
+    softWrapCheck_ = new QCheckBox(QStringLiteral("Перенос длинных строк по словам"), this);
 
     auto* appearance = new QGroupBox(QStringLiteral("Внешний вид"), this);
     auto* appearanceForm = new QFormLayout(appearance);
@@ -126,6 +127,7 @@ EditorSettingsDialog::EditorSettingsDialog(QWidget* parent, const EditorSettings
     textForm->addRow(autoIndentCheck_);
     textForm->addRow(autoCloseCheck_);
     textForm->addRow(indentGuidesCheck_); // M21 (13th knob)
+    textForm->addRow(softWrapCheck_);     // M25 (14th options knob)
 
     auto* behavior = new QGroupBox(QStringLiteral("Поведение"), this);
     auto* behaviorForm = new QFormLayout(behavior);
@@ -165,6 +167,7 @@ void EditorSettingsDialog::setSettings(const EditorSettings& s)
     autoCloseCheck_->setChecked(s.autoCloseEnabled);
     readOnlyCheck_->setChecked(s.readOnly);
     indentGuidesCheck_->setChecked(s.indentGuidesEnabled); // M21
+    softWrapCheck_->setChecked(s.softWrapEnabled);         // M25
     // M24: a Custom kind seed (only manual role edits can leave one on a
     // live editor) clamps to the Default row via indexOfMode.
     themeCombo_->setCurrentIndex(indexOfMode(kThemePresets, s.themePreset));
@@ -204,6 +207,7 @@ EditorSettings EditorSettingsDialog::settings() const
     s.autoCloseEnabled = autoCloseCheck_->isChecked();
     s.readOnly = readOnlyCheck_->isChecked();
     s.indentGuidesEnabled = indentGuidesCheck_->isChecked(); // M21
+    s.softWrapEnabled = softWrapCheck_->isChecked();         // M25
     s.themePreset = kThemePresets[themeCombo_->currentIndex()]; // M24
     // M20: the seed font patched, never rebuilt — weight/style/hinting
     // ride through, only the two edited fields move (round-trip QFont

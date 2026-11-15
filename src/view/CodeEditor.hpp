@@ -890,6 +890,12 @@ private:
     // the leading whitespace; semantics on paintIndentGuides below.
     void setIndentGuidesEnabled(bool enabled);
     bool indentGuidesEnabled() const { return indentGuidesEnabled_; }
+    // M25: the soft-wrap knob lives here (editor PRIVATE) exactly like the
+    // M19-M21 knobs; CodeEditorOptions owns the public door + the signal.
+    // See the machinery block near modelLineForY for the semantics (PLAN
+    // §M25) and the frozen-surface note about the row doors' UNITS.
+    void setSoftWrapEnabled(bool enabled);
+    bool softWrapEnabled() const { return softWrapEnabled_; }
     friend class CodeEditorOptions;
     friend class CodeEditorAccessible; // M11: the a11y bridge reads the live
                                        // model/caret/geometry state directly
@@ -1172,7 +1178,9 @@ private:
     int foldVisibleTotal_ = 0; // cached visibleLineTotal() (set by rebuildHiddenRuns)
     int foldDocLines_ = 0;     // lineCount() at the last fold sweep (edit diff)
     void rebuildHiddenRuns();  // collapsed_ -> hiddenRuns_/visibleLines_
-    void shiftFoldStateForEdit(const qmn::core::TextBuffer::EditEvent& ev);
+    // true = the fold map rebuilt (hiddenRuns_ indices moved): the M25 wrap
+    // layer then resyncs its weight half (retuneWrapForFolds) in the same op.
+    bool shiftFoldStateForEdit(const qmn::core::TextBuffer::EditEvent& ev);
     // Foldable starts known for the painted window: engine @fold captures
     // (exact ends) where a fold grammar is active, else the indent rule
     // (start-only; ends resolved lazily by foldEndForLine on the actual
@@ -1208,6 +1216,123 @@ private:
     int slotOfModelLine(int line) const;      // visibleIndexOfModelLine, clamped >= 0
     // Model line whose slot row contains widget y (-1 outside text rows).
     int modelLineForY(int y) const;
+
+    // --- M25 soft wrap (Gate 2; semantics: PLAN §M25) ------------------------
+    // The unit change (the sanctioned contract shift): with wrap ON the row
+    // doors above speak VISUAL SLOTS. The line-space fold machinery above
+    // stays exactly as M13 built it; wrap rides on top as ONE additive rule:
+    //   weight(line) = hidden ? 0 : wrapSlotCount(line)
+    //   slot(line)   = Σ weight, L < line
+    // so a fold's hidden run becomes a whole block of zero-weight lines and
+    // a wrapped line's slots stay contiguous — fold × wrap is ONE story with
+    // no second table, and every line boundary is a slot boundary (the fold
+    // range [slot(start+1), slot(end+1)) can only cut between slots, never
+    // "into" a line: hidden line == all its slots hidden).
+    //
+    // Coverage: measured lines cost their exact counts, UNMEASURED visible
+    // lines count as exactly 1 — the slot total is always honest for the
+    // wrap-OFF world, and wrap ON costs nothing on lines the viewport never
+    // visits (the fold perf story, kept). Viewport entry measures eagerly
+    // (caret lines answer exactly: revealAt/ensureCaretVisible measure their
+    // own line first); a budgeted forward walker escalates the rest inside
+    // the HighlightEngine's latency precedent (kWrapBudgetMs) — resize
+    // storms cost the budget, never an O(document) sweep.
+    bool softWrapEnabled_ = false; // the 14th knob (options() door)
+    int appliedWrapWidth_ = 0;     // the h-window width the updateScrollBarRange
+                                   // watcher last saw (change detection only:
+                                   // plans key their own width, live checks
+                                   // read horizontalViewportWidth() directly)
+    static constexpr double kWrapBudgetMs = 8.0; // measured-wrap latency
+                                                 // budget (kParseBudgetMs
+                                                 // precedent, round 1)
+    struct WrapInfo {
+        quint32 textLen = 0;    // laid-out line length at measure time
+        int widthKey = -1;      // horizontalViewportWidth() the breaks used
+        quint32 epoch = 0;      // wrapPlanEpoch_ at measure time: a glyph-
+                                // cache wipe (font/zoom/tab-stop) kills plans
+        QVector<int> starts;    // code-unit STARTS of continuation rows
+                                // (sorted, every one < lineLength; the
+                                // number of slots this line takes is
+                                // starts.size() + 1; empty = fits)
+    };
+    QHash<int, WrapInfo> wrap_;            // model line -> measured row plan
+    QVector<int> wrapWeight_;              // per line: hidden? 0 : slot count
+    QVector<int> wrapPrefix_;              // prefix sums: wrapPrefix_[L] ==
+                                           // slot(L); size lineCount()+1
+    int wrapTotal_ = 0;                    // cached wrapPrefix_.back()
+    int wrapDocLines_ = 0;                 // lineCount() at the last wrap seam
+    quint32 wrapPlanEpoch_ = 1;            // resetGeoCache bumps: plans die
+    int wrapCursor_ = 0;                   // walker frontier (model line)
+    // The previous run's hidden-mask snapshot (superset semantics, so the
+    // restore half of a retune is proportional to the fold, not the doc).
+    QVector<HiddenRun> wrapZeroed_;
+    // True when model line is inside one of hiddenRuns_ (the fold authority,
+    // unchanged: hidden stays hidden, its rows simply all disappear).
+    bool lineIsHiddenByFold(int line) const;
+    // The slot doors of the wrap map (the visible* doors route here when the
+    // knob is on): the line's FIRST slot (-1 hidden/out of range), and the
+    // inverse (total and clamped, exactly like modelLineForVisibleIndex).
+    int wrapIndexOfLine(int line) const;
+    int wrapLineForSlot(int slot) const;
+    // The ONE wrap answer for a visible line: measured exact, unmeasured 1.
+    int wrapSlotCount(int line) const;
+    // The live plan of a line, or null when absent/stale (epoch, width or
+    // line length moved): the validity rule every consumer shares.
+    const WrapInfo* liveWrapPlan(int line) const;
+    // Measure (or re-measure after a width/geo-cache change) one line;
+    // returns its slot count. Overbudget lines break on the monospace cell
+    // grid — the established far-right geometry-only trade (the geo
+    // comment above geoMaxUnits() records why that tail is honest).
+    int measureWrap(int line);
+    // Grow/shrink the weight+prefix tables to lineCount() (appended lines are
+    // provisional 1) and keep wrapTotal_ current.
+    void syncWrapTables();
+    // ONE suffix pass of the prefix table, from `from` to the end: every
+    // batched mutation runs exactly one of these (per-line rebuilds would
+    // make a window of measurements cost a window of sweeps).
+    void rebuildPrefixFrom(int from);
+    // Resync the weight half after a fold-map change: drop dead plans,
+    // restore lines the map just un-hid (via wrapZeroed_), zero the current
+    // hidden runs, then one batched prefix rebuild. Keeps wrapZeroed_ ==
+    // hiddenRuns_ for the next call.
+    void retuneWrapForFolds();
+    // The wrap half of the edit observer (runs right after the fold half, so
+    // hiddenRuns_ is already current): shift/drop plan keys and array entries
+    // about the seam, one batched rebuild. See its comment for the frame.
+    void shiftWrapStateForEdit(const qmn::core::TextBuffer::EditEvent& ev);
+    // The budgeted walker: measure forward from wrapCursor_ while inside
+    // kWrapBudgetMs up to capModelLine. The viewport entry calls it with the
+    // visible window plus two viewports of headroom, so a wheel-down near the
+    // bottom edge never paints blind rows (the HighlightEngine Mode-Viewport
+    // lesson in row shape).
+    void advanceWrapFrontier(int capModelLine);
+    // Eager coverage of a MODEL-line range (the caret doors use it: a caret
+    // line answers its slot exactly, never provisionally).
+    void ensureWrapLinesCovered(int fromLine, int toLine);
+    // Paint/scroll entry: cover the rows about to be shown, then escalate
+    // within the budget. Called before the paint loop reads the row window,
+    // so totals it changes are re-read by the same pass (the wrap-OFF
+    // early-out never comes here at all).
+    void prepareWrapViewport(int firstSlot, int rows);
+    // Wrap-aware row cursor for the paint/hit/caret geometry (machine 2;
+    // with segStart=0 every expression it feeds reduces to the v1.6.1
+    // form — the wrap-off identity). Invalid when wrap is off or the slot
+    // is hidden.
+    struct RowPlan {
+        int slot = -1;
+        int line = -1;
+        int segStart = 0; // first code unit painted on this row
+        int segEnd = 0;   // exclusive ink end
+        int segs = 1;     // the line's total slots
+        int segIdx = 0;   // 0 = the line's first row (gutter/number lives here)
+    };
+    RowPlan rowPlan(int slot) const;
+
+    // M25 machine 2 (paint/hit/caret geometry): xInWrapped mirrors xInLine's
+    // phantom-cell extrapolation in the SEGMENT frame (at segStart == 0 it is
+    // the v1.6.1 expression exactly — the wrap-off identity rides these
+    // helpers, not a parallel implementation).
+    double xInWrapped(const GeoSlot* gs, int segStart, int col) const;
 
     // --- M22 fold-gutter hover (semantics: PLAN M22) ----------------------
     // While the fold strip is live, mouse tracking follows the pointer and

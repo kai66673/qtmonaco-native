@@ -40,6 +40,7 @@ private:
     QCheckBox* autoCloseCheck_;
     QCheckBox* readOnlyCheck_;
     QCheckBox* indentGuidesCheck_;
+    QCheckBox* softWrapCheck_; // M25 (14th options knob): word wrap
     // M20 font/zoom trio. The dialog edits only family + pixel size +
     // factor; seedFont_ (pushed by setSettings) carries the font's REST
     // (weight, style, the no-hinting strategy the editor's metrics rule

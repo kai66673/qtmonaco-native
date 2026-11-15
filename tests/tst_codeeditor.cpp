@@ -346,6 +346,21 @@ private slots:
     void documentModifiedLifecycleIsMarkSavedBounded();
     void documentUriDoorsAndPerEditorIsolation();
 
+    // ---- M25 soft wrap (Gate 2): the pure slot-map layer, BEFORE the paint/
+    // hit/caret segment wiring. The DoD's numeric tripwires: the row doors'
+    // unit change (lines -> visual slots), the slot-sum identity + round-trip
+    // inverse, fold x wrap on the one shared table, unbreakable-token overflow
+    // (PLAN's never-char-break rule), caret-row scroll math, and the stale-
+    // plan seams (edit anchor, resize width watcher).
+    void softWrapKnobIsOptionsOwnedAndDegradesHScroll();
+    void softWrapOffRowMapStaysTheV1FoldMap();
+    void softWrapRowsFillTheTextWindowExactly();
+    void softWrapUnbreakableTokenOverflowsItsRow();
+    void softWrapSlotSumIdentityAndRoundTrip();
+    void softWrapFoldHidesWholeWrappedLines();
+    void softWrapCaretRowDrivesScrollMath();
+    void softWrapEditsAndResizeDropStalePlans();
+
 private:
     CodeEditor* editor = nullptr;
 };
@@ -8942,6 +8957,389 @@ void TestCodeEditor::documentUriDoorsAndPerEditorIsolation()
     QTest::keyClicks(&second, "x");
     QCOMPARE(firstSpy.count(), 0); // isolated observer slots
     QCOMPARE(doc->toPlainText(), QString());
+}
+
+// --- M25 soft wrap fixtures (the pure slot-map layer tests) -----------------
+// Rows are derived from PUBLIC doors only (cellWidth, horizontalViewport-
+// Width) so the expectations never lean on the wrap implementation: a line of
+// 4-letter words separated by single spaces fills floor(win/cw)=k units per
+// row, and a full row of w words occupies exactly 5w-1 units, so one row
+// holds wpr = floor((k+1)/5) words and a line of n words takes
+// ceil(n/wpr) rows. That is the independent arithmetic every assertion below
+// recomputes.
+static QString wordLine(int nWords)
+{
+    QStringList words;
+    for (int i = 0; i < nWords; ++i)
+        words << QStringLiteral("abcd");
+    return words.join(QLatin1Char(' '));
+}
+
+static int ceilDiv(int a, int b) { return (a + b - 1) / b; }
+
+struct WrapWindow {
+    int win = 0; // the text window px the breaks must fit into
+    double cw = 0.0; // the monospace cell width
+    int k = 0; // units per row: the largest with k*cw <= win
+    int wpr = 0; // words per row of a flush 4-letter word line
+};
+
+static WrapWindow wrapWindow(const CodeEditor* e)
+{
+    WrapWindow w;
+    w.win = e->horizontalViewportWidth();
+    w.cw = e->cellWidth();
+    w.k = int(w.win / w.cw); // floor (both positive)
+    w.wpr = (w.k + 1) / 5;
+    return w;
+}
+
+// The wrap layer is viewport-lazy by design; every row-count expectation
+// below needs the plans in place first, and the caret doors measure their
+// line EAGERLY (revealAt/ensureCaretVisible) - so walking the caret down
+// the document is the door-visible measurement trigger.
+static void measureAllLines(CodeEditor* e)
+{
+    for (int l = 0; l < e->lineCount(); ++l)
+        e->setPosition({l, 0});
+}
+
+// Full row-space state through the frozen v1 doors: the slot->line inverse
+// and the line->first-slot map (the private totalHeight() math follows the
+// same visibleLineTotal(), so the slot sum is the state's whole story).
+static QString rowSpaceSnapshot(CodeEditor* e)
+{
+    const int vt = e->visibleLineTotal();
+    QString out = QStringLiteral("total=%1").arg(vt);
+    for (int s = 0; s < vt; ++s)
+        out += QStringLiteral(" %1:%2").arg(s).arg(e->modelLineForVisibleIndex(s));
+    for (int l = 0; l < e->lineCount(); ++l)
+        out += QStringLiteral(" L%1=%2").arg(l).arg(e->visibleIndexOfModelLine(l));
+    return out;
+}
+
+void TestCodeEditor::softWrapKnobIsOptionsOwnedAndDegradesHScroll()
+{
+    // The 14th knob follows the M19 ownership rule: editor-private doors,
+    // the public door and the changed signal on options().
+    QSignalSpy knobSpy(editor->options(), &CodeEditorOptions::softWrapEnabledChanged);
+    QVERIFY(knobSpy.isValid());
+    QVERIFY(!editor->options()->softWrapEnabled()); // default OFF (v1.6.1)
+
+    editor->setPlainText(QString(300, QLatin1Char('z')) + QLatin1Char('\n')
+                         + QStringLiteral("tail"));
+    editor->grab(); // warms the geo layout (the docWidthPx_ feeder)
+    QVERIFY(editor->maxHorizontalScroll() > 0); // wrap OFF: h-scroll is real
+    editor->setHorizontalScrollOffset(120);
+    QCOMPARE(editor->horizontalScrollOffset(), 120);
+
+    editor->options()->setSoftWrapEnabled(true);
+    QCOMPARE(knobSpy.count(), 1);
+    QCOMPARE(knobSpy.at(0).at(0).toBool(), true);
+    // The PLAN's degradation rule: the h-scroll doors stay but become no-ops
+    // (ONE maxHorizontalScroll()==0 guard covers setter, bar, wheel, reveal).
+    QCOMPARE(editor->maxHorizontalScroll(), 0);
+    QCOMPARE(editor->horizontalScrollOffset(), 0); // the toggle parked it
+    editor->setHorizontalScrollOffset(120);
+    QCOMPARE(editor->horizontalScrollOffset(), 0);
+    editor->grab(); // wrap-ON paint must not resurrect an h-scroll offset
+
+    editor->options()->setSoftWrapEnabled(false);
+    QCOMPARE(knobSpy.count(), 2);
+    QVERIFY(editor->maxHorizontalScroll() > 0); // OFF: the space is back
+    editor->setHorizontalScrollOffset(100);
+    QCOMPARE(editor->horizontalScrollOffset(), 100);
+
+    editor->options()->setSoftWrapEnabled(false); // M19: same-value sets silent
+    QCOMPARE(knobSpy.count(), 2);
+}
+
+void TestCodeEditor::softWrapOffRowMapStaysTheV1FoldMap()
+{
+    // DoD tripwire (wrap-OFF byte-identical rule): toggling the knob ON and
+    // OFF must leave the fold line-space map exactly as v1.6.1 answers it.
+    // foldDoc's lines are ALL one-row, so with wrap ON the slot map must
+    // also be door-for-door identical: the unit change is only visible when
+    // a line takes more than one row.
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    const QString plainOff = rowSpaceSnapshot(editor);
+    editor->foldLine(0);
+    const QString folded = rowSpaceSnapshot(editor);
+    QVERIFY(folded.contains(QStringLiteral(" L1=-1"))); // the v1 hidden answer
+    editor->unfoldLine(0);
+    const QString unfolded = rowSpaceSnapshot(editor);
+
+    editor->options()->setSoftWrapEnabled(true);
+    QCOMPARE(rowSpaceSnapshot(editor), plainOff);
+    editor->foldLine(0);
+    QCOMPARE(rowSpaceSnapshot(editor), folded);
+    editor->unfoldLine(0);
+    QCOMPARE(rowSpaceSnapshot(editor), unfolded);
+
+    editor->options()->setSoftWrapEnabled(false);
+    QCOMPARE(rowSpaceSnapshot(editor), plainOff);
+    editor->foldLine(0);
+    QCOMPARE(rowSpaceSnapshot(editor), folded);
+    editor->unfoldLine(0);
+    QCOMPARE(rowSpaceSnapshot(editor), unfolded);
+}
+
+void TestCodeEditor::softWrapRowsFillTheTextWindowExactly()
+{
+    // Same window both readings (same lineCount -> same gutter digits), so
+    // the derived row counts must hold exactly.
+    editor->setPlainText(QStringLiteral("1\n2\n3"));
+    editor->options()->setSoftWrapEnabled(true);
+    const WrapWindow w = wrapWindow(editor);
+    QVERIFY2(w.k >= 12 && w.wpr >= 2,
+             qPrintable(QStringLiteral("k=%1 wpr=%2 win=%3 cw=%4")
+                            .arg(w.k)
+                            .arg(w.wpr)
+                            .arg(w.win)
+                            .arg(w.cw)));
+    QVERIFY(w.win >= w.k * w.cw); // the k boundary the breaks ride on
+    QVERIFY(w.win < (w.k + 1) * w.cw);
+
+    editor->setPlainText(wordLine(2 * w.wpr + 1) + QLatin1Char('\n')
+                         + wordLine(w.wpr) + QLatin1Char('\n')
+                         + wordLine(w.wpr + 1));
+    measureAllLines(editor);
+    // Independent arithmetic: 3 rows, 1 row, 2 rows.
+    QCOMPARE(editor->visibleIndexOfModelLine(0), 0);
+    QCOMPARE(editor->visibleIndexOfModelLine(1), 3);
+    QCOMPARE(editor->visibleIndexOfModelLine(2), 4);
+    QCOMPARE(editor->visibleLineTotal(), 6);
+
+    QVector<int> tally(3, 0);
+    for (int s = 0; s < 6; ++s)
+        ++tally[editor->modelLineForVisibleIndex(s)];
+    QCOMPARE(tally.at(0), 3);
+    QCOMPARE(tally.at(1), 1);
+    QCOMPARE(tally.at(2), 2);
+}
+
+void TestCodeEditor::softWrapUnbreakableTokenOverflowsItsRow()
+{
+    // PLAN §M25's never-char-break rule in numbers: a token longer than the
+    // whole window gets EXACTLY one overflowing row (machine 2 clips the
+    // tail; the caret motion still walks the full token).
+    editor->setPlainText(QStringLiteral("x"));
+    const WrapWindow w = wrapWindow(editor);
+    const QString tok(w.k + 7, QLatin1Char('z')); // wider than the window
+    editor->setPlainText(tok);
+    editor->options()->setSoftWrapEnabled(true);
+    measureAllLines(editor);
+    QCOMPARE(editor->visibleLineTotal(), 1);
+    QCOMPARE(editor->modelLineForVisibleIndex(0), 0);
+
+    // Sandwiched: the neighbors break around it, the token keeps its ONE
+    // row: [word row][overflow row][tail row].
+    editor->setPlainText(wordLine(w.wpr) + QLatin1Char(' ') + tok
+                         + QLatin1Char(' ') + QStringLiteral("end"));
+    measureAllLines(editor);
+    QCOMPARE(editor->visibleLineTotal(), 3);
+}
+
+void TestCodeEditor::softWrapSlotSumIdentityAndRoundTrip()
+{
+    editor->setPlainText(QStringLiteral("1\n2\n3\n4"));
+    editor->options()->setSoftWrapEnabled(true);
+    const WrapWindow w = wrapWindow(editor);
+    QVERIFY(w.wpr >= 2);
+    editor->setPlainText(wordLine(w.wpr) + QLatin1Char('\n')
+                         + wordLine(2 * w.wpr + 1) + QLatin1Char('\n')
+                         + QStringLiteral("short") + QLatin1Char('\n')
+                         + wordLine(3 * w.wpr + 2));
+    measureAllLines(editor);
+    const int rows[4] = { 1, 3, 1, 4 }; // ceil(n / wpr), independent math
+    int total = 0;
+    for (int l = 0; l < 4; ++l) {
+        QCOMPARE(editor->visibleIndexOfModelLine(l), total); // = Σ weights above
+        total += rows[l];
+    }
+    QCOMPARE(editor->visibleLineTotal(), total); // the slot-sum identity
+
+    QVector<int> tally(4, 0);
+    int last = -1;
+    for (int s = 0; s < total; ++s) {
+        const int line = editor->modelLineForVisibleIndex(s);
+        ++tally[line];
+        QVERIFY(line >= last); // the inverse is monotone (continuations stick)
+        last = line;
+    }
+    for (int l = 0; l < 4; ++l)
+        QCOMPARE(tally.at(l), rows[l]);
+
+    // The v1 out-of-range contracts ride the slot space too.
+    QCOMPARE(editor->visibleIndexOfModelLine(-1), -1);
+    QCOMPARE(editor->visibleIndexOfModelLine(4), -1);
+    QCOMPARE(editor->modelLineForVisibleIndex(-3), 0);
+    QCOMPARE(editor->modelLineForVisibleIndex(total + 5), 3); // clamped
+
+    // Turning the knob OFF restores the fold line space (v1.6.1 shape).
+    editor->options()->setSoftWrapEnabled(false);
+    QCOMPARE(editor->visibleLineTotal(), 4);
+    for (int l = 0; l < 4; ++l)
+        QCOMPARE(editor->visibleIndexOfModelLine(l), l);
+}
+
+void TestCodeEditor::softWrapFoldHidesWholeWrappedLines()
+{
+    // One shared table (PLAN): folding removes a whole line's slot block -
+    // a line's rows are never partially hidden. Counts are DERIVED from the
+    // doors (c1, c2), so the 2-space indent never needs its own formula.
+    editor->setPlainText(QStringLiteral("d"));
+    const WrapWindow w = wrapWindow(editor);
+    QVERIFY(w.wpr >= 2 && w.k > 12);
+    editor->setPlainText(QStringLiteral("def head:\n  ") + wordLine(4 * w.wpr)
+                         + QLatin1Char('\n') + QStringLiteral("  ")
+                         + wordLine(4 * w.wpr + 1) + QLatin1Char('\n')
+                         + QStringLiteral("next\nlast"));
+    editor->options()->setSoftWrapEnabled(true);
+    editor->grab(); // the fold-cache warm-up (like the foldMap tests)
+    measureAllLines(editor);
+    QVERIFY(editor->isFoldable(0));
+
+    const int s0 = editor->visibleIndexOfModelLine(0);
+    const int s1 = editor->visibleIndexOfModelLine(1);
+    const int s2 = editor->visibleIndexOfModelLine(2);
+    const int s3 = editor->visibleIndexOfModelLine(3);
+    const int s4 = editor->visibleIndexOfModelLine(4);
+    const int total0 = editor->visibleLineTotal();
+    const int c1 = s2 - s1; // line 1's rows
+    const int c2 = s3 - s2; // line 2's rows
+    QCOMPARE(s0, 0);
+    QCOMPARE(s1 - s0, 1); // "def head:" is one short row
+    QVERIFY(c1 >= 4); // 4*wpr indented words: >= 4 rows no matter the indent cut
+    QVERIFY(c2 >= 4);
+    QCOMPARE(total0, s4 + 1); // "last" ends the map with one row
+
+    editor->foldLine(0);
+    QCOMPARE(editor->visibleIndexOfModelLine(1), -1); // whole blocks vanish
+    QCOMPARE(editor->visibleIndexOfModelLine(2), -1);
+    QCOMPARE(editor->visibleLineTotal(), total0 - c1 - c2);
+    QCOMPARE(editor->visibleIndexOfModelLine(0), 0);
+    QCOMPARE(editor->visibleIndexOfModelLine(3), s3 - c1 - c2);
+    QCOMPARE(editor->visibleIndexOfModelLine(4), s4 - c1 - c2);
+    const QVector<int> want{ 0, 3, 4 }; // the slot walk skips the fold hole
+    for (int s = 0; s < editor->visibleLineTotal(); ++s)
+        QCOMPARE(editor->modelLineForVisibleIndex(s), want.value(s, -999));
+
+    // The plans survived the fold (the zero block is a WEIGHT, not a wipe):
+    // unfolding restores the exact prior map without re-measuring.
+    editor->unfoldLine(0);
+    QCOMPARE(editor->visibleLineTotal(), total0);
+    const int pre[5] = { s0, s1, s2, s3, s4 };
+    for (int l = 0; l < 5; ++l)
+        QCOMPARE(editor->visibleIndexOfModelLine(l), pre[l]);
+}
+
+void TestCodeEditor::softWrapCaretRowDrivesScrollMath()
+{
+    // DoD numeric tripwire: in slot space a NearTop reveal is the line's
+    // FIRST slot flush at the top edge, so the delta between two flush
+    // reveals is exactly (slot distance) x lineHeight (padding cancels).
+    QStringList lines;
+    for (int i = 0; i < 30; ++i)
+        lines << QStringLiteral("x");
+    editor->setPlainText(lines.join(QLatin1Char('\n')));
+    const WrapWindow w = wrapWindow(editor);
+    QVERIFY(w.wpr >= 2);
+    lines.insert(30, wordLine(2 * w.wpr + 1)); // line 30 takes 3 rows
+    while (lines.size() < 61)
+        lines << QStringLiteral("x");
+    editor->setPlainText(lines.join(QLatin1Char('\n')));
+    editor->options()->setSoftWrapEnabled(true);
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+
+    editor->revealAt({30, 0}, CodeEditor::RevealMode::NearTop);
+    const int aOn = editor->verticalScrollOffset();
+    editor->revealAt({31, 0}, CodeEditor::RevealMode::NearTop);
+    const int bOn = editor->verticalScrollOffset();
+    const int cLine = editor->visibleIndexOfModelLine(31) - editor->visibleIndexOfModelLine(30);
+    QCOMPARE(cLine, 3); // the wrapped row was measured EAGERLY for the caret
+    QVERIFY(aOn > 0); // the flush really scrolls (an unclamped interior line)
+    QCOMPARE(aOn, editor->visibleIndexOfModelLine(30) * lh - pad);
+    QCOMPARE(bOn - aOn, cLine * lh);
+
+    // The same reveals in the wrap-OFF line space: one row apart.
+    editor->options()->setSoftWrapEnabled(false);
+    editor->revealAt({30, 0}, CodeEditor::RevealMode::NearTop);
+    const int aOff = editor->verticalScrollOffset();
+    editor->revealAt({31, 0}, CodeEditor::RevealMode::NearTop);
+    const int bOff = editor->verticalScrollOffset();
+    QCOMPARE(aOff, 30 * lh - pad);
+    QCOMPARE(bOff - aOff, lh);
+    QCOMPARE((bOn - aOn) - (bOff - aOff), (cLine - 1) * lh);
+}
+
+void TestCodeEditor::softWrapEditsAndResizeDropStalePlans()
+{
+    // All three staleness seams, in numbers: an IN-LINE edit drops the
+    // touched line's plan (the caret door then remeasures the NEW content,
+    // so the surviving counts prove the old plan really died); a NEWLINE
+    // split drops both halves while the plans BELOW shift keys and stay
+    // alive; a width change drops ALL plans.
+    editor->setPlainText(QStringLiteral("1\n2\n3\n4\n5"));
+    editor->options()->setSoftWrapEnabled(true);
+    const WrapWindow w = wrapWindow(editor);
+    QVERIFY(w.wpr >= 2);
+    const QString longLine = wordLine(2 * w.wpr + 1); // 3 rows
+    editor->setPlainText(longLine + QLatin1Char('\n') + wordLine(w.wpr - 1)
+                         + QLatin1Char('\n') + QStringLiteral("x\n") + longLine
+                         + QLatin1Char('\n') + longLine);
+    measureAllLines(editor);
+    //      L0:3  L1:1  L2:1  L3:3  L4:3
+    QCOMPARE(editor->visibleLineTotal(), 11);
+    QCOMPARE(editor->visibleIndexOfModelLine(4), 8);
+
+    // (a) in-line delta=0: L1 gains wpr four-letter words (wpr-1 -> 2wpr-1:
+    // 2 rows, since one row holds exactly wpr of them). The plan died at the
+    // seam and the caret remeasured the NEW content; had the old plan
+    // survived, wpr-1 words would still say 1 row and the total 11.
+    editor->insertTextAt({1, 100000}, QLatin1Char(' ') + wordLine(w.wpr)); // col clamps to EOL
+    QCOMPARE(editor->visibleLineTotal(), 3 + 2 + 1 + 3 + 3);
+    QCOMPARE(editor->visibleIndexOfModelLine(1), 3); // L0's plan untouched
+    QCOMPARE(editor->visibleIndexOfModelLine(4), 9); // L4 alive at its own count...
+    QCOMPARE(editor->visibleLineTotal() - editor->visibleIndexOfModelLine(4), 3); // ...= 3 rows
+
+    // (b) newline split (delta=+1): cut L3 after wpr+2 words. The anchor
+    // rule pins anchor=3 (lineColAt on the inserted '\n' resolves BEFORE
+    // it) and lastTouched=4, so both halves fall to provisional 1 while
+    // L4's plan shifts key 4 -> 5 ALIVE (its 3 rows ride the shifted key).
+    // The caret lands on the new line (wpr-1 words: 1 row), measured eagerly.
+    editor->insertTextAt({3, 5 * w.wpr + 10}, QStringLiteral("\n")); // after a space
+    QCOMPARE(editor->lineCount(), 6);
+    //      L0:3  L1:2  L2:1  L3:1  L4:1  L5:3 <- the shifted plan carries L5
+    QCOMPARE(editor->visibleLineTotal(), 11);
+    QCOMPARE(editor->visibleIndexOfModelLine(5), 8);
+    editor->setPosition({3, 0}); // remeasure the top half: wpr+2 words -> 2 rows
+    //      L0:3  L1:2  L2:1  L3:2  L4:1  L5:3
+    QCOMPARE(editor->visibleLineTotal(), 12);
+    QCOMPARE(editor->visibleIndexOfModelLine(4), 8);
+
+    // (c) resize: the width watcher drops every plan - the whole document
+    // falls back to the fold truth (one row per line) until the window walks.
+    // The show(): Qt only delivers resizeEvent to a VISIBLE top-level (the
+    // offscreen suite keeps the editor hidden, and resize events queue until
+    // show) - production editors are visible, so this is the honest path.
+    editor->show();
+    editor->resize(700, 400);
+    QCOMPARE(editor->visibleLineTotal(), 6);
+    for (int l = 0; l < 5; ++l)
+        QCOMPARE(editor->visibleIndexOfModelLine(l + 1) - editor->visibleIndexOfModelLine(l), 1);
+
+    const WrapWindow w2 = wrapWindow(editor);
+    QVERIFY(w2.k > w.k); // wider window, identical gutter (still one digit)
+    // Same word counts, new fit: L0 2wpr+1, L1 2wpr-1, L2 "x", L3 wpr+2,
+    // L4 wpr-1, L5 2wpr+1.
+    const int total2 = ceilDiv(2 * w.wpr + 1, w2.wpr) + ceilDiv(2 * w.wpr - 1, w2.wpr) + 1
+                       + ceilDiv(w.wpr + 2, w2.wpr) + ceilDiv(w.wpr - 1, w2.wpr)
+                       + ceilDiv(2 * w.wpr + 1, w2.wpr);
+    measureAllLines(editor);
+    QCOMPARE(editor->visibleLineTotal(), total2);
 }
 
 QTEST_MAIN(TestCodeEditor)

@@ -115,6 +115,19 @@ public:
     void setIndentGuidesEnabled(bool enabled);
     bool indentGuidesEnabled() const;
 
+    // M25 soft wrap (default OFF = the v1.6.1 line space, byte-identical
+    // row math). ON: long lines wrap at WORD boundaries inside the text
+    // window (viewport minus padding/gutter/fold-zone/overview ruler); an
+    // unbreakable token wider than the window OVERFLOWS its row and is
+    // never split. The row doors (visibleLineTotal & friends) switch UNITS
+    // to visual slots; the horizontal scroll doors degrade to no-ops; a
+    // folded-away line's rows all disappear; fold markers and gutter
+    // numbers ride the line's FIRST row only. Word wrapping is a lazy,
+    // viewport-bounded measurement cache: huge documents pay the visible
+    // window, never the whole file (PLAN §M25).
+    void setSoftWrapEnabled(bool enabled);
+    bool softWrapEnabled() const;
+
 Q_SIGNALS:
     // Emitted by the editor's setters (NOT here) after the change has
     // been applied — so handlers can read the NEW value through this
@@ -131,6 +144,7 @@ Q_SIGNALS:
     void autoCloseEnabledChanged(bool enabled);
     void readOnlyChanged(bool readOnly);
     void indentGuidesEnabledChanged(bool enabled); // M21
+    void softWrapEnabledChanged(bool enabled);     // M25
     void codeFontChanged(const QFont& font);     // M20 (M17 knob)
     void zoomFactorChanged(double factor);       // M20 (clamped value)
 
