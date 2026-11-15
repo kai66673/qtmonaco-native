@@ -5,7 +5,7 @@ Native code editor widget for Qt6, built from scratch on a raw `QWidget`
 QPlainTextEdit, no Chromium. Long-term hobby project; roadmap in `README.md`,
 phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
 
-## Current state (v1.6.0) — gates and the frozen surface
+## Current state (v1.6.1) — gates and the frozen surface
 
 - Gate 1 (editor v1) froze the public API at tag `v1.0`; Gate 1.5 (usability
   train M20–M24) closed 2026-11-12 at tag `v1.5.0`. **Gate 2 is the open
@@ -36,6 +36,11 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
   (tabbed demo app). `qmn-demo`'s window/dialog logic lives in the
   `qmn_demo_app` STATIC lib (`demo_main.cpp` is a thin main) because
   `tst_demo` links the lib and drives it offscreen.
+- `pydemo/` — a uv project, NOT built by CMake: the Python analog of
+  `qmn-demo` running on the shipped wheel (path dep into gitignored
+  `dist/`; `uv.lock` stays uncommitted). Mirrors the C++ demo door-for-door
+  including the 14 settings knobs (13 via `options()`, the M24 theme preset
+  via `theme()`).
 
 Include headers relative to `src/` (CMake adds `src/` as a PUBLIC include dir):
 `#include "core/TextBuffer.hpp"`, `#include "view/CodeEditor.hpp"`.
@@ -181,6 +186,17 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
   `mjb_rejected_functions.log`. **After adding public view API, run
   `--codegen` and check the rejected log** — silently dropped functions never
   reach Python. Set `REBUILD_IMAGE=1` to rebuild the (slow) image.
+- **Bound-type lists live in THREE copies and must stay in sync:** the
+  typesystem's type entries, `bindings/CMakeLists.txt` (`HEADERS` + the
+  `_generated` TU names), and the hand-reproduced codegen CLI in
+  `build_in_container.sh --codegen`. The 1.6.1 run caught the drift for
+  real: adding `CodeEditorTheme` to typesystem+CMake but not to the
+  script's header list produced "type ... specified in typesystem, but not
+  defined" and NO theme wrapper TU. What the binding wraps today: the three
+  QObjects (`CodeEditor`/`CodeEditorOptions`/`CodeEditorTheme`, ctor
+  removed — editor-owned), `TextPosition`, the five decoration record
+  structs and every nested enum; only `PerfStats` and the
+  SlotEdit/UndoMark/std::function machinery stay unbound by design.
 - **Pins are load-bearing:** `PySide6-Essentials==6.12.0` /
   `shiboken6_generator==6.12.0` at build time, `~=6.12.0` at runtime — the
   generated wrappers reference Qt_6.12 versioned symbols and versioned
