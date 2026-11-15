@@ -1327,6 +1327,20 @@ private:
         int segIdx = 0;   // 0 = the line's first row (gutter/number lives here)
     };
     RowPlan rowPlan(int slot) const;
+    // The row slot a position's ink rides (the line's first slot + the
+    // segment holding col; unmeasured lines: the first slot). -1 hidden,
+    // exactly like the fold map's door. The caret scroll math, the paint
+    // caret and positionAt all address rows through this one door.
+    int slotOfPosition(TextPosition p) const;
+    // The segment holding col in a line's plan (0 unmeasured): col == a
+    // break start belongs to the row it starts.
+    int segIndexOfCol(int line, int col) const;
+    // Visual-row Up/Down (M25 machine 2, the frozen comment's "column
+    // memory"): the step is ONE slot (hidden fold lines own no slots, so
+    // the fold jump rides the map for free); the target col keeps the
+    // caret's row-local x on the destination row. Invalid/hidden rows
+    // degrade to the v1 model-line step.
+    TextPosition rowStepTarget(TextPosition from, bool up) const;
 
     // M25 machine 2 (paint/hit/caret geometry): xInWrapped mirrors xInLine's
     // phantom-cell extrapolation in the SEGMENT frame (at segStart == 0 it is

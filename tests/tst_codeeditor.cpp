@@ -360,6 +360,19 @@ private slots:
     void softWrapFoldHidesWholeWrappedLines();
     void softWrapCaretRowDrivesScrollMath();
     void softWrapEditsAndResizeDropStalePlans();
+    // M25 machine 2 (the segment-aware paint/hit/caret wiring): the row is
+    // the unit of ink AND of interaction — clicks resolve to the clicked
+    // row's col window, Up/Down step one visual row with column proximity,
+    // a caret on a continuation row scrolls that row (not its model line),
+    // and the fold skip steps whole wrapped blocks as one slot run.
+    void softWrapHitTestMapsClicksToRowSegments();
+    void softWrapUpDownStepsVisualRowsAndColumns();
+    void softWrapContinuationRowScrollsIntoView();
+    void softWrapFoldedRowsSkipWholeWrappedBlocks();
+    // M25 DoD perf gate: the resize storm on a doc far taller than the
+    // viewport must stay inside the lazy-coverage contract (PLAN's budget +
+    // escalation), never re-measure the document per paint.
+    void softWrapResizeStormStaysInsideTheEscalationBudget();
 
 private:
     CodeEditor* editor = nullptr;
@@ -9340,6 +9353,317 @@ void TestCodeEditor::softWrapEditsAndResizeDropStalePlans()
                        + ceilDiv(2 * w.wpr + 1, w2.wpr);
     measureAllLines(editor);
     QCOMPARE(editor->visibleLineTotal(), total2);
+}
+
+// --- M25 machine 2: the row as the unit of interaction ----------------------
+// The clicks, the Up/Down step and the scroll math all address ROWS through
+// the same slot map machine 1 shipped. The exact-col expectations lean on
+// the flush wordLine grid the fixtures already establish (4-letter words,
+// single spaces, monospace cell = cellWidth exactly): a row of wpr words
+// breaks at exactly 5*wpr code units, and a row-space x is an exact
+// multiple of the cell width.
+
+void TestCodeEditor::softWrapHitTestMapsClicksToRowSegments()
+{
+    editor->setPlainText(QStringLiteral("1\n2\n3"));
+    editor->options()->setSoftWrapEnabled(true);
+    const WrapWindow w = wrapWindow(editor);
+    QVERIFY(w.wpr >= 2 && w.k >= 12);
+    const QString longLine = wordLine(2 * w.wpr + 1); // 3 rows: [5wpr, 10wpr)
+    editor->setPlainText(longLine + QLatin1Char('\n') + QStringLiteral("tail"));
+    measureAllLines(editor);
+    QCOMPARE(editor->visibleLineTotal(), 4);
+    editor->revealAt({0, 0}, CodeEditor::RevealMode::NearTop); // slot 0 flushes (clamped)
+    const int pad = editor->padding();
+    const int lh = editor->lineHeight();
+    const int cl = editor->contentLeft();
+    const double cw = editor->cellWidth();
+    const auto rowY = [&](int s) {
+        return pad + s * lh - editor->verticalScrollOffset() + lh / 2;
+    };
+
+    // A click at the left edge of the SECOND row answers the break col (the
+    // row's first word), and a mid-row click answers the row's own word
+    // grid: 7.3 cells in is cell 7 of this row. The v1.6.1 answer for the
+    // same widget x was col ~7 of the MODEL line (h-scroll was 0) — the
+    // unit change made visible.
+    auto p = editor->positionAt(QPoint(cl + 2, rowY(1)));
+    QCOMPARE(p.line, 0);
+    QCOMPARE(p.col, 5 * w.wpr);
+    p = editor->positionAt(QPoint(cl + int(7.3 * cw), rowY(1)));
+    QCOMPARE(p.col, 5 * w.wpr + 7);
+    // The band past a row's last glyph clamps to THAT row's end — the break
+    // col, which belongs to the next row (consistent with segIndexOfCol),
+    // never to the model line's end two rows down (the v1 answer).
+    p = editor->positionAt(QPoint(cl + w.win - 2, rowY(1)));
+    QCOMPARE(p.col, 10 * w.wpr);
+    // On the LAST row the row end IS the line end.
+    p = editor->positionAt(QPoint(cl + w.win - 2, rowY(2)));
+    QCOMPARE(p.col, longLine.size());
+    // Row identity: every row's left edge equals the previous row's clamped
+    // right edge (one continuous col space split between rows).
+    for (int s = 1; s <= 2; ++s) {
+        const int left = editor->positionAt(QPoint(cl, rowY(s))).col;
+        const int right = editor->positionAt(QPoint(cl + w.win - 2, rowY(s - 1))).col;
+        QCOMPARE(left, right);
+    }
+    // Regression guard (latent v1 crash shape): a click in the TOP PADDING
+    // (y above the first row) rides the v1 clamp to row 0 — and the wrap
+    // layer must never be handed a negative slot (the rowPlan guard).
+    p = editor->positionAt(QPoint(cl, 0));
+    QCOMPARE(p.line, 0);
+    QCOMPARE(p.col, 0);
+}
+
+void TestCodeEditor::softWrapUpDownStepsVisualRowsAndColumns()
+{
+    editor->setPlainText(QStringLiteral("1\n2\n3"));
+    editor->options()->setSoftWrapEnabled(true);
+    const WrapWindow w = wrapWindow(editor);
+    QVERIFY(w.wpr >= 2 && w.k >= 12);
+    editor->setPlainText(wordLine(2 * w.wpr + 1) + QLatin1Char('\n')
+                         + wordLine(2 * w.wpr + 1) + QLatin1Char('\n')
+                         + QStringLiteral("tail"));
+    measureAllLines(editor);
+    QCOMPARE(editor->visibleLineTotal(), 7); // 3 + 3 + 1 rows all live in the view
+
+    // One key = one VISUAL row: from {0,0} three Downs land on the next
+    // MODEL line's first row — and the row-local x (0) pins the col to the
+    // row starts, i.e. the exact break cols 5wpr / 10wpr of the flush grid.
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 0);
+    QCOMPARE(editor->position().col, 5 * w.wpr);
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().col, 10 * w.wpr);
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 1);
+    QCOMPARE(editor->position().col, 0);
+
+    // Column proximity from mid-row: row-local x survives the row change
+    // (2 cells in stays 2 cells in), and the Up path walks the exact same
+    // cols back (the deterministic monospace grid).
+    editor->setPosition({0, 5 * w.wpr + 2});
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 0);
+    QCOMPARE(editor->position().col, 10 * w.wpr + 2);
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 1);
+    QCOMPARE(editor->position().col, 2);
+    QTest::keyClick(editor, Qt::Key_Up);
+    QCOMPARE(editor->position().col, 10 * w.wpr + 2);
+    QTest::keyClick(editor, Qt::Key_Up);
+    QCOMPARE(editor->position().col, 5 * w.wpr + 2); // exact round trip
+
+    // The v1 document-edge collapses ride the slot space: up from the first
+    // row stays at col 0, down from the last row flushes to the line end.
+    editor->setPosition({0, 5 * w.wpr + 2});
+    QTest::keyClick(editor, Qt::Key_Up); // back onto row 0: same row-local x
+    QCOMPARE(editor->position().line, 0);
+    QCOMPARE(editor->position().col, 2);
+    QTest::keyClick(editor, Qt::Key_Up); // document top: v1's collapse (col 0)
+    QCOMPARE(editor->position().line, 0);
+    QCOMPARE(editor->position().col, 0);
+    QTest::keyClick(editor, Qt::Key_Up); // and it stays pinned at the top
+    QCOMPARE(editor->position().line, 0);
+    QCOMPARE(editor->position().col, 0);
+    editor->setPosition({2, 2}); // "tail": the last row (slot 6)
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 2);
+    QCOMPARE(editor->position().col, 4);
+
+    // Wrap OFF the very same key is v1: one MODEL line per press, col kept.
+    editor->options()->setSoftWrapEnabled(false);
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 1);
+    QCOMPARE(editor->position().col, 0);
+}
+
+void TestCodeEditor::softWrapContinuationRowScrollsIntoView()
+{
+    // DoD tripwire: the caret's OWN row drives the scroll — entering a
+    // continuation row at the bottom edge flushes the viewport by one row,
+    // while the same keys in the wrap-OFF line space do not scroll at all.
+    editor->setPlainText(QStringLiteral("1\n2\n3"));
+    editor->options()->setSoftWrapEnabled(true);
+    const WrapWindow w = wrapWindow(editor);
+    QVERIFY(w.wpr >= 2);
+    editor->setPlainText(wordLine(2 * w.wpr + 1) + QLatin1Char('\n')
+                         + QStringLiteral("tailA\ntailB\ntailC"));
+    const int pad = editor->padding();
+    const int lh = editor->lineHeight();
+    editor->resize(600, 2 * pad + 3 * lh); // exactly 3 rows fit
+    measureAllLines(editor);
+    QCOMPARE(editor->visibleLineTotal(), 6); // 3 + 1 + 1 + 1
+    editor->revealAt({0, 0}, CodeEditor::RevealMode::NearTop); // slot 0 flushes
+    QCOMPARE(editor->verticalScrollOffset(), 0);
+
+    editor->setPosition({0, 0});
+    // Rows 1 and 2 already live in the 3-row window: no scroll on entry.
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 0);
+    QCOMPARE(editor->verticalScrollOffset(), 0);
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 0);
+    QCOMPARE(editor->verticalScrollOffset(), 0);
+    // The step into the next MODEL line sits one row below the window: v1's
+    // bottom-flush formula (caretBottom + padding - height) lands exactly
+    // one row further down than the flush that started the frame.
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 1);
+    QCOMPARE(editor->verticalScrollOffset(), lh - pad); // 4*lh + pad - (2*pad+3*lh)
+
+    // The same keys in the wrap-OFF line space: the first press already
+    // reaches line 1, and that line fits the window — nothing scrolls.
+    editor->options()->setSoftWrapEnabled(false);
+    editor->revealAt({0, 0}, CodeEditor::RevealMode::NearTop);
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 1);
+    QCOMPARE(editor->verticalScrollOffset(), 0);
+}
+
+void TestCodeEditor::softWrapFoldedRowsSkipWholeWrappedBlocks()
+{
+    // Fold x wrap caret stepping on ONE table: a hidden line is a zero-
+    // weight whole block, so a step out of the fold header's LAST row lands
+    // on the first row of the first line BELOW the hidden run — and the
+    // column-proximity rule (row-local x) rides the jump. The hidden run's
+    // exact row counts come from the doors (c1/c2/c3 below), never a formula.
+    editor->setPlainText(QStringLiteral("1\n2\n3"));
+    editor->options()->setSoftWrapEnabled(true);
+    const WrapWindow w = wrapWindow(editor);
+    QVERIFY(w.wpr >= 2 && w.k >= 12);
+    editor->setPlainText(QStringLiteral("root ") + wordLine(2 * w.wpr + 1)
+                         + QLatin1Char('\n') + QStringLiteral("  one\n  ")
+                         + wordLine(2 * w.wpr + 1) + QLatin1Char('\n')
+                         + QStringLiteral("  three\nnext\nlast"));
+    editor->grab(); // the fold-cache warm-up (like the foldMap tests)
+    measureAllLines(editor);
+    QVERIFY(editor->isFoldable(0));
+    // Door-derived row counts (the fixture pattern of measured counts c1/c2):
+    // rows0 = line 0's run; hidden = the run of rows lines 1..3 own together.
+    const int rows0 = editor->visibleIndexOfModelLine(1) - editor->visibleIndexOfModelLine(0);
+    const int hidden = editor->visibleIndexOfModelLine(4) - editor->visibleIndexOfModelLine(1);
+    QVERIFY(rows0 >= 3); // "root " + 2wpr+1 words: the header itself wraps
+    QVERIFY(hidden >= 3); // the long wrapped child guarantees a fat hidden block
+    const int total0 = editor->visibleLineTotal();
+    QVERIFY(editor->foldLine(0)); // hides lines 1..3 (the whole wrapped block)
+    QCOMPARE(editor->visibleIndexOfModelLine(1), -1);
+    QCOMPARE(editor->visibleLineTotal(), total0 - hidden);
+
+    // Header rows: line 0 = "root " + wordLine(2wpr+1) = a flush 2wpr+2
+    // word grid (prefix "root " is exactly 5 units), 3 rows. The caret
+    // starts on its CONTINUATION row 1; the wrap-ON v1.6.1 world has no
+    // such thing (the header was one row).
+    const int cA = 5 * w.wpr + 2;
+    editor->setPosition({0, cA});
+    QTest::keyClick(editor, Qt::Key_Down); // header row 1 -> header row 2
+    QCOMPARE(editor->position().line, 0);
+    QCOMPARE(editor->position().col, 10 * w.wpr + 2);
+    QTest::keyClick(editor, Qt::Key_Down); // header row 2 -> "next" row 0
+    QCOMPARE(editor->position().line, 4);
+    QCOMPARE(editor->position().col, 2); // the row-local x (2 cells) rode the jump
+    QTest::keyClick(editor, Qt::Key_Down); // -> "last" row 0
+    QCOMPARE(editor->position().line, 5);
+    QCOMPARE(editor->position().col, 2);
+    // The exact round trip back over the fold gap...
+    QTest::keyClick(editor, Qt::Key_Up);
+    QCOMPARE(editor->position().line, 4);
+    QCOMPARE(editor->position().col, 2);
+    QTest::keyClick(editor, Qt::Key_Up);
+    QCOMPARE(editor->position().line, 0);
+    QCOMPARE(editor->position().col, 10 * w.wpr + 2);
+    QTest::keyClick(editor, Qt::Key_Up);
+    QCOMPARE(editor->position().col, cA);
+
+    // Wrap OFF the fold step is v1: one model line per press, and the col
+    // re-clamps to the short "next" line (no column proximity in v1).
+    editor->options()->setSoftWrapEnabled(false);
+    editor->setPosition({0, cA});
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 4);
+    QCOMPARE(editor->position().col, 4); // re-clamped to len("next")
+}
+
+void TestCodeEditor::softWrapResizeStormStaysInsideTheEscalationBudget()
+{
+    // Timing note (the third timing-sensitive test, with precedent in
+    // foldEndEscapesViewportParseClamp and textRangeWalkStaysPrunedMany-
+    // Pieces): the real tripwire is STRUCTURAL — with lazy coverage the row
+    // total can only grow by the measured head (viewport-capped: the walker
+    // is aimed at lastModel + 2*rows + 8 model lines, and the width watcher
+    // restarts it on every resize), so it stays O(viewport) above docLines.
+    // A whole-document-per-paint implementation lands at ~5x docLines rows
+    // and busts the bound deterministically — the wall-clock legs below can
+    // only pass vacuously (measurement stayed bounded => paints are fast),
+    // never flake red on a healthy implementation (measured margins >> the
+    // observed cost on this machine in Release AND Debug).
+    editor->options()->setSoftWrapEnabled(true);
+    const WrapWindow w = wrapWindow(editor);
+    QVERIFY(w.wpr >= 2);
+    const QString wide = wordLine(4 * w.wpr + 1); // >= 5 rows at every width tried
+    const int docLines = 12000;
+    editor->setPlainText(QStringList(docLines, wide).join(QLatin1Char('\n')));
+    const int fullTotal = 5 * docLines; // the fully-measured row count at the
+                                        // seeded width (more at narrower ones)
+
+    // First paint: eager viewport + escalation, but the escalation is
+    // viewport-aimed — the measured head grows the total a little, nowhere
+    // near the fully-measured 5x. The show(): resizeEvent only reaches a
+    // VISIBLE top-level (same honest path as the width-watcher leg of
+    // softWrapEditsAndResizeDropStalePlans).
+    editor->show();
+    // The overview ruler OFF for the storm's wall-clock legs: its v1 stripe
+    // loop pays buffer_.offsetOfLine per stride sample, and on a ONE-PIECE
+    // (loaded) document that scan is O(doc) — ~230 ms/paint measured here,
+    // identical wrap-OFF (recorded as a known pre-existing cliff in PLAN,
+    // its own car later). The DoD's escalation budget is about the WRAP
+    // layer; with the ruler out, every paint ms belongs to wrap.
+    editor->options()->setOverviewRulerEnabled(false);
+    editor->grab();
+    const int after1 = editor->visibleLineTotal();
+    QVERIFY(after1 > docLines);                       // the head WAS measured
+    QVERIFY(after1 < docLines + 6000);                // O(viewport), not O(doc)
+
+    // The storm: 40 width jitters (any pixel delta flips the width key,
+    // kills every live plan and rewinds the walker — the worst case for a
+    // lazy layer) with a paint after each. Structural bound after EVERY
+    // paint: the document is never fully measured mid-storm.
+    QElapsedTimer t;
+    int maxPaintMs = 0;
+    qint64 totalMs = 0;
+    for (int i = 0; i < 40; ++i) {
+        t.start();
+        editor->resize(600 - 12 + (i * 29) % 25, 400);
+        editor->grab();
+        const int ms = int(t.elapsed());
+        totalMs += ms;
+        maxPaintMs = std::max(maxPaintMs, ms);
+        QVERIFY2(editor->visibleLineTotal() < fullTotal - 6 * 1000,
+                 qPrintable(QStringLiteral("storm paint %1 fully measured: total %2 of %3")
+                                .arg(i).arg(editor->visibleLineTotal()).arg(fullTotal)));
+    }
+    // Wall-clock legs (the escalation budget's own shape: the 8 ms walker
+    // latency per paint over an O(viewport) eager head): the budgets are a
+    // 5x+ margin over the MEASURED cost on this machine (Release max 17 ms,
+    // Debug max 23 ms per storm paint) and 4x+ under the smallest broken
+    // shape (a whole-doc re-measure is 500 ms-3 s per paint, ruler out).
+    QVERIFY2(maxPaintMs < 120, qPrintable(QStringLiteral("worst storm paint %1 ms").arg(maxPaintMs)));
+    QVERIFY2(totalMs < 40 * 120, qPrintable(QStringLiteral("storm total %1 ms").arg(totalMs)));
+
+    // The map survives the storm intact: still lazily bounded at the end,
+    // and the inverse map stays monotone along the sampled slots.
+    QVERIFY(editor->visibleLineTotal() > docLines);   // head still measured
+    QVERIFY(editor->visibleLineTotal() < fullTotal);  // ...still lazily bounded
+    int last = -1;
+    for (int s = 0; s < editor->visibleLineTotal(); s += 977) {
+        const int line = editor->modelLineForVisibleIndex(s);
+        QVERIFY2(line >= last, qPrintable(QStringLiteral("inverse map not monotone at slot %1").arg(s)));
+        last = line;
+    }
+    QCOMPARE(editor->visibleIndexOfModelLine(0), 0);
 }
 
 QTEST_MAIN(TestCodeEditor)

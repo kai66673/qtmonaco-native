@@ -847,6 +847,20 @@ main (verified by stash), release builds stay silent but caret marks drift
 fixing it is deliberately NOT folded into an M25 car; it gets its own fix car
 with its own tripwire.
 
+**Known pre-existing perf cliff (recorded 2026-11-16, deferred to its own
+car):** the overview-ruler stripe loop (v1.6.1 code, unchanged by M25 except
+the lines→slots unit) calls `buffer_.offsetOfLine` once per stride sample,
+and `offsetOfNthNewline` scans WITHIN the holding piece from the piece start —
+on a ONE-PIECE (loaded, not typed-into) document that is O(doc). Measured on
+a 12k-line/6MiB single-piece doc: ~1 ms per call x ~400 samples = ~230 ms
+per paint, IDENTICAL with wrap ON and OFF (bit-parity holds; the wrap layer
+itself stays inside its 8 ms escalation budget — the M25 resize-storm test
+measures the wrap legs with the ruler OFF and says so). A production user
+resizing a big loaded file pays this in shipped v1.6.1 too. The fix belongs
+to the core's line index (per-piece newline position lists or a line cache),
+not to the wrap layer — its own car with a bench tripwire, never folded into
+M25.
+
 ### CodeDocument (new public view QObject; lands first inside M25)
 
 Decided 2026-11-15 (owner proposal). `src/view/CodeDocument.{hpp,cpp}`: a

@@ -633,6 +633,52 @@ TextPosition CodeEditor::positionAt(const QPoint& widgetPos) const
     // model line, formula bit-for-bit the old one).
     const int row = (widgetPos.y() - padding_ + vScroll_) / lineHeight_;
     pos.line = modelLineForVisibleIndex(row); // clamps to the visible range
+    if (softWrapEnabled_) {
+        // M25 machine 2: the click lands on a ROW — y picked the slot, the
+        // slot's RowPlan owns the col window this x maps into, and the row's
+        // own segment origin is the x anchor (hScroll_ is 0 with wrap ON, so
+        // the widget x IS the line-space x plus the contentLeft offset).
+        // Clicks in the band past a row's last glyph clamp to that row's
+        // end (VS Code), never to the model line's end two rows down.
+        const RowPlan rp = rowPlan(row);
+        if (rp.line < 0) {
+            pos.col = 0; // hidden/invalid (defensive: the map owns the slots)
+            return pos;
+        }
+        const GeoSlot* s = hitLine(pos.line);
+        if (!s || !s->valid) {
+            pos.col = rp.segStart; // empty line: every x is the row start
+            return pos;
+        }
+        // Clamp in ROW space (the widget x IS row space: hScroll_ is pinned
+        // to 0 with wrap ON), then convert back to line space for the v1
+        // xToCursor chain — the layout is the whole model line, so its x
+        // coordinates live in line space and only the clamp was row-local.
+        const double segX0 = xInLine(s, rp.segStart);
+        const double rowX = std::clamp(widgetPos.x() - double(contentLeft()),
+                                       0.0, xInWrapped(s, rp.segStart, rp.segEnd));
+        const double x = rowX + segX0;
+        int c;
+        if (x > s->line.naturalTextWidth()) {
+            // Phantom region (a truncated layout, the row ends past the
+            // layout budget): the v1 cell math, clamped into the row's col
+            // window below either way.
+            c = int(s->text.size()) + int((x - s->line.naturalTextWidth()) / cellWidth_);
+        } else {
+            c = std::max(s->line.xToCursor(x), 0);
+            while (c > 0) { // v1's nearest-edge walk verbatim
+                int snapped = c;
+                const double left = s->line.cursorToX(&snapped, QTextLine::Leading);
+                if (left <= x) {
+                    c = snapped;
+                    break;
+                }
+                c = s->layout.previousCursorPosition(snapped);
+            }
+        }
+        pos.col = std::clamp(c, rp.segStart, rp.segEnd);
+        return pos;
+    }
     const GeoSlot* s = hitLine(pos.line);
     if (!s || !s->valid) {
         pos.col = 0; // empty line: every x is the line start
@@ -1559,8 +1605,9 @@ void CodeEditor::revealAt(TextPosition pos, RevealMode mode)
     if (softWrapEnabled_)
         ensureWrapLinesCovered(p.line, p.line); // M25: exact caret row, same
                                                 // eager rule as ensureCaretVisible
-    const int top = slotOfModelLine(p.line) * lineHeight_; // pad-offset frame:
-    const int bot = top + lineHeight_;                     // y = padding+top-vScroll
+    const int top = slotOfPosition(p) * lineHeight_; // M25: the POSITION's row
+    const int bot = top + lineHeight_;               // (wrap OFF: the line's
+                                                     // slot, v1 form)
     int target = vScroll_;
     switch (mode) {
     case RevealMode::Center:
@@ -1632,11 +1679,12 @@ void CodeEditor::ensureCaretVisible()
         // row. (Measuring is the same line materialization hitLine already
         // pays for the caret line, plus the break scan.)
         ensureWrapLinesCovered(caret_.line, caret_.line);
-    const int caretTop = slotOfModelLine(caret_.line) * lineHeight_;
-    const int caretBottom = caretTop + lineHeight_;
-    int target = vScroll_;
-    if (caretTop - padding_ < vScroll_)
-        target = caretTop - padding_;
+    const int caretTop = std::max(0, slotOfPosition(caret_)) * lineHeight_; // M25:
+    const int caretBottom = caretTop + lineHeight_;            // the caret's
+                                                               // OWN row (a
+    int target = vScroll_;                                     // continuation
+    if (caretTop - padding_ < vScroll_)                        // row scrolls
+        target = caretTop - padding_;                          // too)
     else if (caretBottom + padding_ > vScroll_ + height())
         target = caretBottom + padding_ - height();
     setVScroll(target);
@@ -2788,8 +2836,9 @@ CodeEditor::RowPlan CodeEditor::rowPlan(int slot) const
     // Invalid (slot < 0) whenever wrap is OFF: the v1.6.1 paint/hit/caret
     // geometry keeps its own line-space math and must never branch here.
     RowPlan p;
-    if (!softWrapEnabled_)
-        return p;
+    if (!softWrapEnabled_ || slot < 0)
+        return p; // invalid: the v1.6.1 paint/hit/caret geometry keeps its
+                  // own line-space math and must never branch here
     const int line = wrapLineForSlot(slot);
     if (line < 0 || lineIsHiddenByFold(line))
         return p; // a slot outside the map, or inside a fold's hole
@@ -2816,6 +2865,97 @@ CodeEditor::RowPlan CodeEditor::rowPlan(int slot) const
     p.segStart = p.segIdx == 0 ? 0 : plan->starts[p.segIdx - 1];
     p.segEnd = p.segIdx < int(plan->starts.size()) ? plan->starts[p.segIdx] : len;
     return p;
+}
+
+int CodeEditor::segIndexOfCol(int line, int col) const
+{
+    const WrapInfo* plan = liveWrapPlan(line);
+    if (!plan)
+        return 0; // unmeasured: the line paints as one row (the provisional
+                  // weight-1 truth), so every col lives on row 0
+    // A col lands on the row whose span holds it: starts[i-1] <= col <
+    // starts[i]; a col EXACTLY on a break start belongs to the row that
+    // starts there (upper_bound skips the equal start). EOL lands on the
+    // last row (all starts < len by the measureWrap invariant).
+    return int(std::upper_bound(plan->starts.begin(), plan->starts.end(), col)
+               - plan->starts.begin());
+}
+
+int CodeEditor::slotOfPosition(TextPosition p) const
+{
+    if (!softWrapEnabled_)
+        return visibleIndexOfModelLine(p.line); // the fold map's door (v1:
+                                                // slot == model line)
+    const int first = wrapIndexOfLine(p.line); // -1 hidden/out of range
+    if (first < 0)
+        return -1;
+    return first + segIndexOfCol(p.line, p.col);
+}
+
+TextPosition CodeEditor::rowStepTarget(TextPosition from, bool up) const
+{
+    // The v1 step (model-line neighbor, col re-clamped by nav) is the
+    // degradation path: reachable when the caret's line is hidden (an
+    // edit merged it into a collapsed fold) or the map is otherwise
+    // unable to answer - never the wrap-ON normal case.
+    const auto degrade = [this, &from](bool up) {
+        TextPosition pos = from;
+        if (up) {
+            const int t = prevVisibleModelLine(pos.line);
+            if (t < pos.line)
+                pos.line = t;
+            else
+                pos.col = 0;
+        } else {
+            const int t = nextVisibleModelLine(pos.line);
+            if (t > pos.line)
+                pos.line = t;
+            else
+                pos.col = lineLength(pos.line);
+        }
+        return pos;
+    };
+    const int mySlot = slotOfPosition(from);
+    if (mySlot < 0)
+        return degrade(up);
+    const int target = up ? mySlot - 1 : mySlot + 1;
+    if (target < 0) { // document top: v1's collapse (first row, col 0)
+        from.col = 0;
+        return from;
+    }
+    if (target >= visibleLineTotal()) { // document bottom: v1's collapse
+                                        // (this line's end)
+        from.col = lineLength(from.line);
+        return from;
+    }
+    const RowPlan mine = rowPlan(mySlot);
+    const RowPlan dest = rowPlan(target);
+    if (mine.line < 0 || dest.line < 0)
+        return degrade(up); // defensive (see the slotOfPosition door: a
+                           // mapped slot is never hidden)
+    TextPosition pos;
+    pos.line = dest.line;
+    // Column proximity: the caret's x WITHIN its row (segment space) maps
+    // to the nearest col edge on the destination row. Monospace grid first
+    // (exact for the plain run every tripwire uses), then a ±1 measured
+    // snap so wide clusters and tab stops pick the honest nearer edge.
+    const double x = xInWrapped(hitLine(mine.line), mine.segStart, from.col);
+    const GeoSlot* gs = hitLine(dest.line);
+    int c = dest.segStart + int(std::llround(x / std::max(1.0, cellWidth_)));
+    c = std::clamp(c, dest.segStart, dest.segEnd);
+    if (gs && gs->valid) {
+        double best = std::abs(xInWrapped(gs, dest.segStart, c) - x);
+        for (const int cand : {c - 1, c + 1}) {
+            if (cand < dest.segStart || cand > dest.segEnd)
+                continue;
+            if (const double d = std::abs(xInWrapped(gs, dest.segStart, cand) - x); d < best - 1e-9) {
+                best = d;
+                c = cand;
+            }
+        }
+    }
+    pos.col = c;
+    return pos;
 }
 
 // --- the 14th knob ----------------------------------------------------------
@@ -3911,22 +4051,94 @@ void CodeEditor::paintEvent(QPaintEvent*)
     // M5 layer 2: whole-line bands under selections and text (qtmonaco
     // highlighted lines + optional current-line band). Full width on
     // purpose: the band rides under the gutter too, Monaco-style.
+    // M25: with wrap ON a model line owns a SLOT RUN, and the wash covers
+    // ALL of its rows (PLAN §M25) — one rect per line spanning the run,
+    // clipped to the painted window. The frame (BackgroundFrame) then reads
+    // as one box around the whole wrapped line, not one per row.
     const QColor band = theme_->ink(Role::HighlightedLinesBand); // fallback: Highlight@45
+    const auto slotRunOf = [&](int line, int& a, int& b) { // visible slot run
+        const int s0 = visibleIndexOfModelLine(line);      // clipped to the
+        if (s0 < 0)                                        // paint window
+            return false;                                  // (-1 = fold-hidden)
+        a = std::max(firstSlot, s0);
+        b = std::min(lastSlot, s0 + wrapSlotCount(line) - 1);
+        return a <= b;
+    };
+    // M25 machine 2: the ONE span-cut shared by the per-line ink layers
+    // (match quads, selections, diagnostic squiggles, inlay hints): a model
+    // line's [c0, c1) span is cut at the line's OWN wrap breaks, and fn
+    // runs only for pieces that survive the cut and land inside the painted
+    // slot window. fn(slot, segOriginCol, pieceC0, pieceC1): the piece's x
+    // is row-space through the row's segment origin
+    // (xw(xInLine(gs, c) - xInLine(gs, segOrg))). A c1 past the line length
+    // (v1's phantom cells: the selected newline, the zero-width markers)
+    // rides the line's LAST row - the phantom never floats onto a
+    // continuation row. Zero-width spans survive as pc0 == pc1 on exactly
+    // the row that holds the col (the caller's phantom logic, v1-style).
+    const auto forVisiblePieces = [&](int line, int c0, int c1, const auto& fn) {
+        const int s0 = visibleIndexOfModelLine(line);
+        if (s0 < 0)
+            return; // fold-hidden: no rows exist
+        const int n = wrapSlotCount(line);
+        const int len = lineLength(line);
+        for (int i = 0; i < n; ++i) {
+            const int slot = s0 + i;
+            if (slot < firstSlot)
+                continue;
+            if (slot > lastSlot)
+                break; // the slot run is contiguous: below is all further down
+            const RowPlan rp = rowPlan(slot);
+            if (rp.line != line)
+                continue; // defensive: never ink the wrong line
+            const int pc0 = std::max(c0, rp.segStart);
+            int pc1 = std::min(c1, rp.segEnd);
+            if (i + 1 == n && c1 > len)
+                pc1 = rp.segEnd + (c1 - len); // the phantom overhang, last row
+            if (pc1 < pc0)
+                continue; // the span does not touch this row at all
+            // A zero-width span survives as pc0 == pc1 on EXACTLY one row:
+            // the one whose [segStart, segEnd) window owns the col (the
+            // line-end col rides the LAST row) — never a copy on every
+            // later row.
+            if (pc0 == pc1 && !(c0 >= rp.segStart && (c0 < rp.segEnd || rp.segEnd == len)))
+                continue;
+            fn(slot, rp.segStart, pc0, pc1);
+        }
+    };
     if (highlightEnd_ >= 0) {
-        for (int line = std::max(first, highlightStart_); line <= std::min(last, highlightEnd_); ++line)
-            if (const int slot = visibleIndexOfModelLine(line); slot >= 0) // M13: hidden rows
-                p.fillRect(QRect(0, padding_ + slot * lh - vScroll_, width(), lh), band);
+        if (softWrapEnabled_) {
+            for (int line = std::max(first, highlightStart_); line <= std::min(last, highlightEnd_); ++line) {
+                int a = 0, b = -1;
+                if (slotRunOf(line, a, b))
+                    p.fillRect(QRect(0, padding_ + a * lh - vScroll_, width(), (b - a + 1) * lh), band);
+            }
+        } else {
+            for (int line = std::max(first, highlightStart_); line <= std::min(last, highlightEnd_); ++line)
+                if (const int slot = visibleIndexOfModelLine(line); slot >= 0) // M13: hidden rows
+                    p.fillRect(QRect(0, padding_ + slot * lh - vScroll_, width(), lh), band);
+        }
     }
     if (currentLineMode_ != CurrentLineMode::Off && caret_.line >= first
         && caret_.line <= last && visibleIndexOfModelLine(caret_.line) >= 0) {
-        const QRect band(0, padding_ + slotOfModelLine(caret_.line) * lh - vScroll_,
-                         width(), lh);
-        p.fillRect(band, theme_->ink(Role::CurrentLineBackground)); // fallback: Text@30, M18-strengthened wash
-        if (currentLineMode_ == CurrentLineMode::BackgroundFrame) {
-            const QPen oldPen = p.pen(); // restore: later layers set their own
-            p.setPen(QPen(theme_->ink(Role::CurrentLineFrame))); // fallback: Text@90
-            p.drawRect(band.adjusted(0, 0, -1, -1));
-            p.setPen(oldPen);
+        int a = slotOfModelLine(caret_.line), b = a; // wrap OFF: v1's single
+        if (softWrapEnabled_) {                      // -line rect verbatim
+            int ra = 0, rb = -1;                     // (the hidden guard
+            if (slotRunOf(caret_.line, ra, rb)) {    //  above already passed)
+                a = ra;
+                b = rb;
+            } else {
+                a = -1; // the run fell fully outside the window mid-frame:
+            }
+        }                                            // paint nothing
+        if (a >= 0) {
+            const QRect band(0, padding_ + a * lh - vScroll_, width(), (b - a + 1) * lh);
+            p.fillRect(band, theme_->ink(Role::CurrentLineBackground)); // fallback: Text@30, M18-strengthened wash
+            if (currentLineMode_ == CurrentLineMode::BackgroundFrame) {
+                const QPen oldPen = p.pen(); // restore: later layers set their own
+                p.setPen(QPen(theme_->ink(Role::CurrentLineFrame))); // fallback: Text@90
+                p.drawRect(band.adjusted(0, 0, -1, -1));
+                p.setPen(oldPen);
+            }
         }
     }
 
@@ -3964,10 +4176,36 @@ void CodeEditor::paintEvent(QPaintEvent*)
             : nullptr;
         for (; it != matches_.end() && it->startLine <= last; ++it) {
             const MatchRange& m = *it;
+            const bool isCur = cur == &m;
+            if (softWrapEnabled_) {
+                // M25 machine 2: a match is cut at the line's own wrap
+                // breaks; each piece quads its own row. A zero-width match
+                // (an empty-regex hit at a col) survives as one phantom cell
+                // on the row that HOLDS the col — never a phantom on every
+                // row. Match inks are single-line spans in matches_, so the
+                // piece walk never crosses a line boundary.
+                forVisiblePieces(m.startLine, m.startCol, m.endCol,
+                                 [&](int slot, int segOrg, int pc0, int pc1) {
+                    const GeoSlot* gs = hitLine(m.startLine);
+                    const double raw0 = xw(xInWrapped(gs, segOrg, pc0));
+                    const double x1 = pc1 > pc0
+                        ? xw(xInWrapped(gs, segOrg, pc1))
+                        : raw0 + cellWidth_; // zero-width match: phantom cell
+                    const double x0 = std::max(raw0, double(textLeft));
+                    if (x1 <= x0 || x0 >= winRight)
+                        return; // M9 cull (piece-local)
+                    QColor ink = theme_->ink(isCur ? Role::FindCurrentMatch
+                                                    : Role::FindMatch);
+                    ink.setAlpha(isCur ? 130 : 80); // wash = paint-time fade
+                    p.fillRect(QRectF(QPointF(x0, padding_ + slot * lh - vScroll_),
+                                      QSizeF(x1 - x0, lh)),
+                               ink);
+                });
+                continue;
+            }
             const int slot = visibleIndexOfModelLine(m.startLine); // M13 cull
             if (slot < 0)
                 continue; // hidden match row: no pixels to paint
-            const bool isCur = cur == &m;
             const GeoSlot* gs = hitLine(m.startLine);
             const double raw0 = xw(xInLine(gs, m.startCol));
             const double x1 = m.endCol > m.startCol
@@ -3998,9 +4236,11 @@ void CodeEditor::paintEvent(QPaintEvent*)
         const TextPosition s = anchorFirst ? slot.anchor : slot.caret;
         const TextPosition e = anchorFirst ? slot.caret : slot.anchor;
         for (int line = std::max(first, s.line); line <= std::min(last, e.line); ++line) {
-            const int slot = visibleIndexOfModelLine(line); // M13: a selection
-            if (slot < 0)                                    // may span a fold:
-                continue;                                    // paint the visible rows only
+            // M25 machine 2: a multi-row selection paints its rows: the row
+            // holding the selection start starts at s.col, the row holding
+            // the end stops at e.col, interior rows are fully covered. The
+            // phantom cell for the selected newline rides the line's LAST
+            // row (forVisiblePieces' overhang rule), never a continuation.
             const int startCol = (line == s.line) ? s.col : 0;
             // On fully covered lines the selection extends one phantom cell
             // past the text to visualize the selected newline; on the end
@@ -4008,6 +4248,21 @@ void CodeEditor::paintEvent(QPaintEvent*)
             const int textLen = lineLength(line);
             const int endCol = (line == e.line) ? e.col : std::max(textLen, 1);
             const GeoSlot* gs = hitLine(line);
+            if (softWrapEnabled_) {
+                forVisiblePieces(line, startCol, endCol,
+                                 [&](int rSlot, int segOrg, int pc0, int pc1) {
+                    const int x0 = qRound(xw(xInWrapped(gs, segOrg, pc0)));
+                    const int x1 = qRound(xw(xInWrapped(gs, segOrg, pc1)));
+                    const int cx0 = std::max(x0, textLeft);
+                    if (x1 > cx0 && cx0 < width())
+                        p.fillRect(QRect(cx0, padding_ + rSlot * lh - vScroll_,
+                                         x1 - cx0, lh), selColor);
+                });
+                continue;
+            }
+            const int slot = visibleIndexOfModelLine(line); // M13: a selection
+            if (slot < 0)                                    // may span a fold:
+                continue;                                    // paint the visible rows only
             const int x0 = qRound(xw(xInLine(gs, startCol)));
             const int x1 = qRound(xw(xInLine(gs, endCol)));
             const int cx0 = std::max(x0, textLeft); // M9: clamp into the window
@@ -4048,7 +4303,16 @@ void CodeEditor::paintEvent(QPaintEvent*)
             if (sSlot >= 0) { // fold starts are always visible rows (foldLine
                               // contract); the guard is belt-and-braces
                 const int top = std::max(firstSlot, sSlot);
-                const int bot = std::min(lastSlot, eSlot >= 0 ? eSlot : sSlot);
+                int bot = std::min(lastSlot, eSlot >= 0 ? eSlot : sSlot);
+                if (softWrapEnabled_)
+                    // M25: rows carry slot RUNS, so the band's bottom is the
+                    // LAST slot of the end line (eSlot is that line's FIRST
+                    // slot); a collapsed fold's interior is fold-hidden
+                    // (eSlot == -1, zero-weight) and the band shrinks to the
+                    // header's whole run — the v1 shrink, in row units.
+                    bot = std::min(lastSlot, eSlot >= 0
+                        ? eSlot + wrapSlotCount(hoverFoldEnd_) - 1
+                        : sSlot + wrapSlotCount(hoverFoldStart_) - 1);
                 if (top <= bot)
                     p.fillRect(QRect(textLeft - fz, padding_ + top * lh - vScroll_,
                                      fz, (bot - top + 1) * lh), theme_->ink(Role::FoldRegion));
@@ -4061,10 +4325,10 @@ void CodeEditor::paintEvent(QPaintEvent*)
         const QColor bright = theme_->ink(Role::GutterActiveDigits); // fallback: Text
         auto dit = diagnostics_.begin(); // sorted by startLine: one forward walk
         for (int slot = firstSlot; slot <= lastSlot; ++slot) { // M13: SLOTS
-            // M25 machine-1 interim: the row's ink is still whole-line, so a
-            // wrapped line paints ONCE, on its first slot (gutter number and
-            // fold marker ride that row too); the continuation rows stay
-            // blank until machine 2 gives them their segments (RowPlan).
+            // M25 (the final rule): gutter chrome — number, breakpoint dot,
+            // severity icon, fold triangle — rides the line's FIRST row
+            // only; continuation rows keep the gutter clean (VS Code
+            // word-wrap paints the same way: one number per model line).
             if (softWrapEnabled_ && rowPlan(slot).segIdx > 0)
                 continue;
             const int line = modelLineForVisibleIndex(slot);
@@ -4124,14 +4388,25 @@ void CodeEditor::paintEvent(QPaintEvent*)
     // lines have no row, so they are never visited, never laid out and
     // never painted (hidden lines cost nothing; that IS the fold's
     // performance story on top of the slot-shrunk scroll space).
+    // M25: the caret's ink rides its OWN row (the slot of its segment,
+    // -1 when the caret line is fold-hidden) — resolved once per frame.
+    const int caretRowSlot = softWrapEnabled_ ? slotOfPosition(caret_) : -1;
     for (int slot = firstSlot; slot <= lastSlot; ++slot) {
-        // M25 machine-1 interim (see the gutter loop): continuation rows get
-        // no ink yet; the line paints on its first slot only.
-        if (softWrapEnabled_ && rowPlan(slot).segIdx > 0)
-            continue;
         const int line = modelLineForVisibleIndex(slot);
         const int yTop = padding_ + slot * lh - vScroll_;
         const GeoSlot* gs = hitLine(line);
+        // M25 machine 2 (the segment-aware paint): the row paints the
+        // line's [segStart, segEnd) window, anchored at the segment origin.
+        // Wrap OFF rowPlan is invalid (segIdx 0, segStart 0, segEnd len),
+        // so every expression below keeps its v1.6.1 form EXCEPT for the
+        // added branch tests — the frozen wrap-off cost (PLAN §M25).
+        const RowPlan rp = rowPlan(slot);
+        const bool seg = softWrapEnabled_ && rp.line == line; // defensive: a
+                                                             // valid row always
+                                                             // maps to its line
+        const int segStart = seg ? rp.segStart : 0;
+        const int segEnd = seg ? rp.segEnd : lineLength(line);
+        const double segX0 = seg ? xInLine(gs, segStart) : 0.0;
 
         // M9 whole-line fast path: once the line's right edge (the same
         // phantom-aware xInLine math the hit-test uses) has scrolled past
@@ -4141,22 +4416,29 @@ void CodeEditor::paintEvent(QPaintEvent*)
         // hitLine visit feeds the ambient doc-width extent (noteWidth) even
         // for skipped lines, so the h-bar keeps growing while the user
         // visits the line.
-        const bool scrolledPast = gs->valid && xInLine(gs, lineLength(line)) <= hShift;
+        // M25: the edge is ROW-space (the segment's own end minus its
+        // origin): a continuation row is never scrolled past while wrap ON
+        // (hScroll_ is pinned to 0 there), and wrap OFF the expression is
+        // the v1 one verbatim (segEnd == line length, segX0 == 0).
+        const bool scrolledPast = gs->valid && xInLine(gs, segEnd) - segX0 <= hShift;
 
         // M21 indent guides: ambient per-line tab-stop guides inside the
         // line's leading whitespace (semantics on paintIndentGuides). They
         // paint UNDER the caret and the glyphs of this same pass; folded-
         // away lines never reach this loop, so collapsed interiors paint
         // nothing for free (the PLAN's view-line-map argument).
-        if (indentGuidesEnabled_ && !scrolledPast)
+        // M25: the leading whitespace lives on the line's FIRST row only.
+        if (indentGuidesEnabled_ && !scrolledPast && (!softWrapEnabled_ || rp.segIdx == 0))
             paintIndentGuides(p, line, yTop);
 
-        if (line == caret_.line && caretOn_ && !scrolledPast) {
+        if (line == caret_.line && caretOn_ && !scrolledPast
+            && (!softWrapEnabled_ || slot == caretRowSlot)) {
             // The caret follows the very cluster advances the line below is
             // drawn with (same QTextLine), so emoji ZWJ sequences no longer
             // push the caret away from the glyphs. During composition the
             // visual caret trails the preedit (which is not in the buffer).
-            double cx = xw(xInLine(gs, caret_.col));
+            // M25: row-space x (the caret sits inside its segment).
+            double cx = xw(xInWrapped(gs, segStart, caret_.col));
             if (!preedit_.isEmpty())
                 cx += fmF.horizontalAdvance(preedit_);
             // M9: the caret is text-space ink — cull it against the window
@@ -4167,22 +4449,26 @@ void CodeEditor::paintEvent(QPaintEvent*)
         }
         // D1: additional carets blink in sync with the primary (one shared
         // blink timer), drawn with the same 2px rule off the same layout.
+        // M25: like the primary, an extra caret rides its OWN row slot.
         if (!scrolledPast) {
-            for (const CaretSlot& slot : extraCarets_) {
-                if (slot.caret.line != line || !caretOn_)
+            for (const CaretSlot& xc : extraCarets_) {
+                if (xc.caret.line != line || !caretOn_)
                     continue;
-                const double cx = xw(xInLine(gs, slot.caret.col));
+                if (softWrapEnabled_ && slotOfPosition(xc.caret) != slot)
+                    continue;
+                const double cx = xw(xInWrapped(gs, segStart, xc.caret.col));
                 if (cx + 2.0 > textLeft && cx < winRight)
                     p.fillRect(QRect(qRound(cx), yTop, 2, lh), theme_->ink(Role::Cursor));
             }
         }
-        if (dropCaretActive_ && line == dropCaret_.line && !scrolledPast) {
+        if (dropCaretActive_ && line == dropCaret_.line && !scrolledPast
+            && (!softWrapEnabled_ || slotOfPosition(dropCaret_) == slot)) {
             // Post-1.0 DnD polish: the target caret of a running text drag,
             // the still twin of the typing caret (same 2px rule, same layout,
             // same window culling) — but NO caretOn_/blink gate: the mark
             // must stay readable through the whole drag while the typing
             // caret keeps blinking.
-            const double cx = xw(xInLine(gs, dropCaret_.col));
+            const double cx = xw(xInWrapped(gs, segStart, dropCaret_.col));
             if (cx + 2.0 > textLeft && cx < winRight)
                 p.fillRect(QRect(qRound(cx), yTop, 2, lh), theme_->ink(Role::DropCaret));
         }
@@ -4203,10 +4489,18 @@ void CodeEditor::paintEvent(QPaintEvent*)
             // gutter nor the ruler chrome can be bled into from the text
             // side. Both branches share origin+clip, so the one-layout
             // fmts/no-fmts bit-parity invariant holds.
-            const QPointF origin(textLeft - hShift, yTop);
+            // M25: the layout is the WHOLE line, the row is its segment:
+            // shift the origin by the segment origin so segStart lands on
+            // the window's left edge, and shrink the clip to the segment's
+            // right edge — the next segment's first word lives on the NEXT
+            // row and must not ghost onto this one. Wrap OFF keeps the clip
+            // the full window width (v1 verbatim).
+            const QPointF origin(textLeft - hShift - segX0, yTop);
             const auto fmts = formatRangesForLine(line, gs);
             p.save();
-            p.setClipRect(QRectF(textLeft, yTop, win, lh));
+            p.setClipRect(QRectF(textLeft, yTop,
+                                 seg ? std::min(win, xInLine(gs, segEnd) - segX0)
+                                     : double(win), lh));
             if (fmts.isEmpty()) {
                 gs->line.draw(&p, origin);
             } else {
@@ -4219,12 +4513,14 @@ void CodeEditor::paintEvent(QPaintEvent*)
             }
             p.restore();
         }
-        if (line == caret_.line && !preedit_.isEmpty() && !scrolledPast) {
+        if (line == caret_.line && !preedit_.isEmpty() && !scrolledPast
+            && (!softWrapEnabled_ || slot == caretRowSlot)) {
             // Composition text at the caret with a dotted underline (Qt's
             // own line-edit convention) to show it is not committed yet.
             // drawText below IS baseline-anchored, so align it with the
             // layout engine's own baseline for the line above.
-            const double px = xw(xInLine(gs, caret_.col));
+            // M25: the composition rides the caret's own row, row-space x.
+            const double px = xw(xInWrapped(gs, segStart, caret_.col));
             const double textBaseline = yTop + (gs->valid ? gs->line.ascent() : ascent_);
             p.drawText(QPointF(px, textBaseline), preedit_);
             p.setPen(QPen(theme_->ink(Role::Text), 0, Qt::DotLine));
@@ -4245,9 +4541,6 @@ void CodeEditor::paintEvent(QPaintEvent*)
             continue;
         const QRgb ink = theme_->severityInk(d.severity);
         for (int line = std::max(first, d.startLine); line <= std::min(last, d.endLine); ++line) {
-            const int slot = visibleIndexOfModelLine(line); // M13: multi-line diag
-            if (slot < 0)                                   // spans a fold: the
-                continue;                                   // hidden rows are skipped
             const int len = lineLength(line);
             int c0 = std::clamp(line == d.startLine ? d.startCol : 0, 0, len);
             int c1 = std::clamp(line == d.endLine ? d.endCol : len, 0, len);
@@ -4257,6 +4550,25 @@ void CodeEditor::paintEvent(QPaintEvent*)
                 c1 = c0 + 1;
             }
             const GeoSlot* gs = hitLine(line);
+            if (softWrapEnabled_) {
+                // M25 machine 2: the squiggle follows the line's rows; the
+                // zero-width phantom cell rides the row HOLDING the col.
+                forVisiblePieces(line, c0, c1, [&](int rSlot, int segOrg,
+                                                   int pc0, int pc1) {
+                    const double raw0 = xw(xInWrapped(gs, segOrg, pc0));
+                    const double x1 = std::min(xw(xInWrapped(gs, segOrg, pc1)),
+                                               winRight);
+                    const double x0 = std::max(raw0, double(textLeft));
+                    if (x1 <= x0)
+                        return;
+                    drawWavyUnderline(p, x0, x1,
+                                      padding_ + rSlot * lh - vScroll_ + lh - 2.5, ink);
+                });
+                continue;
+            }
+            const int slot = visibleIndexOfModelLine(line); // M13: multi-line diag
+            if (slot < 0)                                   // spans a fold: the
+                continue;                                   // hidden rows are skipped
             const double raw0 = xw(xInLine(gs, c0));
             const double x1 = std::min(xw(xInLine(gs, c1)), winRight);
             const double x0 = std::max(raw0, double(textLeft)); // M9 clamp+cull
@@ -4277,10 +4589,24 @@ void CodeEditor::paintEvent(QPaintEvent*)
                 continue;
             if (h.line > last)
                 break; // sorted by line
+            const GeoSlot* gs = hitLine(h.line);
+            if (softWrapEnabled_) {
+                // M25 machine 2: a hint is a zero-width span — it rides the
+                // row that holds its col (forVisiblePieces' identity rule).
+                forVisiblePieces(h.line, std::max(h.col, 0), std::max(h.col, 0),
+                                 [&](int rSlot, int segOrg, int pc0, int) {
+                    const double x = xw(xInWrapped(gs, segOrg, pc0));
+                    if (x < textLeft || x >= winRight)
+                        return; // M9: hint anchored outside the text window
+                    const double baseline = padding_ + rSlot * lh - vScroll_
+                                            + (gs->valid ? gs->line.ascent() : ascent_);
+                    p.drawText(QPointF(x, baseline), h.text);
+                });
+                continue;
+            }
             const int slot = visibleIndexOfModelLine(h.line); // M13: hint inside
             if (slot < 0)                                     // a collapsed fold
                 continue;                                     // has no row
-            const GeoSlot* gs = hitLine(h.line);
             const double x = xw(xInLine(gs, std::max(h.col, 0)));
             if (x < textLeft || x >= winRight)
                 continue; // M9: hint anchored outside the text window
@@ -4322,8 +4648,11 @@ void CodeEditor::paintOverviewRuler(QPainter& p) const
         const int slot = visibleIndexOfModelLine(line);
         if (slot < 0)
             return;
+        // M25: a wrapped marker line owns a SLOT RUN, and its stripe
+        // spans all of its rows (wrap OFF: count 1, the v1 band verbatim).
+        const int lastRow = slot + (softWrapEnabled_ ? wrapSlotCount(line) - 1 : 0);
         const int y0 = rulerY(padding_ + slot * lineHeight_);
-        const int y1 = rulerY(padding_ + (slot + 1) * lineHeight_);
+        const int y1 = rulerY(padding_ + (lastRow + 1) * lineHeight_);
         p.fillRect(QRect(g.left() + 3, y0, kOverviewRulerWidth - 6, qMax(minThick, y1 - y0)), c);
     };
 
@@ -5741,10 +6070,16 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         // collapsed fold's header Down lands on the line after the hidden
         // run (the caret jumps the whole fold for free; the merged-run
         // invariant guarantees the target is visible).
+        // M25: with wrap ON the step is ONE VISUAL SLOT and the target col
+        // keeps the caret's row-local x (the frozen comment's "column memory
+        // for soft wrap work" lands here — the map owns the rows, the map
+        // owns the step).
         if (!extraCarets_.isEmpty()) {
             const bool up = key == Qt::Key_Up;
             moveCarets(
                 [this, up](const CaretSlot& s) {
+                    if (softWrapEnabled_)
+                        return rowStepTarget(s.caret, up);
                     TextPosition p = s.caret;
                     if (up) {
                         const int t = prevVisibleModelLine(p.line);
@@ -5766,6 +6101,11 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             return;
         }
         TextPosition pos = caret_;
+        if (softWrapEnabled_) {
+            nav(rowStepTarget(caret_, key == Qt::Key_Up), shift);
+            finish();
+            return;
+        }
         if (key == Qt::Key_Up) {
             const int t = prevVisibleModelLine(pos.line);
             if (t < pos.line)
@@ -5926,11 +6266,18 @@ QVariant CodeEditor::inputMethodQuery(Qt::InputMethodQuery query) const
     case Qt::ImCursorRectangle: {
         // Candidate-window anchor: the visual caret, which during
         // composition trails the preedit instead of the buffer caret.
-        double x = contentLeft() + xInLine(hitLine(caret_.line), caret_.col);
+        // M25: with wrap ON the caret sits inside its row's segment, so the
+        // x is row-space (line-space minus the row's own segment origin) and
+        // the y rides the caret's OWN slot, not the line's first one.
+        const GeoSlot* gsCaret = hitLine(caret_.line);
+        const double segX = softWrapEnabled_
+            ? xInLine(gsCaret, rowPlan(slotOfPosition(caret_)).segStart)
+            : 0.0;
+        double x = contentLeft() + xInLine(gsCaret, caret_.col) - segX;
         if (!preedit_.isEmpty())
             x += QFontMetricsF(font_).horizontalAdvance(preedit_);
         // M13: the caret row lives in slot space (hidden runs shift the y).
-        const int y = padding_ + slotOfModelLine(caret_.line) * lineHeight_ - vScroll_;
+        const int y = padding_ + std::max(0, slotOfPosition(caret_)) * lineHeight_ - vScroll_;
         return QRect(qRound(x), y, 2, lineHeight_);
     }
     case Qt::ImCurrentSelection:
