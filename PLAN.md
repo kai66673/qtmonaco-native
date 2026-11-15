@@ -501,8 +501,8 @@ defaults documented on the setters (freeze-bound).
   | `set_scroll_beyond_last_line_enabled` | not implemented | E1, ✔ bound |
   | `set_minimap_enabled` | no minimap by design | E1 ruler (**maps to it**, decided), ✔ bound |
   | `set_vim_mode_enabled` | out of scope | binding **warns, never implements** — ✔ stub exists |
-  | `open_diffs` | none | **Gate 2** (M10) — deliberately ABSENT (honest AttributeError) |
-  | LSP hooks (`update_workspace_configuration`, `add_action`, lsp header) | none | **Gate 2** (M8) — deliberately ABSENT |
+  | `open_diffs` | none | **Gate 2 (design decided 2026-11-15)**: M10 door `setDiffDocuments` + shim; binds at the diff car; until then the honest AttributeError stands |
+  | LSP hooks (`update_workspace_configuration`, `add_action`, lsp header) | none | **Gate 2 (design decided 2026-11-15)**: config-buffer door + `addAction` door + pure-Python header; ride the M8 car; until then the honest AttributeError stands |
 
 - **Freeze:** bump `SOVERSION`, CHANGELOG discipline, then the v1 tag.
   ✔ Done at freeze: package VERSION 1.0.0 (SOVERSION is a no-op for the
@@ -525,6 +525,14 @@ and `current_cursor` is a *property*.
   `AttributeError`.
 - **minimap** — `set_minimap_enabled` maps onto the E1 overview ruler. No
   Chromium-style minimap is ever built.
+- **Gate-2 set, decided 2026-11-15, landing with the owning cars:**
+  `add_action`'s `language` precondition is ACCEPTED AND IGNORED (the native
+  language scoping on the editor does the job); `open_diffs`'s `options`
+  dict is accepted with unknown keys ignored and `renderSideBySide:false`
+  unimplemented (side-by-side only in v1); no LSP client class ever crosses
+  the wheel — the config door carries compact JSON as `QString` (PySide6
+  has no `QJsonObject`), and `set/get_lsp_header` stay pure-Python shim
+  text-prepending.
 
 **Gate-1 exit checklist:** ctest green + wheel smoke + C++ consumer smoke +
 bench within perf targets (README) on the big file → tag `v1.0`.
@@ -811,27 +819,249 @@ container AT the tag is the owner's release step; it carries the
 options-mirror/theme/language doors into Python for the first time.
 **Gate 1.5 CLOSED — Gate 2 may open.**
 
-# GATE 2 — IDE surface (opens after Gate 1.5 closes)
+# GATE 2 — IDE surface (open since 2026-11-15)
 
 Everything here is a *consumer* of the frozen v1 widget API; none of it may
 require new view primitives (if it does, that is a Gate-1 design bug to fix,
-not a Gate-2 workaround).
+not a Gate-2 workaround). The design knots below were decided 2026-11-15 in
+planning, with the Vala/GTK4 IDE `iide` (`/home/kai/kaigit/iide`) mined for
+prior art; its own `RECOMMENDATIONS.md` doubles as our anti-pattern list.
 
-- **M8 LSP client** — new layer `src/lsp/`, QtCore/QtNetwork only, **zero
-  widget dependency**; glue (diagnostics → decoration layer 1+3, hover/
-  completion popups) is a thin consumer. **Transport correction:** LSP speaks
-  JSON-RPC over **stdio pipes to a spawned server process** (`QProcess`);
-  README's old "QWebSocket" claim was wrong (websocket is a rare secondary
-  transport) — corrected in README.
-- **DAP features** — the widget's contribution already exists after D3:
-  breakpoint glyphs, current-stack-frame line, inlay hints for variable
-  values. A DAP protocol client would sit at the same QtCore level as
-  `src/lsp/`. No view surgery needed or allowed.
-- **M10 diff view** — structural alignment on tree-sitter ASTs + inline or
-  side-by-side layout (open decision at start); bind `open_diffs`.
-- **Soft wrap** — the deferred half of M9 (decided 2026-11-09: v1 ships
-  h-scroll only); rides E2's view-line map.
-- **Parity leftovers:** LSP hooks + `open_diffs` rows from the F table.
+**Train ordering (decided): wrap → diff → LSP → DAP.** Wrap is literally M9's
+deferred half — by the gate rule above that is a Gate-1 debt, and it is paid
+BEFORE anything builds on row math: the diff alignment rows live in slot
+space, so a late wrap would force a full revalidation round on diff tests.
+The wheel-parity leftovers ride their owning cars, they are not a car of
+their own.
+
+### CodeDocument (new public view QObject; lands first inside M25)
+
+Decided 2026-11-15 (owner proposal). `src/view/CodeDocument.{hpp,cpp}`: a
+QObject that OWNS the `TextBuffer` (the editor's `buffer_` value member
+becomes a pointer — the one honest piece of view surgery in Gate 2, guarded
+by the 210-slot `tst_codeeditor` suite); `CodeEditor::document()` returns the
+editor-owned document (lifetime pattern = `options()`, non-null, attached in
+the ctor). Public: `setPlainText/toPlainText`, read-only line getters,
+`setDocumentUri(QString)/documentUri()`, modified = `markSaved() ->
+isModified()/modificationChanged(bool)` (v1: reset ONLY by explicit
+`markSaved()` — the undo-back-to-baseline refinement waits on a core undo
+hook, documented interim), `documentSaved()`-style signals stay consumer
+concerns (real I/O is theirs). Signals: `textChanged()`, **`editApplied(int
+start, int end, QString inserted)`** — offsets in the PRE-OP frame, exactly
+LSP `contentChanges` semantics; one emit per primitive mutation including
+undo/redo replay; emitted after the mutation, before the `textChanged()`
+ping; plain Qt types so it Shibokens free. Contract: **one editor per
+document in v1** — two editors on one buffer would fight over the single
+core edit-observer (the highlight engine's slot); multi-view editors are a
+separate future machine that needs a core multi-observer first, and the
+diff car does NOT need it (two documents in one widget, not two widgets on
+one document). Language stays on the VIEW (a render property; moving
+languageId to the document touches `LanguageProperties` machinery — not in
+this car).
+
+### M25 — soft wrap (car 1; includes the CodeDocument migration)
+
+- **Units (the one sanctioned contract change):** no new public doors.
+  `visibleLineTotal()` counts VISUAL SLOTS; `visibleIndexOfModelLine()` = the
+  line's FIRST slot (-1 hidden); `modelLineForVisibleIndex()` maps a slot to
+  its owning line (continuation slots → the same line); `firstVisibleLine/
+  visibleLineCount` stay row-windowed; `totalHeight() = 2·padding +
+  visibleLineTotal()·lineHeight`. CHANGELOG carries this as a semantic
+  (unit) change, `parity_monaco.py`'s `lh` scroll math is revalidated.
+- **One slot-space table:** `HiddenRun` moves to slots; fold∧wrap stays ONE
+  table — `foldLine` hides the slot range `[slot(start+1) .. slot(end+1))`
+  and may clip a wrapped line's slots PARTIALLY (decided over the
+  "hide-the-whole-line" simplification). Blank alignment rows (car 2) will
+  be the positive-weight direction of the SAME table.
+- **Behavior:** WordWrap; unbreakable tokens OVERFLOW (never char-break);
+  wrap width = viewport minus gutter/padding/fold-zone; when wrap is ON the
+  h-scroll doors degrade to no-ops; continuation rows get full width (visual
+  indent = a later `options()` knob, not in this car); current-line wash
+  covers ALL slots of the line; fold markers ride the first slot, the
+  hidden-run ellipsis the last visible slot before the range; caret up/down
+  keeps column proximity across slots.
+- **Cache:** GeoSlot grows wrap segments, keyed `(line, text, width)`;
+  resize invalidates LAZILY per viewport with the HighlightEngine budget +
+  escalation pattern. Perf gate: wrap-OFF cost must be byte-identical to
+  v1.6.1 (early-out), per-keystroke budgets unchanged.
+- **Knob:** `softWrapEnabled` in `CodeEditorOptions` (14th) — EditorSettings
+  + dialog + `tst_demo` drift tripwire move together.
+- **DoD:** pure view-line-map tests BEFORE wiring (the E1→E2 lesson, risk
+  №3); numeric tripwires — slot-sum identity, caret-y = slot·lh, hit-test
+  correctness mid-wrap, up/down column proximity; resize storm on the perf
+  doc inside the escalation budget.
+
+### M10 — diff view (car 2)
+
+- **`src/diff/`** — new QtCore-only layer: Miller–Myers over hashed lines
+  (pure, headless, tested like `tst_textbuffer`; ctest grows a 4th test
+  `diff`) producing hunks + the alignment table.
+- **Doors (widget-shaped parity, because qtmonaco's `open_diffs` is a
+  method OF the editor, not a container):** `setDiffDocuments(CodeDocument*
+  original, CodeDocument* modified, language)` + a plain-QString overload,
+  `clearDiffDocuments()`, `isDiffMode()`, `nextChange()/previousChange()`
+  (over the existing `revealAt`). In diff mode: caret/undo/`textChanged`/
+  `cursorMoved`/`toPlainText()` all speak the MODIFIED document (qtmonaco:
+  `_value = modified`); original is selectable-for-copy but never editable;
+  find/fold/`setHighlightedLines` apply to modified; `readOnly` applies to
+  modified (original is always read-only, same as Monaco).
+- **Paint:** two content columns + a gutter per column + the connector
+  strip; ONE row axis — `visibleLineTotal()` = aligned rows, blank rows are
+  the positive-weight extension of the HiddenRun machinery in slot space
+  (no second map).
+- **Theme:** additive `Role` entries `DiffAddedBand/DiffModifiedBand/
+  DiffDeletedMarker/DiffConnectorFill/DiffChangeGutterMark` — severity
+  colors are NOT overloaded for diff.
+- **Live update:** `editApplied` (the signal's car is THIS one, not M8 —
+  the diff needs re-key deltas just as badly as the syncer does) → hunks
+  debounced-recomputed in v1 with a budget, caret-anchored re-alignment (no
+  row jumps); incremental application and word-token inline highlight are
+  M10b.
+- **Descoped (honest):** the tree-sitter structural-alignment pass moves to
+  a follow-on car — line diff is the permanent basis and the permanent
+  fallback; AST alignment can only ever be a REFINEMENT and physically
+  cannot live in `src/diff/` (vendored tree-sitter is `qmn_view`-private).
+  Inline/unified diff mode and Monaco `options` mapping: out of v1,
+  documented.
+
+### M8 — protocol core + LSP (car 3)
+
+- **Layers:** `src/protocol/` (QtCore+QtNetwork, zero view — Framing with
+  full header-block parse + 64 MiB upper bound that fails as a transport
+  error, not an allocation; ProcessTransport via QProcess stdio;
+  TcpTransport; RpcClient = id allocation + pending-map + per-door timeouts
+  (initialize 10 s, feature doors 5 s, NOT a blanket 15 s) + `$/cancelRequest`
+  on supersede/timeout + a write queue whose errors SURFACE + the two-phase
+  stop barrier + pending-eviction with a `TransportClosed` error) →
+  `src/lsp/` (LspClient, document syncer, position converter, server
+  matrix) → `src/dap/` (car 4, same RpcClient/transports, DAP envelope
+  `seq/request_seq/command`). New export sets (planned: `qmn::protocol`,
+  `qmn::lsp`); the protocol layers NEVER know CodeEditor/CodeDocument —
+  "zero widget dependency" holds literally; glue (diagnostics→
+  `setDiagnostics`, syncer↔`CodeDocument::editApplied`) lives in the app
+  layer. QtNetwork joins `find_package` (qt6-base is already a CI dep).
+- **Server→client rule "always answer, never lie":** implement
+  `workspace/applyEdit` (→ glue), `workspace/configuration`,
+  `workspace/workspaceFolders`, `window/showMessage` (→ SIGNAL, visible —
+  not a debug print), `window/logMessage`/`$/logTrace`, `$/progress` +
+  `workDoneProgress/create`; unknown request → `-32601`, unknown
+  notification → ignored. **`client/registerCapability` gets a real
+  capability registry** (decided 2026-11-15 over the `-32601` shortcut: the
+  server drives; statics are not declared where dynamic registration is
+  expected; unknown registration method → error response). v1 registration
+  sources: completion/hover/definition/references/codeAction/formatting/
+  rename/textDocumentSync-change.
+- **semanticTokens (decided 2026-11-15):** the WIRE + decoder ships (full
+  tokens, legend, relative encoding, `resultId`, server-side dynamic
+  registration) but we NEVER REQUEST them (no static capability, no accept
+  of unregistered pushes for painting — decoded and kept as data only).
+  tree-sitter stays the paint master; a blend option is a future car.
+- **Position units:** declare `positionEncoding:"utf-16"`, honor the
+  server (clangd → `utf-8`); the utf-8/utf-32 column converter lives in
+  `src/lsp/`; spec default when absent = utf-16. Round-trip tests on
+  Cyrillic/emoji/surrogates per encoding against fake servers; live clangd
+  is a manual probe only (CI has no clangd).
+- **Lifecycle:** lazy start on first `didOpen` per language; one client per
+  server spec (multi-document, VS Code shape); crash → auto-restart ONCE
+  with backoff, then FAILED + `restartServer()` door; after re-READY a
+  **re-didOpen self-heal** re-syncs every document; per-server PROTOCOL and
+  STDERR logs stay separate channels.
+- **Syncer contract:** deltas batch into ONE `didChange` `contentChanges`
+  array (spec = sequential application, no coalescing by design); 400 ms
+  debounce + a typing cap; version increments per flush; FULL fallback
+  (range-less didChange) on any desync detector and after server-primed
+  edits — the syncer suppresses the queue during its own WorkspaceEdit
+  application, then sends one full-text sync (iide's
+  `suppress_lsp_echo`+`force_full_sync` pair, living on the syncer side so
+  the view stays dumb); `didOpen/didSave/didClose`, `willSaveWaitUntil` when
+  the server declares it.
+- **Feature doors v1:** publishDiagnostics (push), completion (+resolve),
+  hover, definition, references, codeAction + edit application (all THREE
+  WorkspaceEdit shapes incl. the clangd `command.arguments[0]` form; edits
+  applied DESCENDING inside ONE undo group), formatting, rename (single-file
+  applies, multi-file hands the structure to glue). M8b: signatureHelp,
+  inlay hints, foldingRange (the M13 fold API takes an LSP provider), pull
+  diagnostics (enabled by the registration registry). Not now:
+  didChangeWatchedFiles, willRename/didRename.
+- **Config:** built-in server matrix with initialize templates + the
+  `${WORKSPACE_ROOT}` macro, deep-merged `.qmn/lsp.json` (objects recurse,
+  arrays replace whole) loaded BEFORE anything starts; `setWorkspaceRoot()`
+  is an app decision.
+- **Hover/completion popups:** view-INTERNAL popup widgets (the M6 `FindBar`
+  precedent) fed through record-struct doors (`showCompletionList`,
+  `showHover(range, plainText)`, hide + auto-hide on key/mouse); anchors use
+  the EXISTING `xForCol` machinery — no new geometry primitives; plain-text
+  content, no markdown renderer. All triggering is glue-side (`cursorMoved`/
+  `editApplied`).
+- **Fake servers (the CI gate):** `tests/fakeserver/` — a C++ LSP server
+  spawned via QProcess; recorded-transcript replay PLUS a smart mode with a
+  true server-side text model that rebuilds from our `contentChanges` and
+  answers VERIFY per flush — deltas are validated before the wire. The
+  harness copies the EXACT initialize templates (iide lesson: a harness that
+  diverges from the template lies). Live clangd = `tools/probe_clangd.sh`,
+  not a gate. ctest grows test 5 `lsp`.
+
+### DAP features (car 4)
+
+Same RpcClient/transports, DAP envelope only. The widget half is ALREADY
+DONE (D3: breakpoint glyphs, current-line, `setInlayHints` named for DAP) —
+inventory confirms zero view work; verified-breakpoints surface as a
+decoration restyle through the existing doors (iide ignored
+`body.breakpoints` — we don't). Fake DAP adapter in the same harness style.
+
+### Gate 2 at the wheel boundary (rides the owning cars)
+
+Parity tripwire = the qtmonaco `monaco.py` `__main__` block reproduced
+door-for-door in `bindings/tests/parity_monaco.py` (its "Gate 2 absent"
+asserts INVERT into behavior asserts):
+- `open_diffs` → the plain-QString overload of the M10 door; `uri` params
+  reach `setDocumentUri` once `CodeDocument` is bound; `options` dict is
+  accepted, unknown keys ignored, `renderSideBySide:false` documented as a
+  divergence.
+- `set/get_lsp_header` — PURE PYTHON (the shim prepends/strips; the native
+  model text is header-free), mirroring qtmonaco's `_value` semantics.
+- `add_action` — new view door `addAction(QString id, QString label)` +
+  `actionTriggered(QString id)` signal into the M16 context menu; the shim
+  keeps the qtmonaco signature and IGNORES the `language` precondition
+  (native language scoping does the job) — decided divergence.
+- `update_workspace_configuration` — view door `setStoredWorkspaceConfiguration`
+  (compact JSON as `QString`; PySide6 6.12 has NO `QJsonObject` — verified
+  in the container) + getter + `workspaceConfigurationChanged()` signal;
+  the buffer lives on the view until app-side glue consumes it — qtmonaco's
+  buffered-until-init semantics without shipping any LSP client to Python.
+  Shiboken fact this rests on: **Python cannot emit a C++ signal**, so every
+  parity signal stays Python-declared exactly as the three existing ones.
+- Binding routine: two new bound-QObject entries (`CodeDocument`, popup/
+  diff record structs) through ALL THREE copies (typesystem / bindings
+  CMake / the codegen CLI list) + mandatory `--codegen` rejected-log check
+  per door batch (the 1.6.1 drift trap) + auditwheel excludes in their two
+  homes.
+
+### Prior art: iide — borrow / anti-pattern
+
+BORROW (their working parts, verified by read): the two-phase stop barrier;
+separate protocol/stderr log channels; re-didOpen self-heal after re-READY;
+`suppress_lsp_echo`+`force_full_sync` convergence pair; 400 ms debounce +
+monotonic version + FULL fallback; descending edit application inside one
+undo group; the three WorkspaceEdit shapes incl. clangd's
+`command.arguments[0]`; raw-JSON diagnostics echo in `codeAction` context;
+initialize-as-template + `${WORKSPACE_ROOT}` + project deep-merge loaded
+before session restore; lazy per-language server start; the frozen-delta
+(PendingChange) idea — our model is UTF-16 natively so deltas are already
+LSP-shaped. NEVER COPY (mostly self-declared in their RECOMMENDATIONS.md):
+byte/codepoint/UTF-16 unit mixing on the inbound path (their
+`get_iter_at_line_index` at UTF-16 columns); hardcoded codeAction range
+`0..99`; the "no diagnostics on line" actions gate; line-only diagnostics
+(columns dropped); "first provider only" for definition/rename/formatting;
+sequential workspace/symbol fan-out; `registerCapability` acked-and-ignored;
+missing `didChangeWatchedFiles`/`didChangeConfiguration`/`didSave`/
+`willSaveWaitUntil`; blanket 15 s timeouts + fake `-32801`; no
+`$/cancelRequest`; no auto-restart; the god-class `LspClient` and the
+Lsp/Dap RPC duplication their own doc flags; write errors swallowed
+mid-queue. NEGATIVE CONTROL: iide has NO diff view, NO change gutter, and
+never enables wrap (every renderer assumes 1 visual = 1 logical) — the wrap
+and diff halves of Gate 2 have NO prior art there and are designed from our
+own E1/E2 map.
 
 ## Top risks
 
@@ -846,7 +1076,10 @@ not a Gate-2 workaround).
    (`2809945`, recoverable via reflog while present) and M13 folding piles a
    second mapping axis on top. Treat E1→E2 as one mapping core: unit-test
    the view-line map as a pure thing *before* wiring the widget, and review
-   the old attempt before retrying.
+   the old attempt before retrying. Gate 2 mitigation (decided 2026-11-15):
+   the train runs wrap FIRST precisely so nothing is built on row math
+   before the units settle; the fold∧wrap interaction (partial slot hides)
+   is the single known-hard seam and gets dedicated tripwire tests.
 4. **Highlight engine — decided** (vendored tree-sitter, v0.27.2). Residual
    risks: adapter byte-unit correctness (mitigation: property tests feeding
    random edits and asserting token spans, `TSInputEdit` in exactly-2×

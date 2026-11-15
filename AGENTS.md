@@ -9,12 +9,17 @@ phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
 
 - Gate 1 (editor v1) froze the public API at tag `v1.0`; Gate 1.5 (usability
   train M20–M24) closed 2026-11-12 at tag `v1.5.0`. **Gate 2 is the open
-  train**: M8 LSP, M10 diff view, soft wrap, DAP-via-decorations. Never start
-  work for a later gate while an earlier one is open.
+  train** since 2026-11-15, ordering decided: M25 soft wrap (incl. the
+  `CodeDocument` migration) → M10 diff → M8 LSP/protocol → DAP. The full
+  design record is the PLAN.md "GATE 2" section — read it before starting a
+  car. Never start work for a later gate while an earlier one is open.
 - The frozen surface widens **only additively** (Gate 1.5 precedent): no new
   view mapping/geometry primitives. The M5 decoration API already covers
-  diagnostics, breakpoints and inlay hints, so Gate 2 must need no view
-  surgery.
+  diagnostics, breakpoints and inlay hints. Two sanctioned Gate-2 deviations
+  (decided 2026-11-15, both in PLAN): the `CodeEditor::buffer_` value member
+  moves into `CodeDocument` (ownership surgery, not API surgery), and the
+  `visible*` row doors change UNITS (lines → visual slots) without adding
+  doors.
 - Both deliverables ship: a C++ static package (export set `qmn::core` /
   `qmn::view`, plus internal `qmn::internal_tree_sitter`) and a PySide6 wheel
   `qmn-native` (cp310-abi3, manylinux_2_34). See "Python bindings" below.
@@ -36,6 +41,13 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
   (tabbed demo app). `qmn-demo`'s window/dialog logic lives in the
   `qmn_demo_app` STATIC lib (`demo_main.cpp` is a thin main) because
   `tst_demo` links the lib and drives it offscreen.
+- Gate-2 layers (decided 2026-11-15, built with the owning cars — contracts
+  NOW, code later): `src/diff/` — **QtCore ONLY** (line-diff + alignment,
+  headless like core). `src/protocol/` — QtCore+QtNetwork, **never view**.
+  `src/lsp/` and `src/dap/` — only `src/protocol/`, **never view**. The
+  view/core never depend on any of these; LSP/DAP/diff *glue* (decoration
+  feeding, syncer wiring) lives in `src/app/`. `CodeDocument` (M25) joins
+  `src/view/` as an editor-owned child QObject and owns the `TextBuffer`.
 - `pydemo/` — a uv project, NOT built by CMake: the Python analog of
   `qmn-demo` running on the shipped wheel (path dep into gitignored
   `dist/`; `uv.lock` stays uncommitted). Mirrors the C++ demo door-for-door
