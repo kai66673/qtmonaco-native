@@ -2,6 +2,12 @@ qt_add_executable(tst_textbuffer tst_textbuffer.cpp)
 target_link_libraries(tst_textbuffer PRIVATE qmn_core Qt6::Test)
 add_test(NAME textbuffer COMMAND tst_textbuffer)
 
+# The 4th ctest entry (M10): headless property + golden tests over the
+# pure line-diff engine (src/diff is QtCore-only, like core).
+qt_add_executable(tst_diff tst_diff.cpp)
+target_link_libraries(tst_diff PRIVATE qmn_diff Qt6::Test)
+add_test(NAME diff COMMAND tst_diff)
+
 qt_add_executable(tst_codeeditor tst_codeeditor.cpp)
 target_link_libraries(tst_codeeditor PRIVATE qmn_view Qt6::Test)
 # The test drives the HighlightEngine seam, whose header includes the
