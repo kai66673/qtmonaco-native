@@ -83,6 +83,41 @@ def run_checks() -> int:
     theme.applyPreset(Preset.Default)  # empty map = the fallback behavior again
     assert theme.kind() == Preset.Default and not theme.hasColor(Role.Base)
 
+    # --- M25 document object (Gate 2, car 1; bound with M25) ------------------
+    # The risky crossings here: the editor-owned QObject* out of the document()
+    # door, and the 3-arg editApplied signal (int/int/str marshalling).
+    doc = editor.document()
+    assert doc is not None and doc.toPlainText() == TEXT
+    assert doc.lineCount() == 3 and doc.lineText(1) == "bravo"
+    assert doc.lineText(99) == ""  # clamped public getter
+
+    doc_hits = []
+    doc.editApplied.connect(lambda s, e, t: doc_hits.append(("delta", s, e, t)))
+    doc.textChanged.connect(lambda: doc_hits.append("changed"))
+    doc.modificationChanged.connect(lambda m: doc_hits.append(("mod", m)))
+    doc.documentUriChanged.connect(lambda u: doc_hits.append(("uri", u)))
+
+    assert doc.isModified() is True  # the setPlainText above dirtied it (load semantics)
+    doc.markSaved()                  # the consumer load pattern: set-then-markSaved
+    assert doc.isModified() is False and doc_hits == [("mod", False)], doc_hits
+    doc_hits.clear()
+    doc.setDocumentUri("untitled:smoke")  # the LSP-facing key
+    doc.setDocumentUri("untitled:smoke")  # same value: NO emission
+    assert doc.documentUri() == "untitled:smoke"
+    assert doc_hits == [("uri", "untitled:smoke")], doc_hits
+
+    # The pre-op-frame delta stream (the frame the LSP syncer and diff car
+    # will ride), and v1 modified semantics: any edit dirties, only
+    # markSaved() clears.
+    doc_hits.clear()
+    doc.setPlainText("ab")  # routes through the editor's replace machinery
+    assert editor.toPlainText() == "ab"  # the delegation crossed the wheel too
+    assert doc_hits == [("mod", True), ("delta", 0, len(TEXT), "ab"), "changed"], doc_hits
+    assert doc.isModified()
+    doc_hits.clear()
+    doc.markSaved()
+    assert not doc.isModified() and doc_hits == [("mod", False)], doc_hits
+
     copies = loaded_libs("libQt6Core.so")
     print(f"qmn module: {qmn.__file__}")
     print(f"signals:    {seen}")

@@ -1,5 +1,6 @@
 #include "CodeEditor.hpp"
 
+#include "view/CodeDocument.hpp"
 #include "view/CodeEditorAccessible.hpp"
 #include "view/CodeEditorOptions.hpp"
 #include "view/CodeEditorTheme.hpp"
@@ -256,8 +257,13 @@ bool parseMoveMarker(const QByteArray& data, quintptr& sourceId, int& startOff, 
 
 } // namespace
 
+// M25 init-list order IS declaration order (document_ before buffer_, see
+// the member comment): the document exists (parented to this widget, the
+// options()/theme() pattern) before buffer_ binds to its owned TextBuffer.
 CodeEditor::CodeEditor(QWidget* parent)
-    : QWidget(parent)
+    : QWidget(parent),
+      document_(new CodeDocument(this)),
+      buffer_(document_->buffer_)
 {
     setFocusPolicy(Qt::StrongFocus);
     setAccessibleName(QStringLiteral("code editor"));
@@ -322,6 +328,14 @@ CodeEditor::CodeEditor(QWidget* parent)
                 QAccessible::updateAccessibility(&ins);
             }
         }
+        // M25: the document half of the edit bus — the LSP-shaped editApplied
+        // delta + the document's own textChanged ping + the modified flag
+        // (v1: any edit sets it; only markSaved() clears it). Fires here, in
+        // the observer pass, so it covers exactly what the core covers: every
+        // primitive mutation, undo/redo replay and setText's whole-doc op
+        // alike. Note: the flag transition leads, then editApplied, then the
+        // document ping, then the editor's textChanged below.
+        document_->noteEdit(ev);
         // Phase F: the detail-free document ping — unconditional (no AT
         // gate), emitted once per primitive mutation, observers of the
         // parity textChanged door ride it.

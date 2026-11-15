@@ -1,6 +1,8 @@
 add_library(qmn_view STATIC
     CodeEditor.hpp
     CodeEditor.cpp
+    CodeDocument.hpp
+    CodeDocument.cpp
     CodeEditorOptions.hpp
     CodeEditorOptions.cpp
     CodeEditorTheme.hpp
@@ -36,6 +38,7 @@ set_target_properties(qmn_view PROPERTIES EXPORT_NAME view)
 install(TARGETS qmn_view EXPORT qmnTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
 install(FILES
     CodeEditor.hpp
+    CodeDocument.hpp
     CodeEditorOptions.hpp
     CodeEditorTheme.hpp
     LanguageProperties.hpp

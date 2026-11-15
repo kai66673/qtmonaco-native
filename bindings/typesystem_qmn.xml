@@ -20,6 +20,9 @@
     * CodeEditorOptions - reached only through CodeEditor::options(); the one
       instance is owned by the editor, so it is read AND written, never built
       from Python (its ctor is removed below).
+    * CodeDocument (M25, Gate 2) - the same editor-owned shape through
+      CodeEditor::document(); the model object (text doors, uri, modified
+      flag, the editApplied delta signals).
     * the nested data structs (HighlightSpan, Diagnostic, InlayHint, MatchRange,
       FoldRange) - the M4/M15/M16 decoration records the Python layer feeds.
       They are value types: fields become attributes, operator== becomes __eq__.
@@ -86,6 +89,19 @@
         <object-type name="CodeEditorOptions">
             <include file-name="view/CodeEditorOptions.hpp" location="global"/>
             <modify-function signature="CodeEditorOptions(qmn::view::CodeEditor*,QObject*)" remove="all"/>
+        </object-type>
+
+        <!-- M25 (Gate 2): the editor-owned model document. Same ownership
+             shape as the options/theme objects: the editor's ctor creates it
+             and CodeEditor::document() is the only door, so the ctor is
+             removed (Python never builds one). Its signals (textChanged,
+             editApplied, documentUriChanged, modificationChanged) bind as
+             ordinary signal slots; every public door speaks plain Qt types
+             (QString/int/bool). The core EditEvent never crosses: noteEdit
+             is private+friend, invisible to the parser. -->
+        <object-type name="CodeDocument">
+            <include file-name="view/CodeDocument.hpp" location="global"/>
+            <modify-function signature="CodeDocument(qmn::view::CodeEditor*)" remove="all"/>
         </object-type>
 
         <!-- Same ownership shape as CodeEditorOptions: the editor creates the

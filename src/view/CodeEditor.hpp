@@ -42,6 +42,7 @@ class CodeEditorOptions; // M19 settings object; view/CodeEditorOptions.hpp
 class CodeEditorAccessible; // M11 a11y bridge; view/CodeEditorAccessible.hpp
 class LanguageProperties; // M23 language overrides; view/LanguageProperties.hpp
 class CodeEditorTheme; // M24 ink themes; view/CodeEditorTheme.hpp
+class CodeDocument; // M25 model owner; view/CodeDocument.hpp
 
 // 0-based text position. col is counted in UTF-16 code units.
 struct TextPosition {
@@ -403,6 +404,15 @@ public:
     // a geo-cache wipe (token ink rides the cached format ranges). Full
     // contract: view/CodeEditorTheme.hpp.
     CodeEditorTheme* theme() const { return theme_; }
+
+    // M25 document object (Gate 2): the editor-owned text model — the
+    // TextBuffer now lives in it (the sanctioned ownership deviation,
+    // AGENTS.md), plus the URI door and the modified flag. ALWAYS non-null
+    // (the ctor creates one and attaches it; same lifetime pattern as
+    // options()/theme()). The editor's text doors keep working verbatim;
+    // they now operate on the document's buffer. One editor per document
+    // (v1); full contract: view/CodeDocument.hpp.
+    CodeDocument* document() const { return document_; }
 
     // Indentation + auto-indent (M14). SOFT TABS ONLY: Tab typing never
     // puts literal '\t' into the buffer; literal tabs (paste, setPlainText)
@@ -995,7 +1005,15 @@ private:
     // re-measure + cache wipe; this call only lands the right font on it.
     void applyCodeFont();
 
-    qmn::core::TextBuffer buffer_;
+    // M25 (Gate 2): the TextBuffer moved into the editor-owned CodeDocument
+    // (the sanctioned ownership deviation). `document_` is declared BEFORE
+    // `buffer_` because member-init order follows declaration order and
+    // buffer_ binds to the document's buffer already in the ctor's init
+    // list. Keeping the name `buffer_` as a REFERENCE member kept all
+    // ~230 call sites — the header inlines, the .cpp machinery and the
+    // accessible friend paths — byte-identical.
+    CodeDocument* document_;
+    qmn::core::TextBuffer& buffer_;
     // M4 highlight engine (declared right after the model it observes).
     std::unique_ptr<HighlightEngine> highlight_;
     QVector<UndoMark> undoMarks_; // aligned with buffer_ undo groups

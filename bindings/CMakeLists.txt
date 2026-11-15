@@ -56,10 +56,10 @@ endif()
 # Names emitted by the generator (verified by running it, see
 # bindings/build_in_container.sh --codegen). Output lands in a subdirectory
 # named after the typesystem package, i.e. _qmn/. One TU per bound type: the
-# three QObjects (editor, options, theme), the free TextPosition struct, and
-# one per nested record struct (HighlightSpan/Diagnostic/InlayHint/MatchRange/
-# FoldRange). The nested ENUMS (RevealMode, LineNumbersMode, the theme's
-# Role/Preset, ...) get no file of their own - since Shiboken 6.8 smart enums
+# four QObjects (editor, options, document, theme), the free TextPosition
+# struct, and one per nested record struct (HighlightSpan/Diagnostic/InlayHint/
+# MatchRange/FoldRange). The nested ENUMS (RevealMode, LineNumbersMode, the
+# theme's Role/Preset, ...) get no file of their own - since Shiboken 6.8 smart enums
 # are emitted inside the owning class's TU.
 set(_gen_dir "${CMAKE_CURRENT_BINARY_DIR}/_qmn")
 set(_generated
@@ -67,6 +67,7 @@ set(_generated
     "${_gen_dir}/qmn_wrapper.cpp"
     "${_gen_dir}/qmn_view_wrapper.cpp"
     "${_gen_dir}/qmn_view_codeeditor_wrapper.cpp"
+    "${_gen_dir}/qmn_view_codedocument_wrapper.cpp"
     "${_gen_dir}/qmn_view_codeeditoroptions_wrapper.cpp"
     "${_gen_dir}/qmn_view_codeeditortheme_wrapper.cpp"
     "${_gen_dir}/qmn_view_textposition_wrapper.cpp"
@@ -93,10 +94,11 @@ shiboken_generator_create_binding(
     LIBRARY_TARGET    qmn_view          # src/view, PUBLIC include dir = src/
     TYPESYSTEM_FILE   "${CMAKE_CURRENT_SOURCE_DIR}/typesystem_qmn.xml"
     # Every binding-header is handed to the parser explicitly (not relying on
-    # CodeEditor.hpp's includes): CodeEditorOptions.hpp and CodeEditorTheme.hpp
-    # are each reachable that way, but naming them keeps the generated set
-    # independent of those includes.
+    # CodeEditor.hpp's includes): CodeEditorOptions.hpp, CodeDocument.hpp and
+    # CodeEditorTheme.hpp are each reachable that way, but naming them keeps
+    # the generated set independent of those includes.
     HEADERS           "${PROJECT_SOURCE_DIR}/src/view/CodeEditor.hpp"
+                      "${PROJECT_SOURCE_DIR}/src/view/CodeDocument.hpp"
                       "${PROJECT_SOURCE_DIR}/src/view/CodeEditorOptions.hpp"
                       "${PROJECT_SOURCE_DIR}/src/view/CodeEditorTheme.hpp"
     GENERATED_SOURCES ${_generated}

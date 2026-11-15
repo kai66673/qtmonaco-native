@@ -27,6 +27,7 @@
 #include <QWheelEvent>
 
 #include "view/CodeEditor.hpp"
+#include "view/CodeDocument.hpp"
 #include "view/CodeEditorOptions.hpp"
 #include "view/CodeEditorTheme.hpp"
 #include "view/HighlightEngine.hpp"
@@ -334,6 +335,16 @@ private slots:
     void themeTokenOverrideFlipsCommentInkAndRestores();
     void themeSeverityOverrideMovesDiagnosticInk();
     void themeChromeRoleOverridesFlipFoldBreakpointFindProbes();
+
+    // ---- M25 CodeDocument (Gate 2, car 1 first machine): the editor-owned
+    // model object — ownership/attach, uri + modified doors, and the
+    // editApplied pre-op-frame delta stream the LSP syncer and diff car
+    // will ride. One editor per document (v1 contract).
+    void documentOwnedAndMirrorsThroughEditorDoors();
+    void documentEditDeltasReplayToExactText();
+    void documentSignalsOrderBeforeEditorTextChanged();
+    void documentModifiedLifecycleIsMarkSavedBounded();
+    void documentUriDoorsAndPerEditorIsolation();
 
 private:
     CodeEditor* editor = nullptr;
@@ -8742,6 +8753,195 @@ void TestCodeEditor::themeChromeRoleOverridesFlipFoldBreakpointFindProbes()
     th->clearColor(Theme::Role::FindMatch);
     th->clearColor(Theme::Role::FindCurrentMatch);
     QVERIFY(warmQuadPixels(editor->grab().toImage(), x0, yTop, yTop + lh) >= 60); // live restore
+}
+
+// ---- M25 CodeDocument (Gate 2, car 1) -------------------------------------
+
+void TestCodeEditor::documentOwnedAndMirrorsThroughEditorDoors()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    QVERIFY(doc);
+    // Lifetime pattern of options()/theme(): parented child of the editor.
+    QCOMPARE(doc->parent(), static_cast<QObject*>(editor));
+
+    editor->setPlainText(QStringLiteral("a\nbb\nccc"));
+    QCOMPARE(doc->toPlainText(), editor->toPlainText());
+    QCOMPARE(doc->lineCount(), 3); // >= 1 even empty; core invariant
+    QCOMPARE(doc->lineText(1), QStringLiteral("bb"));
+    QVERIFY(doc->lineText(-1).isEmpty()); // clamped getter (public-door safety)
+    QVERIFY(doc->lineText(3).isEmpty());
+
+    // The document-side replace door must DELEGATE to the editor's full
+    // replace machinery — a bare buffer swap would leave the caret and the
+    // fold/scroll bookkeeping of the attached view stale.
+    editor->setPosition({0, 1});
+    doc->setPlainText(QStringLiteral("x"));
+    QCOMPARE(editor->toPlainText(), QStringLiteral("x"));
+    QCOMPARE(doc->toPlainText(), QStringLiteral("x"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0})); // caret reset proves the delegation
+    QCOMPARE(editor->lineCount(), doc->lineCount());
+}
+
+void TestCodeEditor::documentEditDeltasReplayToExactText()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+
+    // Server-side-model harness (the shape the LSP syncer test will ride):
+    // a naive reference string rebuilt ONLY from editApplied deltas. The
+    // bounds check inside is the frame trap: a delta emitted in a post-op
+    // (or otherwise wrong) frame lands out of bounds or mis-splices.
+    QString ref;
+    QObject::connect(doc, &CodeDocument::editApplied,
+                     [&ref](int start, int end, const QString& inserted) {
+                         QVERIFY2(start >= 0 && start <= end && end <= ref.size(),
+                                  qPrintable(QStringLiteral("delta %1..%2 out of frame, ref len %3")
+                                                 .arg(start).arg(end).arg(ref.size())));
+                         ref.replace(start, end - start, inserted);
+                     });
+    QSignalSpy appliedSpy(doc, &CodeDocument::editApplied);
+    QSignalSpy pingSpy(editor, &CodeEditor::textChanged); // same coverage claim:
+    QVERIFY(appliedSpy.isValid() && pingSpy.isValid());    // one delta per primitive mutation
+
+    doc->setPlainText(QStringLiteral("hello world\nsecond\n")); // one whole-doc op
+    QCOMPARE(appliedSpy.count(), 1);
+    QCOMPARE(ref, doc->toPlainText());
+
+    QTest::keyClicks(editor, "XY");    // typing at the caret (0,0): one insert op per char
+    QTest::keyClicks(editor, "123");   // coalesces UNDO-wise, but each op still streams
+    QTest::keyClick(editor, Qt::Key_Backspace); // pure delete (inserted empty)
+    QTest::keyClick(editor, Qt::Key_Return);    // newline insert
+    editor->selectAll();
+    QTest::keyClicks(editor, "Z");     // selection replace: delete + insert, bracketed
+
+    QCOMPARE(ref, doc->toPlainText()); // every delta spliced in frame
+
+    // undo/redo replay through the SAME stream (core contract: one event
+    // per replayed op, pre-op frame of the inverse). Group walk: replace-
+    // selection, Enter (its own group — a newline breaks the typing chain),
+    // the Backspace chunk, the typing burst. setText is NOT undoable (it
+    // CLEARS the history), so four steps land back on the loaded text.
+    editor->undo(); // the select-all replace group
+    QCOMPARE(ref, doc->toPlainText());
+    editor->undo(); // the Enter insert
+    editor->undo(); // the Backspace chunk (inverse: re-inserts '3')
+    editor->undo(); // the typing burst group (ops replay in order)
+    QCOMPARE(ref, QStringLiteral("hello world\nsecond\n"));
+    QVERIFY(!editor->canUndo());
+
+    editor->redo();
+    editor->redo();
+    editor->redo();
+    editor->redo();
+    QCOMPARE(ref, doc->toPlainText());
+    QCOMPARE(ref, QStringLiteral("Z"));
+
+    // The counting contract: editApplied and the editor's textChanged ping
+    // cover exactly the same moments (both ride the single observer pass).
+    QCOMPARE(appliedSpy.count(), pingSpy.count());
+}
+
+void TestCodeEditor::documentSignalsOrderBeforeEditorTextChanged()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+
+    QStringList bus;
+    QObject::connect(doc, &CodeDocument::modificationChanged,
+                     [&bus](bool m) { bus << (m ? QStringLiteral("mod:true") : QStringLiteral("mod:false")); });
+    QObject::connect(doc, &CodeDocument::editApplied,
+                     [&bus](int s, int e, const QString& t) {
+                         bus << QStringLiteral("applied:%1:%2:%3").arg(s).arg(e).arg(t);
+                     });
+    QObject::connect(doc, &CodeDocument::textChanged,
+                     [&bus] { bus << QStringLiteral("doc"); });
+    QObject::connect(editor, &CodeEditor::textChanged,
+                     [&bus] { bus << QStringLiteral("editor"); });
+
+    // First mutation on a fresh document: flag transition leads, then the
+    // delta, then the document ping, and ONLY THEN the editor's ping — the
+    // order the ctor's observer keeps (noteEdit before emit textChanged()).
+    QTest::keyClick(editor, Qt::Key_X); // types lowercase 'x' (existing convention)
+    QCOMPARE(bus, (QStringList{QStringLiteral("mod:true"), QStringLiteral("applied:0:0:x"),
+                               QStringLiteral("doc"), QStringLiteral("editor")}));
+    bus.clear();
+    QTest::keyClick(editor, Qt::Key_Y); // flag already set: no transition signal
+    QCOMPARE(bus, (QStringList{QStringLiteral("applied:1:1:y"), QStringLiteral("doc"),
+                               QStringLiteral("editor")}));
+}
+
+void TestCodeEditor::documentModifiedLifecycleIsMarkSavedBounded()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    QSignalSpy modSpy(doc, &CodeDocument::modificationChanged);
+    QVERIFY(modSpy.isValid());
+
+    QVERIFY(!doc->isModified()); // fresh document: clean
+    doc->markSaved();            // no-op on a clean document
+    QCOMPARE(modSpy.count(), 0);
+
+    // v1 semantics (documented interim): a programmatic load DIRTY-S the
+    // document — the consumer's load pattern is set-then-markSaved.
+    doc->setPlainText(QStringLiteral("loaded"));
+    QVERIFY(doc->isModified());
+    QCOMPARE(modSpy.count(), 1);
+    QCOMPARE(modSpy.at(0).at(0).toBool(), true);
+
+    doc->markSaved();
+    QVERIFY(!doc->isModified());
+    doc->markSaved(); // idempotent: only real transitions signal
+    QCOMPARE(modSpy.count(), 2);
+    QCOMPARE(modSpy.at(1).at(0).toBool(), false);
+
+    QTest::keyClicks(editor, "!");
+    QVERIFY(doc->isModified());
+    QCOMPARE(modSpy.count(), 3);
+
+    // The documented interim imprecision: undo back to the baseline does
+    // NOT auto-clear the flag — ONLY markSaved() does (core undo-position
+    // hook deferred). The text is back; the flag is not.
+    QTest::keyClick(editor, Qt::Key_Z, Qt::ControlModifier);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("loaded"));
+    QVERIFY(doc->isModified());
+    QCOMPARE(modSpy.count(), 3); // no modificationChanged during undo
+
+    doc->markSaved();
+    QVERIFY(!doc->isModified());
+    QCOMPARE(modSpy.count(), 4);
+}
+
+void TestCodeEditor::documentUriDoorsAndPerEditorIsolation()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    QVERIFY(doc->documentUri().isEmpty()); // empty = unnamed (consumer's scheme business)
+
+    QSignalSpy uriSpy(doc, &CodeDocument::documentUriChanged);
+    QVERIFY(uriSpy.isValid());
+    doc->setDocumentUri(QStringLiteral("file:///a.py"));
+    QCOMPARE(doc->documentUri(), QStringLiteral("file:///a.py"));
+    QCOMPARE(uriSpy.count(), 1);
+    QCOMPARE(uriSpy.at(0).at(0).toString(), QStringLiteral("file:///a.py"));
+    doc->setDocumentUri(QStringLiteral("file:///a.py")); // same value: NO signal
+    QCOMPARE(uriSpy.count(), 1);
+    doc->setDocumentUri(QStringLiteral("untitled:noname"));
+    QCOMPARE(uriSpy.count(), 2);
+
+    // One editor per document (v1 contract): every editor owns its OWN
+    // document — no shared buffer, no cross-talk between edit streams.
+    CodeEditor second;
+    QVERIFY(second.document() != doc);
+    QVERIFY(second.document()->parent() == static_cast<QObject*>(&second));
+    second.setPlainText(QStringLiteral("second model"));
+    QCOMPARE(doc->toPlainText(), QString()); // the first document never saw it
+    QVERIFY(second.document()->isModified());
+    QVERIFY(!doc->isModified());
+    QSignalSpy firstSpy(doc, &CodeDocument::textChanged);
+    QTest::keyClicks(&second, "x");
+    QCOMPARE(firstSpy.count(), 0); // isolated observer slots
+    QCOMPARE(doc->toPlainText(), QString());
 }
 
 QTEST_MAIN(TestCodeEditor)
