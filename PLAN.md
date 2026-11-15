@@ -922,7 +922,15 @@ this car).
 
 - **`src/diff/`** — new QtCore-only layer: Miller–Myers over hashed lines
   (pure, headless, tested like `tst_textbuffer`; ctest grows a 4th test
-  `diff`) producing hunks + the alignment table.
+  `diff`) producing hunks + the alignment table. **Layering decision
+  (2026-11-16, owner):** `qmn_view` PRIVATE-links `qmn::diff` — diff is a
+  pure QtCore layer like `core`, NOT a network layer, so the
+  "never in the view" isolation applies to protocol/LSP/DAP only; no diff
+  type appears in ANY public view header (the doors take `CodeDocument*`/
+  `QString` + view-nested types only, so they stay Shiboken-wrappable and
+  the link never propagates to consumers' compiles; installed-package
+  export mirrors the `qmn::internal_tree_sitter` mechanism: link-only
+  internal target). The demo/app side still owns *when* and *what* to diff.
 - **Doors (widget-shaped parity, because qtmonaco's `open_diffs` is a
   method OF the editor, not a container):** `setDiffDocuments(CodeDocument*
   original, CodeDocument* modified, language)` + a plain-QString overload,

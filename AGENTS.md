@@ -45,8 +45,14 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
   NOW, code later): `src/diff/` — **QtCore ONLY** (line-diff + alignment,
   headless like core). `src/protocol/` — QtCore+QtNetwork, **never view**.
   `src/lsp/` and `src/dap/` — only `src/protocol/`, **never view**. The
-  view/core never depend on any of these; LSP/DAP/diff *glue* (decoration
-  feeding, syncer wiring) lives in `src/app/`. `CodeDocument` (M25) joins
+  view/core never depend on protocol/lsp/dap; LSP/DAP *glue* (decoration
+  feeding, syncer wiring) lives in `src/app/`. **M10 amendment (decided
+  2026-11-16): `qmn_view` PRIVATE-links `qmn::diff`** — the pure line-diff
+  layer is QtCore-only like core, not a network layer; no diff type crosses
+  any public view header (the diff doors take `CodeDocument*`/`QString` and
+  view-nested types only), and the static-package link rides the
+  `qmn::internal_tree_sitter` mechanism (internal export target, link-only,
+  consumers never link it themselves). `CodeDocument` (M25) joins
   `src/view/` as an editor-owned child QObject and owns the `TextBuffer`.
 - `pydemo/` — a uv project, NOT built by CMake: the Python analog of
   `qmn-demo` running on the shipped wheel (path dep into gitignored
