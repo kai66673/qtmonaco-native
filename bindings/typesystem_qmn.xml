@@ -3,8 +3,9 @@
   Shiboken6 typesystem for the native editor binding.
 
   What used to be the Phase B "thin spine" is, since Phase F, the WHOLE frozen
-  Gate 1 public surface: every public door of CodeEditor/CodeEditorOptions is
-  meant to be reachable from Python, because the Gate 1 API freeze must be the
+  Gate 1 public surface: every public door of CodeEditor/CodeEditorOptions/
+  CodeEditorTheme is meant to be reachable from Python, because the Gate 1 API
+  freeze must be the
   last chance to shape what a wheel can express. Everything crossing that
   boundary is a plain Qt type (QString/QStringList/QRect/QPoint/QFont/int/
   bool/double), a nested plain struct, or a nested enum class - no templates,
@@ -85,6 +86,20 @@
         <object-type name="CodeEditorOptions">
             <include file-name="view/CodeEditorOptions.hpp" location="global"/>
             <modify-function signature="CodeEditorOptions(qmn::view::CodeEditor*,QObject*)" remove="all"/>
+        </object-type>
+
+        <!-- Same ownership shape as CodeEditorOptions: the editor creates the
+             theme in its ctor and CodeEditor::theme() is the only door, so the
+             ctor is removed. The M24 knob set the qmn-demo dialog mirrors:
+             applyPreset/kind (the preset pair), the explicit-role and token
+             override doors, ink() (the resolved paint color), severityInk()
+             (QRgb is an unsigned-int typedef - PySide's core typesystem knows
+             it), and the themeChanged signal. -->
+        <object-type name="CodeEditorTheme">
+            <include file-name="view/CodeEditorTheme.hpp" location="global"/>
+            <enum-type name="Role"/>
+            <enum-type name="Preset"/>
+            <modify-function signature="CodeEditorTheme(qmn::view::CodeEditor*,QObject*)" remove="all"/>
         </object-type>
       </namespace-type>
     </namespace-type>

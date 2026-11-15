@@ -18,6 +18,10 @@ C++ doors stay silent by the M19 contract, so the shim pre-checks
 
 Deliberate, documented divergences (PLAN.md "Decided divergences"):
 
+* ``set_theme`` round-trips the label like qtmonaco, AND routes the known
+  Monaco names through the M24 theme object: "light"/"vs" apply the Light
+  preset, "vs-dark" applies Dark; anything else (``hc-black`` included -
+  no high-contrast preset exists) paints nothing extra, label only.
 * ``set_vim_mode_enabled`` exists but only WARNS - vim mode is out of scope
   forever, and a warning (not ``AttributeError``) keeps drop-in callers alive.
 * ``set_minimap_enabled`` maps onto the overview ruler; no Chromium-style
@@ -42,6 +46,7 @@ import _qmn as _ext
 from PySide6.QtCore import Signal
 
 CodeEditor = _ext.qmn.view.CodeEditor
+CodeEditorTheme = _ext.qmn.view.CodeEditorTheme
 TextPosition = _ext.qmn.view.TextPosition
 
 
@@ -178,14 +183,30 @@ class Monaco(CodeEditor):
         super().setLanguage(language)
         self.language_changed.emit(language)
 
+    # qtmonaco/Monaco theme names -> our preset maps. Unknown names (the
+    # hc-black family, typos) round-trip as label only - documented
+    # divergence above.
+    _THEME_PRESETS = {
+        "light": CodeEditorTheme.Preset.Light,
+        "vs": CodeEditorTheme.Preset.Light,
+        "vs-dark": CodeEditorTheme.Preset.Dark,
+    }
+
     def get_theme(self):
-        """The theme NAME. v1 stores the label Python-side only: no palette
-        API has crossed the freeze yet, and qtmonaco only ever round-tripped
-        the string through Chromium anyway."""
+        """The theme NAME (qtmonaco's label round-trip); known labels also
+        drive the paint through the M24 theme object (see ``set_theme``)."""
         return self._theme
 
     def set_theme(self, theme):
         self._theme = theme
+        preset = self._THEME_PRESETS.get(theme)
+        if preset is not None:
+            t = self.theme()
+            # Same-kind skip, the demo's applySettings rule: applyPreset
+            # WIPES the whole explicit map, so a redundant set must not
+            # silently undo manual role/token tweaks.
+            if t.kind() != preset:
+                t.applyPreset(preset)
         self.theme_changed.emit(theme)
 
     # --- editor options ------------------------------------------------------------
@@ -239,4 +260,4 @@ class Monaco(CodeEditor):
         )
 
 
-__all__ = ["CodeEditor", "TextPosition", "Monaco"]
+__all__ = ["CodeEditor", "CodeEditorTheme", "TextPosition", "Monaco"]

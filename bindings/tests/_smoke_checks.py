@@ -52,6 +52,37 @@ def run_checks() -> int:
     editor.selectAll()
     assert seen, "no signal reached Python"
 
+    # --- M24 theme object (the 14th knob, bound for the wheel from 1.6.1) ----
+    # The risky conversions all live here: nested enums both directions,
+    # QColor in AND out, QRgb out (severityInk), and the themeChanged signal.
+    from PySide6.QtGui import QColor
+
+    theme = editor.theme()
+    Role, Preset = qmn.CodeEditorTheme.Role, qmn.CodeEditorTheme.Preset
+    assert theme.kind() == Preset.Default, theme.kind()
+    assert not theme.hasColor(Role.Base)
+    assert theme.color(Role.Base).isValid() is False  # invalid = "fallback paints"
+
+    theme_hits = []
+    theme.themeChanged.connect(lambda: theme_hits.append(1))
+
+    theme.applyPreset(Preset.Dark)
+    assert theme.kind() == Preset.Dark and theme_hits == [1], theme_hits
+    assert theme.hasColor(Role.Base) and theme.ink(Role.Base).isValid()
+
+    theme.setColor(Role.Base, QColor("magenta"))  # a real QColor crosses IN
+    assert theme_hits == [1, 1], theme_hits      # setColor -> one more emission
+    assert theme.kind() == Preset.Custom         # manual edit flips the tracker
+    assert theme.color(Role.Base).name() == "#ff00ff"  # and back OUT verbatim
+
+    ink = theme.severityInk(qmn.CodeEditor.Severity.Error)  # QRgb is an int
+    assert isinstance(ink, int) and ink != 0
+
+    theme.clearColor(Role.Base)
+    assert theme_hits == [1, 1, 1], theme_hits
+    theme.applyPreset(Preset.Default)  # empty map = the fallback behavior again
+    assert theme.kind() == Preset.Default and not theme.hasColor(Role.Base)
+
     copies = loaded_libs("libQt6Core.so")
     print(f"qmn module: {qmn.__file__}")
     print(f"signals:    {seen}")

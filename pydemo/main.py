@@ -9,11 +9,10 @@ for headless smoke runs, failures land in the status bar, never a blocking
 dialog), and the SAME widget underneath: the C++ CodeEditor through the
 shiboken wrappers of the shipped qmn_native wheel.
 
-The one C++ knob NOT reproduced is the 14th, the M24 theme-preset combo:
-CodeEditorTheme does not cross the wheel bindings (see
-bindings/typesystem_qmn.xml), so no preset door exists from Python; the
-editor simply keeps its shipped palette. Everything else - the 13 option
-knobs (M19/M20/M21) and every editor behavior - is the real thing.
+The settings surface is the FULL fourteen knobs of the C++ demo: the 13
+option knobs ride `options()` (M19/M20/M21) and the 14th, the M24 theme
+preset, rides `theme()` — `CodeEditorTheme` crosses the wheel bindings from
+wheel 1.6.1 on, so the theme combo is the real thing here too.
 """
 
 from __future__ import annotations
@@ -47,8 +46,8 @@ from PySide6.QtWidgets import (
 # The wheel's Python shim (bindings/python/qmn/__init__.py): it imports
 # PySide6.QtWidgets BEFORE the _qmn extension (the wrapper resolves its
 # QWidget base through shiboken's converter registry) and flattens
-# _qmn.qmn.view.* to qmn.CodeEditor.
-from qmn import CodeEditor
+# _qmn.qmn.view.* to qmn.CodeEditor / qmn.CodeEditorTheme.
+from qmn import CodeEditor, CodeEditorTheme
 
 APP_TITLE = "qtmonaco-native \u2014 \u0434\u0435\u043c\u043e\u043d\u0441\u0442\u0440\u0430\u0446\u0438\u044f (Python)"
 
@@ -126,12 +125,24 @@ CURRENT_LINE_LABELS = [
     "\u0424\u043e\u043d \u0438 \u0440\u0430\u043c\u043a\u0430",  # Фон и рамка
 ]
 
+ThemePreset = CodeEditorTheme.Preset
+
+# M24 theme rows, the C++ dialog's table: Custom is deliberately NOT a row
+# (a live editor only reaches it through manual role edits this demo never
+# offers), and _index_of clamps such a seed to the Default row.
+THEME_PRESETS = [ThemePreset.Default, ThemePreset.Light, ThemePreset.Dark]
+THEME_LABELS = [
+    "\u041f\u0430\u043b\u0438\u0442\u0440\u0430 (\u043f\u043e \u0443\u043c\u043e\u043b\u0447\u0430\u043d\u0438\u044e)",  # Палитра (по умолчанию)
+    "\u0421\u0432\u0435\u0442\u043b\u0430\u044f",  # Светлая
+    "\u0422\u0451\u043c\u043d\u0430\u044f",  # Тёмная
+]
+
 
 @dataclass
 class EditorSettings:
-    """Mirror of the C++ EditorSettings template MINUS the theme preset
-    (the wheel has no CodeEditorTheme door, module docstring). Defaults =
-    CodeEditor's shipped defaults, like the C++ tripwire test demands."""
+    """Mirror of the C++ EditorSettings template, all fourteen knobs.
+    Defaults = CodeEditor's shipped defaults, like the C++ tripwire test
+    demands."""
 
     line_numbers_mode: LineNumbersMode = LineNumbersMode.On
     current_line_mode: CurrentLineMode = CurrentLineMode.Background
@@ -146,12 +157,14 @@ class EditorSettings:
     indent_guides_enabled: bool = True
     code_font: QFont = field(default_factory=demo_default_code_font)
     zoom_factor: float = 1.0
+    theme_preset: ThemePreset = ThemePreset.Default
 
 
 def apply_settings(editor: CodeEditor, settings: EditorSettings) -> None:
     """The options() object is the demo's one door in (as in C++): every
     setter delegates to the editor and the editor emits the *Changed
-    signal. The 14th C++ knob (theme preset) has no Python door."""
+    signal. The M24 theme preset rides theme() next, mirroring the C++
+    applySettings rule exactly."""
     options = editor.options()
     options.setLineNumbersMode(settings.line_numbers_mode)
     options.setCurrentLineMode(settings.current_line_mode)
@@ -166,6 +179,13 @@ def apply_settings(editor: CodeEditor, settings: EditorSettings) -> None:
     options.setIndentGuidesEnabled(settings.indent_guides_enabled)
     options.setCodeFont(settings.code_font)
     options.setZoomFactor(settings.zoom_factor)
+
+    # M24 (14th knob): same-kind seeds skip applyPreset WHOLE - otherwise
+    # every dialog accept would wipe the map and repaint. Any other kind
+    # (a Custom left by manual edits included) applies the preset as-is.
+    theme = editor.theme()
+    if theme.kind() != settings.theme_preset:
+        theme.applyPreset(settings.theme_preset)
 
 
 def settings_from(editor: CodeEditor) -> EditorSettings:
@@ -186,6 +206,7 @@ def settings_from(editor: CodeEditor) -> EditorSettings:
         indent_guides_enabled=options.indentGuidesEnabled(),
         code_font=options.codeFont(),
         zoom_factor=options.zoomFactor(),
+        theme_preset=editor.theme().kind(),  # M24: live kind, Custom included
     )
 
 
@@ -201,7 +222,7 @@ def _index_of(table: list, value) -> int:
 
 class SettingsDialog(QDialog):
     """Настройки->Параметры редактора… - the C++ EditorSettingsDialog's
-    rows, minus the theme combo (no wheel door for it)."""
+    rows, the M24 theme combo included (wheel >= 1.6.1)."""
 
     def __init__(self, parent, initial: EditorSettings):
         super().__init__(parent)
@@ -217,12 +238,16 @@ class SettingsDialog(QDialog):
         ruler = QSpinBox(self)
         ruler.setRange(0, 999)
         ruler.setValue(initial.long_line_ruler_column)
+        theme = QComboBox(self)
+        theme.addItems(THEME_LABELS)
+        theme.setCurrentIndex(_index_of(THEME_PRESETS, initial.theme_preset))
 
         appearance = QGroupBox("\u0412\u043d\u0435\u0448\u043d\u0438\u0439 \u0432\u0438\u0434", self)
         appearance_form = QFormLayout(appearance)
         appearance_form.addRow("\u041d\u043e\u043c\u0435\u0440\u0430 \u0441\u0442\u0440\u043e\u043a:", line_numbers)
         appearance_form.addRow("\u041f\u043e\u0434\u0441\u0432\u0435\u0442\u043a\u0430 \u0442\u0435\u043a\u0443\u0449\u0435\u0439 \u0441\u0442\u0440\u043e\u043a\u0438:", current_line)
         appearance_form.addRow("\u041b\u0438\u043d\u0438\u044f-\u043e\u0433\u0440\u0430\u043d\u0438\u0447\u0438\u0442\u0435\u043b\u044c (\u0441\u0442\u043e\u043b\u0431\u0435\u0446):", ruler)
+        appearance_form.addRow("\u0422\u0435\u043c\u0430:", theme)  # M24 (14th knob)
 
         font = QFontComboBox(self)
         family = initial.code_font.family()
@@ -292,6 +317,7 @@ class SettingsDialog(QDialog):
 
         # Named through attributes so settings() can read the rows back.
         self._line_numbers, self._current_line, self._ruler = line_numbers, current_line, ruler
+        self._theme_combo = theme
         self._font, self._font_px, self._zoom = font, font_px, zoom
         self._tab_stop = tab_stop
         self._checks = {
@@ -312,6 +338,7 @@ class SettingsDialog(QDialog):
             tab_stop_width=self._tab_stop.value(),
             code_font=self._seed_font_result(),
             zoom_factor=self._zoom.value(),
+            theme_preset=THEME_PRESETS[self._theme_combo.currentIndex()],  # M24
         )
         for name, check in self._checks.items():
             setattr(result, name, check.isChecked())

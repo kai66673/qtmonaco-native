@@ -3,6 +3,39 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.6.1] — 2026-11-15
+
+### Added
+- **`pydemo/`: the Python demo app on wheels.** A `uv` project mirroring the
+  C++ `qmn-demo` door-for-door — tabbed editors, Файл/Настройки menus, the
+  settings-template semantics, the `--exit-after-ms` headless-smoke CLI —
+  consuming the shipped wheel as a path dependency (see `pydemo/README.md`;
+  `uv.lock` stays uncommitted, its wheel path lives in gitignored `dist/`).
+- **The wheel binds the M24 theme object.** `bindings/typesystem_qmn.xml` +
+  `bindings/CMakeLists.txt` wrap `qmn::view::CodeEditorTheme` (the nested
+  `Role`/`Preset` enums, the `ink`/`severityInk` resolvers, the role and
+  token override doors, `applyPreset`/`kind`, the `themeChanged` signal),
+  ctor removed — the same editor-owned-object pattern as CodeEditorOptions,
+  `CodeEditor::theme()` finally reachable from Python. The FROZEN C++
+  surface is untouched (this door exists since M24; the typesystem simply
+  never wrapped it). The shim exports `qmn.CodeEditorTheme`; the smoke and
+  parity suites cover the new crossings (QColor both directions, QRgb out,
+  nested enums, the signal).
+- pydemo settings dialog: 14th knob `theme_preset` rides `editor.theme()`
+  with the C++ demo's mirror rule (same-kind seeds skip `applyPreset`), the
+  dialog rows are the C++ table (Custom seeds clamp to the Default row).
+
+### Changed
+- **`Monaco.set_theme` now routes through the theme object** (it was a
+  label-only round trip): "light"/"vs" apply the Light preset, "vs-dark"
+  applies Dark; unknown names (the `hc-black` family — no high-contrast
+  preset exists) stay label-only, a documented divergence. The qtmonaco
+  contract (label round trip, one `theme_changed` emission) is unchanged.
+- Dev tooling (unreleased since 1.6.0, docs-only): the README records the
+  VS Code OSS editor setup, and a tracked `.clangd` kills the Arch GCC 16
+  `-mno-direct-extern-access` bogus clangd diagnostic (IntelliSense only,
+  the GCC build untouched).
+
 ## [1.6.0] — 2026-11-14
 
 ### Added

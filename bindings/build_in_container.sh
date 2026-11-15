@@ -46,6 +46,7 @@ mkdir -p /tmp/gen
   -T"$SP/PySide6/typesystems" \
   --output-directory=/tmp/gen \
   /work/src/view/CodeEditor.hpp /work/src/view/CodeEditorOptions.hpp \
+  /work/src/view/CodeEditorTheme.hpp \
   /work/bindings/typesystem_qmn.xml
 echo "=== generated files ==="
 find /tmp/gen -type f | sort

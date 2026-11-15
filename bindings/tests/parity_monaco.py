@@ -255,6 +255,17 @@ def check_parity() -> int:
     assert ed.get_theme() == "light"
     assert themes == ["light"], themes
 
+    # From 1.6.1 the known Monaco labels also ride the M24 preset door (the
+    # documented map); the label round-trip above stays qtmonaco-identical.
+    Preset = qmn.CodeEditorTheme.Preset
+    assert ed.theme().kind() == Preset.Light, ed.theme().kind()
+    ed.set_theme("vs-dark")
+    assert ed.theme().kind() == Preset.Dark, ed.theme().kind()
+    ed.set_theme("hc-black")  # no high-contrast preset: label only, paint intact
+    assert ed.theme().kind() == Preset.Dark, ed.theme().kind()
+    assert ed.get_theme() == "hc-black"
+    assert themes == ["light", "vs-dark", "hc-black"], themes
+
     print("Monaco parity checks OK (%d text_changed announcements seen)" % len(seen))
     return 0
 
