@@ -87,6 +87,7 @@ def run_checks() -> int:
     # The risky crossings here: the editor-owned QObject* out of the document()
     # door, and the 3-arg editApplied signal (int/int/str marshalling).
     doc = editor.document()
+    assert isinstance(doc, qmn.CodeDocument)  # the shim export crosses too
     assert doc is not None and doc.toPlainText() == TEXT
     assert doc.lineCount() == 3 and doc.lineText(1) == "bravo"
     assert doc.lineText(99) == ""  # clamped public getter
@@ -117,6 +118,26 @@ def run_checks() -> int:
     doc_hits.clear()
     doc.markSaved()
     assert not doc.isModified() and doc_hits == [("mod", False)], doc_hits
+
+    # --- M25 soft wrap knob (the 14th options knob, new to the wheel with M25) --
+    # The FIRST knob-door smoke (the 13 older knobs predate the bindings
+    # suite): default OFF crosses, the setter delegates editor-wards, the
+    # *Changed signal crosses back, a same-value set does not re-emit.
+    opt = editor.options()
+    wrap_hits = []
+    opt.softWrapEnabledChanged.connect(wrap_hits.append)
+    assert opt.softWrapEnabled() is False  # the shipped default
+    opt.setSoftWrapEnabled(True)
+    assert opt.softWrapEnabled() is True and wrap_hits == [True], wrap_hits
+    opt.setSoftWrapEnabled(True)  # same value: no emission
+    assert wrap_hits == [True], wrap_hits
+    # The row doors still answer in slot units from Python (wrap ON, one
+    # line, hidden editor: the unit contract, not geometry - a hidden
+    # editor's paint budget may legitimately be 0 slots).
+    assert editor.firstVisibleLine() == 0
+    assert editor.modelLineForVisibleIndex(0) == 0
+    opt.setSoftWrapEnabled(False)
+    assert wrap_hits == [True, False], wrap_hits
 
     copies = loaded_libs("libQt6Core.so")
     print(f"qmn module: {qmn.__file__}")

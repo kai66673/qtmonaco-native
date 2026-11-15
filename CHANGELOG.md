@@ -3,6 +3,52 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [Unreleased] — Gate 2 open; the M25 soft-wrap car landed
+
+### Added
+- **M25 soft wrap (Gate 2, car 1).** `options().softWrapEnabled` — the 14th
+  options knob, default OFF, full M19 signal discipline. WORD wrap only: an
+  unbreakable token (a word longer than the viewport, or after a run of
+  spaces) OVERFLOWS past the right edge; wrap width =
+  `horizontalViewportWidth()`; the horizontal-scroll doors go no-op while
+  wrap is ON. Measurement is lazy and viewport-bounded (the 8 ms paint
+  budget with the escalation pattern for pathologically long lines).
+- **`CodeDocument`** (`src/view/`, M25 machine 1): the editor-owned text
+  model — the `TextBuffer` moved into it (the sanctioned OWNERSHIP
+  deviation, AGENTS.md), plus the URI door, the modified flag (`markSaved`)
+  and the `editApplied(start, end, inserted)` edit stream with pre-op
+  offsets — exactly the LSP `textDocument/didChange` semantics and the diff
+  car's re-key signal. Reachable through `CodeEditor::document()`, ALWAYS
+  non-null, editor-attached for life (v1: one editor per document). The
+  wheel binds it (the bound-type THREE-copy sync held; ctor removed —
+  editor-owned, like options()/theme()).
+- The wrap knob through the demo stack: C++ dialog checkbox («Перенос
+  длинных строк по словами») + template round trip + `tst_demo` drift
+  tripwire; the pydemo mirror (`soft_wrap_enabled`, wheel >= 1.7.0
+  expected — an honest `AttributeError` on older wheels).
+
+### Changed
+- **The `visible*` row doors changed UNITS, not names (lines -> visual
+  slots)** — the sanctioned Gate-2 deviation, no new doors:
+  `visibleLineCount()`, `firstVisibleLine()` and `modelLineForVisibleIndex()`
+  now walk ONE slot table shared with folds (a fold range may clip a
+  wrapped line's slots partially; fold markers ride the first slot, the
+  hidden-run ellipsis the last visible slot). With wrap OFF, slot == line:
+  the wrap-OFF path keeps the 1.6.1 cost exactly (the slot table collapses,
+  the paint loop is verbatim). `parity_monaco.py`'s `lh` scroll math was
+  revalidated against the repaired wheel.
+- Caret navigation follows the slot unit: Up/Down move ONE visual slot and
+  keep row-local-x proximity (a column walks down a wrap chain);
+  `positionAt` lands mid-wrap on the visual line you clicked;
+  `ensureCaretVisible`/`revealAt`/the IME anchor ride slot space.
+- `tst_codeeditor` grew 13 softWrap slots — 8 PURE map tests written
+  BEFORE the paint/hit/caret wiring (the E1→E2 lesson), then behavior
+  (hit-test, caret proximity, fold∧wrap, selection ink) and the perf DoD
+  tripwire `softWrapResizeStormStaysInsideTheEscalationBudget` (6 MiB /
+  12k-line document, 40-width resize storm; the STRUCTURAL tripwire — row
+  count stays O(viewport) above docLines — is the real guard, the
+  wall-clock legs carry 5x+ margin).
+
 ## [1.6.1] — 2026-11-15
 
 ### Added

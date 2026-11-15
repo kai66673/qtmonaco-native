@@ -47,6 +47,7 @@ from PySide6.QtCore import Signal
 
 CodeEditor = _ext.qmn.view.CodeEditor
 CodeEditorTheme = _ext.qmn.view.CodeEditorTheme
+CodeDocument = _ext.qmn.view.CodeDocument  # M25 (editor-owned, like the theme)
 TextPosition = _ext.qmn.view.TextPosition
 
 
@@ -260,4 +261,4 @@ class Monaco(CodeEditor):
         )
 
 
-__all__ = ["CodeEditor", "CodeEditorTheme", "TextPosition", "Monaco"]
+__all__ = ["CodeEditor", "CodeEditorTheme", "CodeDocument", "TextPosition", "Monaco"]

@@ -9,10 +9,12 @@ for headless smoke runs, failures land in the status bar, never a blocking
 dialog), and the SAME widget underneath: the C++ CodeEditor through the
 shiboken wrappers of the shipped qmn_native wheel.
 
-The settings surface is the FULL fourteen knobs of the C++ demo: the 13
-option knobs ride `options()` (M19/M20/M21) and the 14th, the M24 theme
+The settings surface is the FULL fifteen knobs of the C++ demo: the 14
+option knobs ride `options()` (M19/M20/M21/M25) and the 15th, the M24 theme
 preset, rides `theme()` — `CodeEditorTheme` crosses the wheel bindings from
-wheel 1.6.1 on, so the theme combo is the real thing here too.
+wheel 1.6.1 on, so the theme combo is the real thing here too. The 14th
+option knob, the M25 soft-wrap toggle, needs a wheel that carries M25
+(>= 1.7.0; the path dep into dist/ is always current).
 """
 
 from __future__ import annotations
@@ -140,7 +142,7 @@ THEME_LABELS = [
 
 @dataclass
 class EditorSettings:
-    """Mirror of the C++ EditorSettings template, all fourteen knobs.
+    """Mirror of the C++ EditorSettings template, all fifteen knobs.
     Defaults = CodeEditor's shipped defaults, like the C++ tripwire test
     demands."""
 
@@ -155,6 +157,7 @@ class EditorSettings:
     auto_close_enabled: bool = True
     read_only: bool = False
     indent_guides_enabled: bool = True
+    soft_wrap_enabled: bool = False  # M25 word wrap (14th options knob)
     code_font: QFont = field(default_factory=demo_default_code_font)
     zoom_factor: float = 1.0
     theme_preset: ThemePreset = ThemePreset.Default
@@ -177,6 +180,7 @@ def apply_settings(editor: CodeEditor, settings: EditorSettings) -> None:
     options.setAutoCloseEnabled(settings.auto_close_enabled)
     options.setReadOnly(settings.read_only)
     options.setIndentGuidesEnabled(settings.indent_guides_enabled)
+    options.setSoftWrapEnabled(settings.soft_wrap_enabled)  # M25 (14th options knob)
     options.setCodeFont(settings.code_font)
     options.setZoomFactor(settings.zoom_factor)
 
@@ -204,6 +208,7 @@ def settings_from(editor: CodeEditor) -> EditorSettings:
         auto_close_enabled=options.autoCloseEnabled(),
         read_only=options.isReadOnly(),
         indent_guides_enabled=options.indentGuidesEnabled(),
+        soft_wrap_enabled=options.softWrapEnabled(),  # M25
         code_font=options.codeFont(),
         zoom_factor=options.zoomFactor(),
         theme_preset=editor.theme().kind(),  # M24: live kind, Custom included
@@ -282,6 +287,8 @@ class SettingsDialog(QDialog):
         auto_close.setChecked(initial.auto_close_enabled)
         indent_guides = QCheckBox("\u0412\u0435\u0440\u0442\u0438\u043a\u0430\u043b\u044c\u043d\u044b\u0435 \u043b\u0438\u043d\u0438\u0438 \u043e\u0442\u0441\u0442\u0443\u043f\u043e\u0432", self)
         indent_guides.setChecked(initial.indent_guides_enabled)
+        soft_wrap = QCheckBox("\u041f\u0435\u0440\u0435\u043d\u043e\u0441 \u0434\u043b\u0438\u043d\u043d\u044b\u0445 \u0441\u0442\u0440\u043e\u043a \u043f\u043e \u0441\u043b\u043e\u0432\u0430\u043c", self)
+        soft_wrap.setChecked(initial.soft_wrap_enabled)  # M25 (14th options knob)
         tab_focus = QCheckBox("Tab \u043f\u0435\u0440\u0435\u0432\u043e\u0434\u0438\u0442 \u0444\u043e\u043a\u0443\u0441 (\u043d\u0435 \u043e\u0442\u0441\u0442\u0443\u043f)", self)
         tab_focus.setChecked(initial.tab_changes_focus)
         overview_ruler = QCheckBox("\u041b\u0438\u043d\u0435\u0439\u043a\u0430 \u043e\u0431\u0437\u043e\u0440\u0430 \u0441\u043f\u0440\u0430\u0432\u0430", self)
@@ -297,6 +304,7 @@ class SettingsDialog(QDialog):
         text_form.addRow(auto_indent)
         text_form.addRow(auto_close)
         text_form.addRow(indent_guides)
+        text_form.addRow(soft_wrap)  # M25 (14th options knob)
         text_form.addRow(tab_focus)
         text_form.addRow(overview_ruler)
         text_form.addRow(scroll_past_end)
@@ -324,6 +332,7 @@ class SettingsDialog(QDialog):
             "auto_indent_enabled": auto_indent,
             "auto_close_enabled": auto_close,
             "indent_guides_enabled": indent_guides,
+            "soft_wrap_enabled": soft_wrap,  # M25
             "tab_changes_focus": tab_focus,
             "overview_ruler_enabled": overview_ruler,
             "scroll_beyond_last_line_enabled": scroll_past_end,

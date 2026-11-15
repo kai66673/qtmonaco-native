@@ -51,7 +51,7 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
 - `pydemo/` — a uv project, NOT built by CMake: the Python analog of
   `qmn-demo` running on the shipped wheel (path dep into gitignored
   `dist/`; `uv.lock` stays uncommitted). Mirrors the C++ demo door-for-door
-  including the 14 settings knobs (13 via `options()`, the M24 theme preset
+  including the 15 settings knobs (14 via `options()`, the M24 theme preset
   via `theme()`).
 
 Include headers relative to `src/` (CMake adds `src/` as a PUBLIC include dir):
@@ -204,10 +204,10 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
   `build_in_container.sh --codegen`. The 1.6.1 run caught the drift for
   real: adding `CodeEditorTheme` to typesystem+CMake but not to the
   script's header list produced "type ... specified in typesystem, but not
-  defined" and NO theme wrapper TU. What the binding wraps today: the three
-  QObjects (`CodeEditor`/`CodeEditorOptions`/`CodeEditorTheme`, ctor
-  removed — editor-owned), `TextPosition`, the five decoration record
-  structs and every nested enum; only `PerfStats` and the
+  defined" and NO theme wrapper TU. What the binding wraps today: the four
+  QObjects (`CodeEditor`/`CodeEditorOptions`/`CodeEditorTheme`/
+  `CodeDocument`, ctors removed — editor-owned), `TextPosition`, the five
+  decoration record structs and every nested enum; only `PerfStats` and the
   SlotEdit/UndoMark/std::function machinery stay unbound by design.
 - **Pins are load-bearing:** `PySide6-Essentials==6.12.0` /
   `shiboken6_generator==6.12.0` at build time, `~=6.12.0` at runtime — the
