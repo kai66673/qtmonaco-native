@@ -1,5 +1,8 @@
 #include "CodeEditor.hpp"
 
+#include "diff/LineDiff.hpp" // M10 engine (QtCore-only layer; PRIVATE link —
+                              // the include stays INSIDE this .cpp: no diff
+                              // type crosses the public view header)
 #include "view/CodeDocument.hpp"
 #include "view/CodeEditorAccessible.hpp"
 #include "view/CodeEditorOptions.hpp"
@@ -51,7 +54,41 @@ using Role = qmn::view::CodeEditorTheme::Role;
 
 namespace qmn::view {
 
+// M10 (Gate 2): the diff-mode state, deliberately defined HERE — the only
+// place the engine types are even named (PLAN §M10: no diff type crosses
+// the public view header, which is what keeps the doors Shiboken-wrappable).
+// The row axis is the M25 wrap map's prefix-sum algebra RE-KEYED BY ROW:
+// aligned rows are the slot space; weight(row) = 0 when the row's MODIFIED
+// line sits in a collapsed fold's hidden range (the original-side twin on
+// that same row disappears with it — honest v1), else 1 (soft wrap is inert
+// while diff mode is live: diff > wrap > fold/plain, exactly ONE live row
+// space at a time, so the wrap/fold tables stay current underneath and the
+// diff-off world restores byte-for-byte on clear).
+struct CodeEditor::DiffState {
+    qmn::diff::LineDiff::Result result; // engine frame: hunks + aligned rows
+    QVector<int> rowPrefix;   // rowPrefix[r] = slots in rows [0,r); back() = total
+    QVector<int> slotToRow;   // materialized inverse (only weight-1 rows emit)
+    QVector<int> modLineToRow;// MODIFIED line -> aligned row, -1 hidden/unknown
+    int slotTotal = 0;
+    CodeDocument* originalDoc = nullptr; // NON-OWNING (pointer door) or the
+                                         // editor-owned standalone child
+};
+
 namespace {
+
+// The engine's line feed: whole-buffer snapshot per recompute (the 120 ms
+// debounce caps the rate; the tst_diff perf tripwire measured the engine
+// itself at ~20 ms per 20k-line pair — the QStringList feed rides lineText,
+// O(view-paying) per line, same cost class).
+QStringList collectBufferLines(const qmn::core::TextBuffer& buf)
+{
+    QStringList out;
+    const int n = std::max(1, buf.lineCount());
+    out.reserve(n);
+    for (int i = 0; i < n; ++i)
+        out << buf.lineText(i);
+    return out;
+}
 
 // Document order for text positions (multi-caret bookkeeping). Lexicographic
 // (line, col) is exactly document order for resolved positions.
@@ -314,6 +351,12 @@ CodeEditor::CodeEditor(QWidget* parent)
             if (foldMapRebuilt)
                 retuneWrapForFolds();
         }
+        // M10: the modified side of the live-update seam — typing, paste,
+        // undo/redo replay and setPlainText alike restart the debounce (the
+        // fold/wrap shifts above already re-keyed the row axis for THIS
+        // frame's fold state; the recompute replaces the stale rows_).
+        if (diff_)
+            scheduleDiffRecompute();
         // M22: every mutation invalidates the fold-hover region (the PLAN
         // invalidation rule; the observer fires for EVERY primitive edit,
         // so this single hook covers typing, paste, undo replay, DnD and
@@ -426,6 +469,16 @@ CodeEditor::CodeEditor(QWidget* parent)
         update();
     });
 
+    // M10: the live-update debounce (PLAN §M10 mechanics): every primitive
+    // mutation of either side restarts ONE single-shot; the burst coalesces
+    // into a single full recompute. diff_ is re-checked at fire time (the
+    // mode may have cleared in between).
+    diffRecomputeTimer_.setSingleShot(true);
+    connect(&diffRecomputeTimer_, &QTimer::timeout, this, [this] {
+        if (diff_)
+            recomputeDiff();
+    });
+
     // M13: seed the fold-map caches before the first paint/edit (empty
     // runs: slot == model line, visibleLineTotal() == lineCount()).
     foldDocLines_ = buffer_.lineCount();
@@ -434,6 +487,20 @@ CodeEditor::CodeEditor(QWidget* parent)
 
 CodeEditor::~CodeEditor()
 {
+    // M10 destruction-order trap (release-only SIGSEGV found in car 2):
+    // child QObjects are deleted LATER, inside ~QObject::deleteChildren()
+    // — after every member of CodeEditor is gone — and a dying child
+    // emits destroyed() straight through the still-severable watch
+    // connections. The lambda's `diff_` guard would then read the
+    // already-destroyed unique_ptr: its storage still holds the stale
+    // (freed) pointer, so clearDiffDocuments() would dereference it AND
+    // double-free the DiffState. Tear the mode down HERE, while the
+    // members are alive: the guard then sees a true nullptr for free.
+    diffRecomputeTimer_.stop();
+    if (diff_ && diff_->originalDoc)
+        disconnect(diff_->originalDoc, nullptr, this, nullptr);
+    diff_.reset();
+
     if (perf_.count > 0) {
         fprintf(stderr, "CodeEditor typing perf: keys=%lld mean=%lldns max=%lldns\n",
                 perf_.count, perf_.meanNs(), perf_.maxNs);
@@ -633,7 +700,7 @@ TextPosition CodeEditor::positionAt(const QPoint& widgetPos) const
     // model line, formula bit-for-bit the old one).
     const int row = (widgetPos.y() - padding_ + vScroll_) / lineHeight_;
     pos.line = modelLineForVisibleIndex(row); // clamps to the visible range
-    if (softWrapEnabled_) {
+    if (softWrapEnabled_ && !diff_) {
         // M25 machine 2: the click lands on a ROW — y picked the slot, the
         // slot's RowPlan owns the col window this x maps into, and the row's
         // own segment origin is the x anchor (hScroll_ is 0 with wrap ON, so
@@ -1602,9 +1669,10 @@ void CodeEditor::revealAt(TextPosition pos, RevealMode mode)
 {
     const TextPosition p = clampPos(pos);
     revealLine(p.line); // M13: a folded-away line is unfolded before reveal
-    if (softWrapEnabled_)
+    if (softWrapEnabled_ && !diff_)
         ensureWrapLinesCovered(p.line, p.line); // M25: exact caret row, same
-                                                // eager rule as ensureCaretVisible
+                                                // eager rule as ensureCaretVisible;
+                                                // M10: inert while diff is live
     const int top = slotOfPosition(p) * lineHeight_; // M25: the POSITION's row
     const int bot = top + lineHeight_;               // (wrap OFF: the line's
                                                      // slot, v1 form)
@@ -1673,7 +1741,7 @@ void CodeEditor::ensureCaretVisible()
     // pre-M13 formula exactly).
     if (visibleIndexOfModelLine(caret_.line) < 0)
         revealLine(caret_.line);
-    if (softWrapEnabled_)
+    if (softWrapEnabled_ && !diff_)
         // M25: the caret's row drives the scroll target, so its line is
         // measured EAGERLY - a provisional count would scroll to the wrong
         // row. (Measuring is the same line materialization hitLine already
@@ -1922,6 +1990,12 @@ void CodeEditor::rulerScrollTo(int y)
 
 int CodeEditor::visibleLineTotal() const
 {
+    // M10 (diff > wrap > fold/plain): diff mode counts ALIGNMENT ROWS that
+    // survive the fold zero-weights — the ONE live row space while the mode
+    // is on. The wrap/fold totals below keep their own truth the whole
+    // time, so clearDiffDocuments() restores the v1.6.1 map for free.
+    if (diff_)
+        return std::max(1, diff_->slotTotal);
     // M25's sanctioned unit change (PLAN §M25): with wrap ON this counts
     // VISUAL SLOTS, with wrap OFF the M13 line space. Exactly one row space
     // is live at a time — foldVisibleTotal_ never holds a slot sum, so
@@ -1931,6 +2005,10 @@ int CodeEditor::visibleLineTotal() const
 
 int CodeEditor::visibleIndexOfModelLine(int line) const
 {
+    // M10: in diff mode `line` is a MODIFIED line (the caret space; PLAN
+    // §M10) addressed through the row tables.
+    if (diff_)
+        return diffVisibleIndexOfModLine(line);
     if (softWrapEnabled_)
         return wrapIndexOfLine(line); // the slot map (it re-checks bounds and
                                       // keeps hidden lines at -1)
@@ -1954,6 +2032,10 @@ int CodeEditor::visibleIndexOfModelLine(int line) const
 
 int CodeEditor::modelLineForVisibleIndex(int visibleIndex) const
 {
+    // M10: slot -> MODIFIED line over the row axis (blank cells resolve to
+    // the nearest visible modified line, nearest-below first).
+    if (diff_)
+        return diffModLineForSlot(visibleIndex);
     if (softWrapEnabled_)
         return wrapLineForSlot(visibleIndex); // slot -> model line (the prefix
                                               // table's inverse; total by
@@ -2009,6 +2091,12 @@ void CodeEditor::rebuildHiddenRuns()
         hidden += last - first + 1;
     }
     foldVisibleTotal_ = docLines - hidden; // runs never cover line 0, so >= 1
+
+    // M10: the fold half of the row-axis re-key (PLAN §M10: fold mutations
+    // re-key the tables WITHOUT an engine recompute — the rows_ alignment
+    // stands, only the zero-weights move).
+    if (diff_)
+        rebuildDiffRowAxis();
 }
 
 bool CodeEditor::shiftFoldStateForEdit(const qmn::core::TextBuffer::EditEvent& ev)
@@ -2059,6 +2147,270 @@ bool CodeEditor::shiftFoldStateForEdit(const qmn::core::TextBuffer::EditEvent& e
         return true; // the run indices moved: the wrap layer resyncs weights
     }
     return false;
+}
+
+// --- M10 diff view (Gate 2; contract: PLAN GATE 2 §M10) ------------------
+// Everything the diff mode IS lives here; the row axis (aligned rows as the
+// slot space, blank cells as weight-1 pseudo-rows) is a re-key of the M13/
+// M25 prefix-sum algebra from LINES to ROWS, so the paint/hit/caret/scroll/
+// ruler machinery rides it through the three visible* doors with zero
+// further branches.
+
+void CodeEditor::setDiffDocuments(CodeDocument* original, CodeDocument* modified,
+                                  const QString& language)
+{
+    // Silent refusals on bad input (the v1 door style): the original must
+    // be STANDALONE — an attached original belongs to some editor's caret/
+    // undo world and the diff view must never make it editable — and a
+    // `modified` attached to ANOTHER editor is that editor's writable
+    // truth, not ours to diff in place.
+    if (!original || !modified || original->editor_ ||
+        (modified->editor_ && modified->editor_ != this))
+        return;
+    if (modified->editor_ != this) {
+        // Standalone modified: one-shot TEXT feed through our own replace
+        // machinery (caret reset, fold drop, scroll reset come for free);
+        // the editor's document stays the single writable truth.
+        document_->setPlainText(modified->toPlainText());
+    }
+    if (diff_ && diff_->originalDoc)
+        disconnect(diff_->originalDoc, nullptr, this, nullptr);
+    diff_ = std::make_unique<DiffState>();
+    diff_->originalDoc = original; // NON-OWNING: the consumer keeps it alive
+    watchDiffOriginal(original);
+    beginDiffMode(language);
+}
+
+void CodeEditor::setDiffDocuments(const QString& original, const QString& modified,
+                                  const QString& language)
+{
+    if (!diffStandaloneOriginal_) {
+        // The string door's original side: a STANDALONE document made a
+        // CHILD of the widget (the QObject owns the C++ lifetime; the
+        // editor_ pointer stays null — parenting is not attaching). Kept
+        // across doors so repeated string doors reuse one doc.
+        diffStandaloneOriginal_ = new CodeDocument();
+        diffStandaloneOriginal_->setParent(this);
+    }
+    if (diff_ && diff_->originalDoc && diff_->originalDoc != diffStandaloneOriginal_)
+        disconnect(diff_->originalDoc, nullptr, this, nullptr); // release a
+                                                                // stale external
+                                                                // original
+    // Re-watch EVERY entry (idempotent): a previous clearDiffDocuments
+    // disconnected this very doc (it was the then-current originalDoc),
+    // so the live seam must be re-established or the second string-door
+    // session would diff blind.
+    watchDiffOriginal(diffStandaloneOriginal_);
+    document_->setPlainText(modified); // attached path: the editor's replace
+                                       // machinery owns the bookkeeping
+    diffStandaloneOriginal_->setPlainText(original); // standalone: silent-
+                                                     // through-signals feed
+    diff_ = std::make_unique<DiffState>();
+    diff_->originalDoc = diffStandaloneOriginal_;
+    beginDiffMode(language);
+}
+
+void CodeEditor::clearDiffDocuments()
+{
+    if (!diff_)
+        return;
+    if (diff_->originalDoc)
+        disconnect(diff_->originalDoc, nullptr, this, nullptr);
+    diffRecomputeTimer_.stop();
+    diff_.reset(); // the row space drops back to wrap/fold: those tables
+                   // were kept CURRENT the whole time (the observer seam is
+                   // gated only on its DIFF half), so the v1.6.1 map
+                   // restores for free — the M25 knob-off precedent.
+    updateScrollBarRange(); // clamps vScroll_ into the restored space
+    update();
+}
+
+bool CodeEditor::isDiffMode() const
+{
+    return diff_ != nullptr; // the ONE truth door: state behind the pointer
+}
+
+void CodeEditor::nextChange()
+{
+    if (!diff_)
+        return;
+    const int modLines = buffer_.lineCount();
+    for (const qmn::diff::LineDiff::Hunk& h : diff_->result.hunks) {
+        // Strict-edge rule (header docs): a hunk owns the closed modified
+        // span [modifiedLine, modifiedLine+max(count,1)-1] — an insert
+        // hunk's insertion point LINE counts as inside — so `next` from
+        // any line at/inside the current hunk lands on the NEXT hunk.
+        if (h.modifiedLine > caret_.line) {
+            const TextPosition pos{std::clamp(h.modifiedLine, 0, modLines - 1), 0};
+            setPosition(pos);
+            revealAt(pos, RevealMode::Minimal);
+            return;
+        }
+    }
+    // No wrap-around at the document bottom (documented divergence from
+    // Monaco's cyclic F7): out of hunks below, this is a no-op.
+}
+
+void CodeEditor::previousChange()
+{
+    if (!diff_)
+        return;
+    const int modLines = buffer_.lineCount();
+    for (int i = diff_->result.hunks.size() - 1; i >= 0; --i) {
+        const qmn::diff::LineDiff::Hunk& h = diff_->result.hunks[i];
+        const int end = h.modifiedLine + std::max(1, h.modifiedCount) - 1;
+        if (end < caret_.line) { // strict edge, mirrored (see nextChange)
+            const int target = h.modifiedCount > 0
+                                   ? h.modifiedLine + h.modifiedCount - 1
+                                   : h.modifiedLine; // insert hunk: the
+                                                     // insertion point line
+            const TextPosition pos{std::clamp(target, 0, modLines - 1), 0};
+            setPosition(pos);
+            revealAt(pos, RevealMode::Minimal);
+            return;
+        }
+    }
+    // No wrap-around at the document top (see nextChange).
+}
+
+void CodeEditor::watchDiffOriginal(CodeDocument* doc)
+{
+    // Idempotent (a re-watch disconnects first — the string door re-uses
+    // its lazy standalone doc across doors).
+    disconnect(doc, nullptr, this, nullptr);
+    // The original side of the live-update seam (PLAN §M10): its own
+    // editApplied stream (the standalone ctor installed the observer)
+    // restarts the SAME debounce the modified side rides.
+    connect(doc, &CodeDocument::editApplied, this, [this] {
+        if (diff_)
+            scheduleDiffRecompute();
+    });
+    // The destroyed() hookup for the NON-OWNING pointer door (harmless for
+    // the parented string-door doc: a dying parent takes the child with it
+    // and Qt auto-severs connections to a destructed receiver).
+    connect(doc, &QObject::destroyed, this, [this, doc] {
+        if (diff_ && diff_->originalDoc == doc)
+            clearDiffDocuments();
+    });
+}
+
+void CodeEditor::scheduleDiffRecompute()
+{
+    diffRecomputeTimer_.start(kDiffDebounceMs); // a burst coalesces; every
+                                                // mutation re-arms the
+                                                // single-shot (the v1
+                                                // debounce shape)
+}
+
+void CodeEditor::recomputeDiff()
+{
+    if (!diff_ || !diff_->originalDoc)
+        return;
+    // Caret anchoring (PLAN §M10): the caret keeps its SCREEN ROW across
+    // the table swap; a caret on a line the old axis never carried, or one
+    // the new axis has not mapped yet (mid-debounce edits), degrades to
+    // no shift + the clamp below (nearest-line behavior, honest v1).
+    const int before = diffVisibleIndexOfModLine(caret_.line);
+    diff_->result = qmn::diff::LineDiff::compute(collectBufferLines(diff_->originalDoc->buffer_),
+                                                 collectBufferLines(buffer_));
+    rebuildDiffRowAxis();
+    const int after = diffVisibleIndexOfModLine(caret_.line);
+    if (before >= 0 && after >= 0)
+        setVScroll(vScroll_ + (after - before) * lineHeight_);
+    else
+        setVScroll(vScroll_); // re-clamps into the (possibly changed) space
+    updateScrollBarRange();
+    update();
+}
+
+void CodeEditor::beginDiffMode(const QString& language)
+{
+    diffRecomputeTimer_.stop(); // the feeds just done must not double-
+                                // compute: the FIRST compute is synchronous
+    setLanguage(language); // ONE language for the whole diff view (PLAN
+                           // §M10; "" = plain, unknown id = plain)
+    recomputeDiff();
+    setVScroll(0); // entering diff mode always starts at the document top
+    updateScrollBarRange();
+    update();
+}
+
+void CodeEditor::rebuildDiffRowAxis()
+{
+    if (!diff_)
+        return;
+    DiffState& d = *diff_;
+    const int rows = d.result.rows.size();
+    d.rowPrefix.resize(rows + 1);
+    d.rowPrefix[0] = 0;
+    d.slotToRow.clear();
+    d.slotToRow.reserve(rows);
+    d.modLineToRow.fill(-1, std::max(1, buffer_.lineCount()));
+    for (int r = 0; r < rows; ++r) {
+        const int mod = d.result.rows[r].modifiedLine;
+        // The fold overlay, in ROW units: a row dies exactly when the
+        // MODIFIED line it carries sits in a hidden run (its original-side
+        // twin disappears with the row — the decided honest v1); a blank
+        // cell has no line to hide, so it is weight 1 by definition.
+        const bool hidden = mod >= 0 && lineIsHiddenByFold(mod);
+        d.rowPrefix[r + 1] = d.rowPrefix[r] + (hidden ? 0 : 1);
+        if (!hidden) {
+            d.slotToRow.push_back(r);
+            if (mod >= 0 && mod < d.modLineToRow.size())
+                d.modLineToRow[mod] = r;
+        }
+    }
+    d.slotTotal = d.rowPrefix[rows];
+}
+
+int CodeEditor::diffVisibleIndexOfModLine(int line) const
+{
+    if (!diff_ || line < 0 || line >= diff_->modLineToRow.size())
+        return -1; // out of range, or a line the current alignment does not
+                   // carry (transient: an edit inside the debounce window
+                   // created it — the recompute lands the rows ≤120 ms later)
+    const int row = diff_->modLineToRow[line];
+    if (row < 0)
+        return -1; // fold-hidden or unmapped (rebuildDiffRowAxis records
+                   // only surviving rows, so a set entry is always visible)
+    return diff_->rowPrefix[row]; // Σ weights above: the row's FIRST slot
+                                  // (every diff row is weight 1: one slot)
+}
+
+int CodeEditor::diffModLineForSlot(int slot) const
+{
+    if (!diff_ || diff_->slotToRow.isEmpty())
+        return 0; // keep the door total (modelLineForVisibleIndex's v1 rule)
+    slot = std::clamp(slot, 0, int(diff_->slotToRow.size()) - 1);
+    int row = diff_->slotToRow[slot];
+    int mod = diff_->result.rows[row].modifiedLine;
+    if (mod >= 0) // transient mid-debounce staleness clamps to the model
+        return std::min(mod, buffer_.lineCount() - 1);
+    // Blank cell (an original-only row): the decided inverse is the
+    // NEAREST visible modified line, nearest-below first — walk the row
+    // axis down, then up (a click on a delete band lands on the next line).
+    const int rows = diff_->result.rows.size();
+    for (int r = row + 1; r < rows; ++r)
+        if (diff_->rowPrefix[r] != diff_->rowPrefix[r + 1]) { // survives folds
+            mod = diff_->result.rows[r].modifiedLine;
+            if (mod >= 0)
+                return std::min(mod, buffer_.lineCount() - 1);
+        }
+    for (int r = row - 1; r >= 0; --r)
+        if (diff_->rowPrefix[r] != diff_->rowPrefix[r + 1]) {
+            mod = diff_->result.rows[r].modifiedLine;
+            if (mod >= 0)
+                return std::min(mod, buffer_.lineCount() - 1);
+        }
+    return 0; // the document has no modified line at all (empty modified +
+              // pure-delete hunks): line 0 is the only addressable position
+}
+
+int CodeEditor::diffRowForSlot(int slot) const
+{
+    if (!diff_ || slot < 0 || slot >= diff_->slotToRow.size())
+        return -1;
+    return diff_->slotToRow[slot];
 }
 
 bool CodeEditor::indentFoldsActive() const
@@ -2378,6 +2730,21 @@ int CodeEditor::nextVisibleModelLine(int line) const
     const int docLines = buffer_.lineCount();
     if (line >= docLines - 1)
         return line; // at (or past) the document end: caller clamps
+    // M10: in diff mode these two doors CANNOT walk slots: a blank
+    // alignment cell's inverse (nearest modified, tie-below-first) echoes
+    // the CURRENT line when the cell sits directly ABOVE it — Up over a
+    // delete band would stall on every keypress (the demo found it; Down
+    // never echoes: the tie-below-first rule lands on the line past the
+    // band). The caret space is the MODIFIED line sequence: step to the
+    // direct neighbor the row axis carries (fold-zeroed rows skip;
+    // transient rows the debounce has not landed yet read as unwalkable —
+    // honest interim, the recompute is <=120 ms away).
+    if (diff_) {
+        for (int l = line + 1; l < docLines; ++l)
+            if (diffVisibleIndexOfModLine(l) >= 0)
+                return l;
+        return line;
+    }
     const int s = visibleIndexOfModelLine(line);
     if (s >= 0) {
         // visible: the next slot, which the run merge guarantees lands on
@@ -2401,6 +2768,16 @@ int CodeEditor::prevVisibleModelLine(int line) const
 {
     if (line <= 0)
         return line; // at the document start: caller clamps
+    // M10: the slot-walk echo trap in diff mode (see nextVisibleModelLine's
+    // comment for the full story: the blank cell above the caret echoes its
+    // own line through the nearest-modified inverse): direct modified-line
+    // neighbor scan instead.
+    if (diff_) {
+        for (int l = line - 1; l >= 0; --l)
+            if (diffVisibleIndexOfModLine(l) >= 0)
+                return l;
+        return line;
+    }
     const int s = visibleIndexOfModelLine(line);
     if (s >= 0) {
         if (s > 0)
@@ -2477,6 +2854,12 @@ const CodeEditor::WrapInfo* CodeEditor::liveWrapPlan(int line) const
 
 int CodeEditor::wrapSlotCount(int line) const
 {
+    // M10: soft wrap is INERT while diff mode is live (the row space is the
+    // alignment axis, every surviving row is weight 1): the band slot-runs
+    // and the M25 span-cut layers must see one row per line, matching what
+    // the paint loop walks through the diff doors.
+    if (diff_)
+        return 1;
     const WrapInfo* plan = liveWrapPlan(line);
     return plan ? int(plan->starts.size()) + 1 : 1; // unmeasured (or dead):
                                                     // the honest wrap-off row
@@ -2833,10 +3216,11 @@ void CodeEditor::prepareWrapViewport(int firstSlot, int rows)
 
 CodeEditor::RowPlan CodeEditor::rowPlan(int slot) const
 {
-    // Invalid (slot < 0) whenever wrap is OFF: the v1.6.1 paint/hit/caret
-    // geometry keeps its own line-space math and must never branch here.
+    // Invalid (slot < 0) whenever wrap is OFF or diff mode is live: the
+    // v1.6.1 paint/hit/caret geometry keeps its own line-space math and
+    // must never branch here (M10: wrap is inert in diff v1).
     RowPlan p;
-    if (!softWrapEnabled_ || slot < 0)
+    if (!softWrapEnabled_ || diff_ || slot < 0)
         return p; // invalid: the v1.6.1 paint/hit/caret geometry keeps its
                   // own line-space math and must never branch here
     const int line = wrapLineForSlot(slot);
@@ -2883,9 +3267,11 @@ int CodeEditor::segIndexOfCol(int line, int col) const
 
 int CodeEditor::slotOfPosition(TextPosition p) const
 {
-    if (!softWrapEnabled_)
+    if (!softWrapEnabled_ || diff_)
         return visibleIndexOfModelLine(p.line); // the fold map's door (v1:
-                                                // slot == model line)
+                                                // slot == model line); M10:
+                                                // in diff mode this IS the
+                                                // row door (one row per line)
     const int first = wrapIndexOfLine(p.line); // -1 hidden/out of range
     if (first < 0)
         return -1;
@@ -2915,6 +3301,12 @@ TextPosition CodeEditor::rowStepTarget(TextPosition from, bool up) const
         }
         return pos;
     };
+    // M10: diff mode rides the plain fold-aware MODEL-line walk (the
+    // degrade path is the whole story): Up/Down skips to the next visible
+    // modified line and never stops on a blank alignment row — a blank
+    // cell has no caret space to land on.
+    if (diff_)
+        return degrade(up);
     const int mySlot = slotOfPosition(from);
     if (mySlot < 0)
         return degrade(up);
@@ -4006,7 +4398,9 @@ void CodeEditor::paintEvent(QPaintEvent*)
     int vt = std::max(1, visibleLineTotal()); // scroll-past-end can push
     int firstSlot = std::clamp((vScroll_ - padding_) / lh, 0, vt - 1); // the slot past
     int lastSlot = std::min(vt - 1, firstSlot + visibleLineCount());   // the last line
-    if (softWrapEnabled_) {
+    if (softWrapEnabled_ && !diff_) {
+        // M10: diff mode never enters the wrap viewport entry (wrap inert);
+        // the row window above already came from the diff row totals.
         prepareWrapViewport(firstSlot, lastSlot - firstSlot + 1);
         vt = std::max(1, visibleLineTotal());
         firstSlot = std::clamp((vScroll_ - padding_) / lh, 0, vt - 1);
@@ -4325,6 +4719,16 @@ void CodeEditor::paintEvent(QPaintEvent*)
         const QColor bright = theme_->ink(Role::GutterActiveDigits); // fallback: Text
         auto dit = diagnostics_.begin(); // sorted by startLine: one forward walk
         for (int slot = firstSlot; slot <= lastSlot; ++slot) { // M13: SLOTS
+            // M10 machine 2 (interim single-column paint): an alignment
+            // row with no MODIFIED line (a delete-side blank cell) carries
+            // NO gutter chrome — no number, no dot, no triangle. The
+            // two-column gutter/connector pass replaces this guard in
+            // machine 3.
+            if (diff_) {
+                const int dRow = diffRowForSlot(slot);
+                if (dRow < 0 || diff_->result.rows[dRow].modifiedLine < 0)
+                    continue;
+            }
             // M25 (the final rule): gutter chrome — number, breakpoint dot,
             // severity icon, fold triangle — rides the line's FIRST row
             // only; continuation rows keep the gutter clean (VS Code
@@ -4390,8 +4794,16 @@ void CodeEditor::paintEvent(QPaintEvent*)
     // performance story on top of the slot-shrunk scroll space).
     // M25: the caret's ink rides its OWN row (the slot of its segment,
     // -1 when the caret line is fold-hidden) — resolved once per frame.
-    const int caretRowSlot = softWrapEnabled_ ? slotOfPosition(caret_) : -1;
+    const int caretRowSlot = softWrapEnabled_ && !diff_ ? slotOfPosition(caret_) : -1;
     for (int slot = firstSlot; slot <= lastSlot; ++slot) {
+        // M10 machine 2: a blank alignment cell paints nothing (the
+        // interim single-column rule; machine 3 turns it into the
+        // connector strip + the original column's text).
+        if (diff_) {
+            const int dRow = diffRowForSlot(slot);
+            if (dRow < 0 || diff_->result.rows[dRow].modifiedLine < 0)
+                continue;
+        }
         const int line = modelLineForVisibleIndex(slot);
         const int yTop = padding_ + slot * lh - vScroll_;
         const GeoSlot* gs = hitLine(line);

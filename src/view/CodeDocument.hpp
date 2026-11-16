@@ -23,11 +23,13 @@
 // highlight engine's seam) and multiplexes every event into this object via
 // the private noteEdit() below. Order per mutation: mutation -> noteEdit
 // (modificationChanged?, editApplied, textChanged) -> editor's own
-// textChanged ping. Consequence, v1 contract: a document's text signals fire
-// only while it is editor-ATTACHED (every document v1 constructs is); a
-// detached document (the M10 diff car's original side — none exists before
-// that car) has no observer installed, so its text doors are silent and its
-// observation is the future car's decision.
+// textChanged ping. STANDALONE documents (the M10 diff car's detached
+// originals/feeds — the no-editor ctor below) install their OWN observer on
+// their own buffer instead (one buffer, one observer slot: someone must
+// multiplex, and no editor is attached); their signals fire exactly like an
+// attached document's, minus nothing — the noteEdit pass is shared. (This
+// replaces the pre-M10 note that "detached documents are silent": that car
+// is here and made the decision its header had reserved.)
 //
 // Modified semantics (decided interim, documented divergence from
 // QTextDocument/Monaco "dirty iff != baseline"): the flag turns TRUE on any
@@ -36,13 +38,20 @@
 // file I/O is a consumer concern (markSaved() is the door they call after
 // their own save).
 //
-// v1 CONTRACT — ONE EDITOR PER DOCUMENT: a document is created by exactly
-// one editor's ctor (parent = owner, lifetime pattern = options()/theme())
-// and is permanently attached to it. Two editors on one buffer would fight
-// over the single core edit-observer slot (and the caret/fold state each
-// view keeps); multi-view editors are a separate future machine that needs
-// core multi-observer support first. The diff car does NOT need it: it puts
-// TWO documents in ONE widget, not two widgets on one document.
+// v1 CONTRACT — ONE EDITOR PER DOCUMENT: an ATTACHED document is created by
+// exactly one editor's ctor (parent = owner, lifetime pattern = options()/
+// theme()) and is permanently attached to it. Two editors on one buffer
+// would fight over the single core edit-observer slot (and the caret/fold
+// state each view keeps); multi-view editors are a separate future machine
+// that needs core multi-observer support first. The diff car does NOT need
+// it: it puts TWO documents in ONE widget, not two widgets on one document.
+//
+// STANDALONE (M10): the no-editor ctor creates a document attached to
+// NOTHING — the diff view's original side, fed by its consumer. Standalone
+// documents own their buffer mutations silently-through-signals (their own
+// observer), never reach an editor's replace machinery, and are never
+// editable through any CodeEditor. Attached vs standalone is decided at
+// CONSTRUCTION and never changes (no attach/detach doors in v1).
 //
 // Language stays on the VIEW (a render property; the M23 LanguageProperties
 // machinery keys off the view's language id) — moving languageId onto the
@@ -54,9 +63,10 @@
 // touch the TextBuffer itself (HighlightEngine attaches through the editor,
 // which is its friend).
 //
-// C++ consumers NEVER construct this class themselves: the public ctor takes
-// the owning CodeEditor and is what the editor's ctor calls; the object is
-// reachable only through CodeEditor::document().
+// Attached documents: C++ consumers NEVER construct those — the editor's
+// ctor calls that one; the object is reachable through CodeEditor::
+// document(). Standalone documents (M10, the diff original side) ARE
+// consumer-constructible: the no-editor ctor below.
 
 #include <QObject>
 #include <QString>
@@ -73,6 +83,11 @@ public:
     // Editor-owned: parented to `owner` (the QObject lifetime pattern of
     // options()/theme()), permanently attached to it (v1 contract above).
     explicit CodeDocument(CodeEditor* owner);
+
+    // Standalone (M10): attached to nothing (the diff view's detached
+    // original side). Installs its own core edit-observer — the header
+    // contract above carries the rules.
+    CodeDocument();
 
     // --- text doors (the document owns the text) --------------------------
     // setPlainText routes through the attached editor's replace machinery
@@ -115,7 +130,8 @@ private:
     void noteEdit(const qmn::core::TextBuffer::EditEvent& ev);
 
     qmn::core::TextBuffer buffer_;
-    CodeEditor* editor_; // the one attached editor (v1: never null)
+    CodeEditor* editor_; // the one attached editor (null for STANDALONE docs,
+                         // M10: the diff car's originals/feeds)
     QString uri_;
     bool modified_ = false;
 };

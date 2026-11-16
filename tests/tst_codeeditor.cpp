@@ -373,6 +373,27 @@ private slots:
     // viewport must stay inside the lazy-coverage contract (PLAN's budget +
     // escalation), never re-measure the document per paint.
     void softWrapResizeStormStaysInsideTheEscalationBudget();
+    // M10 diff view (car 2 machine 2): the mode's doors and the ONE
+    // alignment-row axis through the public visible* doors — doors speak
+    // MODIFIED lines, blank cells resolve to the nearest visible modified
+    // line (nearest-below first), folds zero the rows of their hidden
+    // modified lines, diff makes soft wrap inert (and the wrap map survives
+    // the mode), the 120 ms debounce contract (a burst = one recompute,
+    // caret-anchored table swap, BOTH sides' edits feed the seam), the
+    // pointer door's rejection rules + non-owning original hookup, and the
+    // strict-edge no-wrap-around hunk navigation.
+    void diffDoorsEnterStringFeedAndRestoreV1Map();
+    void diffRowAxisDoorsSpeakModifiedLines();
+    void diffBlankSlotsResolveToNearestModifiedLine();
+    void diffUpDownStepsOverBlankRows();
+    void diffRejectsAttachedOriginalAndForeignModified();
+    void diffPointerDoorOriginalIsNonOwning();
+    void diffFoldZeroesRowsOfHiddenModifiedLines();
+    void diffModeKeepsSoftWrapInertAndRestoresWrapMap();
+    void diffEditBurstRecomputesOnceAndKeepsCaretSlot();
+    void diffOriginalEditsAlsoTriggerRecompute();
+    void diffNavigationStrictEdgeNoWrap();
+    void standaloneCodeDocumentSignalsFire();
 
 private:
     CodeEditor* editor = nullptr;
@@ -9664,6 +9685,317 @@ void TestCodeEditor::softWrapResizeStormStaysInsideTheEscalationBudget()
         last = line;
     }
     QCOMPARE(editor->visibleIndexOfModelLine(0), 0);
+}
+
+// ---- M10 diff view (Gate 2, car 2 machine 2) -----------------------------
+// The visible* doors are the probe: they carry the alignment-row axis, in
+// MODIFIED-line space, across enter/clear, folds, the wrap knob, the
+// debounce and the door rules. (The engine itself is tripwired headless in
+// tst_diff; the two-column paint is machine 3.)
+
+void TestCodeEditor::diffDoorsEnterStringFeedAndRestoreV1Map()
+{
+    using qmn::view::CodeDocument; // the seam tripwire looks the standalone
+                                   // original up among the editor's children
+    editor->setPlainText(QStringLiteral("old"));
+    QCOMPARE(editor->visibleLineTotal(), 1);
+    editor->setDiffDocuments(QStringLiteral("a\nX\nb\nc"),
+                             QStringLiteral("a\nb\nc"), QString());
+    QVERIFY(editor->isDiffMode());
+    // The string door feeds BOTH sides: modified into the editor's own
+    // document (through the replace machinery: caret/scroll/undo reset).
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a\nb\nc"));
+    QCOMPARE(editor->document()->lineCount(), 3);
+    // (a,a) (X,-1) (b,b) (c,c): the deleted X is a weight-1 blank cell.
+    QCOMPARE(editor->visibleLineTotal(), 4);
+    editor->clearDiffDocuments();
+    QVERIFY(!editor->isDiffMode());
+    QCOMPARE(editor->visibleLineTotal(), 3); // the v1 map restored for free
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a\nb\nc")); // mode-off keeps the text
+    // The door re-opens cleanly (the lazy standalone original is re-fed):
+    editor->setDiffDocuments(QStringLiteral("z"), QStringLiteral("z\nw"), QString());
+    QCOMPARE(editor->visibleLineTotal(), 2); // (z,z),(-1,w)
+    // The re-watch tripwire (car 2 release bug hunt): the first clear
+    // DISCONNECTED this very doc (it was the then-current original), so a
+    // dead seam on re-entry means the original side diffs blind forever.
+    // The lazy standalone doc is findable as the editor's other CodeDocument
+    // child (parenting, not attaching — the string door's contract):
+    CodeDocument* orig = nullptr;
+    const auto docs = editor->findChildren<CodeDocument*>();
+    for (CodeDocument* d : docs)
+        if (d != editor->document())
+            orig = d;
+    QVERIFY(orig);
+    orig->setPlainText(QStringLiteral("q\nz"));
+    QTest::qWait(300); // the 120 ms debounce fired the recompute...
+    // ...and the NEW original text entered it: [q,z] vs [z,w] pairs the z's,
+    // deleting q and inserting w around the match: 3 rows.
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    editor->clearDiffDocuments();
+}
+
+void TestCodeEditor::diffRowAxisDoorsSpeakModifiedLines()
+{
+    editor->setDiffDocuments(QStringLiteral("a\nb\nc\nd"),
+                             QStringLiteral("a\nX\nc\nd"), QString());
+    // A 1-for-1 replacement PAIRS side-by-side (the tst_diff replaceBlock
+    // golden): four rows, no blanks.
+    QCOMPARE(editor->visibleLineTotal(), 4);
+    QCOMPARE(editor->visibleIndexOfModelLine(0), 0);
+    QCOMPARE(editor->visibleIndexOfModelLine(1), 1); // X on the paired row
+    QCOMPARE(editor->visibleIndexOfModelLine(3), 3);
+    QCOMPARE(editor->visibleIndexOfModelLine(4), -1); // out of range (v1 rule)
+    QCOMPARE(editor->modelLineForVisibleIndex(1), 1);
+    QCOMPARE(editor->modelLineForVisibleIndex(99), 3); // total clamp (v1 rule)
+}
+
+void TestCodeEditor::diffBlankSlotsResolveToNearestModifiedLine()
+{
+    // Middle blank (a delete INSIDE the alignment): nearest-below first.
+    editor->setDiffDocuments(QStringLiteral("a\nX\nb\nc"),
+                             QStringLiteral("a\nb\nc"), QString());
+    QCOMPARE(editor->visibleLineTotal(), 4);
+    QCOMPARE(editor->visibleIndexOfModelLine(1), 2); // "b" at slot 2 (X owns slot 1)
+    QCOMPARE(editor->modelLineForVisibleIndex(1), 1); // blank cell -> the line below
+    editor->clearDiffDocuments();
+    // Trailing blank (a delete at the end): no line below -> nearest ABOVE.
+    editor->setDiffDocuments(QStringLiteral("a\nb"), QStringLiteral("a"), QString());
+    QCOMPARE(editor->visibleLineTotal(), 2);
+    QCOMPARE(editor->modelLineForVisibleIndex(1), 0);
+    editor->clearDiffDocuments();
+}
+
+void TestCodeEditor::diffUpDownStepsOverBlankRows()
+{
+    // The demo-found stall (machine 2): Up under a delete band walked the
+    // fold-map's prevVisibleModelLine slot step, whose blank-cell inverse
+    // (nearest modified, tie-below-first) ECHOED the current line — every
+    // Up was a no-op. Consecutive blanks make it unmissable; the fix is
+    // the direct modified-line neighbor walk in both step doors.
+    editor->setDiffDocuments(QStringLiteral("a\nX\nY\nb"), QStringLiteral("a\nb"),
+                             QString());
+    QCOMPARE(editor->visibleLineTotal(), 4); // (a,a) (X,-1) (Y,-1) (b,b)
+    editor->setPosition({1, 1}); // "b" col 1, under the two blank rows
+    QTest::keyClick(editor, Qt::Key_Up);
+    QCOMPARE(editor->position().line, 0); // over the band in one step...
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 1); // ...and Down back down as before
+    editor->setPosition({0, 1});
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 1);
+    QTest::keyClick(editor, Qt::Key_Up);
+    QCOMPARE(editor->position().line, 0);
+    // Part 2: the demo's EXACT scenario (python grammar, the blank from
+    // the deleted "# old sum", caret on the modified line right under it):
+    const QString original = QStringLiteral(
+        "def greet(name):\n"
+        "    message = f\"hello {name}\"\n"
+        "    print(message)\n"
+        "    return message\n"
+        "\n"
+        "def add(a, b):\n"
+        "    # old sum\n"
+        "    total = a + b\n"
+        "    return total\n"
+        "\n"
+        "greet(\"world\")\n"
+        "add(1, 2)\n");
+    const QString modified = QStringLiteral(
+        "def greet(name: str) -> str:\n"
+        "    message = f\"hello {name}\"\n"
+        "    print(message)\n"
+        "    return message\n"
+        "\n"
+        "def add(a, b):\n"
+        "    total = a + b\n"
+        "    return a + b\n"
+        "\n"
+        "def sub(a, b):\n"
+        "    return a - b\n"
+        "\n"
+        "greet(\"world\")\n"
+        "add(1, 2)\n");
+    editor->clearDiffDocuments();
+    editor->setDiffDocuments(original, modified, QStringLiteral("python"));
+    // (probe asserts below once the alignment/paths are pinned down)
+    editor->setPosition({6, 0}); // "    total = a + b": under the band
+    QTest::keyClick(editor, Qt::Key_Up);
+    QCOMPARE(editor->position().line, 5); // must land on "def add(a, b):"
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(editor->position().line, 6);
+}
+
+void TestCodeEditor::diffRejectsAttachedOriginalAndForeignModified()
+{
+    CodeEditor other;
+    other.resize(300, 200);
+    other.setPlainText(QStringLiteral("x"));
+    editor->setPlainText(QStringLiteral("a\nb"));
+    // The original must be STANDALONE — an attached doc belongs to some
+    // editor's caret/undo world the diff view must never make editable:
+    editor->setDiffDocuments(other.document(), editor->document(), QString());
+    QVERIFY(!editor->isDiffMode());
+    // A modified attached to ANOTHER editor is that editor's writable truth:
+    editor->setDiffDocuments(editor->document(), other.document(), QString());
+    QVERIFY(!editor->isDiffMode());
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a\nb")); // NOTHING was fed
+    QCOMPARE(other.toPlainText(), QStringLiteral("x"));
+}
+
+void TestCodeEditor::diffPointerDoorOriginalIsNonOwning()
+{
+    using qmn::view::CodeDocument; // the M25 test-file pattern
+    editor->setPlainText(QStringLiteral("a\nb"));
+    auto* original = new CodeDocument(); // consumer-OWNED standalone doc
+    original->setPlainText(QStringLiteral("a\nX\nb"));
+    editor->setDiffDocuments(original, editor->document(), QString());
+    QVERIFY(editor->isDiffMode());
+    QCOMPARE(editor->visibleLineTotal(), 3); // (a,a) (X,-1) (b,b)
+    delete original; // the consumer drops it: the destroyed() hookup MUST
+                     // clear the mode (no dangling original, no crash)
+    QVERIFY(!editor->isDiffMode());
+    QCOMPARE(editor->visibleLineTotal(), 2); // the v1 map, restored
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a\nb"));
+}
+
+void TestCodeEditor::diffFoldZeroesRowsOfHiddenModifiedLines()
+{
+    const QString text = QStringLiteral("h\n  a\n  b\ntail");
+    editor->setDiffDocuments(text, text, QString()); // plain language: the
+                                                     // indent fold is active
+    QCOMPARE(editor->visibleLineTotal(), 4); // identical docs: 4 aligned rows
+    QVERIFY(editor->foldLine(0)); // hides MODIFIED lines 1-2...
+    QCOMPARE(editor->visibleLineTotal(), 2); // ...and with them their rows
+    QCOMPARE(editor->visibleIndexOfModelLine(1), -1);
+    QCOMPARE(editor->visibleIndexOfModelLine(2), -1);
+    QCOMPARE(editor->visibleIndexOfModelLine(3), 1);
+    QCOMPARE(editor->modelLineForVisibleIndex(1), 3);
+    QVERIFY(editor->unfoldLine(0));
+    QCOMPARE(editor->visibleLineTotal(), 4); // fold changes ride the table
+                                             // WITHOUT a recompute (the rows
+                                             // alignment never moved)
+    // Fold STATE is the editor's truth across the mode boundary: the
+    // restored fold map zeroes the very same lines.
+    QVERIFY(editor->foldLine(0));
+    editor->clearDiffDocuments();
+    QVERIFY(!editor->isDiffMode());
+    QCOMPARE(editor->visibleLineTotal(), 2); // the untouched v1 fold map
+}
+
+void TestCodeEditor::diffModeKeepsSoftWrapInertAndRestoresWrapMap()
+{
+    QStringList words;
+    for (int i = 0; i < 60; ++i) // ~390 chars: many rows in a 600px window
+        words << QStringLiteral("word%1").arg(i);
+    const QString text = words.join(QLatin1Char(' ')) + QLatin1Char('\n')
+                       + QStringLiteral("tail");
+    editor->options()->setSoftWrapEnabled(true);
+    editor->setPlainText(text);
+    editor->grab(); // warm the walker: the wrap map covers the window
+    QVERIFY2(editor->visibleLineTotal() >= 3,
+             qPrintable(QStringLiteral("wrap ON: total %1").arg(editor->visibleLineTotal())));
+    editor->setDiffDocuments(text, text, QString());
+    // diff > wrap: ONE live row space — the axis is the 2 aligned rows and
+    // the long line is NOT wrapped (the inert-wrap decision, PLAN §M10).
+    QCOMPARE(editor->visibleLineTotal(), 2);
+    QCOMPARE(editor->visibleIndexOfModelLine(1), 1);
+    // The wrap seam kept feeding underneath; the map must come back whole:
+    editor->clearDiffDocuments();
+    editor->grab();
+    QVERIFY2(editor->visibleLineTotal() >= 3,
+             qPrintable(QStringLiteral("wrap map survived diff: total %1")
+                            .arg(editor->visibleLineTotal())));
+    editor->options()->setSoftWrapEnabled(false);
+}
+
+void TestCodeEditor::diffEditBurstRecomputesOnceAndKeepsCaretSlot()
+{
+    using qmn::view::CodeDocument; // signal-pointer spelling (the M25 pattern)
+    QStringList lines;
+    for (int i = 0; i < 20; ++i)
+        lines << QStringLiteral("l%1").arg(i);
+    const QString text = lines.join(QLatin1Char('\n'));
+    editor->setDiffDocuments(text, text, QString()); // identical: 20 rows
+    QCOMPARE(editor->visibleLineTotal(), 20);
+    QSignalSpy edits(editor->document(), &CodeDocument::editApplied);
+    editor->setPosition({0, 0});
+    QTest::keyClick(editor, Qt::Key_Return); // splits line 0: +1 modified line
+    QCOMPARE(editor->document()->lineCount(), 21);
+    // The debounce contract (PLAN §M10): NO recompute on the key path —
+    // the axis is still the previous table right after the mutation.
+    QCOMPARE(editor->visibleLineTotal(), 20);
+    QTest::qWait(300); // the 120 ms single-shot fires once: one recompute
+    QCOMPARE(editor->visibleLineTotal(), 21); // rows: (blank original cell,
+                                              // inserted mod line 0) then the
+                                              // shifted pairs
+    QCOMPARE(edits.count(), 1); // one primitive mutation entered the spy
+    // Caret anchoring: the caret's LINE kept its slot across the swap...
+    QCOMPARE(editor->position().line, 1);
+    QCOMPARE(editor->visibleIndexOfModelLine(1), 1);
+    // ...and the top slot is the INSERT row: its MODIFIED line (the new
+    // empty line 0) is real and addressable — the blank cell is the
+    // ORIGINAL side (the engine's Insert rows carry a modified line; only
+    // Delete rows are blank on the modified side).
+    QCOMPARE(editor->firstVisibleLine(), 0);
+}
+
+void TestCodeEditor::diffOriginalEditsAlsoTriggerRecompute()
+{
+    using qmn::view::CodeDocument; // the M25 test-file pattern
+    auto* original = new CodeDocument(); // standalone: its OWN observer
+                                         // multiplexes the edit stream
+    original->setPlainText(QStringLiteral("a\nb\nc"));
+    editor->setPlainText(QStringLiteral("a\nb\nc"));
+    editor->setDiffDocuments(original, editor->document(), QString());
+    QCOMPARE(editor->visibleLineTotal(), 3); // identical docs
+    QSignalSpy spy(original, &CodeDocument::editApplied);
+    original->setPlainText(QStringLiteral("a\nX\nb\nc"));
+    QCOMPARE(spy.count(), 1); // the standalone feed FIRED (the header
+                              // contract the diff car decided)
+    QCOMPARE(editor->visibleLineTotal(), 3); // still the stale table
+    QTest::qWait(300);
+    QCOMPARE(editor->visibleLineTotal(), 4); // (a,a) (-1,X) (b,b) (c,c)
+    delete original;
+    QVERIFY(!editor->isDiffMode()); // destroyed() -> cleared
+    QCOMPARE(editor->visibleLineTotal(), 3);
+}
+
+void TestCodeEditor::diffNavigationStrictEdgeNoWrap()
+{
+    editor->setDiffDocuments(QStringLiteral("a\n1\nb\nc\nd\ne"),
+                             QStringLiteral("a\nb\nc\nd\nX\ne"), QString());
+    // (a,a) (1,-1) (b,b) (c,c) (d,d) (-1,X) (e,e)
+    QCOMPARE(editor->visibleLineTotal(), 7);
+    editor->setPosition({0, 0});
+    editor->nextChange();
+    QCOMPARE(editor->position().line, 1); // the delete hunk's modified line
+    editor->nextChange();
+    QCOMPARE(editor->position().line, 4); // the insert hunk owns line 4 ("X")
+    editor->nextChange();
+    QCOMPARE(editor->position().line, 4); // past the last hunk: NO wrap-around
+    editor->previousChange();
+    QCOMPARE(editor->position().line, 1); // strict edge back to the first hunk
+    editor->previousChange();
+    QCOMPARE(editor->position().line, 1); // before the first hunk: NO wrap
+}
+
+void TestCodeEditor::standaloneCodeDocumentSignalsFire()
+{
+    using qmn::view::CodeDocument; // the M25 test-file pattern
+    CodeDocument doc; // the no-editor ctor: the diff car's original form
+    QSignalSpy edits(&doc, &CodeDocument::editApplied);
+    QSignalSpy text(&doc, &CodeDocument::textChanged);
+    QSignalSpy mod(&doc, &CodeDocument::modificationChanged);
+    QVERIFY(!doc.isModified());
+    doc.setPlainText(QStringLiteral("a\nb"));
+    QCOMPARE(doc.lineCount(), 2);
+    QCOMPARE(edits.count(), 1); // setText = ONE whole-document op
+    QCOMPARE(text.count(), 1);
+    QCOMPARE(mod.count(), 1); // false -> true, exactly one transition
+    QVERIFY(doc.isModified());
+    doc.markSaved();
+    QVERIFY(!doc.isModified());
+    QCOMPARE(doc.toPlainText(), QStringLiteral("a\nb"));
 }
 
 QTEST_MAIN(TestCodeEditor)

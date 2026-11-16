@@ -959,6 +959,46 @@ this car).
   Inline/unified diff mode and Monaco `options` mapping: out of v1,
   documented.
 
+- **Car-round ownership + axis decisions (2026-11-16):** the editor's OWN
+  attached document IS the modified side — caret/undo/find/fold/
+  `textChanged`/`toPlainText`/`readOnly` speak it natively, zero surgery;
+  the original is a **detached (standalone) `CodeDocument`** — the new
+  no-editor ctor installs its own core edit-observer, so its `editApplied`/
+  `textChanged`/`modificationChanged` fire (this replaces M25's "detached
+  documents are silent" note, which already reserved the diff car). The
+  pointer door requires a detached `original` and keeps it NON-OWNING (a
+  `destroyed()` hookup clears diff mode); a `modified` pointer different
+  from `document()` is a one-shot text feed through the editor's replace
+  machinery (the editor's model stays the single writable truth). The
+  string door feeds both sides (the original into a lazy editor-owned
+  child standalone doc). `language` = ONE language for the whole diff
+  view (routes through `setLanguage`).
+- **Row axis (the M25 machinery generalized):** aligned rows are the slot
+  space, exactly one live space at a time (diff > wrap > fold/plain):
+  blank cells are weight-1 pseudo-rows with no backing line (the
+  positive-weight twin of the fold `HiddenRun` machinery — same prefix-sum
+  algebra, keyed by ROW not line, no second map); a collapsed fold zeroes
+  the weight of every row whose MODIFIED line it hides (the original
+  twin hides with them — honest v1); soft wrap is **inert in diff v1**
+  (the wrap seam keeps fed so the map stays alive for the diff-off world;
+  two-column wrap budget math is a follow-on car). `visibleIndexOfModelLine`
+  / `modelLineForVisibleIndex` speak MODIFIED lines over that axis
+  (blank-slot inverse = nearest visible modified line, nearest-below
+  first). `nextChange`/`previousChange` use the strict-edge rule (from any
+  line at/inside a hunk, next goes to the NEXT hunk) and do NOT wrap
+  around at the document edges (documented divergence from Monaco's
+  cyclic navigation).
+- **Live update (v1 mechanics):** every primitive mutation of the modified
+  buffer (the editor's observer pass) and every `editApplied` of the
+  original doc → a 120 ms single-shot debounce → FULL recompute with the
+  engine's auto budget → caret-anchored scroll restore (the caret keeps
+  its screen row; a caret inside a vanished line degrades to nearest-
+  line clamping). Fold-map changes re-key the row axis WITHOUT recompute
+  (prefix tables only).
+- The `diff` engine result never leaks through the header: the state sits
+  behind a forward-declared `DiffState` (defined in the .cpp, holds the
+  engine records + the row prefix tables + the modLine→row map).
+
 ### M8 — protocol core + LSP (car 3)
 
 - **Layers:** `src/protocol/` (QtCore+QtNetwork, zero view — Framing with

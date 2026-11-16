@@ -25,9 +25,16 @@ target_include_directories(qmn_view PUBLIC
 # STATIC lib, so the installed qmn_view must name the (installed, internal)
 # qmn_ts target again — $<INSTALL_INTERFACE:...> evaluates only inside the
 # exported package, where qmn::internal_tree_sitter is defined.
+# M10 (layering decision 2026-11-16): qmn_diff rides the EXACT same
+# mechanism — the pure QtCore line-diff is not a network layer, it links
+# into the view, no diff type crosses a public header (the include lives
+# inside CodeEditor.cpp only), and the installed package re-names it as
+# qmn::internal_diff (link-only, LineDiff.hpp not installed).
 target_link_libraries(qmn_view
-    PUBLIC qmn_core Qt6::Widgets $<INSTALL_INTERFACE:qmn::internal_tree_sitter>
-    PRIVATE qmn_ts)
+    PUBLIC qmn_core Qt6::Widgets
+        $<INSTALL_INTERFACE:qmn::internal_tree_sitter>
+        $<INSTALL_INTERFACE:qmn::internal_diff>
+    PRIVATE qmn_ts qmn_diff)
 
 # Public-header review (PLAN.md Phase F): the install allow-list is exactly
 # the consumer-facing surface. HighlightEngine.hpp/QueryData.hpp (the

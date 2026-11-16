@@ -10,13 +10,26 @@ CodeDocument::CodeDocument(CodeEditor* owner)
 {
 }
 
+CodeDocument::CodeDocument()
+    : QObject(nullptr),
+      editor_(nullptr)
+{
+    // Standalone (M10): nobody else multiplexes this buffer's edit stream,
+    // so the document drives its own observer into the SAME noteEdit pass
+    // the attached path uses (modified flag -> editApplied -> textChanged).
+    buffer_.setEditObserver([this](const qmn::core::TextBuffer::EditEvent& ev) {
+        noteEdit(ev);
+    });
+}
+
 void CodeDocument::setPlainText(const QString& text)
 {
     // The attached path routes through the editor's replace machinery (caret
     // reset, fold drop, scroll + undo-mark bookkeeping); the observer pass
     // then signals through this document like for any other mutation. A
-    // DETACHED document (v1: none exists; the M10 diff car will create the
-    // first ones) mutates its buffer with the core's silent door.
+    // STANDALONE document (M10: the diff car's original side) mutates its
+    // buffer through the core's silent door; its own installed observer
+    // still fires the signal trio.
     if (editor_)
         editor_->setPlainText(text);
     else

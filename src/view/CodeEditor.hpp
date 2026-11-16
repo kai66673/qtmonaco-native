@@ -652,6 +652,39 @@ public:
     void collapseAll();
     void expandAll();
 
+    // --- M10 diff view (Gate 2; semantics: PLAN GATE 2 §M10) ---------------
+    // Diff mode puts TWO documents in ONE widget (the "one editor per
+    // document" contract untouched): the editor's OWN attached document IS
+    // the modified side, so caret/undo/find/fold/textChanged/toPlainText/
+    // readOnly speak it natively; the original side is a STANDALONE
+    // (detached) CodeDocument and is never editable through any door of
+    // this widget. The pointer door requires a detached `original` and
+    // keeps it NON-OWNING (a destroyed() hookup clears diff mode); a
+    // `modified` pointer different from document() is a one-shot text feed
+    // through the editor's replace machinery. The string door feeds both
+    // (original into a lazy editor-owned child standalone doc). `language`
+    // is ONE language for the whole diff view (routes through setLanguage;
+    // "" = plain).
+    //
+    // While diff mode is active the visible* row doors below speak the
+    // ALIGNMENT ROW axis (blank cells are weight-1 pseudo-rows, a
+    // collapsed fold zeroes the rows whose MODIFIED line it hides, soft
+    // wrap is inert) — and they speak MODIFIED line numbers (the caret
+    // space; original-side geometry is the paint side's business).
+    void setDiffDocuments(CodeDocument* original, CodeDocument* modified,
+                          const QString& language);
+    void setDiffDocuments(const QString& original, const QString& modified,
+                          const QString& language);
+    void clearDiffDocuments();
+    bool isDiffMode() const;
+    // Hunk navigation: revealAt + caret to the change's MODIFIED-side line.
+    // Strict-edge rule: from any line at/inside a hunk, nextChange goes to
+    // the NEXT hunk (previousChange mirrors); NO wrap-around at the
+    // document edges — out of hunks it is a no-op (documented divergence
+    // from Monaco's cyclic navigation).
+    void nextChange();
+    void previousChange();
+
     // The ONE view-line map (M13): visible slots are numbered
     // [0, visibleLineTotal()) top-to-bottom; a hidden (folded-away) model
     // line has visible index -1. Paint, caret navigation, hit-testing,
@@ -1347,6 +1380,42 @@ private:
     // the v1.6.1 expression exactly — the wrap-off identity rides these
     // helpers, not a parallel implementation).
     double xInWrapped(const GeoSlot* gs, int segStart, int col) const;
+
+    // --- M10 diff mode (semantics: PLAN GATE 2 §M10; the LineDiff include
+    // lives in the .cpp ONLY — no diff type crosses this header) ----------
+    // State behind a forward declaration: DiffState (defined in the .cpp)
+    // holds the engine's hunks/rows, the fold-over-row prefix tables and
+    // the modLine->row map. diff_ non-null == diff mode active; the row
+    // axis (aligned rows, one live space: diff > wrap > fold/plain) rides
+    // the same prefix-sum algebra as M25's wrap map, keyed by ROW.
+    struct DiffState;
+    std::unique_ptr<DiffState> diff_;
+    CodeDocument* diffStandaloneOriginal_ = nullptr; // editor-owned child,
+                                                     // string-door feed only
+    QTimer diffRecomputeTimer_; // single-shot live-update debounce
+    static constexpr int kDiffDebounceMs = 120;
+    // Shared tail of both doors (after the texts/documents are settled):
+    // language, first synchronous recompute, axis, scroll reset.
+    void beginDiffMode(const QString& language);
+    // FULL recompute of the alignment (engine auto budget), then
+    // rebuildDiffRowAxis() + caret-anchored scroll restore (the caret keeps
+    // its screen row; vanished-line carets degrade to nearest-line clamp).
+    void recomputeDiff();
+    // The edit seams (modified observer pass + the original's own
+    // editApplied): restart the single-shot debounce.
+    void scheduleDiffRecompute();
+    // Re-key the fold-over-row prefix tables from rows_ + hiddenRuns_
+    // (fold mutations ride this WITHOUT a recompute; rows mutations ride
+    // it after every recompute).
+    void rebuildDiffRowAxis();
+    // The diff half of the three visible* doors (line == MODIFIED line).
+    int diffVisibleIndexOfModLine(int line) const;
+    int diffModLineForSlot(int slot) const;
+    // The alignment row under a visible slot (-1 out of range): the
+    // blank-cell-aware door for the paint/hit side (machine 3).
+    int diffRowForSlot(int slot) const;
+    // Guard the external original pointer: destroyed() -> clear the mode.
+    void watchDiffOriginal(CodeDocument* doc);
 
     // --- M22 fold-gutter hover (semantics: PLAN M22) ----------------------
     // While the fold strip is live, mouse tracking follows the pointer and
