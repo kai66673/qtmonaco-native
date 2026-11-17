@@ -3,7 +3,7 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — Gate 2 open; the M25 soft-wrap car landed, M10 diff built
+## [1.7.0] — 2026-11-17 — Gate 2 open; the M25 soft-wrap car landed, M10 diff built
 
 ### Added
 - **M10 diff view (Gate 2, car 2).** The two-column native diff, all three
