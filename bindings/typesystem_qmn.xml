@@ -102,6 +102,14 @@
         <object-type name="CodeDocument">
             <include file-name="view/CodeDocument.hpp" location="global"/>
             <modify-function signature="CodeDocument(qmn::view::CodeEditor*)" remove="all"/>
+            <!-- M10 (machine 2) added the standalone no-editor ctor. It stays
+                 C++-only: the wheel's contract is that Python NEVER builds a
+                 CodeDocument (the editor owns its document() and the diff
+                 view's detached original is fed through the string door of
+                 setDiffDocuments, which creates the editor-owned child on
+                 the C++ side). Without this entry Shiboken would happily
+                 wrap the default ctor and hand Python a way to build one. -->
+            <modify-function signature="CodeDocument()" remove="all"/>
         </object-type>
 
         <!-- Same ownership shape as CodeEditorOptions: the editor creates the

@@ -4,7 +4,11 @@ Drives the Python shim (bindings/python/qmn/__init__.py) against the semantics
 frozen from qtmonaco's own monaco.py + backend/src/main.ts: 1-based cursors,
 {"line":..,"column":..} cursor dicts, ValueError on read-only edits, the
 set_text early-return ORDER (same-value, then readonly, then TypeError), the
-insert_text line/column rules, and the reveal flag mapping.
+insert_text line/column rules, the reveal flag mapping, and the M10 diff view
+(open_diffs/close_diffs: modified-side value speech, one relay announcement,
+the chrome geometry doors, the read-only ORIGINAL column driven by real
+mouse gestures, the set_text diff-exit order, and the pinned same-modified
+no-announcement divergence).
 
 The 1-based/0-based conversion lives entirely in the shim, so the assertions
 below are written in qtmonaco's 1-based terms and the raw C++ getters (0-based)
@@ -20,7 +24,9 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
 def check_parity() -> int:
     import qmn
-    from PySide6.QtCore import Qt
+    from PySide6.QtCore import QPoint, Qt
+    from PySide6.QtGui import QGuiApplication
+    from PySide6.QtTest import QTest
     from PySide6.QtWidgets import QApplication
 
     app = QApplication.instance() or QApplication([])
@@ -206,11 +212,12 @@ def check_parity() -> int:
         warnings.simplefilter("always")
         ed.set_vim_mode_enabled(True)  # must NOT raise AttributeError
     assert len(caught) == 1 and "vim mode" in str(caught[0].message), caught
-    # Gate 2 stays unbound ON PURPOSE (PLAN.md): open_diffs and every LSP hook
-    # of qtmonaco are absent, so callers get an honest AttributeError instead of
-    # a silent no-op that would pretend the feature exists.
+    # The rest of qtmonaco's Gate-2 surface stays unbound ON PURPOSE (PLAN.md):
+    # every LSP hook of qtmonaco is absent, so callers get an honest
+    # AttributeError instead of a silent no-op that would pretend the feature
+    # exists. (open_diffs shipped with M10 — it lives in the diff section at
+    # the end of this file.)
     for gate2 in (
-        "open_diffs",
         "set_lsp_header",
         "get_lsp_header",
         "add_action",
@@ -265,6 +272,179 @@ def check_parity() -> int:
     assert ed.theme().kind() == Preset.Dark, ed.theme().kind()
     assert ed.get_theme() == "hc-black"
     assert themes == ["light", "vs-dark", "hc-black"], themes
+
+    # --- the M10 diff view (open_diffs / close_diffs) --------------------------
+    # The fixture words sit at known columns (line 0 "alpha" cols 4..8, line
+    # 1 "world" word chars cols 12..16), the line COUNT is equal on both
+    # sides (the modified number column's digit width stays stable, so the
+    # gutter grows by exactly diffChromeWidth()), and the session rides the
+    # python grammar on both columns.
+    diff_orig = "def alpha:\n    return 'world'"
+    diff_mod = "def alpha:\n    return 'hi'"
+    gutter_before, content_before = ed.gutterWidth(), ed.contentLeft()
+    assert ed.diffChromeWidth() == 0  # closed: the chrome term is zero
+    assert ed.foldZoneLeft() >= ed.padding()  # v1 shape, the door answers
+    ed.open_diffs(diff_orig, diff_mod, language="python")
+    assert ed.isDiffMode() is True
+    assert ed.diffChromeWidth() > 0, ed.diffChromeWidth()
+    assert ed.gutterWidth() == gutter_before + ed.diffChromeWidth(), (
+        ed.gutterWidth(), gutter_before, ed.diffChromeWidth(),
+    )
+    assert ed.contentLeft() == content_before + ed.diffChromeWidth()
+    # geometry doors in cells: textCol is the 50/50 parity split, never 0
+    assert ed.diffChromeTextCol() > 0 and ed.diffChromeDigitsCol() > 0
+    assert ed.diffChromeWidth() == ed.diffChromeTextCol() \
+        + ed.diffChromeDigitsCol() + ed.diffChromeGap()
+    # get_text speaks MODIFIED (qtmonaco: self._value = modified); the
+    # announcement is the relay echo of the native feed — exactly one.
+    assert ed.get_text() == diff_mod, ed.get_text()
+    assert seen[-1] == diff_mod, seen[-1]
+    assert seen.count(diff_mod) == 1, seen
+    # the requested grammar rides the session (open_diffs emits NO
+    # language_changed: set_language would paint the old grammar first):
+    assert ed.get_language() == "python"
+    assert langs[-1] == "typescript", langs
+    # hunk navigation (F7/F8's doors): strict-edge hunks, silent at the edges
+    ed.nextChange()
+    ed.previousChange()
+    # The read-only ORIGINAL column is driven by REAL mouse gestures (there
+    # is no programmatic ORIGINAL selection door on purpose): warm the paint
+    # cache, then chained double-clicks replay the v1 click chain in
+    # ORIGINAL space (word on the first click; a second click at the same
+    # spot would grow to the line — we stop at the word).
+    ed.grab()
+    cell = ed.cellWidth()
+    lh = ed.lineHeight()
+    win_x0 = ed.foldZoneLeft() + ed.foldZoneWidth() + ed.diffChromeDigitsCol() \
+        + ed.diffChromeGap()
+    y0 = ed.padding() + lh // 2  # row 0 (diff mode starts at the top)
+    x_world = win_x0 + int(13 * cell + cell / 2 + 0.4)  # 'o' of 'world' (word
+    # chars sit at cols 12..16: a click ON the quote (col 11) would select
+    # only the quote — wordSelRange runs by class, quotes are class Other)
+    x_alpha = win_x0 + int(4 * cell + cell / 2 + 0.4)   # inside 'alpha' (col 4)
+    LEFT = Qt.MouseButton.LeftButton
+    NO_MOD = Qt.KeyboardModifier.NoModifier
+    QTest.mouseDClick(ed, LEFT, NO_MOD, QPoint(x_world, y0 + lh))
+    assert ed.originalSelectionText() == "world", ed.originalSelectionText()
+    QTest.mouseDClick(ed, LEFT, NO_MOD, QPoint(x_alpha, y0))
+    assert ed.originalSelectionText() == "alpha", ed.originalSelectionText()
+    # the ORIGINAL selection feeds the copy path even though the shim knows
+    # nothing about it (the C++ copy() reads the original selection first):
+    clip = QGuiApplication.clipboard()
+    clip.setText("sentinel")
+    ed.copy()
+    assert clip.text() == "alpha", repr(clip.text())
+    assert ed.originalSelectionText() == "alpha"  # copy never clears it
+    # the ORIGINAL side is never editable: the shim's read-only pre-check
+    # raises the same ValueError qtmonaco raises (the C++ doors stay silent).
+    ed.set_readonly(True)
+    for edit_call in (lambda: ed.insert_text("Z", line=2, column=1),
+                      lambda: ed.delete_line(1)):
+        try:
+            edit_call()
+            raise AssertionError("expected ValueError on a read-only edit")
+        except ValueError:
+            pass
+    ed.set_readonly(False)
+    assert ed.get_text() == diff_mod  # nothing was written anywhere
+    # typing on the MODIFIED side still works mid-diff; the live recompute
+    # seam (120 ms debounce) must not drop the session. column=1 is 1-based:
+    # the Z lands at col 0, BEFORE the indent (qtmonaco's insert rule).
+    ed.insert_text("Z", line=2, column=1)
+    assert ed.get_text() == "def alpha:\nZ    return 'hi'", ed.get_text()
+    QTest.qWait(400)  # let the debounced recompute land
+    assert ed.isDiffMode() is True
+    # PROGRAMMATIC doors never drop the read-side selection — only real
+    # modified-side gestures/keys reach the C++ clear seam (mousePress/
+    # keyPress/mouseDoubleClick/cut call it; setPosition and the edit doors
+    # deliberately do not):
+    assert ed.originalSelectionText() == "alpha", ed.originalSelectionText()
+    # A real KEY on the modified side DOES drop it; Down at the last line
+    # just re-places the caret there (the diff-mode modified-line walk).
+    QTest.keyClick(ed, Qt.Key.Key_Down)
+    assert ed.originalSelectionText() == "", ed.originalSelectionText()
+    clip.setText("sentinel")
+    ed.copy()  # selection gone: the v1 whole-line fallback runs on the
+    # MODIFIED side (caret at {1,1} after the insert, on the LAST line:
+    # no trailing newline to give)
+    assert clip.text() == "Z    return 'hi'", repr(clip.text())
+    # undo speaks the modified buffer MID-diff too (the doc is the truth;
+    # the string-door feed wiped the pre-diff history, so the stack here is
+    # exactly [feed boundary, the Z push] — one undo lands on diff_mod):
+    ed.undo()
+    assert ed.get_text() == diff_mod and ed.isDiffMode() is True
+    assert seen.count(diff_mod) == 2, seen  # the undo's echo of the value
+    # set_text EXITS diff mode, flag-before-early-return, exactly like
+    # qtmonaco's `_diff_mode = False` sitting above the same-value guard.
+    before = len(seen)
+    ed.set_text(diff_mod)  # value EQUALS now: no announcement...
+    assert len(seen) == before, seen
+    assert ed.isDiffMode() is False  # ...but the diff session still closed
+    assert ed.diffChromeWidth() == 0
+    ed.set_text(diff_mod)  # same value again: the flag path is inert now
+    assert len(seen) == before, seen
+    # reopen WITHOUT the language param: the current grammar is kept (the
+    # shim re-passes the current id — the C++ beginDiffMode always routes
+    # setLanguage, so "" would really mean plain; the same-modified re-feed
+    # announces NOTHING — the documented divergence from qtmonaco's
+    # unconditional text_changed(modified) emit, pinned here):
+    ed.open_diffs(diff_orig, diff_mod)
+    assert ed.isDiffMode() is True
+    assert ed.get_language() == "python"
+    assert langs[-1] == "typescript", langs
+    assert len(seen) == before, seen
+    # the reopened session starts with a clean read side: the ORIGINAL
+    # selection is gone (session teardown), and with the MODIFIED caret bare
+    # at {0,0} the v1 whole-line copy fallback speaks (line 0 is not last:
+    # the trailing newline rides along, Monaco-style):
+    clip.setText("sentinel")
+    assert ed.originalSelectionText() == ""
+    ed.copy()
+    assert clip.text() == "def alpha:\n", repr(clip.text())
+    # close_diffs: the exit door qtmonaco never had (there, re-setting the
+    # value is the only way out); closing twice is a silent no-op.
+    ed.close_diffs()
+    assert ed.isDiffMode() is False
+    ed.close_diffs()
+    assert ed.get_text() == diff_mod
+    # a bare open_diffs on a read-only editor is LEGAL (no edit door was
+    # blocked): qtmonaco pushes the same readOnly flag into its diff editor,
+    # where the ORIGINAL side is read-only by design too, and the C++
+    # string-door feed is not a user edit.
+    before = len(seen)
+    ed.set_readonly(True)
+    ed.open_diffs("a", "b")
+    assert ed.isDiffMode() is True and ed.get_text() == "b"
+    assert seen[-1] == "b" and len(seen) == before + 1, seen  # value speaks
+    ed.close_diffs()
+    ed.set_readonly(False)
+    # The string-door feed is the undo HISTORY boundary: the C++ replace
+    # machinery (CodeEditor::setPlainText) CLEARS the core undo/redo stacks,
+    # so one undo after the closed "b" diff is silent — the doc stays "b".
+    # (Same net effect as Monaco's model.setValue: a full replace resets the
+    # undo stack.)
+    ed.undo()
+    assert ed.get_text() == "b", ed.get_text()
+    assert len(seen) == before + 1, seen  # only the "b" feed spoke
+    # TypeErrors ride qtmonaco's exact checks; the options DICT is validated
+    # and its keys (renderSideBySide:false included) are documented-IGNORED.
+    for bad in (lambda: ed.open_diffs(None, "m"), lambda: ed.open_diffs("o", 42),
+                lambda: ed.open_diffs("o", "m", options=1)):
+        try:
+            bad()
+            raise AssertionError("expected TypeError from open_diffs")
+        except TypeError:
+            pass
+    assert ed.isDiffMode() is False  # the TypeErrors never opened a session
+    ed.open_diffs("o", "m", options={"renderSideBySide": False})  # legal
+    assert ed.isDiffMode() is True
+    assert ed.get_text() == "m"
+    assert seen[-1] == "m" and len(seen) == before + 2, seen  # the feed speaks
+    ed.close_diffs()
+    assert ed.isDiffMode() is False
+    # the diff_mod announcements in this whole section: the first open feed
+    # and the mid-diff undo echo — nothing else ever spoke it.
+    assert seen.count(diff_mod) == 2, seen
 
     print("Monaco parity checks OK (%d text_changed announcements seen)" % len(seen))
     return 0

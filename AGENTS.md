@@ -5,14 +5,14 @@ Native code editor widget for Qt6, built from scratch on a raw `QWidget`
 QPlainTextEdit, no Chromium. Long-term hobby project; roadmap in `README.md`,
 phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
 
-## Current state (v1.6.1) — gates and the frozen surface
+## Current state (v1.7.0 in development) — gates and the frozen surface
 
 - Gate 1 (editor v1) froze the public API at tag `v1.0`; Gate 1.5 (usability
   train M20–M24) closed 2026-11-12 at tag `v1.5.0`. **Gate 2 is the open
-  train** since 2026-11-15, ordering decided: M25 soft wrap (incl. the
-  `CodeDocument` migration) → M10 diff → M8 LSP/protocol → DAP. The full
-  design record is the PLAN.md "GATE 2" section — read it before starting a
-  car. Never start work for a later gate while an earlier one is open.
+  train** since 2026-11-15, ordering decided: M25 soft wrap (SHIPPED) → M10
+  diff (cars 1–3 built: engine + view + chrome) → M8 LSP/protocol → DAP. The
+  full design record is the PLAN.md "GATE 2" section — read it before starting
+  a car. Never start work for a later gate while an earlier one is open.
 - The frozen surface widens **only additively** (Gate 1.5 precedent): no new
   view mapping/geometry primitives. The M5 decoration API already covers
   diagnostics, breakpoints and inlay hints. Two sanctioned Gate-2 deviations
@@ -212,7 +212,9 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
   script's header list produced "type ... specified in typesystem, but not
   defined" and NO theme wrapper TU. What the binding wraps today: the four
   QObjects (`CodeEditor`/`CodeEditorOptions`/`CodeEditorTheme`/
-  `CodeDocument`, ctors removed — editor-owned), `TextPosition`, the five
+  `CodeDocument`, ctors removed — editor-owned; the M10 standalone
+  `CodeDocument()` stays C++-only, the diff view's detached original is fed
+  through the string door instead), `TextPosition`, the five
   decoration record structs and every nested enum; only `PerfStats` and the
   SlotEdit/UndoMark/std::function machinery stay unbound by design.
 - **Pins are load-bearing:** `PySide6-Essentials==6.12.0` /
@@ -225,6 +227,13 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
   unpacks a real Qt **6.12.0** — fetched from `mirror.yandex.ru/mirrors/qt.io`
   (`download.qt.io` connect-times out from this network, and aqt 3.3.0 can't
   parse the Qt≥6.9 one-package layout — don't try it).
+- **The image's `dejavu-sans-mono-fonts` package is load-bearing:** the
+  editor's default is `systemFont(FixedFont)`, and a font-package-less
+  Rocky 9 base resolves "monospace" to a PROPORTIONAL fallback (space 4.4px
+  vs `w` 11.4px measured), silently skewing the monospace cell arithmetic —
+  the M10 parity ORIGINAL-column clicks landed ~2 cols off their word
+  (2026-11-17). The gesture pins assume a real monospace, like any real
+  user base has.
 - **One Qt at runtime:** a `DT_NEEDED libQt6Core.so.6` resolves to the
   already-loaded PySide6-bundled Qt, but `dlopen()` *by path* would load a
   second copy. Never load Qt by absolute path, never ship Qt libs beside the
@@ -246,8 +255,9 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
 - Deliberate divergences: `set_vim_mode_enabled` exists and only **warns**
   (vim mode is out of scope forever — never implement it);
   `set_minimap_enabled` maps to the overview ruler, never a Chromium-style
-  minimap; `open_diffs` and LSP hooks are absent until Gate 2 — an honest
-  `AttributeError` beats a silent no-op.
+  minimap; `open_diffs` SHIPPED with M10 (the plain-QString door + the
+  shim; uri/options params accepted-and-ignored); the LSP hooks stay absent
+  until M8 — an honest `AttributeError` beats a silent no-op.
 
 ## Model micro-benchmark (`tools/bench_model.cpp`)
 

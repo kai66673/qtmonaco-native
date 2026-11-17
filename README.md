@@ -202,8 +202,10 @@ Gate 1.5 — usability interlude (post-freeze minor train, see PLAN.md;
 Gate 2 — IDE surface (after the freeze):
 
 - [ ] M8 LSP client (stdio JSON-RPC via QProcess) — completion, diagnostics, hover
-- [ ] M10 diff view → `open_diffs` parity
-- [ ] Soft wrap (the deferred half of M9)
+- [x] M10 diff view → `open_diffs` parity (the line-diff engine + the two-
+      column chrome + the wheel/shim crossing; inline word-level highlight,
+      wrap×diff budget math and original-side wrap ride a follow-on M10b)
+- [x] Soft wrap (the deferred half of M9) — the M25 car
 - [ ] DAP features via decorations (breakpoints, current frame, value hints)
 
 Out of scope by design: vim mode. The `set_vim_mode_enabled` setter is still

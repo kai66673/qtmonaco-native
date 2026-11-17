@@ -1163,10 +1163,15 @@ decoration restyle through the existing doors (iide ignored
 Parity tripwire = the qtmonaco `monaco.py` `__main__` block reproduced
 door-for-door in `bindings/tests/parity_monaco.py` (its "Gate 2 absent"
 asserts INVERT into behavior asserts):
-- `open_diffs` → the plain-QString overload of the M10 door; `uri` params
-  reach `setDocumentUri` once `CodeDocument` is bound; `options` dict is
-  accepted, unknown keys ignored, `renderSideBySide:false` documented as a
-  divergence.
+- `open_diffs` → the plain-QString overload of the M10 door (SHIPPED with
+  car 2: the shim `Monaco.open_diffs` + the close_diffs/set_text diff-exit
+  pair). `uri` params are accepted-and-IGNORED, permanently by design: the
+  typesystem removes BOTH CodeDocument ctors (the M10 standalone `()` ctor
+  included — Python never builds a document, so there is no Python-side doc
+  to URI); `options` dict is accepted, unknown keys ignored,
+  `renderSideBySide:false` documented as a divergence (inline mode is out
+  of v1). The pointer door `setDiffDocuments(CodeDocument*,...)` stays
+  C++-only for the same reason.
 - `set/get_lsp_header` — PURE PYTHON (the shim prepends/strips; the native
   model text is header-free), mirroring qtmonaco's `_value` semantics.
 - `add_action` — new view door `addAction(QString id, QString label)` +

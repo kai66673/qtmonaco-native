@@ -34,7 +34,15 @@ RUN dnf -y install \
         mesa-libGL mesa-libEGL libxkbcommon libdrm fontconfig freetype dbus-libs \
         libglvnd-devel \
         glib2 zlib libzstd \
+        dejavu-sans-mono-fonts \
     && dnf clean all
+# dejavu-sans-mono-fonts is load-bearing for the parity test, NOT decoration:
+# the editor's default is QFontDatabase::systemFont(FixedFont), and on a font
+# package-less Rocky 9 base fontconfig resolves "monospace" to a PROPORTIONAL
+# fallback (measured 2026-11-17: space 4.4px vs w 11.4px), which silently
+# skews the monospace cell arithmetic the gesture math pins (the ORIGINAL
+# column click chain landed ~2 cols off its word). Any real desktop user base
+# has a monospace font installed; the test image must match that environment.
 
 ENV VIRTUAL_ENV=/opt/venv
 RUN python3.11 -m venv /opt/venv && \

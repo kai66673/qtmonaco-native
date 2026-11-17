@@ -26,8 +26,10 @@ Deliberate, documented divergences (PLAN.md "Decided divergences"):
   forever, and a warning (not ``AttributeError``) keeps drop-in callers alive.
 * ``set_minimap_enabled`` maps onto the overview ruler; no Chromium-style
   minimap is ever built.
-* ``open_diffs`` and the LSP hooks are NOT present at all (Gate 2): an
-  ``AttributeError`` here is honest, a silent no-op would not be.
+* ``open_diffs`` shipped with M10 (Gate 2): the two-column native diff view,
+  with the uri/options params accepted-and-ignored (see its docstring). The
+  LSP hooks are still NOT present at all (M8 is the next car): an
+  ``AttributeError`` there is honest, a silent no-op would not be.
 
 Attribute access (not ``from _qmn.qmn.view import ...``) is on purpose: the
 namespace shims are attributes created by the extension at import time, not
@@ -107,7 +109,12 @@ class Monaco(CodeEditor):
         same-value returns first, then the read-only ``ValueError``, then the
         ``TypeError``. ``uri`` is accepted and IGNORED natively (models/URIs
         are Gate 2). ``language`` (optional) routes through ``set_language``.
+        Like qtmonaco, setting a value EXITS diff mode — the flag check sits
+        at the top, mirroring qtmonaco's ``_diff_mode = False`` sitting both
+        before the early return and before the value assignment.
         """
+        if self.isDiffMode():
+            self.clearDiffDocuments()
         if self.toPlainText() == value:
             return
         self._check_writable("set value")
@@ -122,6 +129,58 @@ class Monaco(CodeEditor):
     def get_text(self):
         """The current document (native truth, always in sync)."""
         return self.toPlainText()
+
+    # --- diff view (M10) -----------------------------------------------------
+
+    def open_diffs(self, original, modified, language=None, original_uri=None,
+                   modified_uri=None, options=None):
+        """Native two-column diff view (the M10 doors). qtmonaco-compatible
+        signature and TypeError checks; the modified side becomes the
+        editor's document (so ``get_text`` and the typing/editing surface
+        keep speaking it, and ``text_changed`` announces it once).
+
+        Documented divergences (PLAN.md §M10): ``original_uri``/
+        ``modified_uri`` are accepted and IGNORED (like ``set_text``'s uri;
+        the original side is an editor-owned standalone document), and
+        ``options`` (Monaco's JS diff-editor dict) is validated and IGNORED —
+        every key including ``renderSideBySide:false`` (inline/unified mode
+        is out of v1, the plan says it honestly) — the native knobs are the
+        regular ``options()`` doors, and the read-only state keeps applying
+        to the MODIFIED side throughout the diff (the ORIGINAL column is
+        always read-only). The C++ pointer door
+        ``setDiffDocuments(CodeDocument*, ...)`` stays C++-only: Python never
+        builds a CodeDocument.
+        """
+        if not isinstance(original, str):
+            raise TypeError("Original value must be a string.")
+        if not isinstance(modified, str):
+            raise TypeError("Modified value must be a string.")
+        if options is not None and not isinstance(options, dict):
+            raise TypeError("Options must be a dictionary.")
+        if language is None:
+            # qtmonaco's "None keeps the language" rule lives HERE: the C++
+            # beginDiffMode ALWAYS routes its language through setLanguage
+            # (which has no same-value skip), so handing it "" would really
+            # mean plain text. Passing the current id keeps the grammar
+            # (an explicit language="" still means plain — the user asked).
+            language = self.get_language()
+        else:
+            self._language = language
+        self.setDiffDocuments(original, modified, language)
+        # text_changed(modified) comes out of the _relay_text plumbing (the
+        # string door feeds document_->setPlainText, the C++ ping); when
+        # modified equals the current text there is no value change and no
+        # announcement — documented divergence from qtmonaco's unconditional
+        # emit, pinned in parity_monaco.
+        # (language_changed is deliberately NOT emitted here: set_language's
+        # door would paint the old grammar on the old text before the diff
+        # session begins; open_diffs passes ONE language to the session.)
+
+    def close_diffs(self):
+        """Exit the diff view (not in qtmonaco's API — the view can only
+        leave diff mode there by re-setting the value; ours has the native
+        clearDiffDocuments door, no-op when already closed)."""
+        self.clearDiffDocuments()
 
     # --- programmatic edits ----------------------------------------------------
 

@@ -3,9 +3,56 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
-## [Unreleased] — Gate 2 open; the M25 soft-wrap car landed
+## [Unreleased] — Gate 2 open; the M25 soft-wrap car landed, M10 diff built
 
 ### Added
+- **M10 diff view (Gate 2, car 2).** The two-column native diff, all three
+  machines:
+  - *The engine* (`src/diff/`, QtCore-only like `core`, the 4th ctest entry
+    `diff`): Miller–Myers line diff over hashed lines (trim + greedy O(ND)
+    trace + budget fallback) producing hunks + the alignment table.
+    `qmn_view` PRIVATE-links `qmn::diff` (the 2026-11-16 layering decision;
+    the static-package export rides the `qmn::internal_tree_sitter`
+    mechanism as `qmn::internal_diff`); no diff type crosses any public
+    view header.
+  - *The doors*: `setDiffDocuments(CodeDocument*, CodeDocument*, language)`
+    + the plain-QString overload, `clearDiffDocuments()`, `isDiffMode()`,
+    `nextChange()/previousChange()` (F7/F8, strict-edge hunks, no
+    wrap-around — documented divergence from Monaco's cyclic navigation).
+    Diff mode speaks the MODIFIED document everywhere (caret/undo/
+    `textChanged`/`toPlainText`/`readOnly`); the ORIGINAL side is a
+    standalone `CodeDocument` (the new no-editor ctor installs its own edit
+    observer) — selectable-for-copy, never editable. Live recompute: a
+    120 ms debounce fed by BOTH buffers, caret-slot anchored.
+  - *The chrome*: one aligned-row axis (rows replace wrap/fold slots,
+    blank cells are weight-1 pseudo-rows, soft wrap inert in diff v1);
+    `gutterWidth()` grows by `diffChromeWidth()` — the x-frame tiles
+    `bp slot | fold zone (FLIPPED to the new door `foldZoneLeft()`) |
+    ORIGINAL digits | ORIGINAL read window (the 50/50 width parity with
+    the modified text region) | connector strip | the modified number
+    column`. The ORIGINAL read window is SYNTAX-HIGHLIGHTED through a
+    second `HighlightEngine` session riding the document's `editApplied`
+    fan. Read-only column gestures (click/drag/double/triple in ORIGINAL
+    space), `originalSelectionText()`, and the copy/cut routing (cut
+    always speaks MODIFIED).
+  - *The theme*: five additive roles `DiffAddedBand/DiffModifiedBand/
+    DiffDeletedMarker/DiffConnectorFill/DiffChangeGutterMark` (+preset
+    maps), token overrides ride the M24 `setTokenColor` machinery.
+  - Descoped to M10b (honest): wrap×diff budget math, inline/word-level
+    highlight, original-side soft wrap.
+- **M10 through the wheel** (wheel 1.7.0): the doors above bind as ordinary
+  CodeEditor methods; the standalone `CodeDocument()` ctor stays C++-only
+  (Python never builds a document — the typesystem removes both ctors). The
+  shim gains `Monaco.open_diffs(original, modified, language=None,
+  original_uri=None, modified_uri=None, options=None)` — qtmonaco-shaped:
+  the modified side becomes the editor's value, `text_changed` announces
+  it once through the relay, the uri/options params are accepted-and-
+  ignored (`renderSideBySide:false` included — inline mode is out of v1);
+  `set_text` exits diff mode with qtmonaco's flag-before-early-return
+  order. `close_diffs` is our exit door qtmonaco never had.
+  `parity_monaco.py` grew the diff section (chrome geometry identities,
+  the same-modified no-announcement divergence pinned, the read-only
+  original selection read).
 - **M25 soft wrap (Gate 2, car 1).** `options().softWrapEnabled` — the 14th
   options knob, default OFF, full M19 signal discipline. WORD wrap only: an
   unbreakable token (a word longer than the viewport, or after a run of
@@ -35,8 +82,15 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
   wrapped line's slots partially; fold markers ride the first slot, the
   hidden-run ellipsis the last visible slot). With wrap OFF, slot == line:
   the wrap-OFF path keeps the 1.6.1 cost exactly (the slot table collapses,
-  the paint loop is verbatim). `parity_monaco.py`'s `lh` scroll math was
+  the paint loop is verbatim). In DIFF mode the same doors speak ALIGNED
+  ROWS (M10: rows replace wrap/fold slots — blank cells are weight-1
+  pseudo-rows — and `Up/Down` become the direct MODIFIED-line neighbor
+  walk). `parity_monaco.py`'s `lh` scroll math was
   revalidated against the repaired wheel.
+- `Monaco.set_text` now EXITS diff mode (qtmonaco's `_diff_mode = False`
+  semantics, flag checked before the same-value early return) — a
+  same-value `set_text` during a diff closes the session without any
+  announcement.
 - Caret navigation follows the slot unit: Up/Down move ONE visual slot and
   keep row-local-x proximity (a column walks down a wrap chain);
   `positionAt` lands mid-wrap on the visual line you clicked;
