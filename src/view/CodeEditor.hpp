@@ -295,10 +295,16 @@ public:
     // widget x read contentLeft(), not padding().
     int gutterWidth() const;
     int contentLeft() const { return padding_ + gutterWidth(); }
-    // The M13 fold zone: fixed-width strip at [contentLeft()-foldZoneWidth(),
-    // contentLeft()), 0 in Off mode. Clicks inside it toggle the fold of
-    // that row's line and never move the caret.
+    // The M13 fold zone: fixed-width strip, 0 in Off mode. Its x is
+    // foldZoneLeft(): [contentLeft()-foldZoneWidth(), contentLeft()) in v1,
+    // pinned to the gutter's LEFT edge while M10 diff mode carries the
+    // original column (see foldZoneLeft()). Clicks inside it toggle the
+    // fold of that row's line and never move the caret.
     int foldZoneWidth() const;
+    // The zone's widget-x left edge (v1: contentLeft()-foldZoneWidth();
+    // diff mode: padding_ + the breakpoint slot) — paint, hit and hover
+    // all read the ONE door, so the frames can never drift.
+    int foldZoneLeft() const;
 
     // (1) Breakpoint glyphs: one filled dot per line, in the reserved
     // slot. Getter returns the sorted, deduplicated lines.
@@ -684,6 +690,25 @@ public:
     // from Monaco's cyclic navigation).
     void nextChange();
     void previousChange();
+    // M10 machine 3: the ORIGINAL column is a read-only canvas with ONE
+    // sanctioned data path — click/drag/double/triple selection in
+    // ORIGINAL-document coordinates + copy(). This door reports that
+    // selection's text ('' = none): non-empty while an original-column
+    // selection is live, and the ONLY way original text leaves the column
+    // (keys, edits, cut and paste never touch it — the modified side stays
+    // the editable truth). The selection is dropped by any modified-side
+    // gesture (click, key press) or by copying.
+    QString originalSelectionText() const;
+    // The chrome block's sub-widths (0 while diff mode is off): the read
+    // window, the ORIGINAL number column and the connector gap — the one
+    // definition diffFrame() lays out and gutterWidth() sums, exposed so
+    // integrators (and the pixel tests) sample the exact frame without
+    // duplicating the math. No mapping/geometry PRIMITIVE is added: the
+    // frames stay the view's business (Gate-1.5 additive precedent).
+    int diffChromeTextCol() const; // the ORIGINAL read window's width
+    int diffChromeDigitsCol() const; // the ORIGINAL number column's width
+    int diffChromeGap() const; // the connector strip between the columns
+    int diffChromeWidth() const; // the sum above (the gutter's diff term)
 
     // The ONE view-line map (M13): visible slots are numbered
     // [0, visibleLineTotal()) top-to-bottom; a hidden (folded-away) model
@@ -1392,6 +1417,13 @@ private:
     std::unique_ptr<DiffState> diff_;
     CodeDocument* diffStandaloneOriginal_ = nullptr; // editor-owned child,
                                                      // string-door feed only
+    // The chrome read window's OWN engine instance (M10: the ORIGINAL side
+    // is syntax-highlighted exactly like the modified side — its second
+    // HighlightEngine rides the same attach/onEdit/setViewport protocol,
+    // fed through the original doc's editApplied signal). Created fresh in
+    // beginDiffMode, dropped by clearDiffDocuments; borrows the original
+    // document's buffer, so it must never outlive the diff session.
+    std::unique_ptr<HighlightEngine> origHighlight_;
     QTimer diffRecomputeTimer_; // single-shot live-update debounce
     static constexpr int kDiffDebounceMs = 120;
     // Shared tail of both doors (after the texts/documents are settled):
@@ -1416,6 +1448,96 @@ private:
     int diffRowForSlot(int slot) const;
     // Guard the external original pointer: destroyed() -> clear the mode.
     void watchDiffOriginal(CodeDocument* doc);
+
+    // --- M10 machine 3: the two-column chrome (paint + interaction) ------
+    // The ORIGINAL side enters the widget through the gutter: gutterWidth()
+    // grows by diffChromeWidth() (the original's number column + text
+    // column + the connector gap), and the fold zone — v1's right-edge
+    // strip — flips to the gutter's LEFT edge (foldZoneLeft()), the chrome
+    // block taking its old place. The MODIFIED numbers stay right-aligned
+    // exactly where textLeft - pad puts them; the text side keeps its v1
+    // geometry doors untouched. The chrome block is a read-only canvas:
+    // clicks there run the ORIGINAL selection/copy gesture (the original
+    // never becomes editable: keys and edits ride the modified side).
+    // x-frame (machine-3 contract, painted + clicked with the same math;
+    // bpPad = the v1 breakpoint slot, fz = foldZoneWidth(), pad = the v1
+    // gutterInnerPad()):
+    //   [padding_, padding_+bpPad)              breakpoint slot (v1)
+    //   [foldZoneLeft(), +fz)                   the fold zone
+    //   [+fz, +origDigitsCol)                   ORIGINAL numbers (right-
+    //                                           aligned in this column)
+    //   [+origDigitsCol, +textCol)              ORIGINAL text window
+    //   [+textCol, +connector)                  the CONNECTOR strip
+    //                                           (stripRight == the chrome
+    //                                           block's end)
+    //   [stripRight, textLeft)                  MODIFIED number column
+    //                                           (v1 digits + both pads,
+    //                                           right-aligned as ever)
+    //   [textLeft, …)                           MODIFIED text (v1 verbatim)
+    // The hunk-kind code per row (rowKind, built with the prefix tables):
+    // rowKind[r] = -1 unchanged | 0 replace (both cells, side by side)
+    // | 1 pure insert (blank ORIGINAL cell) | 2 pure delete (blank
+    // MODIFIED cell) — the paint map of the five diff roles.
+    int origDiffDigits() const; // the ORIGINAL doc's digit count (chrome col)
+    // The v1 gutter WITHOUT the diff term (digits + pads + bp slot + fold
+    // zone): gutterWidth() = this + diffChromeWidth(). diffChromeTextCol()
+    // needs it to split the remaining width 50/50 between the two text
+    // windows (the live-check fix of 2026-11-17: a flat width() fraction
+    // made the ORIGINAL half visibly narrower than the MODIFIED side).
+    int gutterV1Width() const;
+    // The chrome text pass's FormatRanges (the v1 formatRangesForLine
+    // protocol applied to origHighlight_ + the ORIGINAL buffer): token
+    // colors ride ol.layout.draw's selections, whitespace and uncolored
+    // runs keep the GutterDigits pen (the default), and an inactive engine
+    // means the plain single-pen path.
+    QVector<QTextLayout::FormatRange> origChromeFormatRanges(
+        int line, const QString& laidOut) const;
+    // Paint pass split (the under pass runs after the selection quads so
+    // bands + the original column's ground/text/selection sit UNDER the
+    // gutter digits and the modified text; the over pass runs after the
+    // text loop: connectors, the delete hatch, the gutter marks — all on
+    // the chrome's opaque Base ground).
+    void drawDiffChromeUnder(QPainter& p) const;
+    void drawDiffChromeOver(QPainter& p) const;
+    // Sub-x-frame of the original column (frame members shared by the
+    // paint and the click routing).
+    struct DiffFrame {
+        int origNumLeft = 0;  // the ORIGINAL digits column's left edge
+        int origNumRight = 0; // its right edge (the digits' right anchor)
+        int origTextLeft = 0; // the ORIGINAL text window's left edge
+        int origTextRight = 0;
+        int stripLeft = 0;    // the connector strip's left edge
+        int stripRight = 0;   // its right edge (== the chrome block's end)
+        int firstSlot = 0;    // the visible-slot window the paint walks
+        int lastSlot = -1;
+        bool valid = false;   // diff mode off / degenerate frame
+    };
+    DiffFrame diffFrame() const;
+    // The alignment row under a widget y (-1 = no row): the y half of the
+    // chrome hit test. diffOriginalHit adds the x half: the col rides the
+    // ORIGINAL line's own one-line layout, inside the fixed read window
+    // (which never rides hScroll_ — the modified side owns the h-scroll).
+    int diffChromeRowAtY(int y) const; // the alignment row under y (-1 none)
+    bool diffChromeHit(const QPoint& pt) const; // x inside the chrome block?
+    TextPosition diffOriginalHit(const QPoint& pt) const;
+    void drawDiffConnectors(QPainter& p, const DiffFrame& f) const;
+    // The original-column gesture state machine (press/drag/double/triple,
+    // the v1 click-chain rules in ORIGINAL coordinates) — routed by the
+    // mouse handlers when the press x lands inside the chrome block
+    // (left of the modified digits, right of the fold zone).
+    void diffOriginalPress(const QPoint& pt, bool shift);
+    void diffOriginalExtend(const QPoint& pt);
+    void diffOriginalDoubleClick(const QMouseEvent* event);
+    void selectDiffOriginalWord(const TextPosition& hit);
+    void selectDiffOriginalLines(int line);
+    // The ONE writer of the ORIGINAL selection: anchor + caret (v1's
+    // anchor_/caret_ mirror) and the offset-sorted A/B pair the paint and
+    // originalSelectionText read; a zero-width pair is a caret-point.
+    void setDiffOriginalSel(const TextPosition& anchor,
+                            const TextPosition& caret);
+    // Any live original-column selection is dropped by every modified-side
+    // gesture/key and by clearDiffDocuments(); copy() routes to it first.
+    void clearDiffOriginalSelection();
 
     // --- M22 fold-gutter hover (semantics: PLAN M22) ----------------------
     // While the fold strip is live, mouse tracking follows the pointer and

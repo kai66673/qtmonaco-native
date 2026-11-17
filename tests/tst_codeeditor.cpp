@@ -22,6 +22,7 @@
 #include <QLineEdit>
 #include <QMenu>
 #include <QMimeData>
+#include <QMouseEvent>
 #include <QPushButton>
 #include <QUrl>
 #include <QWheelEvent>
@@ -393,6 +394,13 @@ private slots:
     void diffEditBurstRecomputesOnceAndKeepsCaretSlot();
     void diffOriginalEditsAlsoTriggerRecompute();
     void diffNavigationStrictEdgeNoWrap();
+    void diffChromeGeometryAndGutterOffStaysV1();
+    void diffFoldZoneShiftAndChromeClickRouting();
+    void diffOriginalColumnGestures();
+    void diffOriginalSelectionReadOnlyAndDropped();
+    void diffOriginalCopyCutClipboardRouting();
+    void diffChromePaintPixels();
+    void diffOriginalChromeSyntaxHighlight();
     void standaloneCodeDocumentSignalsFire();
 
 private:
@@ -9977,6 +9985,507 @@ void TestCodeEditor::diffNavigationStrictEdgeNoWrap()
     QCOMPARE(editor->position().line, 1); // strict edge back to the first hunk
     editor->previousChange();
     QCOMPARE(editor->position().line, 1); // before the first hunk: NO wrap
+}
+
+// --- M10 machine 3 helpers ------------------------------------------------
+// The ORIGINAL-column frame REBUILT from the public doors + the re-derived
+// v1 inner pad (an independent reconstruction: a drift between the paint
+// frame and the probe frame is a real failure, which is the point). The
+// drag is the established manual press+move+release synthesis (Qt routes
+// button-carrying moves to mouseMoveEvent only when they go through
+// sendEvent; QTest::mouseMove carries no button state; the sendEvent
+// calls are never wrapped in an assert-style macro — release builds strip
+// the whole expression, events included).
+static int m3Pad(CodeEditor* e) { return std::max(3, qRound(e->cellWidth())); }
+
+struct M3Frame {
+    int left, textL, textR, stripL, stripR, pad;
+};
+static M3Frame m3frame(CodeEditor* e)
+{
+    M3Frame f;
+    f.pad = m3Pad(e);
+    const int bpPad = e->breakpointLines().isEmpty() ? 0 : 2 * m3Pad(e);
+    f.left = e->padding() + bpPad + e->foldZoneWidth(); // foldZoneLeft()+fz
+    f.textL = f.left + e->diffChromeDigitsCol();
+    f.textR = f.textL + e->diffChromeTextCol();
+    f.stripL = f.textR;
+    f.stripR = f.left + e->diffChromeWidth(); // the chrome block's right
+    return f;                                 // edge == stripL + gap
+}
+
+static QPoint origTextPoint(CodeEditor* e, int slot, int col, double xNudge = 0.4)
+{
+    const M3Frame f = m3frame(e);
+    return QPoint(f.textL + int(col * e->cellWidth() + e->cellWidth() / 2 + xNudge),
+                  e->padding() + slot * e->lineHeight() + e->lineHeight() / 2);
+}
+
+static void origDrag(CodeEditor* e, const QPoint& from, const QPoint& to)
+{
+    const QPointF a(from), b(to);
+    QMouseEvent press(QEvent::MouseButtonPress, a, a, Qt::LeftButton,
+                      Qt::LeftButton, Qt::NoModifier);
+    QMouseEvent move(QEvent::MouseMove, b, b, Qt::NoButton, Qt::LeftButton,
+                     Qt::NoModifier);
+    QMouseEvent release(QEvent::MouseButtonRelease, b, b, Qt::LeftButton,
+                        Qt::NoButton, Qt::NoModifier);
+    QVERIFY(QApplication::sendEvent(e, &press));
+    QVERIFY(QApplication::sendEvent(e, &move));
+    QVERIFY(QApplication::sendEvent(e, &release));
+}
+
+static QColor imgPixel(CodeEditor* e, int x, int y)
+{
+    const QImage img = e->grab().toImage();
+    if (x < 0 || y < 0 || x >= img.width() || y >= img.height())
+        return QColor(Qt::magenta); // out of frame: an exact-match assert
+                                    // then fails loudly, never vacuously
+    return img.pixelColor(x, y);
+}
+
+// M10 machine 3 (the two-column chrome): geometry identity, click routing,
+// the ORIGINAL gesture, the copy path and the paint frames. chrome == 0
+// outside diff mode is the v1 byte-identity tripwire; inside diff mode the
+// numbers and the fold zone keep their exact v1 frames (the contentLeft
+// delta splits into the chrome terms with ZERO slop).
+
+void TestCodeEditor::diffChromeGeometryAndGutterOffStaysV1()
+{
+    editor->setPlainText(QStringLiteral("alpha\nbeta"));
+    const int clV1 = editor->contentLeft();
+    const int fz = editor->foldZoneWidth();
+    const int gwV1 = editor->gutterWidth();
+    QVERIFY(fz > 0);
+    QCOMPARE(editor->foldZoneLeft(), clV1 - fz); // v1: the gutter's right edge
+    QCOMPARE(editor->diffChromeWidth(), 0);
+
+    editor->setDiffDocuments(QStringLiteral("alpha\nbeta\ngamma"),
+                             QStringLiteral("alpha\nbeta"), QString());
+    QVERIFY(editor->isDiffMode());
+    QVERIFY(editor->diffChromeTextCol() > 0);
+    const int chrome = editor->diffChromeWidth();
+    QCOMPARE(chrome, editor->diffChromeDigitsCol() + editor->diffChromeTextCol()
+                         + editor->diffChromeGap());
+    // The whole modified column shifts right by the chrome term, and the
+    // digits column keeps its v1 right alignment against textLeft - pad
+    // (the exact split, no slop):
+    QCOMPARE(editor->contentLeft(), clV1 + chrome);
+    QCOMPARE(editor->gutterWidth(), gwV1 + chrome);
+    // The fold zone flips to the gutter's LEFT edge (flush against the
+    // widget's own padding, exactly like the v1 breakpoint slot; no bp slot
+    // in this test) and the whole frame CLOSES with zero slop: the zone,
+    // the chrome block and the v1 number column tile the gutter from
+    // padding_ to contentLeft():
+    QCOMPARE(editor->foldZoneLeft(), editor->padding());
+    QCOMPARE(editor->foldZoneLeft() + editor->gutterWidth(),
+             editor->contentLeft());
+    // The chrome block's right edge lands exactly where the MODIFIED
+    // number column (v1 digits + both pads) begins:
+    const M3Frame f = m3frame(editor);
+    QCOMPARE(f.stripR + (gwV1 - fz), editor->contentLeft());
+    QVERIFY(f.stripR > f.stripL); // the connector strip is drawable
+    QVERIFY(f.textL < f.textR);   // and so is the read window
+
+    // The 50/50 split (the live-check fix of 2026-11-17: the flat 30%
+    // read window left the left half visibly NARROWER than the right
+    // side): the MODIFIED text region — contentLeft() to the widget's
+    // right padding — gets the same width as the read window, up to the
+    // qRound slop of the halving (≤1px).
+    const int T = editor->diffChromeTextCol();
+    const int rightW =
+        editor->width() - editor->padding() - editor->contentLeft();
+    QVERIFY2(std::abs(rightW - T) <= 1,
+             qPrintable(QStringLiteral("read window %1 vs modified text region %2")
+                            .arg(T).arg(rightW)));
+    // Both clamps stay in force at the window-size extremes (tiny windows
+    // keep a readable column; giant ones never let the chrome swallow
+    // the editing side): doors only, no painting in the degenerate sizes.
+    const QSize sz0 = editor->size();
+    editor->resize(4000, sz0.height());
+    QCOMPARE(editor->diffChromeTextCol(), qRound(60 * editor->cellWidth()));
+    editor->resize(120, sz0.height());
+    QCOMPARE(editor->diffChromeTextCol(), qRound(12 * editor->cellWidth()));
+    editor->resize(sz0);
+
+    // Gutter Off kills the chrome (the fold zone's own switch, mirrored):
+    // contentLeft == padding, the v1 Off-mode click frames stay verbatim.
+    editor->setLineNumbersMode(CodeEditor::LineNumbersMode::Off);
+    QCOMPARE(editor->diffChromeWidth(), 0);
+    QCOMPARE(editor->contentLeft(), editor->padding());
+    editor->grab();
+    const QPoint mid(editor->padding() + 5,
+                     editor->padding() + editor->lineHeight() / 2);
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, mid);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0})); // v1 click
+    QVERIFY(editor->originalSelectionText().isEmpty()); // no column to select
+    editor->setLineNumbersMode(CodeEditor::LineNumbersMode::On);
+}
+
+void TestCodeEditor::diffFoldZoneShiftAndChromeClickRouting()
+{
+    editor->setDiffDocuments(QStringLiteral("one\ntwo\nthree"), foldDoc(),
+                             QString());
+    editor->grab(); // warm the foldable cache (the v1 fold-test pattern)
+    QVERIFY(editor->isFoldable(0)); // the MODIFIED side folds, v1 doors
+    const int lh = editor->lineHeight();
+    const int fz = editor->foldZoneWidth();
+    const int zoneX = editor->foldZoneLeft() + fz / 2; // the shifted frame
+    auto zoneY = [&](int slot) { return editor->padding() + slot * lh + lh / 2; };
+    QVERIFY(editor->foldZoneLeft() < editor->contentLeft() - fz); // shifted
+
+    // A fold-zone click in the shifted frame toggles, caret never moves.
+    editor->setPosition({5, 2});
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(0)));
+    QVERIFY(editor->isFolded(0));
+    QVERIFY(editor->visibleLineTotal() < 6); // the hidden run zeroes its rows
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{5, 2}));
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(zoneX, zoneY(0)));
+    QVERIFY(!editor->isFolded(0));
+
+    // Just right of the zone sits the ORIGINAL column: the same y clicks
+    // now run the chrome gesture — no fold, no caret move, no modified
+    // selection; only the ORIGINAL's own selection moves.
+    const int origX = editor->foldZoneLeft() + fz
+                      + editor->diffChromeDigitsCol() + 5; // in the window
+    QVERIFY(origX < editor->contentLeft()); // inside the gutter block
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier, QPoint(origX, zoneY(1)));
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{5, 2}));
+    QVERIFY(!editor->hasSelection());
+    QVERIFY(editor->originalSelectionText().isEmpty()); // a caret-point
+
+    // The numbers zone keeps its v1 meaning (caret to col 0), and so does
+    // the text side.
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier,
+                      QPoint(editor->contentLeft() - 4, zoneY(2)));
+    QCOMPARE(editor->position().line, 2);
+    QCOMPARE(editor->position().col, 0);
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier,
+                      caretPixel(editor, 3, 1));
+    QCOMPARE(editor->position().line, 3);
+    QVERIFY(editor->position().col > 0);
+}
+
+void TestCodeEditor::diffOriginalColumnGestures()
+{
+    editor->setDiffDocuments(QStringLiteral("one\ntwo\nthree"),
+                             QStringLiteral("one\nXwo\nthree"), QString());
+    editor->grab();
+    editor->setPosition({0, 1}); // a caret elsewhere: untouched throughout
+
+    // A plain click places a caret-point: no live selection ('').
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier,
+                      origTextPoint(editor, 0, 0));
+    QVERIFY(editor->originalSelectionText().isEmpty());
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+
+    // Drag selects the ORIGINAL span (inclusive-start, exclusive-end); row
+    // 1 of this diff is the paired replace row, ORIGINAL line "two".
+    origDrag(editor, origTextPoint(editor, 0, 0), origTextPoint(editor, 1, 3));
+    QCOMPARE(editor->originalSelectionText(), QStringLiteral("one\ntwo"));
+
+    // Shift+click extends from the selection's ANCHOR (the drag's start
+    // stayed (0,0); only the far end moves) — the v1 shift-click rule, so
+    // this backward shift shrinks the span to "o", exactly like the
+    // modified side would.
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::ShiftModifier,
+                      origTextPoint(editor, 0, 1));
+    QCOMPARE(editor->originalSelectionText(), QStringLiteral("o"));
+
+    // A plain click collapses (the selection dies, '' again).
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier,
+                      origTextPoint(editor, 2, 2));
+    QVERIFY(editor->originalSelectionText().isEmpty());
+    // Shift from a bare caret-point extends v1-style (back to the top).
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::ShiftModifier,
+                      origTextPoint(editor, 0, 0));
+    QCOMPARE(editor->originalSelectionText(), QStringLiteral("one\ntwo\nth"));
+
+    // Chained double-clicks in the read window run the v1 chain in
+    // ORIGINAL space (word -> whole line + newline -> block growth; QTest
+    // stamps synthetic events 0 = chained).
+    const QPoint p = origTextPoint(editor, 1, 1);
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QCOMPARE(editor->originalSelectionText(), QStringLiteral("two"));
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QCOMPARE(editor->originalSelectionText(), QStringLiteral("two\n"));
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QCOMPARE(editor->originalSelectionText(), QStringLiteral("two\nthree"));
+    // The 4th grows again; at the document bottom the direction FLIPS and
+    // the block keeps growing from the other end (v1's edge rule).
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QCOMPARE(editor->originalSelectionText(), QStringLiteral("one\ntwo\nthree"));
+
+    // A far re-press kills the chain (fresh word, v1 x-slop rule).
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier,
+                      origTextPoint(editor, 2, 3));
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier,
+                       origTextPoint(editor, 2, 1));
+    QCOMPARE(editor->originalSelectionText(), QStringLiteral("three"));
+
+    // The modified caret never moved, and the modified selection never
+    // happened: the ORIGINAL is a different space entirely.
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 1}));
+    QVERIFY(!editor->hasSelection());
+}
+
+void TestCodeEditor::diffOriginalSelectionReadOnlyAndDropped()
+{
+    editor->setDiffDocuments(QStringLiteral("keep"), QStringLiteral("mod"),
+                             QString());
+    editor->grab();
+    const QPoint p = origTextPoint(editor, 0, 1);
+
+    // A typed key DROPS the original selection and edits the MODIFIED
+    // side only (the read side carries no verbs).
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QCOMPARE(editor->originalSelectionText(), QStringLiteral("keep"));
+    QTest::keyClick(editor, Qt::Key_Z);
+    QVERIFY(editor->originalSelectionText().isEmpty());
+    QCOMPARE(editor->toPlainText(), QStringLiteral("zmod"));
+
+    // A click on the modified TEXT drops it too (and places the caret).
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QVERIFY(!editor->originalSelectionText().isEmpty());
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier,
+                      caretPixel(editor, 0, 1));
+    QVERIFY(editor->originalSelectionText().isEmpty());
+    QCOMPARE(editor->position().line, 0);
+
+    // A modified-side Ctrl+A does not reach the original: the original
+    // buffer is byte-identical, its selection stays empty.
+    const auto docs = editor->findChildren<qmn::view::CodeDocument*>();
+    qmn::view::CodeDocument* orig = nullptr;
+    for (qmn::view::CodeDocument* d : docs)
+        if (d != editor->document())
+            orig = d;
+    QVERIFY(orig);
+    QCOMPARE(orig->toPlainText(), QStringLiteral("keep"));
+    QTest::keyClick(editor, Qt::Key_A, Qt::ControlModifier);
+    QVERIFY(editor->hasSelection()); // the MODIFIED side selected
+    QVERIFY(editor->originalSelectionText().isEmpty());
+    QCOMPARE(orig->toPlainText(), QStringLiteral("keep"));
+
+    // clearDiffDocuments drops everything with the state (and the
+    // ORIGINAL door goes permanently quiet).
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QVERIFY(!editor->originalSelectionText().isEmpty());
+    editor->clearDiffDocuments();
+    QVERIFY(editor->originalSelectionText().isEmpty());
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QVERIFY(editor->originalSelectionText().isEmpty());
+}
+
+void TestCodeEditor::diffOriginalCopyCutClipboardRouting()
+{
+    using qmn::view::CodeDocument; // the M25 test-file pattern
+    QApplication::clipboard()->clear();
+    editor->setDiffDocuments(QStringLiteral("keep"), QStringLiteral("mod"),
+                             QString());
+    editor->grab();
+    const QPoint p = origTextPoint(editor, 0, 1);
+
+    // Ctrl+C reads the live ORIGINAL selection (the ONLY exit).
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QTest::keyClick(editor, Qt::Key_C, Qt::ControlModifier);
+    QCOMPARE(QApplication::clipboard()->text(QClipboard::Clipboard),
+             QStringLiteral("keep"));
+    QVERIFY(!editor->hasSelection()); // the modified side never selected
+
+    // Ctrl+X NEVER cuts the ORIGINAL: cut() drops the live original
+    // selection first, then the v1 verb runs on the MODIFIED side — the
+    // caret-only cut takes the whole (modified) line, clipboard without
+    // the newline. The ORIGINAL document is untouched by any of it.
+    CodeDocument* origDoc = nullptr;
+    for (CodeDocument* d : editor->findChildren<CodeDocument*>())
+        if (d != editor->document())
+            origDoc = d; // the string door's lazy editor-owned standalone
+    QVERIFY(origDoc);
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QTest::keyClick(editor, Qt::Key_X, Qt::ControlModifier);
+    QCOMPARE(origDoc->toPlainText(), QStringLiteral("keep")); // untouchable
+    QVERIFY(editor->originalSelectionText().isEmpty()); // the cut dropped it
+    QCOMPARE(editor->toPlainText(), QString()); // the modified line was cut
+    QCOMPARE(QApplication::clipboard()->text(QClipboard::Clipboard),
+             QStringLiteral("mod")); // the v1 line-cut rode the modified side
+
+    // Re-enter diff mode, then a MODIFIED-side selection copies v1-style
+    // while no original selection is live (the selection focus rule).
+    editor->setDiffDocuments(QStringLiteral("keep"), QStringLiteral("mod"),
+                             QString());
+    QTest::mouseClick(editor, Qt::LeftButton, Qt::NoModifier,
+                      caretPixel(editor, 0, 0));
+    QVERIFY(editor->originalSelectionText().isEmpty()); // the click dropped it
+    QTest::keyClick(editor, Qt::Key_End, Qt::ShiftModifier);
+    QVERIFY(editor->hasSelection());
+    QTest::keyClick(editor, Qt::Key_C, Qt::ControlModifier);
+    QCOMPARE(QApplication::clipboard()->text(QClipboard::Clipboard),
+             QStringLiteral("mod"));
+
+    // Paste drops the original selection and pastes the CLIPBOARD (never
+    // the live original text): the read side carries no verbs at all. The
+    // caret sits at the MODIFIED line's end, so the clipboard rides in.
+    QTest::mouseDClick(editor, Qt::LeftButton, Qt::NoModifier, p);
+    QVERIFY(!editor->originalSelectionText().isEmpty());
+    editor->setPosition({0, 3}); // a programmatic move rides the MODIFIED side
+    QTest::keyClick(editor, Qt::Key_V, Qt::ControlModifier);
+    QVERIFY(editor->originalSelectionText().isEmpty());
+    QCOMPARE(editor->toPlainText(), QStringLiteral("modmod"));
+}
+
+void TestCodeEditor::diffChromePaintPixels()
+{
+    using Theme = qmn::view::CodeEditorTheme;
+    Theme* th = editor->theme();
+    const QColor base(1, 2, 3);
+    const QColor modBand(4, 5, 6);
+    const QColor conn(7, 8, 9);
+    const QColor mark(10, 11, 12);
+    const QColor delInk(13, 14, 15);
+    th->setColor(Theme::Role::Base, base);
+    th->setColor(Theme::Role::DiffAddedBand, QColor(16, 17, 18));
+    th->setColor(Theme::Role::DiffModifiedBand, modBand);
+    th->setColor(Theme::Role::DiffConnectorFill, conn);
+    th->setColor(Theme::Role::DiffChangeGutterMark, mark);
+    th->setColor(Theme::Role::DiffDeletedMarker, delInk);
+
+    // A 1-for-1 replace (tst_diff's paired-row golden): band + connector +
+    // mark on row 0, a plain row below.
+    editor->setDiffDocuments(QStringLiteral("one\ntwo"),
+                             QStringLiteral("uno\ntwo"), QString());
+    editor->grab();
+    const M3Frame f = m3frame(editor);
+    const int lh = editor->lineHeight();
+    const int yR0 = editor->padding();
+    const int yR1 = editor->padding() + lh;
+
+    auto inkNear = [&](int x, int yTop, const QColor& ink) {
+        const QImage img = editor->grab().toImage();
+        for (int y = yTop; y < yTop + lh; ++y)
+            for (int xx = std::max(0, x - 4); xx <= x + 4; ++xx)
+                if (xx < img.width() && y < img.height()
+                    && img.pixelColor(xx, y) == ink)
+                    return true;
+        return false;
+    };
+
+    // The chrome ground: opaque Base across the whole block (any v1
+    // current-line/highlight bleed is overpainted — the read side has its
+    // own frame). Sampled where no glyph can be: the read window's empty
+    // right tail, and the gap strip on an UNCHANGED row (no connector, no
+    // hatch, no mark there).
+    QCOMPARE(imgPixel(editor, f.textR - 3, yR0 + lh / 2), base);
+    QCOMPARE(imgPixel(editor, f.stripL + 1, yR1 + lh / 2), base);
+    // THE REGRESSION TRIPWIRE (the live-check catch of 2026-11-17): the
+    // ORIGINAL text is actually inked inside the read window. QTextLine::
+    // draw's pos is the layout TOP-LEFT (the engine adds line.y()+ascent
+    // itself — the v1 text-loop comment); a baseline anchor there slid
+    // every chrome line one ascent down, and the row clip ate it whole:
+    // the window stayed an empty ground strip while every numeric and
+    // geometry door stayed green. Default-theme chrome ink rides the
+    // palette, so force a fixed GutterDigits color for the sample.
+    const QColor chromeInk(200, 201, 202);
+    th->setColor(Theme::Role::GutterDigits, chromeInk);
+    editor->grab();
+    QVERIFY2(inkNear(f.textL + 4, yR0, chromeInk),
+             "no ORIGINAL glyphs in the read window");
+    // The MODIFIED band of the replace row (the number column's cell,
+    // right of the chrome block); the unchanged row below carries NO band.
+    QCOMPARE(imgPixel(editor, f.stripR + 2, yR0 + lh / 2), modBand);
+    QCOMPARE(imgPixel(editor, f.stripR + 2, yR1 + lh / 2), base);
+    // The connector wedge fills the gap strip on the paired hunk's rows.
+    QVERIFY(inkNear(f.stripL + (f.stripR - f.stripL) / 2, yR0, conn));
+    // The change mark at the strip's right edge (replace rows).
+    QCOMPARE(imgPixel(editor, f.stripR - 1, yR0 + lh / 2), mark);
+    // The fold-zone column (left of the chrome block) is NOT banded and
+    // NOT covered by the chrome's opaque ground (the ground starts at the
+    // chrome block's left edge): it rides the v1 passes verbatim — the
+    // current-line wash on the caret's row, plain Base below. The test
+    // theme is Default (only Base is overridden), so the wash is the
+    // documented fallback ink: Text@30 — offscreen's Text role is
+    // #1F2021, and over the black widget ground it composites to that
+    // same RGB, exactly what the probe measured.
+    QCOMPARE(imgPixel(editor, editor->foldZoneLeft() + 1, yR0 + lh / 2),
+             QColor(0x1F, 0x20, 0x21));
+    QCOMPARE(imgPixel(editor, editor->foldZoneLeft() + 1, yR1 + lh / 2),
+             base);
+
+    // A pure delete: the hatch rides the BLANK MODIFIED cell, and the
+    // ORIGINAL text column stays plain ground right beside it.
+    editor->clearDiffDocuments();
+    editor->setDiffDocuments(QStringLiteral("one\ntwo\nthree"),
+                             QStringLiteral("one\nthree"), QString());
+    editor->grab();
+    const M3Frame g = m3frame(editor);
+    const int yDel = editor->padding() + lh; // the (two,-1) blank row
+    QVERIFY(inkNear(g.stripR + 6, yDel, delInk)); // the 45-deg hatch
+    QCOMPARE(imgPixel(editor, g.textR - 3, yDel + lh / 2), base); // the
+                                                                  // read
+    // window's empty tail stays plain chrome ground beside the hatch.
+
+    th->clearColor(Theme::Role::Base);
+    th->clearColor(Theme::Role::DiffAddedBand);
+    th->clearColor(Theme::Role::DiffModifiedBand);
+    th->clearColor(Theme::Role::DiffConnectorFill);
+    th->clearColor(Theme::Role::DiffChangeGutterMark);
+    th->clearColor(Theme::Role::DiffDeletedMarker);
+    th->clearColor(Theme::Role::GutterDigits);
+}
+
+void TestCodeEditor::diffOriginalChromeSyntaxHighlight()
+{
+    using Theme = qmn::view::CodeEditorTheme;
+    Theme* th = editor->theme();
+    const QColor kwInk(10, 220, 10);
+    const QColor strInk(20, 20, 220);
+    th->setTokenColor(CodeEditor::TokenKind::Keyword, kwInk);
+    th->setTokenColor(CodeEditor::TokenKind::String, strInk);
+
+    // The ORIGINAL rides an EXTERNAL standalone doc: its CodeDocument
+    // doors stay open, so the live editApplied -> chrome-engine fan is
+    // exercised below, not just the entering feed.
+    qmn::view::CodeDocument doc;
+    doc.setPlainText(QStringLiteral("def f():\n    return \"hi\""));
+    editor->setPlainText(QStringLiteral("def f():\n    return \"ho\""));
+    editor->setDiffDocuments(&doc, editor->document(), QStringLiteral("python"));
+    QVERIFY(editor->isDiffMode());
+    editor->grab(); // the paint pays the first (full) parse of both engines
+    const M3Frame f = m3frame(editor);
+    const int lh = editor->lineHeight();
+    const int yR0 = editor->padding();
+    const int yR1 = editor->padding() + lh;
+
+    auto inkNear = [&](int x, int yTop, const QColor& ink) {
+        const QImage img = editor->grab().toImage();
+        for (int y = yTop; y < yTop + lh; ++y)
+            for (int xx = std::max(0, x - 4); xx <= x + 4; ++xx)
+                if (xx < img.width() && y < img.height()
+                    && img.pixelColor(xx, y) == ink)
+                    return true;
+        return false;
+    };
+
+    // The chrome read window speaks the SAME token roles as the modified
+    // side: `def` (row 0, cols 0..2) rides Keyword inks...
+    QVERIFY2(inkNear(f.textL + 6, yR0, kwInk),
+             "no Keyword ink on the ORIGINAL's def in the read window");
+    // ...and the literal (row 1's `return "hi"`, cols 11..14) rides String.
+    QVERIFY2(inkNear(f.textL + int(12.5 * editor->cellWidth()), yR1, strInk),
+             "no String ink on the ORIGINAL's literal in the read window");
+
+    // The live seam: edit the ORIGINAL through its OWN document door —
+    // the fan feeds the chrome engine's onEdit, the debounce recomputes
+    // the rows, and the NEXT paint re-colors the NEW text (an engine left
+    // stale would keep painting the OLD text's roles: the `if` cell would
+    // carry plain ink, not Keyword).
+    doc.setPlainText(QStringLiteral("if x == 1:\n    pass"));
+    QTest::qWait(300); // the 120 ms diff debounce fires the recompute
+    QVERIFY2(inkNear(f.textL + 3, yR0, kwInk),
+             "chrome highlight not refreshed after an ORIGINAL edit");
+
+    th->clearTokenColor(CodeEditor::TokenKind::Keyword);
+    th->clearTokenColor(CodeEditor::TokenKind::String);
 }
 
 void TestCodeEditor::standaloneCodeDocumentSignalsFire()

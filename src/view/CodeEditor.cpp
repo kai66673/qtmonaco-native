@@ -18,6 +18,7 @@ using Role = qmn::view::CodeEditorTheme::Role;
 #include <QApplication>
 #include <QClipboard>
 #include <QContextMenuEvent>
+#include <QDateTime> // M10 m3: the original column's own click-chain stamps
 #include <QDrag>
 #include <QDragEnterEvent>
 #include <QDragLeaveEvent>
@@ -69,9 +70,36 @@ struct CodeEditor::DiffState {
     QVector<int> rowPrefix;   // rowPrefix[r] = slots in rows [0,r); back() = total
     QVector<int> slotToRow;   // materialized inverse (only weight-1 rows emit)
     QVector<int> modLineToRow;// MODIFIED line -> aligned row, -1 hidden/unknown
+    QVector<qint8> rowKind;   // machine 3, one code per row (built with the
+                              // prefix tables): -1 unchanged, 0 replace,
+                              // 1 pure insert (blank ORIGINAL cell),
+                              // 2 pure delete (blank MODIFIED cell)
     int slotTotal = 0;
     CodeDocument* originalDoc = nullptr; // NON-OWNING (pointer door) or the
                                          // editor-owned standalone child
+    // M10 machine 3: the ORIGINAL column's selection (the copy gesture —
+    // positions are ORIGINAL-document coordinates, always normalized
+    // origSelA_ <= origSelB_; empty == no live selection). origSelActive_
+    // also marks the column as the gesture owner (its caret-line frame
+    // paints, keys are about to drop it); origColDrag_ is the pressed
+    // move state; origChainDepth_ mirrors the v1 multi-click chain.
+    // origSelAnchor_/origSelCaret_ are the read side's mirror of v1's
+    // anchor_/caret_: the ANCHOR is where the gesture started, so a
+    // Shift+click moves the OTHER end (A/B stay offset-sorted because the
+    // paint and the text read want the span, not the direction).
+    TextPosition origSelA_, origSelB_;
+    TextPosition origSelAnchor_, origSelCaret_;
+    bool origSelActive_ = false;
+    bool origColDrag_ = false;
+    bool origPress_ = false; // the last press owned the original column:
+                             // moves/releases/double-clicks route there
+                             // until any other press takes the frame
+    int origChainDepth_ = 0;
+    int origChainLine_ = -1; // the line the chain started on (4+-click growth)
+    int origChainEnd_ = -1;  // the block's end line (the growth frontier)
+    int origChainDir_ = 1;   // the growth direction (v1's edge flip rule)
+    qint64 origChainMs_ = 0; // the chain stamps, mirroring the v1 double-click
+    int origChainX_ = 0;     // chain (line + x-window + time-window rules)
 };
 
 namespace {
@@ -895,6 +923,20 @@ QString CodeEditor::selectedText() const
     return buffer_.textRange(start, end);
 }
 
+// M10 machine 3 (contract: CodeEditor.hpp): the ORIGINAL column's live
+// selection text — '' when diff mode is off or no original selection is
+// live. Positions are normalized (origSelA_ <= origSelB_) by every
+// gesture path, and they address the ORIGINAL document's buffer.
+QString CodeEditor::originalSelectionText() const
+{
+    if (!diff_ || !diff_->originalDoc || !diff_->origSelActive_)
+        return {};
+    const qmn::core::TextBuffer& ob = diff_->originalDoc->buffer_;
+    const int a = ob.offsetOf(diff_->origSelA_.line, diff_->origSelA_.col);
+    const int b = ob.offsetOf(diff_->origSelB_.line, diff_->origSelB_.col);
+    return b > a ? ob.textRange(a, b) : QString();
+}
+
 int CodeEditor::selectedLength() const
 {
     if (!hasSelection_)
@@ -940,6 +982,13 @@ void CodeEditor::copy()
     QClipboard* cb = QGuiApplication::clipboard();
     if (!cb)
         return;
+    // M10 machine 3: a live ORIGINAL selection wins — the original side is
+    // the only source that door reads (the modified side's caret/selection
+    // logic stands untouched whenever no original selection is live).
+    if (diff_ && diff_->origSelActive_) {
+        cb->setText(originalSelectionText(), QClipboard::Clipboard);
+        return;
+    }
     if (!extraCarets_.isEmpty()) {
         // Multi-caret copy (D1, VS Code): with any selections active the
         // clipboard is those selection texts joined by newlines (carets
@@ -989,6 +1038,10 @@ void CodeEditor::cut()
     QClipboard* cb = QGuiApplication::clipboard();
     if (!cb)
         return;
+    // M10 machine 3: the ORIGINAL side is NEVER cuttable — a cut (or any
+    // destructive door) drops a live original selection instead.
+    if (diff_)
+        clearDiffOriginalSelection();
     // Unbracketed: the cut's delete may coalesce with an adjacent delete
     // chain (the preceding selection motion already froze any older chain).
     const UndoMark pre = captureEditMark();
@@ -2217,6 +2270,10 @@ void CodeEditor::clearDiffDocuments()
     if (diff_->originalDoc)
         disconnect(diff_->originalDoc, nullptr, this, nullptr);
     diffRecomputeTimer_.stop();
+    origHighlight_.reset(); // the chrome engine borrows the ORIGINAL's
+                            // buffer: it dies with the session, before the
+                            // row space and (for a non-owning pointer door)
+                            // possibly the document itself go away
     diff_.reset(); // the row space drops back to wrap/fold: those tables
                    // were kept CURRENT the whole time (the observer seam is
                    // gated only on its DIFF half), so the v1.6.1 map
@@ -2280,10 +2337,18 @@ void CodeEditor::watchDiffOriginal(CodeDocument* doc)
     disconnect(doc, nullptr, this, nullptr);
     // The original side of the live-update seam (PLAN §M10): its own
     // editApplied stream (the standalone ctor installed the observer)
-    // restarts the SAME debounce the modified side rides.
-    connect(doc, &CodeDocument::editApplied, this, [this] {
-        if (diff_)
-            scheduleDiffRecompute();
+    // restarts the SAME debounce the modified side rides — and feeds the
+    // chrome's highlight engine its core-shaped delta (the engine's
+    // onEdit wants the pre-op offsets the signal carries verbatim).
+    connect(doc, &CodeDocument::editApplied, this,
+            [this](int start, int end, const QString& inserted) {
+        if (!diff_)
+            return; // pre-beginDiffMode feeds: the fresh session engine
+                    // parses the settled text, these deltas would be noise
+        if (origHighlight_)
+            origHighlight_->onEdit(
+                qmn::core::TextBuffer::EditEvent{start, end, inserted});
+        scheduleDiffRecompute();
     });
     // The destroyed() hookup for the NON-OWNING pointer door (harmless for
     // the parented string-door doc: a dying parent takes the child with it
@@ -2292,6 +2357,687 @@ void CodeEditor::watchDiffOriginal(CodeDocument* doc)
         if (diff_ && diff_->originalDoc == doc)
             clearDiffDocuments();
     });
+}
+
+// --- M10 machine 3: the two-column chrome (paint + interaction) -----------
+// The x-frame is declared with the private helpers (CodeEditor.hpp): the
+// breakpoint slot keeps its v1 left-edge frame, the fold zone flips from
+// the gutter's right edge to its left one (foldZoneLeft()), then the
+// ORIGINAL digits, the ORIGINAL text window, the CONNECTOR strip, and the
+// MODIFIED digits keep their right alignment against textLeft - pad.
+// Interaction routing: fold zone = the v1 handler verbatim (its frame
+// moves through foldZoneLeft()); everything from the fold zone's right
+// edge through the connector strip = the ORIGINAL selection/copy gesture;
+// the modified digits zone keeps its v1 breakpoint/caret meaning; the text
+// side is modified-side v1 verbatim.
+
+CodeEditor::DiffFrame CodeEditor::diffFrame() const
+{
+    DiffFrame f;
+    const int chrome = diffChromeWidth();
+    if (!diff_ || chrome <= 0)
+        return f;
+    const int pad = gutterInnerPad();
+    const int bpPad = breakpointLines_.isEmpty() ? 0 : 2 * pad;
+    const int digitsCol = diffChromeDigitsCol();
+    // The chrome block's sub-widths in paint order (the same three doors
+    // diffChromeWidth() sums: ORIGINAL digits, read window, gap).
+    const int left = padding_ + bpPad + foldZoneWidth(); // the block starts
+    f.origNumLeft = left;                                // right after the
+    f.origNumRight = left + digitsCol - pad;             // folded-away zone
+    f.origTextLeft = left + digitsCol;
+    f.origTextRight = f.origTextLeft + diffChromeTextCol();
+    f.stripLeft = f.origTextRight;
+    f.stripRight = f.origTextRight + diffChromeGap(); // == left + chrome:
+                                                      // the gap strip is
+                                                      // fully drawable, and
+                                                      // the MODIFIED number
+                                                      // column (its v1 pads
+                                                      // included) begins here
+    f.firstSlot = std::clamp((vScroll_ - padding_) / lineHeight_, 0,
+                             std::max(1, visibleLineTotal()) - 1);
+    f.lastSlot = std::min(std::max(1, visibleLineTotal()) - 1,
+                          f.firstSlot + visibleLineCount());
+    f.valid = f.stripRight > f.stripLeft && f.origTextRight > f.origTextLeft
+              && f.origNumRight > f.origNumLeft;
+    return f;
+}
+
+int CodeEditor::origDiffDigits() const
+{
+    // The ORIGINAL document decides the digit count (the chrome column
+    // never reflows as the modified side grows during typing).
+    const int lines = diff_ && diff_->originalDoc
+                          ? std::max(1, diff_->originalDoc->buffer_.lineCount())
+                          : 1;
+    int digits = 1;
+    for (int n = lines; n >= 10; n /= 10)
+        ++digits;
+    return digits;
+}
+
+int CodeEditor::diffChromeTextCol() const
+{
+    if (!diff_ || !diff_->originalDoc || lineNumbersMode_ == LineNumbersMode::Off)
+        return 0;
+    // The read window: HALF of what the fixed columns leave over, so the
+    // ORIGINAL text window and the MODIFIED text window end up the same
+    // width (the live-check fix of 2026-11-17: a flat width()*0.30 made
+    // the left half visibly narrower than the right side). The algebra:
+    // contentLeft() = padding_ + gutterV1Width() + digits + T + gap, and
+    // the MODIFIED text region runs from contentLeft() to width() -
+    // padding_ — so T = (width() - 2*padding_ - v1 gutter - digits - gap)
+    // / 2 leaves both regions (W' - T) equal, up to qRound slop (≤1px).
+    // Floored at 12 cells and capped at 60 so tiny windows keep a
+    // readable column and giant ones never let the chrome swallow the
+    // editing side entirely. Deliberately NOT document-dependent: no
+    // doc-width scan, no h-scroll math split (long lines are clipped, and
+    // M10b's wrap will soft-wrap them).
+    const int rest = width() - 2 * padding_ - gutterV1Width()
+                   - diffChromeDigitsCol() - diffChromeGap();
+    return std::clamp(qRound(rest / 2.0),
+                      qRound(12 * cellWidth_),
+                      qRound(60 * cellWidth_));
+}
+
+int CodeEditor::diffChromeDigitsCol() const
+{
+    if (!diff_ || !diff_->originalDoc || lineNumbersMode_ == LineNumbersMode::Off)
+        return 0;
+    return qRound(origDiffDigits() * cellWidth_) + 2 * gutterInnerPad();
+}
+
+int CodeEditor::diffChromeGap() const
+{
+    if (!diff_ || !diff_->originalDoc || lineNumbersMode_ == LineNumbersMode::Off)
+        return 0;
+    return std::max(10, qRound(1.5 * cellWidth_)); // the hunk-connector strip
+}
+
+int CodeEditor::diffChromeWidth() const
+{
+    // M10 machine 3: the ORIGINAL column's share of the gutter, added to
+    // gutterWidth() ONLY while diff mode is on (the v1 layout is
+    // byte-identical everywhere else). Like the fold zone, it rides the
+    // gutter Off switch off: no gutter chrome, no original column (the
+    // single-column row axis stays honest in that mode).
+    return diffChromeDigitsCol() + diffChromeTextCol() + diffChromeGap();
+}
+
+int CodeEditor::diffChromeRowAtY(int y) const
+{
+    if (!diff_)
+        return -1;
+    const int total = std::max(1, visibleLineTotal());
+    int slot = (y - padding_) / lineHeight_; // the same slot math positionAt
+    slot = std::clamp(slot, 0, total - 1);   // and modelLineForVisibleIndex use
+    const int row = diffRowForSlot(slot);
+    if (row >= 0)
+        return row; // past-the-end slots clamp to the last row
+    return -1;
+}
+
+namespace {
+
+// M10 machine 3: one read-only line laid out exactly like hitLine's cache
+// entry (NoWrap, natural width, the same font/tab stops/budget) — the
+// ORIGINAL column's glyphs and its x-advances therefore agree with each
+// other and with the modified side's metrics, without a cache entry (the
+// chrome visits at most one viewport of lines per frame). QTextLayout is
+// copy-disabled, so this rides fill-in-place, never a return-by-value.
+struct OrigLayout {
+    QTextLayout layout;
+    QTextLine line;
+    QString text; // the budget-clipped text that was laid out
+    bool valid = false;
+
+    void load(const QFont& font, double cellWidth, int tabStopWidth,
+              const QString& full, int maxUnits)
+    {
+        text = full.size() > maxUnits ? full.left(maxUnits) : full;
+        layout.setText(text);
+        layout.setFont(font);
+        QTextOption opt;
+        opt.setWrapMode(QTextOption::NoWrap);
+        opt.setTabStopDistance(static_cast<qreal>(tabStopWidth) * cellWidth);
+        layout.setTextOption(opt);
+        layout.beginLayout();
+        line = layout.createLine();
+        if (line.isValid())
+            line.setLineWidth(Q_INFINITY);
+        layout.endLayout();
+        valid = line.isValid();
+    }
+};
+
+// Line-space x of a col (the col may ride the phantom region past the
+// layout budget: the monospace cell math, the v1 xInLine rule).
+double origXAdvance(const OrigLayout& ol, double cellWidth, int col)
+{
+    if (col <= 0 || !ol.valid)
+        return 0.0;
+    if (col <= int(ol.text.size()))
+        return ol.line.cursorToX(col);
+    return ol.line.naturalTextWidth() + (col - int(ol.text.size())) * cellWidth;
+}
+
+// The col under a line-space x: the v1 positionAt chain verbatim (clamp
+// into the extent, cell math in the phantom region, then the grapheme-safe
+// nearest-edge walk back).
+int origColAtX(const OrigLayout& ol, double cellWidth, double x, int lineLen)
+{
+    if (!ol.valid || ol.text.isEmpty() || x <= 0.0)
+        return 0;
+    const double natural = ol.line.naturalTextWidth();
+    if (x > natural) // phantom region: cellWidth cell math
+        return std::min(lineLen, int(ol.text.size()) + int((x - natural) / cellWidth));
+    int c = std::max(ol.line.xToCursor(x), 0);
+    while (c > 0) {
+        int snapped = c;
+        const double left = ol.line.cursorToX(&snapped, QTextLine::Leading);
+        if (left <= x) {
+            c = snapped;
+            break;
+        }
+        c = ol.layout.previousCursorPosition(snapped);
+    }
+    return std::max(0, std::min(c, lineLen));
+}
+
+} // namespace
+
+// The chrome block's click bounds (shared by the mouse routing and the hit
+// test): from the fold zone's RIGHT edge (a fold-zone click keeps its v1
+// meaning) to the modified digits' left padding (a number click keeps its
+// v1 meaning).
+bool CodeEditor::diffChromeHit(const QPoint& pt) const
+{
+    const DiffFrame f = diffFrame();
+    if (!f.valid)
+        return false;
+    const int left = foldZoneLeft() + foldZoneWidth();
+    const int right = f.stripRight; // the chrome block ends where the
+                                    // MODIFIED number column (v1 pads
+                                    // included) begins
+    return pt.x() >= left && pt.x() < right;
+}
+
+// The ORIGINAL cell under a widget point: line -1 when the point misses the
+// chrome block or lands on a row with a blank ORIGINAL cell (a pure
+// insert's row). The col rides the read window: the window is fixed-width
+// and NEVER h-scrolls (the modified side owns hScroll_), so a click at its
+// right edge clamps to the window's last reachable col — triple-click is
+// the documented way to take a whole long line (M10b's wrap will widen
+// this).
+TextPosition CodeEditor::diffOriginalHit(const QPoint& pt) const
+{
+    TextPosition pos;
+    const DiffFrame f = diffFrame();
+    if (!f.valid || !diff_->originalDoc || !diffChromeHit(pt))
+        return pos;
+    const int row = diffChromeRowAtY(pt.y());
+    if (row < 0)
+        return pos;
+    const qmn::core::TextBuffer& ob = diff_->originalDoc->buffer_;
+    const int line = diff_->result.rows[row].originalLine;
+    if (line < 0 || line >= ob.lineCount())
+        return pos; // a blank ORIGINAL cell (a pure insert's row)
+    pos.line = line;
+    const int len = ob.lineText(line).size(); // core has no lineLength door:
+                                              // lineText IS the size source
+    const double windowW = f.origTextRight - f.origTextLeft;
+    const int windowCols = std::max(1, int(windowW / cellWidth_));
+    const double x = std::clamp(double(pt.x() - f.origTextLeft), 0.0,
+                                std::min(double(len) * cellWidth_, windowW));
+    OrigLayout ol;
+    ol.load(font_, cellWidth_, tabStopWidth_, ob.lineText(line), geoMaxUnits());
+    pos.col = std::min(origColAtX(ol, cellWidth_, x, len),
+                       std::min(len, windowCols)); // the window's reach
+    return pos;
+}
+
+// The ORIGINAL-column gesture: a press owns the chrome block until any
+// other press takes the frame (the v1 mouse-capture shape). Shift extends
+// the live selection from its ANCHOR (the far end moves, v1's rule); a
+// plain press re-places the caret (a zero-width selection the drag grows).
+void CodeEditor::diffOriginalPress(const QPoint& pt, bool shift)
+{
+    const TextPosition hit = diffOriginalHit(pt);
+    if (hit.line < 0)
+        return;
+    // Shift extends ONLY when the ORIGINAL column already owns a caret (a
+    // live selection or the last chrome press): a first-ever chrome click
+    // with Shift held has nothing to extend from, so it places (v1's
+    // shift-with-no-anchor rule, mirrored for a column that starts empty).
+    const bool hasOrigCaret = diff_->origSelActive_ || diff_->origPress_;
+    if (shift && hasOrigCaret)
+        setDiffOriginalSel(diff_->origSelAnchor_, hit);
+    else
+        setDiffOriginalSel(hit, hit); // a placement: the drag makes it real
+    diff_->origChainDepth_ = 0; // a fresh press kills the click chain (the
+    diff_->origColDrag_ = true; // M15 rule, mirrored for the read side)
+    diff_->origPress_ = true;
+    update();
+}
+
+void CodeEditor::diffOriginalExtend(const QPoint& pt)
+{
+    if (!diff_->origColDrag_)
+        return;
+    const TextPosition hit = diffOriginalHit(pt);
+    if (hit.line < 0)
+        return; // outside the block: hold the last live selection
+    if (hit != diff_->origSelCaret_)
+        setDiffOriginalSel(diff_->origSelAnchor_, hit);
+}
+
+// The v1 multi-click chain, mirrored in ORIGINAL coordinates: the chained
+// double selects the word run (wordSelRange on the ORIGINAL line), the
+// triple selects the WHOLE line, and 4th+ clicks grow the block by a line
+// per click (VS Code's line-selection growth). The chain reads the event
+// timestamps + the landing spot exactly like the modified side's (QTest
+// stamps synthetic sequences 0, which keeps them chained).
+void CodeEditor::diffOriginalDoubleClick(const QMouseEvent* event)
+{
+    const QPoint pt = event->position().toPoint();
+    const TextPosition hit = diffOriginalHit(pt);
+    if (hit.line < 0)
+        return;
+    const qint64 now = event->timestamp();
+    const bool chained =
+        diff_->origChainDepth_ > 0 && diff_->origChainLine_ == hit.line
+        && qAbs(pt.x() - diff_->origChainX_) <= qMax(8, int(std::ceil(cellWidth_)))
+        && now - diff_->origChainMs_ <= qint64(QApplication::doubleClickInterval());
+    if (!chained) {
+        diff_->origChainDepth_ = 1;
+        diff_->origChainLine_ = hit.line;
+        diff_->origChainMs_ = now;
+        diff_->origChainX_ = pt.x();
+        diff_->origChainDir_ = 1;
+        selectDiffOriginalWord(hit);
+        return;
+    }
+    diff_->origChainMs_ = now;
+    ++diff_->origChainDepth_;
+    // The v1 chain verbatim (see multiClickLinesSelectWholeLinesAndGrow):
+    // Qt folds a fast click run into DblClick events, so the 2nd chained
+    // dclick here IS v1's triple-click (whole line), the 3rd+ grow the
+    // block one line per click.
+    selectDiffOriginalLines(hit.line);
+}
+
+void CodeEditor::selectDiffOriginalWord(const TextPosition& hit)
+{
+    const qmn::core::TextBuffer& ob = diff_->originalDoc->buffer_;
+    const auto [lo, hi] = wordSelRange(ob.lineText(hit.line), hit.col);
+    if (hi <= lo)
+        setDiffOriginalSel(hit, hit); // word-less spot: just a caret (Monaco
+    else                              // parity, mirrored on the read side)
+        setDiffOriginalSel({hit.line, lo}, {hit.line, hi});
+}
+
+// Triple+ click: the whole line, trailing newline INCLUDED (the selection
+// reaches col 0 of the next line; the last line stops at EOL) — the v1
+// line rule in ORIGINAL coordinates. 4th and later clicks grow the block by
+// one line per click, flipping direction at a document edge (v1's rule).
+void CodeEditor::selectDiffOriginalLines(int line)
+{
+    const qmn::core::TextBuffer& ob = diff_->originalDoc->buffer_;
+    const int lastLine = ob.lineCount() - 1;
+    if (diff_->origChainDepth_ == 2) { // the 2nd chained dclick = v1's
+        diff_->origChainLine_ = line;  // triple-click: exactly one line
+        diff_->origChainEnd_ = line;   // the block's anchor
+    } else {
+        if (diff_->origChainDir_ > 0) {
+            if (diff_->origChainEnd_ < lastLine)
+                ++diff_->origChainEnd_;
+            else {
+                diff_->origChainDir_ = -1;
+                if (diff_->origChainLine_ > 0)
+                    --diff_->origChainLine_;
+            }
+        } else {
+            if (diff_->origChainLine_ > 0)
+                --diff_->origChainLine_;
+            else {
+                diff_->origChainDir_ = 1;
+                if (diff_->origChainEnd_ < lastLine)
+                    ++diff_->origChainEnd_;
+            }
+        }
+    }
+    const int endLine = std::clamp(diff_->origChainEnd_, 0, lastLine);
+    const int startLine = std::clamp(diff_->origChainLine_, 0, lastLine);
+    // v1's line-span rule verbatim: every line in [startLine..endLine] is
+    // covered whole, the trailing newline included — except at the
+    // document end, where there is no newline to take.
+    const int eLine = endLine < lastLine ? endLine + 1 : endLine;
+    const int eCol = endLine < lastLine ? 0 : ob.lineText(endLine).size();
+    setDiffOriginalSel({startLine, 0}, {eLine, eCol});
+}
+
+void CodeEditor::clearDiffOriginalSelection()
+{
+    if (!diff_ || (!diff_->origSelActive_ && !diff_->origColDrag_
+                   && diff_->origChainDepth_ == 0))
+        return; // nothing live: no repaint to ask for
+    diff_->origSelA_ = diff_->origSelB_ = {};
+    diff_->origSelAnchor_ = diff_->origSelCaret_ = {};
+    diff_->origSelActive_ = false;
+    diff_->origColDrag_ = false;
+    diff_->origPress_ = false;
+    diff_->origChainDepth_ = 0;
+    diff_->origChainLine_ = -1;
+    diff_->origChainEnd_ = -1;
+    diff_->origChainDir_ = 1;
+    update();
+}
+
+// The ONE place that writes the ORIGINAL selection: the ANCHOR + CARET
+// pair (the read side's mirror of v1's anchor_/caret_) plus the
+// offset-SORTED pair A/B every reader uses (the paint wash, the extent
+// hairlines, originalSelectionText). A zero-width pair is a caret-point:
+// origSelActive_ goes false, which is what keeps a plain click from
+// looking like a selection.
+void CodeEditor::setDiffOriginalSel(const TextPosition& anchor,
+                                    const TextPosition& caret)
+{
+    if (!diff_ || !diff_->originalDoc)
+        return;
+    diff_->origSelAnchor_ = anchor;
+    diff_->origSelCaret_ = caret;
+    qmn::core::TextBuffer& ob = diff_->originalDoc->buffer_;
+    const int oa = ob.offsetOf(anchor.line, anchor.col);
+    const int oc = ob.offsetOf(caret.line, caret.col);
+    if (oc < oa) {
+        diff_->origSelA_ = caret;
+        diff_->origSelB_ = anchor;
+    } else {
+        diff_->origSelA_ = anchor;
+        diff_->origSelB_ = caret;
+    }
+    diff_->origSelActive_ = oa != oc;
+    update();
+}
+
+// The chrome text pass's FormatRanges: formatRangesForLine's protocol
+// (theme token map -> engine fallback table -> skip invalid, clamp into
+// the laid-out text, grapheme-snap both edges) on the SECOND engine over
+// the ORIGINAL buffer. The engine's line index is the same generation the
+// paintEvent refresh just produced.
+QVector<QTextLayout::FormatRange> CodeEditor::origChromeFormatRanges(
+    int line, const QString& laidOut) const
+{
+    QVector<QTextLayout::FormatRange> out;
+    if (!origHighlight_ || !origHighlight_->active() || !diff_
+        || !diff_->originalDoc)
+        return out;
+    const std::vector<int>& ls = origHighlight_->lineStarts();
+    if (line < 0 || size_t(line) >= ls.size())
+        return out;
+    const qmn::core::TextBuffer& ob = diff_->originalDoc->buffer_;
+    const int lineStart = ls[size_t(line)];
+    const int lineEnd = size_t(line) + 1 < ls.size()
+        ? ls[size_t(line) + 1] - 1 // the '\n' terminating this line
+        : ob.charCount();          // last line: no terminator past it
+    const auto& hs = origHighlight_->spans();
+    auto it = std::upper_bound(hs.begin(), hs.end(), lineStart,
+                               [](int v, const HighlightEngine::Span& s) { return v < s.end; });
+    const int laidOut2 = laidOut.size(); // the budget-clipped layout text
+    for (; it != hs.end() && it->start < lineEnd; ++it) {
+        QColor color = theme_->tokenColor(it->kind);
+        if (!color.isValid())
+            color = HighlightEngine::colorFor(it->kind);
+        if (!color.isValid())
+            continue;
+        int a = std::max(it->start, lineStart) - lineStart;
+        int b = std::min(it->end, lineEnd) - lineStart;
+        b = std::min(b, laidOut2);
+        if (a >= b)
+            continue; // span lies in the never-laid-out tail of a monster
+        a = snapToGraphemeForward(laidOut, a);
+        b = snapToGraphemeForward(laidOut, b);
+        if (a >= b)
+            continue;
+        QTextCharFormat fmt; // font untouched: monospace stays monospace
+        fmt.setForeground(color);
+        out.append(QTextLayout::FormatRange{a, b - a, fmt});
+    }
+    return out;
+}
+
+// --- Pass 1 (under the gutter digits and the modified text) --------------
+void CodeEditor::drawDiffChromeUnder(QPainter& p) const
+{
+    const DiffFrame f = diffFrame();
+    if (!f.valid)
+        return;
+    const int lh = lineHeight_;
+    const int rowsN = diff_->result.rows.size();
+    const qmn::core::TextBuffer& ob = diff_->originalDoc->buffer_;
+    for (int slot = f.firstSlot; slot <= f.lastSlot; ++slot) {
+        const int row = diffRowForSlot(slot);
+        if (row < 0 || row >= rowsN)
+            continue;
+        const qint8 kind = diff_->rowKind[row];
+        const int yTop = padding_ + slot * lh - vScroll_;
+        // (1) the MODIFIED zone's band (digits + text; the chrome block and
+        // the fold zone are NOT banded — the chrome gets its own ground):
+        // kind 1 pure insert -> AddedBand, 0 replace -> ModifiedBand, 2
+        // pure delete -> no band (pass 2's hatch is its marker, and the
+        // hatch's exact pixels stay assertable against plain Base), -1 none.
+        const QColor bandInk = kind == 1 ? theme_->ink(Role::DiffAddedBand)
+                                         : kind == 0 ? theme_->ink(Role::DiffModifiedBand)
+                                                    : QColor();
+        if (bandInk.isValid())
+            p.fillRect(QRect(f.stripRight, yTop, contentLeft() - f.stripRight, lh),
+                       bandInk);
+        // (2) the chrome ground: opaque Base across the original digits +
+        // text window + connector strip (over any current-line wash and
+        // highlighted-lines band an earlier pass bled in here — none of
+        // that belongs to the read side).
+        p.fillRect(QRect(f.origNumLeft, yTop, f.stripRight - f.origNumLeft, lh),
+                   theme_->ink(Role::Base));
+        const qmn::diff::LineDiff::Row& r = diff_->result.rows[row];
+        if (r.originalLine < 0 || r.originalLine >= ob.lineCount())
+            continue; // a blank ORIGINAL cell (a pure insert's row): digits
+                      // and text are both absent by definition
+        const int lineLen = ob.lineText(r.originalLine).size();
+        OrigLayout ol;
+        ol.load(font_, cellWidth_, tabStopWidth_, ob.lineText(r.originalLine),
+                geoMaxUnits());
+        const double baseline = yTop + (ol.valid ? ol.line.ascent() : ascent_);
+        // (3) the selection wash, under the glyphs. A selection that
+        // continues past this row paints the phantom newline cell (the v1
+        // visualization rule), clamped into the read window.
+        if (diff_->origSelActive_) {
+            const TextPosition& a = diff_->origSelA_;
+            const TextPosition& b = diff_->origSelB_;
+            if (r.originalLine >= a.line && r.originalLine <= b.line) {
+                const int c0 = r.originalLine == a.line ? a.col : 0;
+                const int c1 = r.originalLine == b.line
+                    ? b.col
+                    : std::max(lineLen, 1); // phantom overhang
+                const double sx = f.origTextLeft + origXAdvance(ol, cellWidth_, c0);
+                const double ex = f.origTextLeft + origXAdvance(ol, cellWidth_, c1);
+                const int xa = std::clamp(int(std::round(sx)), f.origTextLeft,
+                                          f.origTextRight);
+                const int xb = std::clamp(int(std::round(ex)), f.origTextLeft,
+                                          f.origTextRight);
+                if (xb > xa)
+                    p.fillRect(QRect(xa, yTop, xb - xa, lh),
+                               theme_->ink(Role::Selection));
+            }
+        }
+        // (4) the text: syntax-highlighted EXACTLY like the modified side
+        // (the second engine over the ORIGINAL buffer; M10's live-check
+        // follow-up) — but only as TOKEN colors: the inline word-level
+        // diff coloring stays M10b's. The draw's pos is the layout
+        // TOP-LEFT, not a baseline anchor — the engine adds line.y() +
+        // line.ascent() itself (the v1 text-loop discovery, comment at its
+        // site: passing a baseline there drew every line a row too low).
+        // The colored path rides the SAME layout through
+        // QTextLayout::draw's FormatRange selections (v1's one-layout
+        // invariant, mirrored for the chrome); uncolored runs — and every
+        // line when no language is set — keep the GutterDigits pen. The
+        // NUMBER below stays baseline-anchored (drawText IS baseline —
+        // v1 gutter numbers do the same).
+        if (ol.valid) {
+            p.save();
+            p.setClipRect(QRect(f.origTextLeft, yTop,
+                                f.origTextRight - f.origTextLeft, lh));
+            p.setPen(theme_->ink(Role::GutterDigits));
+            const auto fmts = origHighlight_ && origHighlight_->active()
+                                  ? origChromeFormatRanges(r.originalLine,
+                                                           ol.text)
+                                  : QVector<QTextLayout::FormatRange>{};
+            if (fmts.isEmpty())
+                ol.line.draw(&p, QPointF(double(f.origTextLeft), double(yTop)));
+            else
+                ol.layout.draw(&p, QPointF(double(f.origTextLeft), double(yTop)),
+                               fmts);
+            p.restore();
+        }
+        // (5) the number, right-aligned in its own column (monospace
+        // digits are exactly cellWidth_ wide — the v1 grid fact).
+        p.setPen(theme_->ink(Role::GutterDigits));
+        const QString num = QString::number(r.originalLine + 1);
+        p.drawText(QPointF(f.origNumRight - num.size() * cellWidth_, baseline), num);
+    }
+}
+
+// --- Pass 2 (over the text): connectors, the delete hatch, the marks -----
+void CodeEditor::drawDiffChromeOver(QPainter& p) const
+{
+    const DiffFrame f = diffFrame();
+    if (!f.valid)
+        return;
+    drawDiffConnectors(p, f);
+    const int lh = lineHeight_;
+    const int rowsN = diff_->result.rows.size();
+    const QColor markInk = theme_->ink(Role::DiffDeletedMarker);
+    p.setPen(QPen(markInk, 1.0, Qt::SolidLine, Qt::FlatCap)); // pixel-exact
+    for (int slot = f.firstSlot; slot <= f.lastSlot; ++slot) {
+        const int row = diffRowForSlot(slot);
+        if (row < 0 || row >= rowsN)
+            continue;
+        const qint8 kind = diff_->rowKind[row];
+        const int yTop = padding_ + slot * lh - vScroll_;
+        if (kind == 2) {
+            // The delete marker: a hatch over the BLANK MODIFIED cell (VS
+            // Code's read-side cue), inside the row's band rect. Diagonals
+            // run 45° up-right, spaced 6px; the row frame keeps the blank
+            // cell's extent readable.
+            const QRect cell(f.stripRight, yTop, contentLeft() - f.stripRight, lh);
+            if (cell.width() > 1 && cell.height() > 1) {
+                p.save();
+                p.setClipRect(cell);
+                for (int dx = 0; dx < cell.width() + cell.height(); dx += 6)
+                    p.drawLine(cell.left() + dx - cell.height(), cell.bottom(),
+                               cell.left() + dx, cell.top());
+                p.restore();
+                p.drawRect(QRect(cell.left(), cell.top(), cell.width() - 1,
+                                 cell.height() - 1));
+            }
+        } else if (kind == 0) {
+            // The 1-for-1 anchor: a 2px bar at the strip's right edge (the
+            // connector side), drawn over the wedge so it survives it.
+            p.fillRect(QRect(f.stripRight - 2, yTop + 2, 2, lh - 4),
+                       theme_->ink(Role::DiffChangeGutterMark));
+        }
+    }
+    // The live original selection's extent cue: one hairline frame around
+    // the read window's rows (the read side has no blinking caret by
+    // design — it is a canvas, not an editing surface).
+    if (diff_->origSelActive_) {
+        const QColor ink = theme_->ink(Role::DiffChangeGutterMark);
+        p.setPen(QPen(ink, 1.0, Qt::SolidLine, Qt::FlatCap));
+        for (int slot = f.firstSlot; slot <= f.lastSlot; ++slot) {
+            const int row = diffRowForSlot(slot);
+            if (row < 0 || row >= rowsN)
+                continue;
+            const int line = diff_->result.rows[row].originalLine;
+            if (line < diff_->origSelA_.line || line > diff_->origSelB_.line)
+                continue;
+            const int yTop = padding_ + slot * lh - vScroll_;
+            p.drawLine(f.origTextLeft, yTop, f.stripRight - 1, yTop);
+            p.drawLine(f.origTextLeft, yTop + lh - 1, f.stripRight - 1, yTop + lh - 1);
+        }
+    }
+    p.setPen(theme_->ink(Role::Text)); // restore the default glyph pen
+}
+
+// The connector wedges: per hunk, one polygon across the gap strip from the
+// hunk's ORIGINAL-side rows (left edge) to its MODIFIED-side rows (right
+// edge) — a replace becomes a trapezoid, a pure insert converges on the
+// right edge at its insertion row, a pure delete converges on the left
+// edge at the modified row that follows the band.
+void CodeEditor::drawDiffConnectors(QPainter& p, const DiffFrame& f) const
+{
+    const int rowsN = diff_->result.rows.size();
+    if (rowsN <= 0)
+        return;
+    const int lh = lineHeight_;
+    const auto rowY = [&](int r) {
+        return padding_ + diff_->rowPrefix[r] * lh - vScroll_;
+    };
+    p.setPen(Qt::NoPen);
+    p.setBrush(theme_->ink(Role::DiffConnectorFill));
+    for (const qmn::diff::LineDiff::Hunk& h : diff_->result.hunks) {
+        const int start = std::min(h.originalLine, h.modifiedLine);
+        const int end = std::max(h.originalLine + std::max(1, h.originalCount),
+                                 h.modifiedLine + std::max(1, h.modifiedCount)) - 1;
+        int rLo = -1, rHi = -1; // the hunk's rows with an ORIGINAL cell
+        int mLo = -1, mHi = -1; // its rows with a MODIFIED cell
+        for (int r = start; r <= end && r < rowsN; ++r) {
+            const qmn::diff::LineDiff::Row& row = diff_->result.rows[r];
+            if (row.originalLine >= 0) {
+                if (rLo < 0)
+                    rLo = r;
+                rHi = r;
+            }
+            if (row.modifiedLine >= 0) {
+                if (mLo < 0)
+                    mLo = r;
+                mHi = r;
+            }
+        }
+        if (rLo < 0 && mLo < 0)
+            continue; // every row folded away: nothing to connect
+        auto modRow = [&](int line) { // the alignment row of a MODIFIED line
+            return line >= 0 && line < diff_->modLineToRow.size()
+                       ? diff_->modLineToRow[line]
+                       : -1;
+        };
+        int a0, a1, b0, b1; // left side (orig rows), right side (mod rows)
+        if (h.originalCount == 0) { // pure insert: the LEFT edge degenerates
+            const int anchor = modRow(h.modifiedLine); // the line the engine
+            a0 = a1 = anchor >= 0 ? anchor : mLo;      // inserted after/at
+            b0 = mLo;
+            b1 = mHi;
+        } else if (h.modifiedCount == 0) { // pure delete: the RIGHT degenerates
+            a0 = rLo;
+            a1 = rHi;
+            const int anchor = modRow(h.modifiedLine);
+            b0 = b1 = anchor >= 0 ? anchor : rHi + 1;
+        } else {
+            a0 = rLo;
+            a1 = rHi;
+            b0 = mLo;
+            b1 = mHi;
+        }
+        if (a0 < 0 || b0 < 0 || a0 >= rowsN || b0 >= rowsN)
+            continue; // the anchors vanished (defensive)
+        const double yA0 = rowY(a0), yA1 = rowY(std::max(a1, a0)) + lh;
+        const double yB0 = rowY(b0), yB1 = rowY(std::max(b1, b0)) + lh;
+        p.drawPolygon(QPolygonF({
+            QPointF(f.stripLeft, yA0),
+            QPointF(f.stripRight, yB0),
+            QPointF(f.stripRight, yB1),
+            QPointF(f.stripLeft, yA1),
+        }));
+    }
+    p.setBrush(Qt::NoBrush);
 }
 
 void CodeEditor::scheduleDiffRecompute()
@@ -2329,6 +3075,14 @@ void CodeEditor::beginDiffMode(const QString& language)
                                 // compute: the FIRST compute is synchronous
     setLanguage(language); // ONE language for the whole diff view (PLAN
                            // §M10; "" = plain, unknown id = plain)
+    // The ORIGINAL side gets its OWN engine instance: same grammar, same
+    // protocol (attach -> setLanguage rebuilds its line index from the
+    // already-fed text; the editApplied fan keeps it current; paint feeds
+    // its viewport window). A fresh instance per session: no tree carried
+    // over from a previous original document.
+    origHighlight_ = std::make_unique<HighlightEngine>();
+    origHighlight_->attach(&diff_->originalDoc->buffer_);
+    origHighlight_->setLanguage(language);
     recomputeDiff();
     setVScroll(0); // entering diff mode always starts at the document top
     updateScrollBarRange();
@@ -2346,6 +3100,34 @@ void CodeEditor::rebuildDiffRowAxis()
     d.slotToRow.clear();
     d.slotToRow.reserve(rows);
     d.modLineToRow.fill(-1, std::max(1, buffer_.lineCount()));
+    // Machine 3's hunk-kind map over rows: walk the (sorted, increasing,
+    // disjoint) hunks with the row cursor — the engine guarantees every
+    // changed row sits inside exactly one hunk, so a linear pass classifies
+    // all rows (unchanged rows stay -1).
+    d.rowKind.assign(d.result.rows.size(), qint8(-1));
+    int hunkIdx = 0;
+    for (int r = 0; r < d.result.rows.size(); ++r) {
+        while (hunkIdx < d.result.hunks.size()) {
+            const qmn::diff::LineDiff::Hunk& h = d.result.hunks[hunkIdx];
+            const int hEnd = std::max(h.originalLine + h.originalCount,
+                                      h.modifiedLine + h.modifiedCount) - 1;
+            if (r <= hEnd)
+                break;
+            ++hunkIdx; // this hunk lives strictly above the row cursor
+        }
+        if (hunkIdx >= d.result.hunks.size())
+            break; // the tail of the rows is unchanged by construction
+        const qmn::diff::LineDiff::Hunk& h = d.result.hunks[hunkIdx];
+        const int hStart = std::min(h.originalLine, h.modifiedLine);
+        if (r < hStart)
+            continue; // unchanged prefix before the hunk (the engine can
+                      // align equal lines INSIDE a replace block)
+        d.rowKind[r] = h.originalCount == 0
+            ? qint8(1) // pure insert: the BLANK cell is on the original side
+            : h.modifiedCount == 0
+                ? qint8(2) // pure delete: the blank cell is modified-side
+                : qint8(0); // a replace (1-for-1 pairs pair side by side)
+    }
     for (int r = 0; r < rows; ++r) {
         const int mod = d.result.rows[r].modifiedLine;
         // The fold overlay, in ROW units: a row dies exactly when the
@@ -3394,6 +4176,22 @@ int CodeEditor::foldZoneWidth() const
     return std::max(10, qRound(2.2 * cellWidth_));
 }
 
+int CodeEditor::foldZoneLeft() const
+{
+    // M10 machine 3: v1 pins the zone to the gutter's RIGHT edge; diff
+    // mode flips it to the LEFT edge (the chrome block — the ORIGINAL
+    // column + the connector strip — occupies what used to be the zone's
+    // right side). One shared door for paint + hit + hover frames.
+    const int fz = foldZoneWidth();
+    if (fz <= 0)
+        return 0;
+    const int chrome = diffChromeWidth();
+    if (chrome <= 0)
+        return contentLeft() - fz; // v1, verbatim
+    const int bpPad = breakpointLines_.isEmpty() ? 0 : 2 * gutterInnerPad();
+    return padding_ + bpPad;
+}
+
 QVector<CodeEditor::FoldRange> CodeEditor::foldableRanges()
 {
     // Exact public view of the paint cache: ends are ALWAYS re-resolved
@@ -3553,10 +4351,12 @@ bool CodeEditor::innermostFoldAt(int row, FoldState* out)
 
 void CodeEditor::updateFoldHoverState(const QPoint& pt)
 {
-    // The hover lives exactly where the click does: the strip column at the
-    // gutter's right edge (the same x-frame the press handler uses).
+    // The hover lives exactly where the click does: the strip column at
+    // the gutter's edge (the same x-frame the press handler uses, through
+    // the ONE foldZoneLeft() door).
     const int fz = foldZoneWidth();
-    const int row = (fz > 0 && pt.x() >= contentLeft() - fz && pt.x() < contentLeft())
+    const int foldLeft = foldZoneLeft();
+    const int row = (fz > 0 && pt.x() >= foldLeft && pt.x() < foldLeft + fz)
                         ? modelLineForY(pt.y())
                         : -1;
     if (row == hoverFoldRow_)
@@ -4436,6 +5236,35 @@ void CodeEditor::paintEvent(QPaintEvent*)
         }
     }
     highlight_->refreshIfNeeded();
+    // M10 machine 3: the chrome's own engine, same cadence and same
+    // adaptive window rule — but the window is the ORIGINAL line range of
+    // the rows about to be painted (the diff rows, not the model lines
+    // first/last: those speak the MODIFIED side).
+    if (origHighlight_) {
+        if (origHighlight_->active() && diff_ && diff_->originalDoc) {
+            const qmn::core::TextBuffer& ob = diff_->originalDoc->buffer_;
+            const std::vector<int>& ols = origHighlight_->lineStarts();
+            const int rowsN = diff_->result.rows.size();
+            int lo = -1, hi = -1;
+            for (int slot = firstSlot; slot <= lastSlot; ++slot) {
+                const int row = diffRowForSlot(slot);
+                if (row < 0 || row >= rowsN)
+                    continue;
+                const int ol = diff_->result.rows[row].originalLine;
+                if (ol < 0)
+                    continue; // blank ORIGINAL cell (pure insert row)
+                lo = lo < 0 ? ol : std::min(lo, ol);
+                hi = std::max(hi, ol);
+            }
+            if (lo >= 0 && size_t(hi) < ols.size()) {
+                const int vpEnd = size_t(hi) + 1 < ols.size()
+                                      ? ols[size_t(hi) + 1]
+                                      : ob.charCount();
+                origHighlight_->setViewport(ols[size_t(lo)], vpEnd);
+            }
+        }
+        origHighlight_->refreshIfNeeded();
+    }
     // M13: foldable starts for this paint's window, from the tree+spans
     // generation the line above just produced (same cadence, same window
     // — a fold query beyond the viewport is never paid here; see
@@ -4667,6 +5496,14 @@ void CodeEditor::paintEvent(QPaintEvent*)
         }
     }
 
+    // M10 machine 3 pass 1 (UNDER the gutter digits and the modified
+    // text): the row bands, the original column's opaque ground + its
+    // numbers + its dim text + its selection wash. Everything the v1
+    // passes painted into the chrome area before (current-line wash,
+    // separator hairline) is overpainted here — the chrome zone is the
+    // original column's canvas while diff mode lives.
+    drawDiffChromeUnder(p);
+
     // M5 layer 1: the gutter - line numbers, breakpoint dots (in their
     // reserved slot) and diagnostic severity icons (in the digit's right
     // padding, so LSP diagnostics never change the gutter layout). Painted
@@ -4674,13 +5511,20 @@ void CodeEditor::paintEvent(QPaintEvent*)
     // loop; text starts at textLeft, so nothing overlaps the numbers.
     if (const int gw = textLeft - padding_; gw > 0) {
         const int pad = gutterInnerPad();
-        const int fz = foldZoneWidth();   // M13 strip at the gutter's right edge
-        const int numRight = textLeft - pad - fz; // right edge of the number column
+        const int fz = foldZoneWidth();   // M13 strip at the gutter's edge
+        // M10 machine 3: diff mode parks the fold zone at the gutter's
+        // LEFT edge (foldZoneLeft()) and the chrome block sits between it
+        // and the numbers, so the number column right-aligns against
+        // textLeft - pad (chrome == 0 outside diff mode: the v1 frame
+        // verbatim, down to the pixel).
+        const int chrome = diffChromeWidth();
+        const int foldLeft = foldZoneLeft();     // zone's left edge
+        const int numRight = chrome > 0 ? textLeft - pad : textLeft - pad - fz;
         const int bpCx = padding_ + pad; // breakpoint slot center
         const int iconCx = numRight + pad / 2;
         // M13 fold-triangle geometry (fixed for the frame: the zone never
         // shifts, so neither does the icon, the numbers or the triangles):
-        const int foldCx = textLeft - fz / 2; // zone center x
+        const int foldCx = foldLeft + fz / 2; // zone center x
         const double fr = std::max(2.5, cellWidth_ * 0.38); // triangle half-extent
         // M22: the hover region — one translucent band over the strip cells
         // of the hovered fold's rows. The anchor is the MODEL row range
@@ -4708,7 +5552,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
                         ? eSlot + wrapSlotCount(hoverFoldEnd_) - 1
                         : sSlot + wrapSlotCount(hoverFoldStart_) - 1);
                 if (top <= bot)
-                    p.fillRect(QRect(textLeft - fz, padding_ + top * lh - vScroll_,
+                    p.fillRect(QRect(foldLeft, padding_ + top * lh - vScroll_,
                                      fz, (bot - top + 1) * lh), theme_->ink(Role::FoldRegion));
             }
         }
@@ -5029,6 +5873,12 @@ void CodeEditor::paintEvent(QPaintEvent*)
         p.setPen(theme_->ink(Role::Text)); // restore the default pen after the hint pass
     }
 
+    // M10 machine 3 pass 2 (OVER the text): the hunk connectors in the
+    // gap strip, the delete hatch, the changed-line gutter marks — every
+    // ink of this pass rides the chrome's opaque Base ground, so the
+    // grab()-pixel tests can assert exact role colors without blend math.
+    drawDiffChromeOver(p);
+
     // M7: the overview ruler is the LAST pass — opaque chrome that
     // overpaints the text's right edge (the viewport is chrome-bounded,
     // VS Code-style). Cost rides the strip, never the document.
@@ -5219,6 +6069,19 @@ int CodeEditor::gutterWidth() const
 {
     if (lineNumbersMode_ == LineNumbersMode::Off)
         return 0;
+    // M10 machine 3: the chrome block (original digits + original text
+    // window + connector gap) rides the gutter BETWEEN the fold zone and
+    // the modified numbers; the fold zone answers by moving to the
+    // gutter's left edge (foldZoneLeft()), so the modified numbers keep
+    // their v1 right alignment and every v1 door keeps its math.
+    return gutterV1Width() + diffChromeWidth();
+}
+
+int CodeEditor::gutterV1Width() const
+{
+    // The v1 number column (its Off guard is gutterWidth()'s; this door
+    // is only reached from there and from diffChromeTextCol(), which
+    // answers 0 in Off mode too).
     // The widest displayed number decides the digit column: every mode
     // shows either the absolute line number or a distance smaller than
     // lineCount. Digits are exactly cellWidth_ wide (monospace), so the
@@ -5228,16 +6091,18 @@ int CodeEditor::gutterWidth() const
         ++digits;
     const int pad = gutterInnerPad();
     int w = qRound(digits * cellWidth_) + 2 * pad;
-    // M13: the fold zone rides the gutter's right edge ALWAYS (when the
-    // gutter exists): constant width, so folding/unfolding never shifts a
-    // single glyph and the M5 crossover/delta tests keep their exact math.
-    w += foldZoneWidth();
     // One reserved glyph slot while any breakpoint exists: toggling a
     // breakpoint must not shift the already-drawn numbers. Diagnostic
     // icons fit into the right digit padding instead (Gate-2 LSP
     // diagnostics never change the layout).
     if (!breakpointLines_.isEmpty())
         w += 2 * pad;
+    // M13: the fold zone (constant width, so folding/unfolding never
+    // shifts a single glyph and the M5 crossover/delta tests keep their
+    // exact math). v1 pins it to the gutter's right edge, the breakpoint
+    // slot to its left, the numbers between; M10 machine 3 keeps the
+    // arithmetic identical and only re-places the pieces (foldZoneLeft()).
+    w += foldZoneWidth();
     return w;
 }
 
@@ -6085,7 +6950,23 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
     // Shift+Del for cut on X11, Shift+Ins for paste…). This must run before
     // the modifier catch-all below, which would otherwise swallow Ctrl+C.
     // matches() checks the modifier set exactly, so Ctrl+Alt+C stays free.
-    if (event->matches(QKeySequence::Copy)) {
+    // M10 machine 3: any REAL key drops a live ORIGINAL selection — every
+    // keyboard route below speaks the MODIFIED side, and the read side
+    // carries no verbs. Two exemptions: Copy (the only door that reads the
+    // original selection at all — copy() takes it first) and bare modifier
+    // presses, which are not keys in this sense: a user physically holding
+    // Shift while Shift+clicking the ORIGINAL column must still find the
+    // anchor to extend. Cut needs no exemption (cut() drops it itself —
+    // the ORIGINAL is never cuttable) and Paste is deliberately NOT one.
+    const bool copyShortcut = event->matches(QKeySequence::Copy);
+    const bool modifierOnly =
+        key == Qt::Key_Shift || key == Qt::Key_Control || key == Qt::Key_Alt
+        || key == Qt::Key_AltGr || key == Qt::Key_Meta
+        || key == Qt::Key_CapsLock || key == Qt::Key_NumLock
+        || key == Qt::Key_ScrollLock;
+    if (diff_ && !copyShortcut && !modifierOnly)
+        clearDiffOriginalSelection();
+    if (copyShortcut) {
         copy();
         finish();
         return;
@@ -6727,7 +7608,9 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
     if (event->button() == Qt::LeftButton && !(event->modifiers() & Qt::AltModifier)) {
         const int fz = foldZoneWidth();
         const QPoint pt = event->position().toPoint();
-        if (fz > 0 && pt.x() >= contentLeft() - fz && pt.x() < contentLeft()) {
+        const int foldLeft = foldZoneLeft(); // M10 m3: the door answers the
+        // diff-mode left-edge frame (v1: contentLeft()-fz)
+        if (fz > 0 && pt.x() >= foldLeft && pt.x() < foldLeft + fz) {
             if (const int line = modelLineForY(pt.y()); line >= 0) {
                 FoldState fs;
                 if (innermostFoldAt(line, &fs) && toggleFold(fs.start)) {
@@ -6737,6 +7620,22 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
             }
         }
     }
+    // M10 machine 3: the ORIGINAL column's read-only canvas sits between
+    // the fold zone and the modified numbers. A press there runs the
+    // original selection gesture and is fully swallowed: it never moves
+    // the modified caret, never touches the undo chain, and the ORIGINAL
+    // buffer is never edited (keys ride the modified side). A press
+    // ANYWHERE else drops a live original selection (the one-selection
+    // focus rule).
+    if (diff_ && diffChromeHit(event->position().toPoint())) {
+        event->accept();
+        if (event->button() == Qt::LeftButton)
+            diffOriginalPress(event->position().toPoint(),
+                              event->modifiers() & Qt::ShiftModifier);
+        return; // every button is swallowed inside the chrome block
+    }
+    if (diff_)
+        clearDiffOriginalSelection();
     if (event->button() == Qt::MiddleButton) {
         // X11 paste gesture: place the caret at the click, then insert the
         // primary selection there. Platforms without a primary selection
@@ -6855,15 +7754,24 @@ void CodeEditor::mouseDoubleClickEvent(QMouseEvent* event)
         return;
     }
     const int fz = foldZoneWidth();
-    if (fz > 0 && pt.x() >= contentLeft() - fz && pt.x() < contentLeft()) {
+    const int foldLeft = foldZoneLeft(); // M10 m3 frame door
+    if (fz > 0 && pt.x() >= foldLeft && pt.x() < foldLeft + fz) {
         event->accept();
         return;
     }
+    // M10 machine 3: the ORIGINAL column's own multi-click chain (word ->
+    // line -> line-block growth, the v1 rules in ORIGINAL coordinates).
+    if (diff_ && diffChromeHit(pt)) {
+        diffOriginalDoubleClick(event);
+        event->accept();
+        return;
+    }
+    if (diff_)
+        clearDiffOriginalSelection(); // any other gesture drops it
     if (event->modifiers() & Qt::AltModifier) {
         event->accept(); // never multi-click: the press already handled the add
         return;
     }
-
     const TextPosition pos = positionAt(pt);
     const qint64 now = event->timestamp();
     // Chained = same line, same spot (within half a cell of slop), inside
@@ -7104,6 +8012,14 @@ void CodeEditor::mouseMoveEvent(QMouseEvent* event)
         event->ignore();
         return;
     }
+    // M10 machine 3: a press that landed in the chrome block drags the
+    // ORIGINAL selection (clamped to the read window by the hit test — no
+    // edge auto-scroll, no undo-chain motion, no modified-side anything).
+    if (diff_ && diff_->origColDrag_) {
+        diffOriginalExtend(event->position().toPoint());
+        event->accept();
+        return;
+    }
     // M16: a press that landed inside the live selection armed a potential
     // text drag. Under startDragDistance the selection is simply HELD (no
     // resize: the press-inside-selection hold semantics, see press event);
@@ -7185,6 +8101,13 @@ void CodeEditor::mouseReleaseEvent(QMouseEvent* event)
         event->accept();
         return;
     }
+    // M10 machine 3: the chrome-block drag ends here (the selection stays
+    // live for Shift-clicks / copy; only the drag flag drops).
+    if (diff_ && diff_->origColDrag_) {
+        diff_->origColDrag_ = false;
+        event->accept();
+        return;
+    }
     if (event->button() == Qt::LeftButton && pressInSelection_) {
         // M16: a press inside the selection that never grew into a text
         // drag ends as a plain click after all: the caret collapses at the
@@ -7225,7 +8148,15 @@ void CodeEditor::contextMenuEvent(QContextMenuEvent* event)
         return;
     }
     const int fz = foldZoneWidth();
-    if (fz > 0 && pt.x() >= contentLeft() - fz && pt.x() < contentLeft()) {
+    const int foldLeft = foldZoneLeft(); // M10 m3 frame door
+    if (fz > 0 && pt.x() >= foldLeft && pt.x() < foldLeft + fz) {
+        event->accept();
+        return;
+    }
+    // M10 machine 3: the chrome block swallows its own right-click — no
+    // caret move, no menu (the read side carries no editing verbs, and a
+    // live ORIGINAL selection stays live: Ctrl+C is its documented exit).
+    if (diff_ && diffChromeHit(pt)) {
         event->accept();
         return;
     }

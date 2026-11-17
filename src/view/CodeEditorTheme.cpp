@@ -65,9 +65,15 @@ const struct {
     {Role::OverviewHighlightedBand, QColor(96, 144, 196, 90)},
     {Role::OverviewViewportFill, QColor(210, 210, 210, 26)},
     {Role::OverviewViewportFrame, QColor(190, 190, 190, 110)},
+    // M10 diff family, VS Code Dark+'s diff colors (opaque bands: the row
+    // text paints OVER them in the same frame, so translucency would only
+    // muddy the ground; the hatch/connector/mark ride the chrome's Base).
+    {Role::DiffAddedBand, QColor(0x58, 0x7C, 0x0C)},      // #587C0C
+    {Role::DiffModifiedBand, QColor(0x6A, 0x4F, 0x2A)},   // #6A4F2A
+    {Role::DiffDeletedMarker, QColor(0x4C, 0x8E, 0xDB)},  // #4C8EDB
+    {Role::DiffConnectorFill, QColor(0x34, 0x58, 0x84)},  // #345884
+    {Role::DiffChangeGutterMark, QColor(0xD2, 0x9E, 0x36)}, // #D29E36
 };
-
-// VS Code Light+ family (chrome + the classic light token colors). The
 // warm/red state-ink family darkens for legibility on white grounds.
 const struct {
     Role role;
@@ -101,6 +107,12 @@ const struct {
     {Role::OverviewHighlightedBand, QColor(96, 144, 196, 90)},
     {Role::OverviewViewportFill, QColor(0, 0, 0, 26)},
     {Role::OverviewViewportFrame, QColor(0, 0, 0, 110)},
+    // M10 diff family, VS Code Light+'s diff colors (opaque — see Dark).
+    {Role::DiffAddedBand, QColor(0xCC, 0xFF, 0x90)},      // #CCFF90
+    {Role::DiffModifiedBand, QColor(0xFD, 0xF0, 0xB2)},   // #FDF0B2
+    {Role::DiffDeletedMarker, QColor(0x93, 0xC8, 0xFF)},  // #93C8FF
+    {Role::DiffConnectorFill, QColor(0xB0, 0xC4, 0xDE)},  // light steel
+    {Role::DiffChangeGutterMark, QColor(0xD2, 0x9E, 0x36)}, // shared warm mark
 };
 
 // Byte-for-byte the table HighlightEngine::colorFor ships (see the
@@ -213,6 +225,14 @@ QColor CodeEditorTheme::ink(Role role) const
     case Role::OverviewHighlightedBand: return QColor(96, 144, 196, 90);
     case Role::OverviewViewportFill: return QColor(210, 210, 210, 26);
     case Role::OverviewViewportFrame: return QColor(190, 190, 190, 110);
+    // M10 diff family (no pre-M24 ancestor: diff mode is new). The default
+    // theme's inks are fixed mid-luminance constant families — they read
+    // on light AND dark grounds (the FoldMarkers/Breakpoint convention).
+    case Role::DiffAddedBand: return QColor(96, 160, 64);
+    case Role::DiffModifiedBand: return QColor(140, 110, 50);
+    case Role::DiffDeletedMarker: return QColor(110, 150, 200);
+    case Role::DiffConnectorFill: return QColor(110, 125, 145);
+    case Role::DiffChangeGutterMark: return QColor(210, 160, 60);
     }
     return QColor(); // unreachable: the enum is closed
 }

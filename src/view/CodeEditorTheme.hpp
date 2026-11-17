@@ -82,6 +82,16 @@ public:
         OverviewHighlightedBand, // highlighted-lines band over the strip
         OverviewViewportFill, // viewport frame fill (alpha 26)
         OverviewViewportFrame,// viewport frame pen (alpha 110)
+        // M10 machine 3 (diff view): the five diff inks. Bands ride OPAQUE
+        // (text paints over them in the same frame — same layering as the
+        // caret-line wash); the hatch/connector/mark sit on the chrome's
+        // opaque Base ground. Semantics map: PLAN GATE 2 §M10.
+        DiffAddedBand,        // green wash over pure-insert modified rows
+        DiffModifiedBand,     // amber wash over replace-hunk modified rows
+        DiffDeletedMarker,    // hatch over blank modified rows of a delete
+        DiffConnectorFill,    // the hunk connectors in the gutter gap strip
+        DiffChangeGutterMark, // small mark at the modified number of a
+                              // replace-hunk line (a 1-for-1 pair anchor)
     };
     Q_ENUM(Role)
 

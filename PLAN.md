@@ -998,6 +998,80 @@ this car).
 - The `diff` engine result never leaks through the header: the state sits
   behind a forward-declared `DiffState` (defined in the .cpp, holds the
   engine records + the row prefix tables + the modLine→row map).
+- **Machine 3 — the two-column chrome (decided + built 2026-11-17).** The
+  ORIGINAL side enters the widget THROUGH THE GUTTER: `gutterWidth()` grows
+  by `diffChromeWidth()` and the x-frame tiles the gutter with zero slop
+  (`pad` = `gutterInnerPad()`, `bpPad` = the v1 breakpoint slot, `fz` =
+  `foldZoneWidth()`):
+  `[padding_, +bpPad)` breakpoint slot (v1) | the fold zone FLIPS from the
+  gutter's right edge to its LEFT one — the new door `foldZoneLeft()` =
+  `padding_+bpPad` (flush, no inner pad) — | ORIGINAL digits column
+  (`diffChromeDigitsCol` = orig-digit-count × cell + 2pad; the ORIGINAL
+  document decides the digit count, it never reflows) | ORIGINAL text read
+  window (`diffChromeTextCol` = the 50/50 split:
+  `clamp(round((width() − 2·padding_ − gutterV1Width() − digits − gap) / 2),
+  12..60 cells)`, so the read window and the MODIFIED text region come out
+  the SAME width up to ≤1px qRound slop — the live-check fix of
+  2026-11-17 replaced a flat 0.30 × width(), which left the left half
+  visibly narrower; never document- or hScroll-dependent; the read
+  window has NO horizontal scroll, clicks clamp to its last reachable
+  col) | CONNECTOR strip (`diffChromeGap` = max(10, 1.5 × cellW)) | the
+  MODIFIED number column `[stripRight, contentLeft())` keeps v1 verbatim
+  (digits + both pads, right-aligned at `textLeft − pad`). `stripRight ==
+  origTextRight + diffChromeGap()` (== chrome block's end); `diffChromeHit`
+  = `[foldZoneLeft()+fz, stripRight)` — the modified number column stays
+  OUTSIDE the hit zone, so v1 gutter clicks (breakpoints, caret-to-col-0)
+  keep their exact v1 semantics. The three public geometry doors
+  (`diffChromeTextCol/DigitsCol/Gap`, summed by `diffChromeWidth()`) are
+  the single definition `diffFrame()` lays out and `gutterWidth()` sums —
+  no mapping/geometry PRIMITIVE added (Gate-1.5 additive precedent).
+- **The ORIGINAL column is a read-only canvas with ONE data path** (the
+  public door `originalSelectionText()`): click/drag/double-click selection
+  in ORIGINAL coordinates + `copy()`. Selection state = anchor+caret (v1's
+  `anchor_/caret_` mirror) with an offset-sorted pair derived by the ONE
+  writer; a plain chrome press sets anchor==caret (a placement), Shift
+  moves the FAR end from the anchor only when the chrome already owns a
+  caret (a first Shift+click into an empty column places), drags extend
+  from the anchor. Chained double-clicks run v1's 3-step chain verbatim
+  in ORIGINAL space: dclick#1 word, dclick#2 whole line + trailing
+  newline, dclick#3+ grow one line per click with v1's edge-flip rule.
+  Routing: a press outside the chrome block drops any live original
+  selection (the selection focus rule); the chrome swallows right-clicks
+  and its own context menu (the selection stays live — Ctrl+C is its
+  exit); ANY key press drops it EXCEPT the Copy shortcut and bare
+  modifier presses (Shift must be holdable for Shift+click); `cut()`
+  drops it and runs v1's verb on the MODIFIED side (the ORIGINAL is never
+  cuttable, its document is untouchable); `paste()` is deliberately NOT
+  exempt (it speaks the clipboard into the modified buffer).
+- **Paint split:** `drawDiffChromeUnder` (after the selection quads,
+  before the gutter pass) paints the MODIFIED bands (`rowKind`: replace →
+  ModifiedBand, pure insert → AddedBand, pure delete → no band — the
+  hatch is its marker) and an OPAQUE Base ground over the chrome block
+  (the v1 current-line/highlighted-lines wash spans x=0..width() and
+  paints BEFORE this pass — the read side gets its own frame; the fold
+  zone stays OUTSIDE the ground and rides the v1 wash verbatim);
+  `drawDiffChromeOver` (after the text loop) paints the connector
+  wedges, the 45° delete hatch + row frame over the blank MODIFIED number
+  cell, the 2px `DiffChangeGutterMark` bar at the strip's right edge for
+  replace rows, and the original-selection wash/extent hairlines (clamped
+  to the read window). Geometric AA is off (no render hints), so the
+  pixel tripwires assert exact role colors.
+- **The read window speaks the SAME token roles (live-check follow-up,
+  2026-11-17):** the chrome's text pass is syntax-highlighted through a
+  SECOND `HighlightEngine` instance (`origHighlight_`) over the ORIGINAL
+  buffer — same grammar, same protocol: created fresh in `beginDiffMode`
+  (attach → `setLanguage` rebuilds its line index from the fed text),
+  dropped by `clearDiffDocuments()` (it borrows the original's buffer),
+  fed incrementally by the original doc's `editApplied` fan (the same
+  connect that restarts the diff debounce), and windowed by paint from
+  the ORIGINAL line range of the rows about to be drawn (not the
+  modified-side model window). Drawing rides v1's FormatRange protocol
+  verbatim (theme token map → `HighlightEngine::colorFor` fallback →
+  skip invalid, grapheme-snap; uncolored runs and language-less sessions
+  keep the GutterDigits pen, the single-pen path). Word-level INLINE
+  diff coloring stays M10b's. Tripwire:
+  `diffOriginalChromeSyntaxHighlight` (Keyword+String inks in the read
+  window + the live-edit re-color through the original doc's own door).
 
 ### M8 — protocol core + LSP (car 3)
 
