@@ -21,6 +21,11 @@ public:
 
     void setWorkingDirectory(const QString& directory);
 
+    // The finished process's exit code (defined only once the process has
+    // finished; the M2 tests use the server's exit code as their wire-side
+    // oracle — fakeserver exits 0 clean, 7 crashed, 2/3 on a contract fail).
+    int exitCode() const { return process_.exitCode(); }
+
     bool start() override;
     void write(const QByteArray& framedBytes) override;
     // stopRequested suppresses the ServerDied report for a deliberate

@@ -13,8 +13,20 @@ add_test(NAME diff COMMAND tst_diff)
 # now, the QProcess fakeserver + LspClient tests with machine 2 into THIS
 # binary (no further ctest entries inside M8).
 qt_add_executable(tst_lsp tst_lsp.cpp)
-target_link_libraries(tst_lsp PRIVATE qmn_protocol Qt6::Test)
+target_link_libraries(tst_lsp PRIVATE qmn_lsp Qt6::Test)
+add_dependencies(tst_lsp fakeserver) # the spawn target must exist at run time
 add_test(NAME lsp COMMAND tst_lsp)
+
+# The LSP fakeserver (machine 2): a tests support binary, NOT a ctest entry.
+# It speaks our own JsonFraming over stdio (stdout = PROTOCOL, stderr = the
+# separate log/corpus-cannery channel), spawned by tst_lsp's factory through
+# ProcessTransport; the path is injected here, the mode travels in argv.
+qt_add_executable(fakeserver fakeserver/main.cpp)
+target_link_libraries(fakeserver PRIVATE qmn_protocol Qt6::Core)
+set_target_properties(fakeserver PROPERTIES WIN32_EXECUTABLE FALSE
+                                            MACOSX_BUNDLE FALSE)
+target_compile_definitions(tst_lsp PRIVATE
+    QMN_TEST_LSP_SERVER=\"$<TARGET_FILE:fakeserver>\")
 
 qt_add_executable(tst_codeeditor tst_codeeditor.cpp)
 target_link_libraries(tst_codeeditor PRIVATE qmn_view Qt6::Test)
