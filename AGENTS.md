@@ -119,8 +119,8 @@ Include headers relative to `src/` (CMake adds `src/` as a PUBLIC include dir):
 
 ## Build & test (C++ host path)
 
-Requirements: CMake ≥ 3.22, C++20, Qt6 ≥ 6.6 (Core/Gui/Widgets/Test). Ninja is
-what CI/README use. CI is the source of truth: `.github/workflows/ci.yml`
+Requirements: CMake ≥ 3.22, C++20, Qt6 ≥ 6.6 (Core/Gui/Widgets/Network/Test).
+Ninja is what CI/README use. CI is the source of truth: `.github/workflows/ci.yml`
 (archlinux container + ubuntu-24.04, both Release).
 
 ```bash
@@ -129,10 +129,13 @@ ninja -C build
 ctest --test-dir build --output-on-failure
 ```
 
-Three ctest tests: `textbuffer` (core property tests), `codeeditor` (widget
-tests), `demo` (drives the qmn-demo surface programmatically). ctest already
-sets `QT_QPA_PLATFORM=offscreen` for `codeeditor` and `demo` (via
-`set_tests_properties`). Run one test:
+Five ctest tests: `textbuffer` (core property tests), `diff` (the pure
+line-diff engine, M10), `lsp` (M8 machine 1: JsonFraming + transports +
+RpcClient headless — this binary GROWS machine by machine through M8, no
+further ctest entries inside the car), `codeeditor` (widget tests), `demo`
+(drives the qmn-demo surface programmatically). `textbuffer`, `diff` and
+`lsp` are guiless; ctest already sets `QT_QPA_PLATFORM=offscreen` for
+`codeeditor` and `demo` (via `set_tests_properties`). Run one test:
 
 ```bash
 ctest --test-dir build -R codeeditor --output-on-failure

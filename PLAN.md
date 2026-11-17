@@ -1148,7 +1148,13 @@ this car).
   answers VERIFY per flush — deltas are validated before the wire. The
   harness copies the EXACT initialize templates (iide lesson: a harness that
   diverges from the template lies). Live clangd = `tools/probe_clangd.sh`,
-  not a gate. ctest grows test 5 `lsp`.
+  not a gate — but a CLOSE-CAR RITUAL (decided 2026-11-18): the probe must
+  run green against the dev machine's clangd before M8 closes, result
+  recorded in the CHANGELOG entry (manual close-car gate, never a CI gate —
+  clangd versions drift and CI has no clangd). ctest grows test 5 `lsp` (AMENDED 2026-11-17: `tests/tst_lsp.cpp`,
+  guiless, STARTS at machine 1 with the protocol framing/RpcClient tests and
+  grows machine by machine — no further ctest entries inside M8; the fakeserver
+  lands at machine 2 into the same binary).
 
 ### DAP features (car 4)
 

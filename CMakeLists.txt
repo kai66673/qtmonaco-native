@@ -28,13 +28,14 @@ if(QMN_BUILD_PYTHON)
     set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 endif()
 
-find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Widgets Test)
+find_package(Qt6 6.6 REQUIRED COMPONENTS Core Gui Widgets Network Test)
 
 qt_standard_project_setup()
 
 # Layering rules (see README):
 #   core  -> QtCore only (headless, fully unit-testable)
 #   diff  -> QtCore only (pure line diff + alignment, M10; headless too)
+#   protocol -> QtCore + QtNetwork, never view (M8: framing/transports/RpcClient)
 #   view  -> core + QtWidgets + (PRIVATE) vendored tree-sitter and qmn_diff
 #   app   -> view only (demo/spike harness)
 add_subdirectory(third_party/tree-sitter)

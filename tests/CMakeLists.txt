@@ -8,6 +8,14 @@ qt_add_executable(tst_diff tst_diff.cpp)
 target_link_libraries(tst_diff PRIVATE qmn_diff Qt6::Test)
 add_test(NAME diff COMMAND tst_diff)
 
+# The 5th ctest entry (M8 machine 1, PLAN amended 2026-11-17): one guiless
+# binary that grows machine by machine — protocol framing/transports/RpcClient
+# now, the QProcess fakeserver + LspClient tests with machine 2 into THIS
+# binary (no further ctest entries inside M8).
+qt_add_executable(tst_lsp tst_lsp.cpp)
+target_link_libraries(tst_lsp PRIVATE qmn_protocol Qt6::Test)
+add_test(NAME lsp COMMAND tst_lsp)
+
 qt_add_executable(tst_codeeditor tst_codeeditor.cpp)
 target_link_libraries(tst_codeeditor PRIVATE qmn_view Qt6::Test)
 # The test drives the HighlightEngine seam, whose header includes the

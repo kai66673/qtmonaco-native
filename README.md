@@ -54,10 +54,13 @@ past the end.
 
 ```
 src/core/   TextBuffer — pure Qt-based C++ (QtCore ONLY), headless, testable
+src/diff/   LineDiff — pure line diff + alignment table (QtCore ONLY too)
+src/protocol/ JsonFraming + transports + RpcClient (QtCore + QtNetwork, NEVER
+            view/core — the M8 layer rule; LSP/DAP glue lives in src/app)
 src/view/   CodeEditor — the raw QWidget canvas (QPainter), depends on core
 src/app/    qmn-spike  — demo/bench harness, depends on view
             qmn-demo   — full demo app: tabbed editors + settings dialog
-tests/      property tests (core) + keyboard smoke tests (view)
+tests/      five ctest entries: core/diff/lsp (guiless) + codeeditor/demo
 tools/      standalone micro-benches (model, highlight latency tree split)
 third_party/ vendored tree-sitter runtime + generated grammars (M4; the
             qmn_ts static lib links PRIVATE into qmn_view — tree-sitter
@@ -69,7 +72,7 @@ This keeps the model benchmarkable and fuzzable without a display.
 
 ## Build
 
-Requirements: CMake ≥ 3.22, a C++20 compiler, Qt6 ≥ 6.6 (Core/Gui/Widgets/Test).
+Requirements: CMake ≥ 3.22, a C++20 compiler, Qt6 ≥ 6.6 (Core/Gui/Widgets/Network/Test).
 
 ```bash
 cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release
