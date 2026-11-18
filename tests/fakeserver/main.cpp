@@ -27,6 +27,22 @@
 //            exits 2 with a stderr explanation otherwise. "noapply" (argv[2])
 //            makes the applyEdit step wait for the TEST's respondApplyEdit
 //            door instead of the client answering itself.
+//   sync     a stateful text server for machine 3 (document syncer +
+//            position converter): keeps an INDEPENDENT server-side UTF-16
+//            text model, applies didOpen/didChange (ranges decoded per the
+//            encoding named in argv[2]: utf-8|utf-16|utf-32, advertised in
+//            the initialize result) / didSave / didClose, and answers the
+//            TEST-ONLY request "test/assertModel" with {ok,model,version,
+//            saves,open}. A TEXT mismatch is an honest ok:false the test
+//            asserts against — NOT an exit 2 (a shared decoder would let
+//            client and server bugs cancel out, so the decoder here is its
+//            own spec implementation). Exit 2 stays reserved for structural
+//            lies: version not strictly increasing, didChange without
+//            didOpen, uri confusion, empty contentChanges. "crashonce"
+//            (argv[2]/argv[3]) _exit(7)s right after the FIRST handshake
+//            of THIS PROCESS (the flag is per-process state: the test
+//            harness hands it to spawn #0 only). The syncer's re-didOpen
+//            self-heal then rides the client's auto-restart.
 //
 // The exit code IS the oracle for the answers the client side cannot see
 // (the battery's wire shapes); tst_lsp asserts exitCode 0 where the mode's
@@ -58,6 +74,16 @@ QString g_mode;
 bool g_noApply = false;
 bool g_batteryDone = false;
 QVector<QJsonObject> g_recorded; // every inbound message, for the checks
+
+// ---- sync-mode state (machine 3: the text model + the test door) ---------
+QString g_syncEncoding = QStringLiteral("utf-16"); // argv[2], advertised
+bool g_crashOnce = false;        // argv[3]: kill the FIRST session only
+bool g_firstHandshakeDone = false;
+bool g_modelOpen = false;
+QString g_modelUri;
+QString g_model;                 // the server-side text (UTF-16 units)
+qint64 g_modelVersion = -1;      // last accepted didChange version
+int g_saves = 0;
 
 // Exactly ONE framing for stdin (the battery's blocking reads and the
 // notifier callback never run concurrently: the battery runs inside a
@@ -401,6 +427,170 @@ void runBattery()
     std::fflush(stderr);
 }
 
+// ----------------------------------------------------------- sync-mode text
+// The INDEPENDENT oracle model for the machine-3 slots. This decoder is its
+// own spec implementation on purpose: sharing the production converter would
+// let a client bug and a server bug cancel into a green test. It walks
+// code points from the line start, counting the encoding's units, and stops
+// BEFORE a code point the requested `character` would split (the same
+// surrogate-boundary discipline the spec asks of servers).
+int specOffset(const QString& text, int line, int character)
+{
+    if (line < 0)
+        line = 0;
+    if (character < 0)
+        character = 0;
+
+    int lineStart = 0;
+    for (int l = 0; l < line; ++l) {
+        if (lineStart >= text.size())
+            break;
+        while (lineStart < text.size() && text.at(lineStart) != u'\n')
+            ++lineStart;
+        if (lineStart < text.size())
+            ++lineStart;
+    }
+    int lineEnd = lineStart;
+    while (lineEnd < text.size() && text.at(lineEnd) != u'\n')
+        ++lineEnd;
+
+    if (g_syncEncoding == QLatin1String("utf-16")) {
+        // utf-16 character units ARE raw UTF-16 code units: offset arithmetic
+        // (clamped to the line end) is the spec reading, pair or no pair.
+        return qMin(lineStart + character, lineEnd);
+    }
+    const bool utf32 = g_syncEncoding == QLatin1String("utf-32");
+    int consumed = 0;
+    int p = lineStart;
+    while (p < lineEnd) {
+        const auto hi = text.at(p).unicode();
+        int codePoint = hi;
+        int width = 1; // units in THIS encoding
+        if (hi >= 0xD800 && hi <= 0xDBFF && p + 1 < lineEnd
+            && text.at(p + 1).unicode() >= 0xDC00
+            && text.at(p + 1).unicode() <= 0xDFFF) {
+            codePoint
+                = 0x10000 + ((int(hi) - 0xD800) << 10)
+                  + (int(text.at(p + 1).unicode()) - 0xDC00);
+            width = utf32 ? 1 : 4; // a non-BMP cp: one utf-32 unit, 4 utf-8 bytes
+        } else if (!utf32) {
+            width = hi < 0x80 ? 1 : (hi < 0x800 ? 2 : 3);
+        }
+        if (consumed + width > character)
+            break; // the position would split this code point: stop before it
+        consumed += width;
+        p += (codePoint > 0xFFFF) ? 2 : 1;
+    }
+    return p;
+}
+
+void syncDidOpen(const QJsonValue& paramsValue)
+{
+    const QJsonObject params = paramsValue.toObject();
+    const QJsonObject doc = params.value(QStringLiteral("textDocument")).toObject();
+    const QString uri = doc.value(QStringLiteral("uri")).toString();
+    if (uri.isEmpty())
+        fail(QStringLiteral("didOpen without a uri"));
+    if (g_modelOpen)
+        fail(QStringLiteral("didOpen while %1 is still open (the syncer must "
+                            "didClose before re-opening)")
+                 .arg(g_modelUri));
+    const double version = doc.value(QStringLiteral("version")).toDouble(-1);
+    if (version != 0)
+        fail(QStringLiteral("didOpen version is %1, not 0").arg(version));
+    g_modelOpen = true;
+    g_modelUri = uri;
+    g_model = doc.value(QStringLiteral("text")).toString();
+    g_modelVersion = 0;
+    g_saves = 0;
+}
+
+void syncDidChange(const QJsonValue& paramsValue)
+{
+    if (!g_modelOpen)
+        fail(QStringLiteral("didChange without didOpen"));
+    const QJsonObject params = paramsValue.toObject();
+    const QJsonObject doc = params.value(QStringLiteral("textDocument")).toObject();
+    if (doc.value(QStringLiteral("uri")).toString() != g_modelUri)
+        fail(QStringLiteral("didChange uri does not match the open document"));
+    const double version = doc.value(QStringLiteral("version")).toDouble(-1);
+    if (version <= double(g_modelVersion))
+        fail(QStringLiteral("didChange version %1 did not increase past %2 "
+                            "(the syncer bumps once per flush)")
+                 .arg(version).arg(double(g_modelVersion)));
+    const QJsonArray changes = params.value(QStringLiteral("contentChanges")).toArray();
+    if (changes.isEmpty())
+        fail(QStringLiteral("didChange with an empty contentChanges"));
+    for (const QJsonValue& changeValue : changes) {
+        const QJsonObject change = changeValue.toObject();
+        const QString text = change.value(QStringLiteral("text")).toString();
+        const QJsonValue range = change.value(QStringLiteral("range"));
+        if (range.isUndefined()) {
+            g_model = text; // range-less change: full replacement (spec)
+            continue;
+        }
+        const QJsonObject start = range.toObject().value(QStringLiteral("start")).toObject();
+        const QJsonObject end = range.toObject().value(QStringLiteral("end")).toObject();
+        const int startOffset
+            = specOffset(g_model, start.value(QStringLiteral("line")).toInt(),
+                         start.value(QStringLiteral("character")).toInt());
+        const int endOffset
+            = specOffset(g_model, end.value(QStringLiteral("line")).toInt(),
+                         end.value(QStringLiteral("character")).toInt());
+        if (startOffset > endOffset)
+            fail(QStringLiteral("range end precedes start at offset %1")
+                     .arg(startOffset));
+        g_model.replace(startOffset, endOffset - startOffset, text);
+    }
+    g_modelVersion = qint64(version);
+}
+
+void syncDidClose(const QJsonValue& paramsValue)
+{
+    const QString uri = paramsValue.toObject()
+                            .value(QStringLiteral("textDocument"))
+                            .toObject()
+                            .value(QStringLiteral("uri"))
+                            .toString();
+    if (uri != g_modelUri)
+        fail(QStringLiteral("didClose for a document that is not open"));
+    g_modelOpen = false;
+}
+
+void syncDidSave(const QJsonValue& paramsValue)
+{
+    const QString uri = paramsValue.toObject()
+                            .value(QStringLiteral("textDocument"))
+                            .toObject()
+                            .value(QStringLiteral("uri"))
+                            .toString();
+    if (uri != g_modelUri)
+        fail(QStringLiteral("didSave for a document that is not open"));
+    ++g_saves;
+}
+
+// The TEST-ONLY door: answers {ok,model,version,saves,open}. A mismatch is
+// an honest ok:false for the test to assert — the exit-2 path stays reserved
+// for structural wire lies (see syncDidChange et al.).
+void handleAssertModel(const QJsonValue& id, const QJsonValue& paramsValue)
+{
+    const QJsonObject params = paramsValue.toObject();
+    const bool textMatches
+        = params.contains(QStringLiteral("expectedText"))
+          && g_model == params.value(QStringLiteral("expectedText")).toString();
+    const bool versionMatches
+        = !params.contains(QStringLiteral("expectedVersion"))
+          || params.value(QStringLiteral("expectedVersion")).toDouble()
+                 == double(g_modelVersion);
+    QJsonObject result;
+    result.insert(QStringLiteral("ok"), textMatches && versionMatches);
+    result.insert(QStringLiteral("model"), g_model);
+    result.insert(QStringLiteral("version"), double(g_modelVersion));
+    result.insert(QStringLiteral("saves"), g_saves);
+    result.insert(QStringLiteral("open"), g_modelOpen);
+    send(response(id, result));
+}
+
 // ------------------------------------------------------------- the server
 void handleInitialize(const QJsonObject& request)
 {
@@ -413,7 +603,7 @@ void handleInitialize(const QJsonObject& request)
     send(response(request.value(QStringLiteral("id")),
                   QJsonObject{{QStringLiteral("capabilities"), capabilities},
                               {QStringLiteral("positionEncoding"),
-                               QStringLiteral("utf-16")},
+                               g_syncEncoding},
                               {QStringLiteral("serverInfo"),
                                QJsonObject{{QStringLiteral("name"),
                                             QStringLiteral("qmn-fakeserver")}}}}));
@@ -421,6 +611,15 @@ void handleInitialize(const QJsonObject& request)
 
 void handleInitialized()
 {
+    if (g_mode == QLatin1String("sync") && g_crashOnce && !g_firstHandshakeDone) {
+        // The self-heal drill: ONLY the first session dies right after the
+        // handshake; the client's one auto-restart then re-runs it, ready()
+        // re-fires, and the syncer's re-didOpen must carry the mirror whole.
+        g_firstHandshakeDone = true;
+        std::fprintf(stderr, "SYNC-CRASH bye after the first handshake\n");
+        std::fflush(stderr);
+        _exit(7);
+    }
     if (g_mode == QLatin1String("crash")) {
         // The crash ladder: EVERY session dies right after the handshake
         // (the client's restart/rearm semantics ride the repetition).
@@ -524,6 +723,21 @@ void runLoop()
                         _exit(0);
                 } else if (method == QLatin1String("$/cancelRequest")) {
                     // spec-silent
+                } else if (g_mode == QLatin1String("sync")
+                           && method == QLatin1String("textDocument/didOpen")) {
+                    syncDidOpen(params);
+                } else if (g_mode == QLatin1String("sync")
+                           && method == QLatin1String("textDocument/didChange")) {
+                    syncDidChange(params);
+                } else if (g_mode == QLatin1String("sync")
+                           && method == QLatin1String("textDocument/didClose")) {
+                    syncDidClose(params);
+                } else if (g_mode == QLatin1String("sync")
+                           && method == QLatin1String("textDocument/didSave")) {
+                    syncDidSave(params);
+                } else if (g_mode == QLatin1String("sync")
+                           && method == QLatin1String("test/assertModel")) {
+                    handleAssertModel(id, params);
                 } else if (!id.isUndefined()) {
                     if (g_mode == QLatin1String("basic")
                         || g_mode == QLatin1String("stderr"))
@@ -559,9 +773,25 @@ int main(int argc, char** argv)
         fail(QStringLiteral("usage: fakeserver <mode> [flags]"));
     g_mode = args.at(1);
     g_noApply = args.size() > 2 && args.at(2) == QLatin1String("noapply");
+    if (g_mode == QLatin1String("sync")) {
+        // argv[2] is the ENCODING in sync mode (a malformed one fails LOUD:
+        // silently defaulting to utf-16 would quietly drop utf-8/utf-32
+        // coverage from the suite). "crashonce" may ride argv[2] or argv[3].
+        const QString enc
+            = args.size() > 2 ? args.at(2) : QStringLiteral("utf-16");
+        if (enc == QLatin1String("utf-8") || enc == QLatin1String("utf-16")
+            || enc == QLatin1String("utf-32"))
+            g_syncEncoding = enc;
+        else if (enc != QLatin1String("crashonce"))
+            fail(QStringLiteral("sync mode: bad encoding \"%1\"").arg(enc));
+        for (int i = 2; i < args.size(); ++i)
+            if (args.at(i) == QLatin1String("crashonce"))
+                g_crashOnce = true;
+    }
     if (g_mode != QLatin1String("basic") && g_mode != QLatin1String("stderr")
         && g_mode != QLatin1String("crash") && g_mode != QLatin1String("deaf")
-        && g_mode != QLatin1String("requests"))
+        && g_mode != QLatin1String("requests")
+        && g_mode != QLatin1String("sync"))
         fail(QStringLiteral("unknown mode \"%1\"").arg(g_mode));
 
     if (g_mode == QLatin1String("stderr")) {

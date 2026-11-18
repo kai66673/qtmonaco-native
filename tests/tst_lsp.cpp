@@ -18,7 +18,9 @@
 #include <functional>
 #include <memory>
 
+#include "lsp/DocumentSyncer.hpp"
 #include "lsp/LspClient.hpp"
+#include "lsp/PositionConverter.hpp"
 #include "protocol/JsonFraming.hpp"
 #include "protocol/ProcessTransport.hpp"
 #include "protocol/RpcClient.hpp"
@@ -152,6 +154,8 @@ struct TestHarness {
 
     QString program;
     QStringList modeArgs;
+    bool crashFirstSessionOnly = false; // see the factory: harness-side
+                                        // crashonce for spawn #0 only
     int spawnCount = 0;
     QVector<Spawn> spawned;
     std::unique_ptr<qmn::lsp::LspClient> client;
@@ -163,22 +167,33 @@ struct TestHarness {
         client.reset(new qmn::lsp::LspClient(
             [this](QObject* parent) {
                 ++spawnCount;
-                auto* transport
-                    = new ProcessTransport(program, modeArgs, parent);
-                const int index = spawned.size();
-                spawned.append(Spawn{transport, false, -1});
-                QObject::connect(transport, &Transport::opened, transport,
-                                 [this, index] { spawned[index].opened = true; });
-                QObject::connect(transport, &Transport::closed, transport,
-                                 [this, index] {
-                                     // Fires from ProcessTransport::onFinished:
-                                     // the exit code is defined right here.
-                                     if (spawned[index].opened)
-                                         spawned[index].exitCode
-                                             = spawned[index].transport->exitCode();
-                                 });
-                return static_cast<Transport*>(transport);
+                QStringList args = modeArgs;
+                if (crashFirstSessionOnly && !spawned.isEmpty())
+                    // "crashonce" is a PER-PROCESS flag in the fakeserver
+                    // (globals reset with each spawn), so the one-shot
+                    // session semantics live HERE: only spawn #0 carries the
+                    // flag; the auto-restart (#1 and beyond) starts clean.
+                    args.removeAll(QStringLiteral("crashonce"));
+                auto* transport = new ProcessTransport(program, args, parent);
+                return attachTransport(transport);
             }));
+    }
+
+    Transport* attachTransport(ProcessTransport* transport)
+    {
+        const int index = spawned.size();
+        spawned.append(Spawn{transport, false, -1});
+        QObject::connect(transport, &Transport::opened, transport,
+                         [this, index] { spawned[index].opened = true; });
+        QObject::connect(transport, &Transport::closed, transport,
+                         [this, index] {
+                             // Fires from ProcessTransport::onFinished:
+                             // the exit code is defined right here.
+                             if (spawned[index].opened)
+                                 spawned[index].exitCode
+                                     = spawned[index].transport->exitCode();
+                         });
+        return static_cast<Transport*>(transport);
     }
 
     // The LSP initialize params every real client must carry (the fakeserver
@@ -210,6 +225,53 @@ bool batteryPassed(const QSignalSpy& stderrSpy)
         if (args.at(0).toString() == QLatin1String("BATTERY-PASS"))
             return true;
     return false;
+}
+
+// The machine-3 verdict door: asks the sync-mode fakeserver to compare its
+// INDEPENDENT text model against the expected text (the test's own naive
+// QString oracle) and version. A mismatch comes back as an honest ok:false
+// (server model included in the reply for the failure dump), never an exit 2
+// — a shared decoder would cancel client and server bugs into a green test.
+QJsonObject assertSyncModel(qmn::lsp::LspClient* client,
+                            const QString& expectedText, qint64 expectedVersion)
+{
+    bool answered = false;
+    QJsonObject result;
+    client->request(QStringLiteral("test/assertModel"),
+                    QJsonObject{{QStringLiteral("expectedText"), expectedText},
+                                {QStringLiteral("expectedVersion"),
+                                 double(expectedVersion)}},
+                    [&answered, &result](const RpcClient::Reply& reply) {
+                        answered = true;
+                        if (!reply.isError)
+                            result = reply.result.toObject();
+                    });
+    // Explicit pump, not a QTRY macro: QTRY's failure path RETURNS, which a
+    // value-returning helper cannot do. No answer means the fakeserver died
+    // on a structural lie (exit 2) — surfaced as an honest ok:false verdict
+    // with the reason, so the QVERIFY2 dump below shows it.
+    for (int waited = 0; waited < 5000 && !answered; waited += 50)
+        QTest::qWait(50); // the request rides the SAME stream as the
+                          // didChange whose effect it checks: ordering IS the
+                          // synchronization, no extra waits
+    if (!answered) {
+        return QJsonObject{{QStringLiteral("ok"), false},
+                           {QStringLiteral("note"),
+                            QStringLiteral("test/assertModel never answered "
+                                           "(structural fakeserver fail: look "
+                                           "for FAKESERVER-FAIL on stderr)")}};
+    }
+    return result;
+}
+
+QString modelDump(const QJsonObject& verdict)
+{
+    // Only ever formatted on a fail: the server-side model text inside the
+    // verdict is the diagnostic that makes a desync debuggable straight from
+    // the ctest log.
+    return QStringLiteral("server model verdict: %1")
+        .arg(QString::fromUtf8(
+            QJsonDocument(verdict).toJson(QJsonDocument::Compact).constData()));
 }
 
 } // namespace
@@ -1211,6 +1273,465 @@ private slots:
                          // off (registrations_ is the client's cross-session
                          // ledger in M2's design)
     }
+    // ------------------------------------------------ M3: position converter
+    void positionConverterWireEncodingNames()
+    {
+        using PC = qmn::lsp::PositionConverter;
+        using Enc = PC::Encoding;
+        QVERIFY(PC::fromWire(QStringLiteral("utf-8")) == Enc::Utf8);
+        QVERIFY(PC::fromWire(QStringLiteral("utf-32")) == Enc::Utf32);
+        QVERIFY(PC::fromWire(QStringLiteral("utf-16")) == Enc::Utf16);
+        // The spec default rule: missing/empty/garbage all read as utf-16.
+        QVERIFY(PC::fromWire(QString()) == Enc::Utf16);
+        QVERIFY(PC::fromWire(QStringLiteral("utf-64")) == Enc::Utf16);
+        QVERIFY(PC::fromWire(QStringLiteral("UTF-8")) == Enc::Utf16); // the
+            // wire spelling is exact ("UTF-8" is NOT a spec positionEncoding)
+        QCOMPARE(PC::toWire(Enc::Utf8), QStringLiteral("utf-8"));
+        QCOMPARE(PC::toWire(Enc::Utf16), QStringLiteral("utf-16"));
+        QCOMPARE(PC::toWire(Enc::Utf32), QStringLiteral("utf-32"));
+        // One code point, three frames (the table the line walks accumulate).
+        QCOMPARE(PC::unitWidth(u'a', Enc::Utf8), 1);
+        QCOMPARE(PC::unitWidth(0x00E9, Enc::Utf8), 2);
+        QCOMPARE(PC::unitWidth(0x4E2D, Enc::Utf8), 3);
+        QCOMPARE(PC::unitWidth(0x1F30D, Enc::Utf8), 4); // non-BMP: 4 bytes
+        QCOMPARE(PC::unitWidth(u'a', Enc::Utf16), 1);
+        QCOMPARE(PC::unitWidth(0x4E2D, Enc::Utf16), 1);
+        QCOMPARE(PC::unitWidth(0x1F30D, Enc::Utf16), 2); // the surrogate pair
+        QCOMPARE(PC::unitWidth(u'a', Enc::Utf32), 1);
+        QCOMPARE(PC::unitWidth(0x1F30D, Enc::Utf32), 1); // one unit, always
+    }
+
+    void positionConverterRoundTripsEveryEncoding()
+    {
+        using PC = qmn::lsp::PositionConverter;
+        using Enc = PC::Encoding;
+        // Latin + e-acute + CJK + emoji (a surrogate PAIR) + 'b', newline,
+        // Cyrillic: from the emoji on, all three frames disagree on columns.
+        const QString text
+            = QStringLiteral("a\u00E9\u4E2D\U0001F30Db\n\u043C\u0438\u0440");
+        // Indices: a0 e1 CJK2 pair(3,4) b5 NL6 м7 и8 р9 -- size 10.
+        QCOMPARE(text.size(), 10);
+
+        // Column pins (the clangd utf-8 reality: the emoji's 4 bytes vs the
+        // 2 UTF-16 units shift every later column; utf-32 counts neither).
+        QCOMPARE(PC::toPosition(text, 3, Enc::Utf8).character, 6);
+        QCOMPARE(PC::toPosition(text, 4, Enc::Utf8).character, 6); // mid-pair:
+                                                                   // pair not
+                                                                   // counted
+        QCOMPARE(PC::toPosition(text, 5, Enc::Utf8).character, 10);
+        QCOMPARE(PC::toPosition(text, 6, Enc::Utf8).character, 11);
+        QCOMPARE(PC::toPosition(text, 3, Enc::Utf32).character, 3);
+        QCOMPARE(PC::toPosition(text, 4, Enc::Utf32).character, 3); // the pair
+        QCOMPARE(PC::toPosition(text, 5, Enc::Utf32).character, 4); // is ONE unit
+        QCOMPARE(PC::toPosition(text, 6, Enc::Utf32).character, 5);
+        QCOMPARE(PC::toPosition(text, 4, Enc::Utf16).character, 4); // utf-16
+                                                                    // DOES count
+        QCOMPARE(PC::toPosition(text, 5, Enc::Utf16).character, 5); // the pair's
+                                                                    // 2 units
+        QCOMPARE(PC::toPosition(text, 6, Enc::Utf16).character, 6); // before NL
+        QCOMPARE(PC::toPosition(text, 7, Enc::Utf16).line, 1);
+        QCOMPARE(PC::toPosition(text, 7, Enc::Utf16).character, 0);
+        QCOMPARE(PC::toPosition(text, 8, Enc::Utf8).character, 2); // Cyrillic
+        QCOMPARE(PC::toPosition(text, 10, Enc::Utf8).character, 6); // is 2 bytes
+        QCOMPARE(PC::toPosition(text, 10, Enc::Utf16).character, 3); // each
+        QCOMPARE(PC::toPosition(text, 10, Enc::Utf32).character, 3);
+
+        // The inverse doors (and the surrogate-boundary discipline: the same
+        // one the view's backspace keeps — a column landing INSIDE a code
+        // point's encoding stops BEFORE it, never splits it).
+        QCOMPARE(PC::toOffset(text, 0, 6, Enc::Utf8), 3); // pair START's byte
+        QCOMPARE(PC::toOffset(text, 0, 7, Enc::Utf8), 3); // bytes 7..9 fall
+        QCOMPARE(PC::toOffset(text, 0, 9, Enc::Utf8), 3); // inside the pair's
+        QCOMPARE(PC::toOffset(text, 0, 10, Enc::Utf8), 5); // sequence: all land
+                                                           // before it
+        QCOMPARE(PC::toOffset(text, 0, 4, Enc::Utf16), 3); // unit 4 would cut
+        QCOMPARE(PC::toOffset(text, 0, 5, Enc::Utf16), 5); // the pair: stop at 3
+        QCOMPARE(PC::toOffset(text, 0, 4, Enc::Utf32), 5); // pair is unit 3:
+                                                           // unit 4 is after it
+        QCOMPARE(PC::toOffset(text, 1, 4, Enc::Utf8), 9); // м+и done, р would
+        QCOMPARE(PC::toOffset(text, 1, 6, Enc::Utf8), 10); // overshoot: stop
+
+        // Clamps are TOTAL (a tolerant server reads them; they never fault):
+        // line past EOF -> document end, character past EOL -> line end.
+        QCOMPARE(PC::toOffset(text, 9, 9, Enc::Utf8), text.size());
+        QCOMPARE(PC::toOffset(text, 0, 100000, Enc::Utf32), 6);
+        QCOMPARE(PC::toOffset(text, -3, -7, Enc::Utf16), 0);
+        QCOMPARE(PC::toPosition(text, 100000, Enc::Utf16).line, 1);
+        QCOMPARE(PC::toPosition(text, 100000, Enc::Utf16).character, 3);
+        QCOMPARE(PC::toPosition(text, -5, Enc::Utf8).character, 0);
+
+        // The round trip: every boundary offset returns to itself in every
+        // frame...
+        for (const Enc enc : {Enc::Utf8, Enc::Utf16, Enc::Utf32}) {
+            for (int offset = 0; offset <= text.size(); ++offset) {
+                if (offset == 4)
+                    continue; // mid-pair: pinned right below
+                const qmn::lsp::LspPosition p
+                    = PC::toPosition(text, offset, enc);
+                QCOMPARE(PC::toOffset(text, p.line, p.character, enc), offset);
+            }
+            // ...and the one degenerate offset INSIDE the pair (view edits
+            // stay on boundaries, core does not — the mirror could in theory
+            // carry one) snaps BACK to the pair's START in every frame: a
+            // split never survives the position frame.
+            const qmn::lsp::LspPosition split = PC::toPosition(text, 4, enc);
+            QCOMPARE(PC::toOffset(text, split.line, split.character, enc), 3);
+        }
+
+        // Edges: empty document, blank lines (an empty line between two
+        // newlines), trailing-newline offset, combining marks counted as
+        // their OWN units (grapheme-accurate columns are NOT ours — the
+        // AGENTS.md standing decision).
+        QCOMPARE(PC::toPosition(QString(), 0, Enc::Utf8).line, 0);
+        QCOMPARE(PC::toPosition(QString(), 0, Enc::Utf32).character, 0);
+        QCOMPARE(PC::toOffset(QString(), 4, 8, Enc::Utf8), 0);
+        const QString blankLines = QStringLiteral("a\n\nb");
+        QCOMPARE(PC::toPosition(blankLines, 2, Enc::Utf16).line, 1);
+        QCOMPARE(PC::toPosition(blankLines, 2, Enc::Utf16).character, 0);
+        QCOMPARE(PC::toPosition(blankLines, 3, Enc::Utf8).line, 2);
+        QCOMPARE(PC::toPosition(blankLines, 3, Enc::Utf8).character, 0);
+        QCOMPARE(PC::toOffset(blankLines, 2, 0, Enc::Utf32), 3);
+        const QString decomposed = QStringLiteral("e\u0301x");
+        QCOMPARE(PC::toPosition(decomposed, 2, Enc::Utf8).character, 3); // e(1B)
+                                                                         // + U+0301(2B)
+        QCOMPARE(PC::toPosition(decomposed, 2, Enc::Utf16).character, 2);
+        QCOMPARE(PC::toPosition(decomposed, 2, Enc::Utf32).character, 2);
+    }
+
+    void positionConverterMatchesReferenceUtf8Offsets()
+    {
+        // The wire-side counterpart of the round-trip slot: for every
+        // boundary offset the utf-8 CHARACTER equals what the spec's own
+        // definition says — the UTF-8 byte length of the line prefix. Qt's
+        // codec is an independent source of truth here (the production
+        // converter walks its own width table; agreement is the pin).
+        const QString text = QStringLiteral("a\u00E9\u4E2D\U0001F30Db\n"
+                                            "\u043C\u0438\u0440 \U0001F680");
+        const QByteArray line0 = text.left(6).toUtf8(); // "a" + e-acute + CJK
+                                                        // + emoji + "b"
+        int utf8Char = 0;
+        int p = 0;
+        while (p < 6) { // walk code points along the reference utf-8 bytes
+            int units = 1;
+            if (text.at(p).isHighSurrogate())
+                units = 2;
+            const QByteArray cp = text.mid(p, units).toUtf8();
+            QCOMPARE(line0.indexOf(cp, utf8Char), utf8Char); // contiguous
+            utf8Char += cp.size();
+            p += units;
+            const qmn::lsp::LspPosition pos
+                = qmn::lsp::PositionConverter::toPosition(text, p,
+                                                          qmn::lsp::PositionConverter::Encoding::Utf8);
+            QCOMPARE(pos.line, 0);
+            QCOMPARE(pos.character, utf8Char); // the table matches Qt's encoder
+            QCOMPARE(qmn::lsp::PositionConverter::toOffset(
+                         text, 0, utf8Char,
+                         qmn::lsp::PositionConverter::Encoding::Utf8),
+                     p);
+        }
+        QCOMPARE(utf8Char, line0.size()); // 1+2+3+4+1 = 11 bytes
+    }
+
+    // -------------------------------------------------- M3: document syncer
+    void documentSyncerDeltaStreamMatchesServerUtf16()
+    {
+        TestHarness h(QStringLiteral("sync"));
+        h.modeArgs << QStringLiteral("utf-16");
+        QSignalSpy readySpy(h.client.get(), &qmn::lsp::LspClient::ready);
+        h.client->start(TestHarness::initParams());
+        QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 12000);
+        QCOMPARE(h.client->positionEncoding(), QStringLiteral("utf-16"));
+
+        qmn::lsp::DocumentSyncer syncer(h.client.get());
+        syncer.setUri(QStringLiteral("file:///sync-utf16.txt"));
+        syncer.setDebounceMs(50); // the test clocks, not the shipped budgets
+        syncer.setTypingCapMs(300);
+        QSignalSpy flushedSpy(&syncer,
+                              &qmn::lsp::DocumentSyncer::flushed);
+
+        syncer.open(QStringLiteral("one\ntwo\nthree"),
+                    QStringLiteral("plaintext"));
+        QVERIFY(syncer.isOpen());
+        QCOMPARE(syncer.version(), qint64(0)); // didOpen carries version 0
+        QJsonObject verdict = assertSyncModel(h.client.get(),
+                                              QStringLiteral("one\ntwo\nthree"),
+                                              0);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict))); // didOpen handed over the
+                                                  // whole text
+
+        // The three-path invariant runs through the WHOLE slot: the naive
+        // reference QString (QTest's own path), the syncer mirror and the
+        // SERVER model must stay equal across every edit.
+        QString reference = QStringLiteral("one\ntwo\nthree");
+        auto edit = [&](int start, int end, const QString& inserted) {
+            syncer.applyDelta(start, end, inserted);
+            reference.replace(start, end - start, inserted);
+            QCOMPARE(syncer.mirrorText(), reference); // the mirror replays
+                                                      // each delta at once
+        };
+        edit(3, 3, QStringLiteral("\nzero")); // insert-only split
+        edit(9, 12, QStringLiteral("2"));     // range replace ("two" -> "2")
+        edit(0, 0, QStringLiteral("W"));      // at document start
+        syncer.flush(); // explicit flush: THREE deltas travel as ONE didChange
+        QCOMPARE(flushedSpy.count(), 1);
+        QCOMPARE(flushedSpy.at(0).at(0).toLongLong(),
+                 qint64(1)); // version bumps ONCE per flush, not per delta
+        QCOMPARE(flushedSpy.at(0).at(1).toInt(), 3); // sequential replay, no
+                                                     // coalescing by design
+        verdict = assertSyncModel(h.client.get(), reference, 1);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+
+        // The debounce burst: two deltas, NO manual flush, must go out as
+        // ONE didChange carrying TWO contentChanges.
+        edit(1, 4, QStringLiteral("orld")); // "one" -> "orld" (range)
+        edit(reference.size(), reference.size(),
+             QStringLiteral("!")); // end-of-document insert
+        QTRY_COMPARE_WITH_TIMEOUT(flushedSpy.count(), 2, 5000); // the 50 ms
+                                                                // debounce fired
+        QCOMPARE(flushedSpy.at(1).at(0).toLongLong(), qint64(2));
+        QCOMPARE(flushedSpy.at(1).at(1).toInt(), 2);
+        verdict = assertSyncModel(h.client.get(), reference, 2);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+
+        // The typing CAP: a burst that never pauses still flushes (the 5 s
+        // debounce would starve a fast typist's server forever).
+        syncer.setDebounceMs(5000);
+        syncer.setTypingCapMs(150);
+        edit(0, 0, QStringLiteral("X"));
+        QTRY_COMPARE_WITH_TIMEOUT(flushedSpy.count(), 3, 3000); // < the 5 s
+                                                                // debounce: the
+                                                                // 150 ms cap won
+        QCOMPARE(flushedSpy.at(2).at(1).toInt(), 1);
+        verdict = assertSyncModel(h.client.get(), reference, 3);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+
+        // save(): flush-then-didSave (the server is current BEFORE the save).
+        syncer.save();
+        verdict = assertSyncModel(h.client.get(), reference, 3);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        QCOMPARE(verdict.value(QStringLiteral("saves")).toInt(),
+                 1); // didSave really landed
+
+        // close + reopen on the same key: version restarts at 0 and the
+        // server re-seeds from the didOpen text. (A syncer that FORGOT the
+        // didClose would drive the fakeserver's structural check to an honest
+        // exit 2 — the assert's answer would never arrive.)
+        syncer.close();
+        QVERIFY(!syncer.isOpen());
+        syncer.open(QStringLiteral("fresh"), QStringLiteral("plaintext"));
+        QCOMPARE(syncer.version(), qint64(0));
+        QCOMPARE(syncer.mirrorText(), QStringLiteral("fresh"));
+        verdict = assertSyncModel(h.client.get(), QStringLiteral("fresh"), 0);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        QCOMPARE(verdict.value(QStringLiteral("open")).toBool(), true);
+        QCOMPARE(verdict.value(QStringLiteral("saves")).toInt(),
+                 0); // the model re-seeded, not carried over
+
+        h.client->stop();
+        QTRY_COMPARE_WITH_TIMEOUT(
+            h.client->state(), qmn::lsp::LspClient::State::Stopped, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(h.exitCodeOf(0), 0,
+                                  5000); // shutdown/exit stayed honest
+    }
+
+    void documentSyncerUtf8ColumnsAndFullFallbackSync()
+    {
+        TestHarness h(QStringLiteral("sync"));
+        h.modeArgs << QStringLiteral("utf-8"); // clangd's REAL frame: the
+        // server-side columns disagree with utf-16 ones, so a converter bug
+        // can only show up as a model mismatch here.
+        QSignalSpy readySpy(h.client.get(), &qmn::lsp::LspClient::ready);
+        h.client->start(TestHarness::initParams());
+        QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 12000);
+        QCOMPARE(h.client->positionEncoding(), QStringLiteral("utf-8"));
+
+        qmn::lsp::DocumentSyncer syncer(h.client.get());
+        syncer.setUri(QStringLiteral("file:///sync-utf8.txt"));
+        syncer.setDebounceMs(50);
+        QSignalSpy flushedSpy(&syncer,
+                              &qmn::lsp::DocumentSyncer::flushed);
+        // привет мир + emoji + " ok": Cyrillic (2 bytes each) + a 4-byte
+        // emoji. utf-16 size 16, the utf-8 line carries 27 units.
+        const QString base
+            = QStringLiteral("\u043F\u0440\u0438\u0432\u0435\u0442 "
+                             "\u043C\u0438\u0440 \U0001F30D ok");
+        QCOMPARE(base.size(), 16);
+        syncer.open(base, QStringLiteral("plaintext"));
+        QVERIFY(syncer.encoding()
+                == qmn::lsp::PositionConverter::Encoding::Utf8);
+        QJsonObject verdict = assertSyncModel(h.client.get(), base, 0);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+
+        QString reference = base;
+        auto edit = [&](int start, int end, const QString& inserted) {
+            syncer.applyDelta(start, end, inserted);
+            reference.replace(start, end - start, inserted);
+            QCOMPARE(syncer.mirrorText(), reference);
+        };
+        edit(16, 16, QStringLiteral("!")); // after "ok": the utf-8 character
+        edit(10, 10, QStringLiteral("big ")); // for THIS edit is 27+1, not 17;
+        syncer.flush(); // the server decodes the columns with its OWN decoder
+        QCOMPARE(flushedSpy.count(), 1);
+        QCOMPARE(flushedSpy.at(0).at(1).toInt(), 2);
+        verdict = assertSyncModel(h.client.get(), reference, 1);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict))); // wrong-frame columns could
+                                                  // NOT survive this compare
+
+        // The server-primed edit suppression pair: beginServerEdit flushes
+        // the user's queued deltas FIRST, the deltas fed inside ride only the
+        // mirror (no echo back), endServerEdit tells the story with ONE
+        // range-less (full) contentChange.
+        syncer.beginServerEdit();
+        edit(0, 6, QStringLiteral("HELLO")); // this must NOT come back as a
+                                            // didChange delta...
+        QCOMPARE(syncer.hasPendingChanges(), false); // ...nothing was queued
+        syncer.endServerEdit(); // ...and here comes the full sync, NOW
+        QCOMPARE(flushedSpy.count(), 2);
+        QCOMPARE(flushedSpy.at(1).at(1).toInt(), 1); // exactly ONE change
+        verdict = assertSyncModel(h.client.get(), reference, 2);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict))); // the range-less text carried
+                                                  // the HELLO edit exactly
+
+        // forceFullSync: the desync detector's door — the NEXT flush goes out
+        // FULL even though a plain delta is already pending (the full text
+        // absorbs the queue; the server sees the mirror, one change).
+        syncer.setDebounceMs(5000); // pin: nothing flushes on the debounce
+        syncer.setTypingCapMs(6000); // ...or the cap during this phase
+        edit(reference.size(), reference.size(), QStringLiteral(" tail"));
+        syncer.forceFullSync();
+        syncer.flush();
+        QCOMPARE(flushedSpy.count(), 3);
+        QCOMPARE(flushedSpy.at(2).at(1).toInt(), 1); // the full text, NOT
+                                                     // delta+full as two changes
+        verdict = assertSyncModel(h.client.get(), reference, 3);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        QVERIFY(!syncer.hasPendingChanges());
+
+        h.client->stop();
+        QTRY_COMPARE_WITH_TIMEOUT(
+            h.client->state(), qmn::lsp::LspClient::State::Stopped, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(h.exitCodeOf(0), 0, 5000);
+    }
+
+    void documentSyncerReDidOpenSelfHealAcrossRestart()
+    {
+        // crashonce: the FIRST session _exit(7)s right after its handshake —
+        // the client's one auto-restart rebuilds the pair, ready() re-fires,
+        // and the syncer's re-didOpen must carry the mirror WHOLE (edits fed
+        // while the server was down included: the didOpen IS the full sync).
+        TestHarness h(QStringLiteral("sync"));
+        h.modeArgs << QStringLiteral("utf-16") << QStringLiteral("crashonce");
+        h.crashFirstSessionOnly = true; // harness-side one-shot: the flag
+                                        // reaches ONLY spawn #0's argv
+        QSignalSpy readySpy(h.client.get(), &qmn::lsp::LspClient::ready);
+        QSignalSpy failedSpy(h.client.get(), &qmn::lsp::LspClient::failed);
+        h.client->start(TestHarness::initParams());
+
+        qmn::lsp::DocumentSyncer syncer(h.client.get());
+        syncer.setUri(QStringLiteral("file:///sync-heal.txt"));
+        syncer.setDebounceMs(10); // flushes WILL fire during the restart
+                                  // window and must survive them (they simply
+                                  // keep the queue: not-Ready flush is a no-op)
+        QSignalSpy flushedSpy(&syncer,
+                              &qmn::lsp::DocumentSyncer::flushed);
+
+        syncer.open(QStringLiteral("alpha beta"), QStringLiteral("plaintext"));
+        QString reference = QStringLiteral("alpha beta");
+        syncer.applyDelta(6, 10, QStringLiteral("BETA")); // "alpha BETA"
+        reference.replace(6, 4, QStringLiteral("BETA"));
+        QCOMPARE(syncer.mirrorText(), reference);
+
+        QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 2, 12000); // TWO handshakes:
+        QCOMPARE(failedSpy.count(), 0); // the crash rode the ONE budget
+        QCOMPARE(h.spawnCount, 2);
+        QTRY_COMPARE_WITH_TIMEOUT(h.exitCodeOf(0), 7, 5000); // the first
+                                                             // session crashed
+        QVERIFY(syncer.isOpen()); // close did NOT follow the crash: the
+                                  // self-heal re-didOpen is the contract
+
+        // Whatever flushed/debounce timers fired while the session was down,
+        // the second session's didOpen carried the mirror whole. The version
+        // pin proves the didOpen re-began the document (version 0), NOT a
+        // resumed didChange stream.
+        QJsonObject verdict = assertSyncModel(h.client.get(), reference, 0);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        QCOMPARE(verdict.value(QStringLiteral("open")).toBool(), true);
+        QVERIFY(!syncer.hasPendingChanges()); // the didOpen absorbed the queue
+
+        // And the healed session syncs normally afterwards: a delta fed now
+        // goes out as a real didChange (version 1 on the re-opened document).
+        syncer.applyDelta(0, 0, QStringLiteral("Z"));
+        reference.replace(0, 0, QStringLiteral("Z"));
+        syncer.flush();
+        QCOMPARE(flushedSpy.count(), 1); // the FIRST honest didChange of this
+                                         // document lifetime (the down-window
+                                         // flushes stayed silent)
+        QCOMPARE(flushedSpy.at(0).at(0).toLongLong(), qint64(1));
+        verdict = assertSyncModel(h.client.get(), reference, 1);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+
+        h.client->stop();
+        QTRY_COMPARE_WITH_TIMEOUT(
+            h.client->state(), qmn::lsp::LspClient::State::Stopped, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(h.exitCodeOf(1), 0, 5000);
+    }
+
+    void documentSyncerNotReadyDoorsStayHonest()
+    {
+        // The non-Ready doors are HONEST: no session means no wire traffic,
+        // the syncer keeps the document registered and the mirror current,
+        // version never bumps for a flush that did not go out — and the
+        // ready() re-didOpen contract owns the resume (the mirror travels
+        // inside the didOpen, so even the queued deltas are NOT lost).
+        TestHarness h(QStringLiteral("sync"));
+        h.modeArgs << QStringLiteral("utf-16");
+        qmn::lsp::DocumentSyncer syncer(h.client.get());
+        syncer.setUri(QStringLiteral("file:///sync-noconn.txt"));
+        syncer.setDebounceMs(10);
+        QSignalSpy flushedSpy(&syncer,
+                              &qmn::lsp::DocumentSyncer::flushed);
+
+        syncer.open(QStringLiteral("never sent"), QStringLiteral("plaintext"));
+        syncer.applyDelta(0, 5, QStringLiteral("ALWAYS"));
+        syncer.save(); // flush-then-didSave without a session: silent, safe
+        QTest::qWait(600); // past the debounce AND the cap windows: the timers
+                           // fired into the not-Ready no-op and stayed quiet
+        QCOMPARE(flushedSpy.count(), 0); // NOTHING went out...
+        QCOMPARE(syncer.version(), qint64(0)); // ...and no version burned on
+                                               // an un-sent flush
+        QVERIFY(syncer.hasPendingChanges()); // the document waits, not lost
+        QCOMPARE(syncer.mirrorText(), QStringLiteral("ALWAYS sent"));
+
+        // Start for real: ready() arrives, the self-heal didOpen carries the
+        // mirror (with the pre-session edit inside), and the assert door
+        // confirms the whole story — it rides the SAME stream after the
+        // didOpen, so ordering IS the synchronization.
+        QSignalSpy readySpy(h.client.get(), &qmn::lsp::LspClient::ready);
+        h.client->start(TestHarness::initParams());
+        QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 12000);
+        QJsonObject verdict = assertSyncModel(
+            h.client.get(), QStringLiteral("ALWAYS sent"), 0);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        QVERIFY(!syncer.hasPendingChanges()); // the didOpen absorbed the queue
+        h.client->stop();
+        QTRY_COMPARE_WITH_TIMEOUT(
+            h.client->state(), qmn::lsp::LspClient::State::Stopped, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(h.exitCodeOf(0), 0, 5000);
+    }
+
 };
 
 QTEST_GUILESS_MAIN(TstLsp)

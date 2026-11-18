@@ -4,7 +4,11 @@
 # this car machine by machine).
 add_library(qmn_lsp STATIC
     LspClient.hpp
-    LspClient.cpp)
+    LspClient.cpp
+    PositionConverter.hpp
+    PositionConverter.cpp
+    DocumentSyncer.hpp
+    DocumentSyncer.cpp)
 
 target_include_directories(qmn_lsp PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
@@ -15,5 +19,5 @@ target_link_libraries(qmn_lsp PUBLIC qmn_protocol)
 # the app-layer glue links it directly (PLAN: lsp glue lives in src/app).
 set_target_properties(qmn_lsp PROPERTIES EXPORT_NAME lsp)
 install(TARGETS qmn_lsp EXPORT qmnTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(FILES LspClient.hpp
+install(FILES LspClient.hpp PositionConverter.hpp DocumentSyncer.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qmn/lsp)

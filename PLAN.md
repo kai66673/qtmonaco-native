@@ -1075,6 +1075,12 @@ this car).
 
 ### M8 — protocol core + LSP (car 3)
 
+Machines built (2026-11-18): 1 `src/protocol/` ✅ → 2 `LspClient` + fakeserver
+oracle ✅ → 3 document syncer + position converter + the `sync`-mode fakeserver
+✅ (lsp binary at 39 slots; the crashonce one-shot is HARNESS-side — the
+fakeserver flag is per-process, so only spawn #0's argv carries it) →
+4 app-layer glue + server matrix + diagnostics feeding — next.
+
 - **Layers:** `src/protocol/` (QtCore+QtNetwork, zero view — Framing with
   full header-block parse + 64 MiB upper bound that fails as a transport
   error, not an allocation; ProcessTransport via QProcess stdio;
