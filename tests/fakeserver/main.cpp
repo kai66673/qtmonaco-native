@@ -27,22 +27,31 @@
 //            exits 2 with a stderr explanation otherwise. "noapply" (argv[2])
 //            makes the applyEdit step wait for the TEST's respondApplyEdit
 //            door instead of the client answering itself.
-//   sync     a stateful text server for machine 3 (document syncer +
-//            position converter): keeps an INDEPENDENT server-side UTF-16
-//            text model, applies didOpen/didChange (ranges decoded per the
+//   sync     a stateful text server for machines 3+4 (document syncer +
+//            position converter + the hub): keeps an INDEPENDENT server-side
+//            UTF-16 text model PER URI (M4: one client carries many
+//            documents; didChange/didClose/didSave for a closed or unknown
+//            uri are structural lies, exit 2), applies
+//            didOpen/didChange (ranges decoded per the
 //            encoding named in argv[2]: utf-8|utf-16|utf-32, advertised in
 //            the initialize result) / didSave / didClose, and answers the
-//            TEST-ONLY request "test/assertModel" with {ok,model,version,
-//            saves,open}. A TEXT mismatch is an honest ok:false the test
+//            TEST-ONLY request "test/assertModel" (uri-qualified, the
+//            no-uri form keeps meaning the lone open document) with
+//            {ok,model,version,saves,open} plus "test/documentCount" with
+//            {count}. A TEXT mismatch is an honest ok:false the test
 //            asserts against — NOT an exit 2 (a shared decoder would let
 //            client and server bugs cancel out, so the decoder here is its
-//            own spec implementation). Exit 2 stays reserved for structural
+//            own spec implementation, and the diags ENCODER below is its
+//            own too). Exit 2 stays reserved for structural
 //            lies: version not strictly increasing, didChange without
 //            didOpen, uri confusion, empty contentChanges. "crashonce"
-//            (argv[2]/argv[3]) _exit(7)s right after the FIRST handshake
+//            _exit(7)s right after the FIRST handshake
 //            of THIS PROCESS (the flag is per-process state: the test
 //            harness hands it to spawn #0 only). The syncer's re-didOpen
-//            self-heal then rides the client's auto-restart.
+//            self-heal then rides the client's auto-restart. "diags"
+//            publishes textDocument/publishDiagnostics (the "bug"-marker
+//            scan, ranges in the NEGOTIATED frame) after every open/change
+//            — machine 4's decoder path through the hub.
 //
 // The exit code IS the oracle for the answers the client side cannot see
 // (the battery's wire shapes); tst_lsp asserts exitCode 0 where the mode's
@@ -79,11 +88,20 @@ QVector<QJsonObject> g_recorded; // every inbound message, for the checks
 QString g_syncEncoding = QStringLiteral("utf-16"); // argv[2], advertised
 bool g_crashOnce = false;        // argv[3]: kill the FIRST session only
 bool g_firstHandshakeDone = false;
-bool g_modelOpen = false;
-QString g_modelUri;
-QString g_model;                 // the server-side text (UTF-16 units)
-qint64 g_modelVersion = -1;      // last accepted didChange version
-int g_saves = 0;
+// sync-mode document table (M4: keyed by uri — one client per spec carries
+// MANY documents, VS Code shape). The assert door answers per-uri.
+struct ModelDoc {
+    QString languageId;
+    QString text;            // the server-side text (UTF-16 units)
+    qint64 version = 0;      // last accepted didChange version
+    int saves = 0;
+};
+QMap<QString, ModelDoc> g_docs;
+bool g_publishDiags = false; // argv flag: publish diagnostics on every
+                             // didOpen/didChange of an open document
+QJsonObject g_initializeParams; // the params the handshake received (the
+                                // M4 test echo door: the hub's built params
+                                // ride it back to the test)
 
 // Exactly ONE framing for stdin (the battery's blocking reads and the
 // notifier callback never run concurrently: the battery runs inside a
@@ -484,6 +502,8 @@ int specOffset(const QString& text, int line, int character)
     return p;
 }
 
+void publishDiagsFor(const QString& uri); // forward: the handlers below call it
+
 void syncDidOpen(const QJsonValue& paramsValue)
 {
     const QJsonObject params = paramsValue.toObject();
@@ -491,33 +511,37 @@ void syncDidOpen(const QJsonValue& paramsValue)
     const QString uri = doc.value(QStringLiteral("uri")).toString();
     if (uri.isEmpty())
         fail(QStringLiteral("didOpen without a uri"));
-    if (g_modelOpen)
+    if (g_docs.contains(uri))
         fail(QStringLiteral("didOpen while %1 is still open (the syncer must "
                             "didClose before re-opening)")
-                 .arg(g_modelUri));
+                 .arg(uri));
     const double version = doc.value(QStringLiteral("version")).toDouble(-1);
     if (version != 0)
         fail(QStringLiteral("didOpen version is %1, not 0").arg(version));
-    g_modelOpen = true;
-    g_modelUri = uri;
-    g_model = doc.value(QStringLiteral("text")).toString();
-    g_modelVersion = 0;
-    g_saves = 0;
+    ModelDoc& d = g_docs[uri];
+    d.languageId = doc.value(QStringLiteral("languageId")).toString();
+    d.text = doc.value(QStringLiteral("text")).toString();
+    d.version = 0;
+    d.saves = 0;
+    if (g_publishDiags)
+        publishDiagsFor(uri);
 }
 
 void syncDidChange(const QJsonValue& paramsValue)
 {
-    if (!g_modelOpen)
-        fail(QStringLiteral("didChange without didOpen"));
     const QJsonObject params = paramsValue.toObject();
     const QJsonObject doc = params.value(QStringLiteral("textDocument")).toObject();
-    if (doc.value(QStringLiteral("uri")).toString() != g_modelUri)
-        fail(QStringLiteral("didChange uri does not match the open document"));
+    const QString uri = doc.value(QStringLiteral("uri")).toString();
+    auto found = g_docs.find(uri);
+    if (found == g_docs.end())
+        fail(QStringLiteral("didChange for \"%1\" without a live didOpen")
+                 .arg(uri));
+    ModelDoc& d = found.value();
     const double version = doc.value(QStringLiteral("version")).toDouble(-1);
-    if (version <= double(g_modelVersion))
+    if (version <= double(d.version))
         fail(QStringLiteral("didChange version %1 did not increase past %2 "
                             "(the syncer bumps once per flush)")
-                 .arg(version).arg(double(g_modelVersion)));
+                 .arg(version).arg(double(d.version)));
     const QJsonArray changes = params.value(QStringLiteral("contentChanges")).toArray();
     if (changes.isEmpty())
         fail(QStringLiteral("didChange with an empty contentChanges"));
@@ -526,23 +550,25 @@ void syncDidChange(const QJsonValue& paramsValue)
         const QString text = change.value(QStringLiteral("text")).toString();
         const QJsonValue range = change.value(QStringLiteral("range"));
         if (range.isUndefined()) {
-            g_model = text; // range-less change: full replacement (spec)
+            d.text = text; // range-less change: full replacement (spec)
             continue;
         }
         const QJsonObject start = range.toObject().value(QStringLiteral("start")).toObject();
         const QJsonObject end = range.toObject().value(QStringLiteral("end")).toObject();
         const int startOffset
-            = specOffset(g_model, start.value(QStringLiteral("line")).toInt(),
+            = specOffset(d.text, start.value(QStringLiteral("line")).toInt(),
                          start.value(QStringLiteral("character")).toInt());
         const int endOffset
-            = specOffset(g_model, end.value(QStringLiteral("line")).toInt(),
+            = specOffset(d.text, end.value(QStringLiteral("line")).toInt(),
                          end.value(QStringLiteral("character")).toInt());
         if (startOffset > endOffset)
             fail(QStringLiteral("range end precedes start at offset %1")
                      .arg(startOffset));
-        g_model.replace(startOffset, endOffset - startOffset, text);
+        d.text.replace(startOffset, endOffset - startOffset, text);
     }
-    g_modelVersion = qint64(version);
+    d.version = qint64(version);
+    if (g_publishDiags)
+        publishDiagsFor(uri);
 }
 
 void syncDidClose(const QJsonValue& paramsValue)
@@ -552,9 +578,8 @@ void syncDidClose(const QJsonValue& paramsValue)
                             .toObject()
                             .value(QStringLiteral("uri"))
                             .toString();
-    if (uri != g_modelUri)
+    if (!g_docs.remove(uri))
         fail(QStringLiteral("didClose for a document that is not open"));
-    g_modelOpen = false;
 }
 
 void syncDidSave(const QJsonValue& paramsValue)
@@ -564,31 +589,168 @@ void syncDidSave(const QJsonValue& paramsValue)
                             .toObject()
                             .value(QStringLiteral("uri"))
                             .toString();
-    if (uri != g_modelUri)
+    auto found = g_docs.find(uri);
+    if (found == g_docs.end())
         fail(QStringLiteral("didSave for a document that is not open"));
-    ++g_saves;
+    ++found.value().saves;
 }
 
-// The TEST-ONLY door: answers {ok,model,version,saves,open}. A mismatch is
-// an honest ok:false for the test to assert — the exit-2 path stays reserved
-// for structural wire lies (see syncDidChange et al.).
+// The server's OWN encoder (the mirror of specOffset): model-frame
+// (line, col in utf-16 units) -> wire {line, character} in the NEGOTIATED
+// frame. Independent from the client's PositionConverter on purpose.
+struct WirePos {
+    int line;
+    int character;
+};
+WirePos wirePosition(const QString& text, int modelLine, int modelCol)
+{
+    int lineStart = 0;
+    for (int l = 0; l < modelLine; ++l) {
+        while (lineStart < text.size() && text.at(lineStart) != u'\n')
+            ++lineStart;
+        if (lineStart < text.size())
+            ++lineStart;
+    }
+    int lineEnd = lineStart;
+    while (lineEnd < text.size() && text.at(lineEnd) != u'\n')
+        ++lineEnd;
+    int col = 0;
+    int character = 0;
+    int p = lineStart;
+    while (p < lineEnd && col < modelCol) {
+        const auto hi = text.at(p).unicode();
+        int codePoint = hi;
+        int units = 1;
+        if (hi >= 0xD800 && hi <= 0xDBFF && p + 1 < lineEnd
+            && text.at(p + 1).unicode() >= 0xDC00
+            && text.at(p + 1).unicode() <= 0xDFFF) {
+            codePoint = 0x10000 + ((int(hi) - 0xD800) << 10)
+                        + (int(text.at(p + 1).unicode()) - 0xDC00);
+            units = 2;
+        }
+        if (g_syncEncoding == QLatin1String("utf-32"))
+            character += 1;
+        else if (g_syncEncoding == QLatin1String("utf-8"))
+            character += codePoint > 0xFFFF
+                             ? 4
+                             : (codePoint < 0x80 ? 1
+                                                 : (codePoint < 0x800 ? 2 : 3));
+        else
+            character += units;
+        p += units;
+        col += units; // the MODEL frame counts utf-16 CODE UNITS, not code
+                      // points: with `++col` this encoder silently ate one
+                      // character per pair ahead of the client's decoder
+                      // (machine 4's utf-8 diags tripwire caught it)
+    }
+    return WirePos{modelLine, character};
+}
+
+// M4: scan the document for marker words and publish them as diagnostics,
+// one per severity level the wire can carry (the decoder's whole severity
+// table gets drilled, not just Error). Ranges go out in the NEGOTIATED frame
+// through the server's OWN encoder — the columns count utf-8/utf-32 units
+// when the encoding says so, which is exactly the trap the glue's decoder
+// must pass. Empty array = the clear signal.
+struct Marker {
+    const char* word;
+    int severity; // LSP DiagnosticSeverity
+};
+const Marker kMarkers[] = {
+    {"bug", 1},  {"warn", 2},  {"note", 3}, {"hint", 4},
+};
+void publishDiagsFor(const QString& uri)
+{
+    const QString& text = g_docs.value(uri).text;
+    QJsonArray diags;
+    int line = 0;
+    int lineStart = 0;
+    for (int i = 0; i <= text.size(); ++i) {
+        if (i == text.size() || text.at(i) == u'\n') {
+            const int lineEnd = i;
+            for (int j = lineStart; j < lineEnd; ++j) {
+                for (const Marker& marker : kMarkers) {
+                    const int length
+                        = int(qstrlen(marker.word)); // the markers are ASCII
+                    if (text.mid(j, length) != QLatin1String(marker.word))
+                        continue;
+                    const WirePos start
+                        = wirePosition(text, line, j - lineStart);
+                    const WirePos end = wirePosition(
+                        text, line, j - lineStart + length);
+                    diags.append(QJsonObject{
+                        {QStringLiteral("range"),
+                         QJsonObject{{QStringLiteral("start"),
+                                      QJsonObject{{QStringLiteral("line"),
+                                                   start.line},
+                                                  {QStringLiteral("character"),
+                                                   start.character}}},
+                                     {QStringLiteral("end"),
+                                      QJsonObject{{QStringLiteral("line"),
+                                                   end.line},
+                                                  {QStringLiteral("character"),
+                                                   end.character}}}}},
+                        {QStringLiteral("severity"), marker.severity},
+                        {QStringLiteral("message"),
+                         QStringLiteral("%1 at line %2")
+                             .arg(QLatin1String(marker.word))
+                             .arg(line)}});
+                    j += length - 1;
+                    break;
+                }
+            }
+            ++line;
+            lineStart = i + 1;
+        }
+    }
+    notify(QStringLiteral("textDocument/publishDiagnostics"),
+           QJsonObject{{QStringLiteral("uri"), uri},
+                       {QStringLiteral("diagnostics"), diags}});
+}
+
+// The TEST-ONLY door: answers {ok,model,version,saves,open} for one uri
+// (M4 multi-doc: the params may carry "uri"; with no uri and exactly one
+// open document that one is the subject — machine 3's callers ride it).
+// A mismatch is an honest ok:false for the test to assert — the exit-2 path
+// stays reserved for structural wire lies (see syncDidChange et al.).
 void handleAssertModel(const QJsonValue& id, const QJsonValue& paramsValue)
 {
     const QJsonObject params = paramsValue.toObject();
+    QString uri = params.value(QStringLiteral("uri")).toString();
+    if (uri.isEmpty() && g_docs.size() == 1)
+        uri = g_docs.firstKey(); // the single-document reading
+    const bool known = g_docs.contains(uri);
+    const ModelDoc doc = known ? g_docs.value(uri) : ModelDoc{};
     const bool textMatches
         = params.contains(QStringLiteral("expectedText"))
-          && g_model == params.value(QStringLiteral("expectedText")).toString();
+          && doc.text == params.value(QStringLiteral("expectedText")).toString();
     const bool versionMatches
         = !params.contains(QStringLiteral("expectedVersion"))
           || params.value(QStringLiteral("expectedVersion")).toDouble()
-                 == double(g_modelVersion);
+                 == double(doc.version);
     QJsonObject result;
-    result.insert(QStringLiteral("ok"), textMatches && versionMatches);
-    result.insert(QStringLiteral("model"), g_model);
-    result.insert(QStringLiteral("version"), double(g_modelVersion));
-    result.insert(QStringLiteral("saves"), g_saves);
-    result.insert(QStringLiteral("open"), g_modelOpen);
+    result.insert(QStringLiteral("ok"), known && textMatches && versionMatches);
+    result.insert(QStringLiteral("model"), doc.text);
+    result.insert(QStringLiteral("version"), double(doc.version));
+    result.insert(QStringLiteral("saves"), doc.saves);
+    result.insert(QStringLiteral("open"), known);
     send(response(id, result));
+}
+
+// M4: how many documents THIS server currently holds open (the hub's
+// multi-doc pins: open/close accounting on the server side of the wire).
+void handleDocumentCount(const QJsonValue& id)
+{
+    send(response(id, QJsonObject{{QStringLiteral("count"),
+                                   g_docs.size()}}));
+}
+
+// M4: hands the initialize params right back (the hub's matrix/template
+// merge and its ${WORKSPACE_ROOT} expansion are only checkable through the
+// wire: this echo is what makes those pins exact instead of inferred).
+void handleInitializeParams(const QJsonValue& id)
+{
+    send(response(id, g_initializeParams));
 }
 
 // ------------------------------------------------------------- the server
@@ -598,6 +760,7 @@ void handleInitialize(const QJsonObject& request)
              .toObject()
              .contains(QStringLiteral("capabilities")))
         fail(QStringLiteral("initialize params lack \"capabilities\""));
+    g_initializeParams = request.value(QStringLiteral("params")).toObject();
     QJsonObject capabilities;
     capabilities.insert(QStringLiteral("hoverProvider"), true);
     send(response(request.value(QStringLiteral("id")),
@@ -738,6 +901,12 @@ void runLoop()
                 } else if (g_mode == QLatin1String("sync")
                            && method == QLatin1String("test/assertModel")) {
                     handleAssertModel(id, params);
+                } else if (g_mode == QLatin1String("sync")
+                           && method == QLatin1String("test/documentCount")) {
+                    handleDocumentCount(id);
+                } else if (g_mode == QLatin1String("sync")
+                           && method == QLatin1String("test/initializeParams")) {
+                    handleInitializeParams(id);
                 } else if (!id.isUndefined()) {
                     if (g_mode == QLatin1String("basic")
                         || g_mode == QLatin1String("stderr"))
@@ -776,17 +945,22 @@ int main(int argc, char** argv)
     if (g_mode == QLatin1String("sync")) {
         // argv[2] is the ENCODING in sync mode (a malformed one fails LOUD:
         // silently defaulting to utf-16 would quietly drop utf-8/utf-32
-        // coverage from the suite). "crashonce" may ride argv[2] or argv[3].
+        // coverage from the suite). "crashonce"/"diags" may ride any argv
+        // slot after the mode.
         const QString enc
             = args.size() > 2 ? args.at(2) : QStringLiteral("utf-16");
         if (enc == QLatin1String("utf-8") || enc == QLatin1String("utf-16")
             || enc == QLatin1String("utf-32"))
             g_syncEncoding = enc;
-        else if (enc != QLatin1String("crashonce"))
+        else if (enc != QLatin1String("crashonce")
+                 && enc != QLatin1String("diags"))
             fail(QStringLiteral("sync mode: bad encoding \"%1\"").arg(enc));
-        for (int i = 2; i < args.size(); ++i)
+        for (int i = 2; i < args.size(); ++i) {
             if (args.at(i) == QLatin1String("crashonce"))
                 g_crashOnce = true;
+            else if (args.at(i) == QLatin1String("diags"))
+                g_publishDiags = true;
+        }
     }
     if (g_mode != QLatin1String("basic") && g_mode != QLatin1String("stderr")
         && g_mode != QLatin1String("crash") && g_mode != QLatin1String("deaf")

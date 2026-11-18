@@ -307,6 +307,12 @@ void LspClient::registerPolicyHandlers(RpcClient* rpc)
                                         o.value(QStringLiteral("token")),
                                         o.value(QStringLiteral("value")));
                                 });
+    // textDocument/publishDiagnostics (M4): verbatim relay, the glue decodes.
+    rpc->setNotificationHandler(
+        QStringLiteral("textDocument/publishDiagnostics"),
+        [this](const QJsonValue& params) {
+            emit diagnosticsReceived(params.toObject());
+        });
 
     // ---- requests: always answer ----
     rpc->setRequestHandler(QStringLiteral("window/showMessageRequest"),

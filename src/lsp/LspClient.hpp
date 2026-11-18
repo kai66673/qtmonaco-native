@@ -117,6 +117,11 @@ signals:
     // The transport's stderr line — the STDERR log channel, kept SEPARATE
     // from the PROTOCOL channel (PLAN-pinned per-server logs).
     void serverStderr(const QString& line);
+    // textDocument/publishDiagnostics (M4, push): relayed VERBATIM (the
+    // params object {uri, diagnostics[]}) — the lsp layer stays text-free
+    // (DocumentSyncer owns the only mirror; decoding to view Diagnostics is
+    // the glue's PositionConverter turn).
+    void diagnosticsReceived(const QJsonObject& params);
     // $/progress (token is string-or-number, passed as QJsonValue).
     void serverProgress(const QJsonValue& token, const QJsonValue& value);
     // workDoneProgress/create: answered null, glue may track the token.

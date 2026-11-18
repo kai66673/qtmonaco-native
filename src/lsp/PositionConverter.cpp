@@ -155,4 +155,19 @@ int PositionConverter::toOffset(const QString& text, int line, int character,
     return target;
 }
 
+ModelPosition PositionConverter::toModelPosition(
+    const QString& text, int line, int character, Encoding enc)
+{
+    const int offset = toOffset(text, line, character, enc);
+    int lineStart = 0;
+    int outLine = 0;
+    for (int i = 0; i < offset; ++i) {
+        if (text.at(i) == u'\n') {
+            lineStart = i + 1;
+            ++outLine;
+        }
+    }
+    return ModelPosition{outLine, offset - lineStart};
+}
+
 } // namespace qmn::lsp

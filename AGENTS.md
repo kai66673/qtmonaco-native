@@ -37,10 +37,15 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
 - `src/view/` (`CodeEditor` + `CodeEditorOptions`/`Theme`/`LanguageProperties`
   child QObjects, `HighlightEngine`) — core + QtWidgets + PRIVATE vendored
   tree-sitter (it never crosses core or the public view API).
-- `src/app/` — view only. `qmn-spike` (bench/spike harness) and `qmn-demo`
-  (tabbed demo app). `qmn-demo`'s window/dialog logic lives in the
+- `src/app/` — view only (`qmn-spike` bench/spike harness and `qmn-demo`
+  tabbed demo app). `qmn-demo`'s window/dialog logic lives in the
   `qmn_demo_app` STATIC lib (`demo_main.cpp` is a thin main) because
-  `tst_demo` links the lib and drives it offscreen.
+  `tst_demo` links the lib and drives it offscreen. **M8 amendment
+  (2026-11-19): `src/app/glue/` is the ONE app target allowed to know
+  lsp/protocol** — `qmn_glue` (STATIC, `LspHub`) links `qmn_view` +
+  `qmn_lsp`, is NOT in any export set (app code, package surface unchanged)
+  and `tst_lsp` links it. Still no view→lsp arrow anywhere: the hub is a
+  *client* of both sides.
 - Gate-2 layers (decided 2026-11-15, built with the owning cars — contracts
   NOW, code later): `src/diff/` — **QtCore ONLY** (line-diff + alignment,
   headless like core). `src/protocol/` — QtCore+QtNetwork, **never view**.
@@ -130,12 +135,14 @@ ctest --test-dir build --output-on-failure
 ```
 
 Five ctest tests: `textbuffer` (core property tests), `diff` (the pure
-line-diff engine, M10), `lsp` (M8 machine 1: JsonFraming + transports +
-RpcClient headless — this binary GROWS machine by machine through M8, no
-further ctest entries inside the car), `codeeditor` (widget tests), `demo`
-(drives the qmn-demo surface programmatically). `textbuffer`, `diff` and
-`lsp` are guiless; ctest already sets `QT_QPA_PLATFORM=offscreen` for
-`codeeditor` and `demo` (via `set_tests_properties`). Run one test:
+line-diff engine, M10), `lsp` (M8: JsonFraming + transports + RpcClient, then
+the fakeserver/LspClient/DocumentSyncer/LspHub machines — this binary GROWS
+machine by machine through M8, no further ctest entries inside the car),
+`codeeditor` (widget tests), `demo` (drives the qmn-demo surface
+programmatically). `textbuffer` and `diff` are guiless; since M8 machine 4
+the `lsp` binary drives real `CodeEditor`s too, so ctest sets
+`QT_QPA_PLATFORM=offscreen` for `lsp`, `codeeditor` and `demo` (via
+`set_tests_properties`). Run one test:
 
 ```bash
 ctest --test-dir build -R codeeditor --output-on-failure

@@ -3,21 +3,34 @@
 // literal ("the protocol layers NEVER know CodeEditor/CodeDocument"). The
 // in-process QTcpServer fake peer plays the server side for RpcClient;
 // the smart text-model fakeserver (machines 2/3) joins this same binary.
+// Machine 4 (the app-layer LspHub) is the exception the contract plans for:
+// the GLUE is allowed to know the view, so the hub slots drive a real
+// CodeEditor and the binary runs offscreen with QTEST_MAIN.
+//
+// NOTE for anyone adding includes here: view/HighlightEngine.hpp pulls the
+// VENDORED tree-sitter api.h, which this target does NOT put on its include
+// path (the system /usr/include/tree_sitter trap — AGENTS.md). view/
+// CodeEditor.hpp stays clean of it, which is what keeps this file building.
 
 #include <QtTest>
 
 #include <QCoreApplication>
+#include <QDir>
+#include <QFileInfo>
 #include <QHostAddress>
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QTcpServer>
 #include <QTcpSocket>
+#include <QTemporaryDir>
+#include <QUrl>
 #include <QVector>
 
 #include <functional>
 #include <memory>
 
+#include "app/glue/LspHub.hpp"
 #include "lsp/DocumentSyncer.hpp"
 #include "lsp/LspClient.hpp"
 #include "lsp/PositionConverter.hpp"
@@ -25,6 +38,8 @@
 #include "protocol/ProcessTransport.hpp"
 #include "protocol/RpcClient.hpp"
 #include "protocol/TcpTransport.hpp"
+#include "view/CodeDocument.hpp"
+#include "view/CodeEditor.hpp"
 
 #include <csignal>
 
@@ -232,36 +247,78 @@ bool batteryPassed(const QSignalSpy& stderrSpy)
 // QString oracle) and version. A mismatch comes back as an honest ok:false
 // (server model included in the reply for the failure dump), never an exit 2
 // — a shared decoder would cancel client and server bugs into a green test.
-QJsonObject assertSyncModel(qmn::lsp::LspClient* client,
-                            const QString& expectedText, qint64 expectedVersion)
+// The door behind every server-side query the M2/M3/M4 slots share: an
+// explicit pump, not a QTRY macro — QTRY's failure path RETURNS, which a
+// value-returning helper cannot do. No answer means the fakeserver died on a
+// structural lie (exit 2): an honest note object, never a silent pass.
+QJsonObject askServer(qmn::lsp::LspClient* client, const QString& method,
+                      const QJsonObject& params)
 {
     bool answered = false;
     QJsonObject result;
-    client->request(QStringLiteral("test/assertModel"),
-                    QJsonObject{{QStringLiteral("expectedText"), expectedText},
-                                {QStringLiteral("expectedVersion"),
-                                 double(expectedVersion)}},
+    client->request(method, params,
                     [&answered, &result](const RpcClient::Reply& reply) {
                         answered = true;
                         if (!reply.isError)
                             result = reply.result.toObject();
                     });
-    // Explicit pump, not a QTRY macro: QTRY's failure path RETURNS, which a
-    // value-returning helper cannot do. No answer means the fakeserver died
-    // on a structural lie (exit 2) — surfaced as an honest ok:false verdict
-    // with the reason, so the QVERIFY2 dump below shows it.
     for (int waited = 0; waited < 5000 && !answered; waited += 50)
-        QTest::qWait(50); // the request rides the SAME stream as the
-                          // didChange whose effect it checks: ordering IS the
+        QTest::qWait(50); // the request rides the SAME stream as the didChange
+                          // whose effect it checks: ordering IS the
                           // synchronization, no extra waits
     if (!answered) {
         return QJsonObject{{QStringLiteral("ok"), false},
                            {QStringLiteral("note"),
-                            QStringLiteral("test/assertModel never answered "
-                                           "(structural fakeserver fail: look "
-                                           "for FAKESERVER-FAIL on stderr)")}};
+                            QStringLiteral("%1 never answered (structural "
+                                           "fakeserver fail: look for "
+                                           "FAKESERVER-FAIL on stderr)")
+                                .arg(method)}};
     }
     return result;
+}
+
+// The machine-3 verdict door: asks the sync-mode fakeserver to compare its
+// INDEPENDENT text model against the expected text (the test's own naive
+// QString oracle) and version. A mismatch comes back as an honest ok:false
+// (server model included in the reply for the failure dump), never an exit 2
+// — a shared decoder would cancel client and server bugs into a green test.
+QJsonObject assertSyncModel(qmn::lsp::LspClient* client,
+                            const QString& expectedText, qint64 expectedVersion)
+{
+    return askServer(client, QStringLiteral("test/assertModel"),
+                     QJsonObject{{QStringLiteral("expectedText"), expectedText},
+                                 {QStringLiteral("expectedVersion"),
+                                  double(expectedVersion)}});
+}
+
+// M4 multi-doc reading of the same door (the hub carries MANY documents per
+// client, so the bare form no longer identifies the subject).
+QJsonObject assertSyncModel(qmn::lsp::LspClient* client, const QString& uri,
+                            const QString& expectedText, qint64 expectedVersion)
+{
+    QJsonObject params{{QStringLiteral("expectedText"), expectedText},
+                       {QStringLiteral("expectedVersion"),
+                        double(expectedVersion)},
+                       {QStringLiteral("uri"), uri}};
+    return askServer(client, QStringLiteral("test/assertModel"), params);
+}
+
+// M4 pins: how many documents the SERVER holds open for this client, and the
+// initialize params it was handed (the matrix/template merge proof).
+int serverDocumentCount(qmn::lsp::LspClient* client)
+{
+    const QJsonObject answer = askServer(client,
+                                         QStringLiteral("test/documentCount"),
+                                         QJsonObject{});
+    return answer.contains(QStringLiteral("count"))
+               ? answer.value(QStringLiteral("count")).toInt()
+               : -1; // never answered (or an error reply): the honest -1
+}
+
+QJsonObject serverInitializeParams(qmn::lsp::LspClient* client)
+{
+    return askServer(client, QStringLiteral("test/initializeParams"),
+                     QJsonObject{});
 }
 
 QString modelDump(const QJsonObject& verdict)
@@ -273,6 +330,110 @@ QString modelDump(const QJsonObject& verdict)
         .arg(QString::fromUtf8(
             QJsonDocument(verdict).toJson(QJsonDocument::Compact).constData()));
 }
+
+// Waits out a client handshake through ANY path (the process spawn, the
+// never-Ready document's deferred didOpen, the auto-restart): the state door,
+// not a ready() spy that might have missed a signal that already fired.
+bool waitReady(qmn::lsp::LspClient* client, int timeoutMs = 15000)
+{
+    for (int waited = 0; waited < timeoutMs; waited += 50) {
+        if (client->isReady())
+            return true;
+        QTest::qWait(50);
+    }
+    return client->isReady();
+}
+
+// ------------------------------------------------------------- M4 hub seam
+// A tiny predicate pump: QSignalSpy's count() and any other int/bool property
+// (the QTRY macros end in a bare `return;`, which is fine inside a slot).
+template <typename Predicate>
+bool waitUntil(Predicate predicate, int timeoutMs = 8000)
+{
+    for (int waited = 0; waited < timeoutMs; waited += 25) {
+        if (predicate())
+            return true;
+        QTest::qWait(25);
+    }
+    return predicate();
+}
+
+// The machine-4 harness: the fakeserver spawn bookkeeping of TestHarness, but
+// the LspClients are the HUB's (one per spec, PLAN) and the mode argv comes
+// from the spec the test installs. `crashingSpawns` is the harness-side copy
+// of the per-process "crashonce" flag: spawn #0..#(n-1) carry it, the rest
+// start clean — the lifecycle drill (auto-restart budget, then FAILED, then
+// the manual restartServer door) needs exactly two dying sessions.
+struct HubHarness {
+    struct Spawn {
+        ProcessTransport* transport = nullptr; // may die: never dereferenced
+        bool opened = false;
+        int exitCode = -1; // -1 until the process is reaped
+    };
+
+    QString program = QString::fromLatin1(QMN_TEST_LSP_SERVER);
+    QStringList modeArgs;
+    // The session-death knob (the fakeserver's "crashonce" is PER-PROCESS, so
+    // the counting lives here): 0 = no spawn dies, N>0 = the FIRST N spawns
+    // die right after their handshake, -1 = every spawn dies.
+    static constexpr int kCrashEverySpawn = -1;
+    int crashSpawnCount = 0;
+    int spawnCount = 0;
+    QVector<Spawn> spawned;
+    qmn::app::LspHub hub;
+
+    explicit HubHarness(const QStringList& modes)
+        : modeArgs(modes)
+    {
+        // The factory ignores the spec's argv and uses modeArgs (the hub
+        // already expands ${WORKSPACE_ROOT} into spec.program, which is what
+        // the spawn really needs).
+        hub.setTransportFactory(
+            [this](const qmn::app::LspHub::ServerSpec& spec, QObject* parent) {
+                ++spawnCount;
+                QStringList args = modeArgs;
+                const bool dies = crashSpawnCount < 0
+                                  || (crashSpawnCount > 0
+                                      && spawned.size()
+                                             < size_t(crashSpawnCount));
+                if (dies)
+                    args << QStringLiteral("crashonce");
+                auto* transport = new ProcessTransport(spec.program, args,
+                                                       parent);
+                const int index = spawned.size();
+                spawned.append(Spawn{transport, false, -1});
+                QObject::connect(transport, &Transport::opened, transport,
+                                 [this, index] { spawned[index].opened = true; });
+                QObject::connect(transport, &Transport::closed, transport,
+                                 [this, index] {
+                                     if (spawned[index].opened)
+                                         spawned[index].exitCode
+                                             = spawned[index].transport->exitCode();
+                                 });
+                return static_cast<Transport*>(transport);
+            });
+    }
+
+    // The spec under test: program/args are the fakeserver + mode; `name` is
+    // what the slots call restartServer with.
+    void installSpec(const QString& name, const QStringList& languages,
+                     const QJsonObject& initializeTemplate = QJsonObject())
+    {
+        qmn::app::LspHub::ServerSpec spec;
+        spec.name = name;
+        spec.program = program;
+        spec.args = modeArgs;
+        spec.languages = languages;
+        spec.initializeTemplate = initializeTemplate;
+        hub.setServerSpec(spec);
+    }
+
+    int exitCodeOf(int spawnIndex) const
+    {
+        return spawnIndex < spawned.size() ? spawned.at(spawnIndex).exitCode
+                                           : -1;
+    }
+};
 
 } // namespace
 
@@ -1732,7 +1893,554 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(h.exitCodeOf(0), 0, 5000);
     }
 
+    // ------------------------------------------------------- M4: the glue
+    void positionConverterToModelPositionPins()
+    {
+        // The hub's diagnostics decoder rides this door: the wire frame comes
+        // back in the VIEW's space (line + utf-16 column = CodeEditor::
+        // Diagnostic's own coordinates), with toOffset's total clamping and
+        // its never-split-a-pair rule.
+        using qmn::lsp::PositionConverter;
+        const QString text = QStringLiteral("ab\ncdé\U0001F600fg\nlast");
+        // offsets: a0 b1 \n2 | c3 d4 é5 [emoji 6,7] f8 g9 \n10 | l11..t14
+        // line 1 is "cdé😀fg": 7 utf-16 units, 6 utf-32 units, 10 utf-8 bytes.
+        // Its utf-16 COLS are c0 d1 é2 emoji3-4 f5 g6 (end = 7).
+        const auto m16 = [&](int line, int character) {
+            return PositionConverter::toModelPosition(
+                text, line, character, PositionConverter::Encoding::Utf16);
+        };
+        const auto m8 = [&](int line, int character) {
+            return PositionConverter::toModelPosition(
+                text, line, character, PositionConverter::Encoding::Utf8);
+        };
+        const auto m32 = [&](int line, int character) {
+            return PositionConverter::toModelPosition(
+                text, line, character, PositionConverter::Encoding::Utf32);
+        };
+        QCOMPARE(m16(0, 0).line, 0);
+        QCOMPARE(m16(0, 0).col, 0);
+        QCOMPARE(m16(1, 0).line, 1); // a line's start stays on ITS line
+        QCOMPARE(m16(1, 0).col, 0);
+        QCOMPARE(m16(1, 3).col, 3); // before the emoji's high surrogate:
+                                    // utf-16 counts code units
+        QCOMPARE(m16(1, 6).col, 6); // the last unit of the line ('g')
+        QCOMPARE(m16(1, 7).col, 7); // the line's end position
+        QCOMPARE(m16(1, 99).col, 7); // character past end-of-line: clamped
+        QCOMPARE(m16(1, 99).line, 1);
+        QCOMPARE(m16(99, 99).line, 2); // line past EOF: the last line...
+        QCOMPARE(m16(99, 99).col, 4); // ...at its end ("last")
+        QCOMPARE(m16(-5, -5).line, 0);
+        QCOMPARE(m16(-5, -5).col, 0);
+
+        // utf-8 frame of the same line: c0 d1 é2-3 emoji4-7 f8 g9 (end 10) ->
+        // character 4 is the boundary AFTER é (col 3); a character INSIDE é's
+        // second byte walks back to é's start (col 2).
+        QCOMPARE(m8(1, 4).line, 1);
+        QCOMPARE(m8(1, 4).col, 3);
+        QCOMPARE(m8(1, 3).col, 2); // split é: the boundary BEFORE it
+        QCOMPARE(m8(1, 9).col, 6); // character 9 = 'g': é(2)+emoji(4) bytes
+        QCOMPARE(m8(1, 10).col, 7); // the end position
+        QCOMPARE(m8(1, 99).col, 7);
+
+        // utf-32 frame: c0 d1 é2 emoji3 f4 g5 (end 6) — the pair is ONE unit,
+        // so é sits at character 2 and the emoji at 3.
+        QCOMPARE(m32(1, 4).col, 5); // 'f'
+        QCOMPARE(m32(1, 3).col, 3); // the emoji's start
+        QCOMPARE(m32(1, 6).col, 7); // the end position
+        QCOMPARE(m32(1, 99).col, 7);
+    }
+
+    void hubLazyStartsAndFeedsTheLiveEditStream()
+    {
+        // THE machine-4 contract: the view's REAL edit stream (CodeDocument::
+        // editApplied, PRE-OP offsets, undo included) drives the server model,
+        // and no server process exists until a document claims its language.
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000); // explicit flush() below owns the versions
+
+        QVERIFY(h.hub.clientForSpec(QStringLiteral("pysrv")) == nullptr);
+        QCOMPARE(h.spawnCount, 0); // LAZY: nothing spawned before an open
+        QCOMPARE(h.hub.specNameForLanguage(QStringLiteral("python")),
+                 QStringLiteral("pysrv"));
+
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("one\ntwo\nthree"));
+        const QString uri = QStringLiteral("file:///hub-a.py");
+        QVERIFY(h.hub.openDocument(&editor, uri, QStringLiteral("python")));
+        QCOMPARE(h.spawnCount, 1); // openDocument IS the start signal
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QCOMPARE(h.hub.clientForUri(uri), client);
+        QVERIFY(waitReady(client));
+        QCOMPARE(client->positionEncoding(), QStringLiteral("utf-16"));
+
+        auto* syncer = h.hub.syncerFor(&editor);
+        QVERIFY(syncer);
+        QVERIFY(syncer->isOpen());
+        QCOMPARE(syncer->uri(), uri);
+        QJsonObject verdict
+            = assertSyncModel(client, editor.toPlainText(), 0);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict))); // didOpen carried the text
+
+        // The feed goes through the EDITOR's own doors — the surrogate-safe
+        // paths a real keystroke takes. The three-path invariant of machine 3
+        // with the view's model in place of the hand-written oracle: the
+        // syncer mirror tracks the editor's text after EVERY primitive.
+        auto mirrorFollowsEditor = [&] {
+            QCOMPARE(syncer->mirrorText(), editor.toPlainText());
+        };
+        editor.insertTextAt(qmn::view::TextPosition(0, 0), QStringLiteral("X"));
+        mirrorFollowsEditor();
+        editor.insertTextAt(qmn::view::TextPosition(1, 3), QStringLiteral("2"));
+        mirrorFollowsEditor();
+        editor.insertTextAt(qmn::view::TextPosition(2, 5), QStringLiteral("!"));
+        mirrorFollowsEditor();
+        editor.undo(); // the edit stream is the truth, not the keystrokes:
+        mirrorFollowsEditor(); // undo feeds didChange exactly like a delete
+        editor.undo();
+        mirrorFollowsEditor();
+        editor.redo();
+        mirrorFollowsEditor();
+        editor.insertTextAt(qmn::view::TextPosition(1, 0),
+                            QStringLiteral("\nmid\n")); // the newline-carrying
+        mirrorFollowsEditor(); // multi-line delta shape
+        syncer->flush(); // the whole burst travels as ONE didChange
+        QCOMPARE(syncer->version(), qint64(1));
+        verdict = assertSyncModel(client, uri, editor.toPlainText(), 1);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+
+        // saveDocument: flush-then-didSave (the server is current BEFORE the
+        // save), then the document's modified flag (v1's only save door).
+        editor.insertTextAt(qmn::view::TextPosition(0, 1), QStringLiteral("Y"));
+        QVERIFY(editor.document()->isModified());
+        h.hub.saveDocument(&editor);
+        QCOMPARE(syncer->version(), qint64(2)); // the save's own flush
+        verdict = assertSyncModel(client, uri, editor.toPlainText(), 2);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        QCOMPARE(verdict.value(QStringLiteral("saves")).toInt(), 1);
+        QVERIFY(!editor.document()->isModified());
+
+        // closeDocument: didClose + release (the syncer door goes null, the
+        // server's document table goes empty).
+        h.hub.closeDocument(&editor);
+        QVERIFY(h.hub.syncerFor(&editor) == nullptr);
+        QVERIFY(h.hub.clientForUri(uri) == nullptr);
+        QCOMPARE(serverDocumentCount(client), 0);
+
+        // An editor that is destroyed takes its wiring with it (the destroyed()
+        // hook releases the registration; the server still sees didClose).
+        {
+            auto* transient = new qmn::view::CodeEditor;
+            transient->setPlainText(QStringLiteral("gone"));
+            QVERIFY(h.hub.openDocument(
+                transient, QStringLiteral("file:///hub-gone.py"),
+                QStringLiteral("python")));
+            QCOMPARE(serverDocumentCount(client), 1);
+            delete transient;
+        }
+        QCOMPARE(serverDocumentCount(client), 0);
+        h.hub.restartServer(QStringLiteral("pysrv")); // Ready already: the
+        QVERIFY(waitReady(client));                   // door is a no-op there
+    }
+
+    void hubDiagnosticsDecodeTheNegotiatedFrame()
+    {
+        // The decoder tripwire: the fakeserver publishes its ranges through
+        // its OWN encoder in the NEGOTIATED frame (utf-8, clangd's real one),
+        // one marker word per wire severity. The hub must land every range on
+        // the view's utf-16 columns and every severity on the view's enum.
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-8"),
+                                 QStringLiteral("diags")});
+        h.installSpec(QStringLiteral("pydiag"), {QStringLiteral("python")});
+
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        // "é" is 2 utf-8 bytes / 1 utf-16 unit, the emoji 4 bytes / 2 units:
+        // the marker on line 0 sits at wire character 7 but MODEL column 4 —
+        // a decoder that trusts the wire number paints three columns late.
+        editor.setPlainText(QStringLiteral("\u00e9\U0001F600 bug\n"
+                                          "warn x\nnote\nhint\n"));
+        QVERIFY(h.hub.openDocument(&editor, QStringLiteral("file:///diag.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pydiag"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QCOMPARE(client->positionEncoding(), QStringLiteral("utf-8"));
+
+        auto dumpDiags = [&editor] {
+            QString out;
+            for (const auto& d : editor.diagnostics())
+                out += QStringLiteral("[%1:%2-%3:%4 sev%5 \"%6\"] ")
+                           .arg(d.startLine)
+                           .arg(d.startCol)
+                           .arg(d.endLine)
+                           .arg(d.endCol)
+                           .arg(int(d.severity))
+                           .arg(d.message);
+            return out;
+        };
+        QVERIFY2(waitUntil([&editor] { return editor.diagnostics().size() == 4; }),
+                 qPrintable(dumpDiags()));
+
+        using Diag = qmn::view::CodeEditor::Diagnostic;
+        using Severity = qmn::view::CodeEditor::Severity;
+        const QVector<Diag> expected{
+            {0, 4, 0, 7, Severity::Error, QStringLiteral("bug at line 0")},
+            {1, 0, 1, 4, Severity::Warning, QStringLiteral("warn at line 1")},
+            {2, 0, 2, 4, Severity::Information, QStringLiteral("note at line 2")},
+            {3, 0, 3, 4, Severity::Hint, QStringLiteral("hint at line 3")},
+        };
+        QVERIFY2(editor.diagnostics() == expected, qPrintable(dumpDiags()));
+
+        // The clear signal: an empty array means "no more problems" (a decoder
+        // that ignored the empty list would leave stale waves on screen).
+        editor.setPlainText(QStringLiteral("clean text, no markers"));
+        QVERIFY2(waitUntil([&editor] { return editor.diagnostics().isEmpty(); }),
+                 qPrintable(dumpDiags()));
+        // And the round trip back: a marker re-typed is published again.
+        editor.insertTextAt(qmn::view::TextPosition(0, 5),
+                            QStringLiteral(" note"));
+        QVERIFY2(waitUntil([&editor] { return editor.diagnostics().size() == 1; }),
+                 qPrintable(dumpDiags()));
+        const auto only = editor.diagnostics();
+        QCOMPARE(only.at(0).startLine, 0);
+        QCOMPARE(only.at(0).startCol, 6); // "clean" + " " -> 'n' of the
+        QCOMPARE(only.at(0).endCol, 10);  // inserted " note" at col 5
+        QCOMPARE(only.at(0).message, QStringLiteral("note at line 0"));
+        QCOMPARE(int(only.at(0).severity), int(Severity::Information));
+    }
+
+    void hubCarriesManyDocumentsOnOneServer()
+    {
+        // PLAN's shape: ONE client per server spec carrying MANY documents
+        // (the VS Code shape), each with its own syncer and version counter.
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16")});
+        h.installSpec(QStringLiteral("multi"), {QStringLiteral("python")});
+
+        qmn::view::CodeEditor alpha;
+        qmn::view::CodeEditor beta;
+        alpha.setPlainText(QStringLiteral("alpha"));
+        beta.setPlainText(QStringLiteral("beta\ncolorado"));
+        const QString uriA = QStringLiteral("file:///m1.py");
+        const QString uriB = QStringLiteral("file:///m2.py");
+        QVERIFY(h.hub.openDocument(&alpha, uriA, QStringLiteral("python")));
+        QVERIFY(h.hub.openDocument(&beta, uriB, QStringLiteral("python")));
+        QCOMPARE(h.spawnCount, 1); // ONE process for two documents
+        auto* client = h.hub.clientForSpec(QStringLiteral("multi"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QCOMPARE(serverDocumentCount(client), 2);
+        QCOMPARE(h.hub.clientForUri(uriB), client);
+
+        auto* syncerA = h.hub.syncerFor(&alpha);
+        auto* syncerB = h.hub.syncerFor(&beta);
+        QVERIFY(syncerA != syncerB);
+        QVERIFY(syncerA && syncerB);
+        // One verdict door per subject (the dump only formats on a fail).
+        auto modelOk = [&](const QString& whichUri, const QString& text,
+                           qint64 version) {
+            const QJsonObject verdict
+                = assertSyncModel(client, whichUri, text, version);
+            QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                     qPrintable(modelDump(verdict)));
+        };
+        modelOk(uriA, alpha.toPlainText(), 0);
+        modelOk(uriB, beta.toPlainText(), 0);
+
+        // Editing A must not disturb B (per-uri accounting on both sides).
+        alpha.insertTextAt(qmn::view::TextPosition(0, 0), QStringLiteral("Q"));
+        syncerA->flush();
+        QCOMPARE(syncerA->version(), qint64(1));
+        QCOMPARE(syncerB->version(), qint64(0));
+        modelOk(uriA, alpha.toPlainText(), 1);
+        modelOk(uriB, QStringLiteral("beta\ncolorado"), 0);
+
+        // Re-opening the same uri is a clean didClose + didOpen pair (the
+        // fakeserver exits 2 on the reverse order, so a wrong order never
+        // answers and the count pin below fails honestly).
+        h.hub.openDocument(&alpha, uriA, QStringLiteral("python"));
+        QCOMPARE(serverDocumentCount(client), 2);
+        h.hub.closeDocument(&alpha);
+        QCOMPARE(serverDocumentCount(client), 1);
+        QVERIFY(h.hub.syncerFor(&alpha) == nullptr);
+        QVERIFY(h.hub.syncerFor(&beta) != nullptr);
+        h.hub.closeDocument(&beta);
+        QCOMPARE(serverDocumentCount(client), 0);
+
+        // A language no spec claims (a plain .txt tab): nothing registered, no
+        // spawn, no syncer — the honest no-op, not a half-wired document.
+        qmn::view::CodeEditor plain;
+        plain.setPlainText(QStringLiteral("just text"));
+        QVERIFY(!h.hub.openDocument(&plain, QStringLiteral("file:///notes.txt"),
+                                    QStringLiteral("plaintext")));
+        QVERIFY(h.hub.syncerFor(&plain) == nullptr);
+        QCOMPARE(h.spawnCount, 1); // still the one process
+        QCOMPARE(h.hub.specNameForLanguage(QStringLiteral("plaintext")),
+                 QString());
+    }
+
+    void hubConfigFileDeepMergesTheServerMatrix()
+    {
+        // PLAN's config contract: <workspaceRoot>/.qmn/lsp.json, OBJECTS
+        // RECURSE, ARRAYS REPLACE whole, and a file that is not an object is
+        // refused WHOLE (never a partial merge).
+        QTemporaryDir root;
+        QVERIFY(root.isValid());
+        qmn::app::LspHub hub;
+        hub.setWorkspaceRoot(root.path());
+        QCOMPARE(hub.workspaceRoot(), root.path());
+
+        // The built-in matrix: clangd only (a built-in the CI cannot verify is
+        // a broken default), and the matrix keys are LANGUAGE IDS, never file
+        // suffixes (the app owns that mapping, MainWindow::languageForSuffix).
+        QCOMPARE(hub.specNameForLanguage(QStringLiteral("cpp")),
+                 QStringLiteral("clangd"));
+        QCOMPARE(hub.specNameForLanguage(QStringLiteral("C")),
+                 QStringLiteral("clangd")); // ids match case-insensitively
+        QCOMPARE(hub.specNameForLanguage(QStringLiteral("py")), QString());
+        QCOMPARE(hub.specNameForLanguage(QStringLiteral("python")), QString());
+        QVERIFY(!hub.loadConfig()); // no file: silent, the built-ins stand
+
+        QVERIFY(QDir(root.path()).mkpath(QStringLiteral(".qmn")));
+        QFile file(root.path() + QStringLiteral("/.qmn/lsp.json"));
+        QVERIFY(file.open(QIODevice::WriteOnly));
+        file.write("{\"servers\": {"
+                   "\"pylsp\": {\"program\": \"pylsp\", \"args\": [\"-v\"],"
+                   " \"languages\": [\"PYTHON\"],"
+                   " \"initializeTemplate\": {\"initializationOptions\":"
+                   " {\"plugins\": {\"jedi\": {\"enabled\": true}}}}},"
+                   "\"clangd\": {\"args\": [\"--background-index\"],"
+                   " \"languages\": [\"cpp\"],"
+                   " \"initializeTemplate\": {\"initializationOptions\":"
+                   " {\"index\": {\"background\": true}}}}"
+                   "}}");
+        file.close();
+        QVERIFY(hub.loadConfig());
+
+        // ARRAYS REPLACE whole: the patched clangd no longer claims "c".
+        QCOMPARE(hub.specNameForLanguage(QStringLiteral("c")), QString());
+        QCOMPARE(hub.specNameForLanguage(QStringLiteral("cpp")),
+                 QStringLiteral("clangd"));
+        QCOMPARE(hub.specNameForLanguage(QStringLiteral("python")),
+                 QStringLiteral("pylsp")); // new spec, ids lowercased
+        const QJsonObject clangd
+            = hub.serverSpec(QStringLiteral("clangd"));
+        QCOMPARE(clangd.value(QStringLiteral("args")).toArray(),
+                 QJsonArray{QStringLiteral("--background-index")});
+        QCOMPARE(clangd.value(QStringLiteral("languages")).toArray(),
+                 QJsonArray{QStringLiteral("cpp")});
+        // OBJECTS RECURSE: the built-in's initializationOptions key survived
+        // the config's added key, and the config's nested object came through.
+        const QJsonObject clangdInit
+            = clangd.value(QStringLiteral("initializeTemplate"))
+                  .toObject()
+                  .value(QStringLiteral("initializationOptions"))
+                  .toObject();
+        QVERIFY(clangdInit.value(QStringLiteral("clangdFileStatus")).toBool());
+        QVERIFY(clangdInit.value(QStringLiteral("index"))
+                    .toObject()
+                    .value(QStringLiteral("background"))
+                    .toBool());
+        const QJsonObject pylsp = hub.serverSpec(QStringLiteral("pylsp"));
+        QCOMPARE(pylsp.value(QStringLiteral("program")).toString(),
+                 QStringLiteral("pylsp"));
+        QCOMPARE(pylsp.value(QStringLiteral("args")).toArray(),
+                 QJsonArray{QStringLiteral("-v")});
+        QCOMPARE(pylsp.value(QStringLiteral("languages")).toArray(),
+                 QJsonArray{QStringLiteral("python")});
+
+        // A malformed config is refused WHOLE, never half-merged, and the
+        // matrix that worked before keeps standing.
+        QFile broken(root.path() + QStringLiteral("/.qmn/lsp.json"));
+        QVERIFY(broken.open(QIODevice::WriteOnly | QIODevice::Truncate));
+        broken.write("[1,2,3]");
+        broken.close();
+        QVERIFY(!hub.loadConfig());
+        QCOMPARE(hub.specNameForLanguage(QStringLiteral("python")),
+                 QStringLiteral("pylsp"));
+        QCOMPARE(hub.specNameForLanguage(QStringLiteral("c")), QString());
+        // The body door with an empty "servers": false, nothing changed.
+        QVERIFY(!hub.loadConfigFromJson(
+            QJsonObject{{QStringLiteral("servers"), QJsonObject{}}}));
+    }
+
+    void hubBuildsInitializeParamsAndExpandsWorkspaceRoot()
+    {
+        // NO setTransportFactory in this slot on purpose: the DEFAULT
+        // ProcessTransport spawn is what every real user rides, and a
+        // ${WORKSPACE_ROOT} that only LOOKED expanded would never start.
+        const QString serverPath = QString::fromLatin1(QMN_TEST_LSP_SERVER);
+        const QString wsroot = QFileInfo(serverPath).absolutePath(); // holds
+                                                                    // fakeserver
+        qmn::app::LspHub hub;
+        hub.setWorkspaceRoot(wsroot);
+        QVERIFY(hub.loadConfigFromJson(QJsonObject{
+            {QStringLiteral("servers"),
+             QJsonObject{{QStringLiteral("clangd"),
+                          QJsonObject{
+                              {QStringLiteral("program"),
+                               QStringLiteral(
+                                   "${WORKSPACE_ROOT}/fakeserver")},
+                              {QStringLiteral("args"),
+                               QJsonArray{QStringLiteral("sync"),
+                                          QStringLiteral("utf-16")}},
+                              {QStringLiteral("initializeTemplate"),
+                               QJsonObject{
+                                   {QStringLiteral("initializationOptions"),
+                                    QJsonObject{
+                                        {QStringLiteral("probe"),
+                                         QStringLiteral(
+                                             "${WORKSPACE_ROOT}/probe")}}}}}}}}}}));
+        // The config patched program/args ONLY: the built-in's language list
+        // and its initializationOptions both survived the deep merge.
+        QCOMPARE(hub.specNameForLanguage(QStringLiteral("cpp")),
+                 QStringLiteral("clangd"));
+        QCOMPARE(hub.specNameForLanguage(QStringLiteral("c")),
+                 QStringLiteral("clangd"));
+
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("cpp"));
+        editor.setPlainText(QStringLiteral("int main(){}"));
+        const QString uri = QStringLiteral("file:///m.cpp");
+        QVERIFY(hub.openDocument(&editor, uri, QStringLiteral("cpp")));
+        auto* client = hub.clientForSpec(QStringLiteral("clangd"));
+        QVERIFY(client);
+        QVERIFY2(waitReady(client),
+                 qPrintable(QStringLiteral("client state %1, spawn never came")
+                                .arg(int(client->state()))));
+        const QJsonObject params = serverInitializeParams(client);
+        const QUrl rootUrl = QUrl::fromLocalFile(wsroot);
+        QCOMPARE(params.value(QStringLiteral("rootUri")).toString(),
+                 rootUrl.toString());
+        const QJsonArray folders
+            = params.value(QStringLiteral("workspaceFolders")).toArray();
+        QCOMPARE(int(folders.size()), 1);
+        QCOMPARE(folders.at(0).toObject()
+                     .value(QStringLiteral("uri"))
+                     .toString(),
+                 rootUrl.toString());
+        QCOMPARE(params.value(QStringLiteral("processId")).toDouble(),
+                 double(QCoreApplication::applicationPid()));
+        // The sync capabilities machine 4 really exercises, on the wire.
+        const QJsonObject sync
+            = params.value(QStringLiteral("capabilities"))
+                  .toObject()
+                  .value(QStringLiteral("textDocument"))
+                  .toObject()
+                  .value(QStringLiteral("synchronization"))
+                  .toObject();
+        QCOMPARE(sync.value(QStringLiteral("didSave")).toBool(), true);
+        QCOMPARE(sync.value(QStringLiteral("willSave")).toBool(), false);
+        QCOMPARE(sync.value(QStringLiteral("willSaveWaitUntil")).toBool(),
+                 false);
+        // The template rode ON TOP of the built params: the built-in's key and
+        // the config's key side by side, with ${WORKSPACE_ROOT} expanded on
+        // the wire (the merge rule applied a second time, template over
+        // built-ins).
+        const QJsonObject initOptions
+            = params.value(QStringLiteral("initializationOptions")).toObject();
+        QVERIFY(initOptions.value(QStringLiteral("clangdFileStatus")).toBool());
+        QCOMPARE(initOptions.value(QStringLiteral("probe")).toString(),
+                 wsroot + QStringLiteral("/probe"));
+        QCOMPARE(client->serverCapabilities()
+                     .contains(QStringLiteral("hoverProvider")),
+                 true);
+        QCOMPARE(hub.clientForUri(uri), client);
+    }
+
+    void hubCrashFailedThenManualRestartSelfHeals()
+    {
+        // PLAN's lifecycle end to end: a dying server gets the client's ONE
+        // automatic restart, then FAILED — and FAILED STAYS failed (a newly
+        // opened document must never silently spawn another process) until the
+        // app's restartServer door, whose ready() makes EVERY open document
+        // re-didOpen its mirror whole.
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16")});
+        h.crashSpawnCount = 2; // sessions #0 and #1 die after the handshake
+        h.installSpec(QStringLiteral("crashy"), {QStringLiteral("python")});
+        QSignalSpy failedSpy(&h.hub, &qmn::app::LspHub::serverFailed);
+
+        qmn::view::CodeEditor first;
+        first.setPlainText(QStringLiteral("first text"));
+        qmn::view::CodeEditor second;
+        second.setPlainText(QStringLiteral("second text"));
+        const QString uriA = QStringLiteral("file:///c1.py");
+        const QString uriB = QStringLiteral("file:///c2.py");
+        QVERIFY(h.hub.openDocument(&first, uriA, QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("crashy"));
+        QVERIFY(client);
+        QSignalSpy readySpy(client, &qmn::lsp::LspClient::ready);
+        QVERIFY2(waitUntil([&] { return readySpy.count() >= 1; }, 20000),
+                 qPrintable(QStringLiteral("no handshake, state %1")
+                                .arg(int(client->state()))));
+        QVERIFY(h.hub.openDocument(&second, uriB, QStringLiteral("python")));
+        QCOMPARE(h.spawnCount, 1); // the second document rode the SAME session
+
+        QVERIFY2(waitUntil([&] { return failedSpy.count() == 1; }, 25000),
+                 qPrintable(QStringLiteral("never failed after %1 spawns")
+                                .arg(h.spawnCount)));
+        QCOMPARE(failedSpy.at(0).at(0).toString(), QStringLiteral("crashy"));
+        QVERIFY2(failedSpy.at(0).at(1).toString().size() > 0,
+                 "the failed() relay carries a reason");
+        QCOMPARE(client->state(), qmn::lsp::LspClient::State::Failed);
+        QCOMPARE(h.spawnCount, 2);           // the budget is EXACTLY one restart
+        QCOMPARE(readySpy.count(), 2);       // two handshakes, no third
+        QTRY_COMPARE_WITH_TIMEOUT(h.exitCodeOf(0), 7, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(h.exitCodeOf(1), 7, 5000);
+
+        // FAILED stays FAILED: a THIRD document opens into the dead spec — the
+        // registration is real, but no spawn and no wire traffic happen.
+        qmn::view::CodeEditor third;
+        third.setPlainText(QStringLiteral("third text"));
+        const QString uriC = QStringLiteral("file:///c3.py");
+        QVERIFY(h.hub.openDocument(&third, uriC, QStringLiteral("python")));
+        QCOMPARE(h.spawnCount, 2); // no silent retry: the app decides
+        QVERIFY(h.hub.syncerFor(&third) != nullptr);
+        QVERIFY(!h.hub.syncerFor(&third)->isOpen()
+                || client->state() == qmn::lsp::LspClient::State::Failed);
+
+        // The app's restart door: a FRESH session (the factory hands a clean
+        // spawn this time) and the syncers' ready() self-heal re-opens all
+        // three documents whole, at version 0.
+        h.hub.restartServer(QStringLiteral("crashy"));
+        QVERIFY2(waitReady(client),
+                 qPrintable(QStringLiteral("restart never came, state %1")
+                                .arg(int(client->state()))));
+        QCOMPARE(h.spawnCount, 3);
+        QCOMPARE(readySpy.count(), 3);
+        QCOMPARE(serverDocumentCount(client), 3);
+        auto modelOk = [&](const QString& whichUri, const QString& text) {
+            const QJsonObject verdict
+                = assertSyncModel(client, whichUri, text, 0);
+            QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                     qPrintable(modelDump(verdict)));
+        };
+        modelOk(uriA, first.toPlainText());
+        modelOk(uriB, second.toPlainText());
+        modelOk(uriC, third.toPlainText());
+        // ...and the live feed works again on the rebuilt session.
+        auto* syncerC = h.hub.syncerFor(&third);
+        third.insertTextAt(qmn::view::TextPosition(0, 0), QStringLiteral(">"));
+        QCOMPARE(syncerC->mirrorText(), third.toPlainText());
+        syncerC->flush();
+        QCOMPARE(syncerC->version(), qint64(1));
+        const QJsonObject verdict
+            = assertSyncModel(client, uriC, third.toPlainText(), 1);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+    }
+
 };
 
-QTEST_GUILESS_MAIN(TstLsp)
+QTEST_MAIN(TstLsp) // NOT guiless any more: machine 4's hub slots drive a real
+                   // CodeEditor (ctest runs this entry offscreen)
 #include "tst_lsp.moc"

@@ -29,6 +29,13 @@ struct LspPosition {
     int character = 0;
 };
 
+// The VIEW frame: line + column counted in UTF-16 code units — exactly the
+// coordinate space CodeEditor::Diagnostic (and the caret) speak.
+struct ModelPosition {
+    int line = 0;
+    int col = 0;
+};
+
 class PositionConverter {
 public:
     enum class Encoding { Utf8, Utf16, Utf32 };
@@ -47,6 +54,13 @@ public:
     // is a UTF-16 offset that never splits a surrogate pair.
     static int toOffset(const QString& text, int line, int character,
                         Encoding enc);
+
+    // Wire position -> the VIEW frame (M4's diagnostics feeding decodes
+    // publishDiagnostics through here): toOffset re-expressed as line +
+    // utf-16-column. Same total clamping; the offset never splits a pair,
+    // so the column never does either.
+    static ModelPosition toModelPosition(const QString& text, int line,
+                                         int character, Encoding enc);
 
     // Width, in `enc` units, of one code point (0..0x10FFFF) — the per-unit
     // count the line walks accumulate. Public for the round-trip tests.

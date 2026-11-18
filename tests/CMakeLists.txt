@@ -8,14 +8,18 @@ qt_add_executable(tst_diff tst_diff.cpp)
 target_link_libraries(tst_diff PRIVATE qmn_diff Qt6::Test)
 add_test(NAME diff COMMAND tst_diff)
 
-# The 5th ctest entry (M8 machine 1, PLAN amended 2026-11-17): one guiless
-# binary that grows machine by machine — protocol framing/transports/RpcClient
+# The 5th ctest entry (M8 machine 1, PLAN amended 2026-11-17): one binary
+# that grows machine by machine — protocol framing/transports/RpcClient
 # now, the QProcess fakeserver + LspClient tests with machine 2 into THIS
-# binary (no further ctest entries inside M8).
+# binary (no further ctest entries inside M8). Machine 4 (the app-layer
+# LspHub) makes it widget-carrying: the hub's doors take a real CodeEditor
+# and its diagnostics feed lands in CodeEditor::setDiagnostics, so the
+# binary links qmn_glue + qmn_view and runs offscreen (QTEST_MAIN below).
 qt_add_executable(tst_lsp tst_lsp.cpp)
-target_link_libraries(tst_lsp PRIVATE qmn_lsp Qt6::Test)
+target_link_libraries(tst_lsp PRIVATE qmn_glue qmn_view qmn_lsp Qt6::Test)
 add_dependencies(tst_lsp fakeserver) # the spawn target must exist at run time
 add_test(NAME lsp COMMAND tst_lsp)
+set_tests_properties(lsp PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
 # The LSP fakeserver (machine 2): a tests support binary, NOT a ctest entry.
 # It speaks our own JsonFraming over stdio (stdout = PROTOCOL, stderr = the

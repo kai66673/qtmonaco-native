@@ -1079,7 +1079,19 @@ Machines built (2026-11-18): 1 `src/protocol/` ✅ → 2 `LspClient` + fakeserve
 oracle ✅ → 3 document syncer + position converter + the `sync`-mode fakeserver
 ✅ (lsp binary at 39 slots; the crashonce one-shot is HARNESS-side — the
 fakeserver flag is per-process, so only spawn #0's argv carries it) →
-4 app-layer glue + server matrix + diagnostics feeding — next.
+4 app-layer glue ✅ (2026-11-19): `src/app/glue/LspHub` (a NON-exported
+`qmn_glue` static lib — app code like `qmn_demo_app`, package surface
+unchanged): server matrix + `.qmn/lsp.json` deep merge + lazy start +
+`editApplied`→`applyDelta` + the diagnostics decode into
+`CodeEditor::setDiagnostics`. lsp binary at 46 slots and now
+widget-carrying (`QTEST_MAIN`, offscreen, links `qmn_view`). Two lessons
+this car paid for: **the hub destructor owns the stop barrier** (a bounded
+`kStopBarrierMs` pump — without it `~QProcess` SIGKILLs a server that never
+answered its `exit`, "QProcess: Destroyed while process is still running");
+and the fakeserver's OWN encoder counted CODE POINTS where the model frame
+counts utf-16 CODE UNITS — one character per surrogate pair of drift, caught
+by the two-sided design on the first utf-8 diagnostics run. Machine 5
+(feature doors + the hover/completion popups) is next.
 
 - **Layers:** `src/protocol/` (QtCore+QtNetwork, zero view — Framing with
   full header-block parse + 64 MiB upper bound that fails as a transport
@@ -1157,10 +1169,13 @@ fakeserver flag is per-process, so only spawn #0's argv carries it) →
   not a gate — but a CLOSE-CAR RITUAL (decided 2026-11-18): the probe must
   run green against the dev machine's clangd before M8 closes, result
   recorded in the CHANGELOG entry (manual close-car gate, never a CI gate —
-  clangd versions drift and CI has no clangd). ctest grows test 5 `lsp` (AMENDED 2026-11-17: `tests/tst_lsp.cpp`,
-  guiless, STARTS at machine 1 with the protocol framing/RpcClient tests and
-  grows machine by machine — no further ctest entries inside M8; the fakeserver
-  lands at machine 2 into the same binary).
+  clangd versions drift and CI has no clangd). ctest grows test 5 `lsp` (AMENDED 2026-11-17:
+  `tests/tst_lsp.cpp`, STARTS at machine 1 guiless with the protocol
+  framing/RpcClient tests and grows machine by machine — no further ctest
+  entries inside M8; the fakeserver lands at machine 2 into the same
+  binary. AMENDED AGAIN 2026-11-19 by machine 4: the hub slots drive a real
+  `CodeEditor`, so that ONE binary is now widget-carrying — `QTEST_MAIN` +
+  `QT_QPA_PLATFORM=offscreen`.)
 
 ### DAP features (car 4)
 
