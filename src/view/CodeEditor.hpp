@@ -574,6 +574,56 @@ public:
     // does not hide the bar.
     void clearFind();
 
+    // --- M8 machine 6: hover + completion popups (PLAN's popup contract) --
+    // View-INTERNAL popup widgets — the M6 FindBar precedent: lazy child
+    // QWidgets defined inside CodeEditor.cpp (internal linkage; only the
+    // records below and these doors cross the Shiboken boundary). The view
+    // NEVER asks a server for anything: all triggering is GLUE-side — an app
+    // wires the hub's feature replies to these doors (PLAN). Content is
+    // PLAIN TEXT (no markdown renderer, PLAN): the app hands the string it
+    // already extracted from the hover markup.
+    //
+    // Anchors ride the EXISTING geometry (PLAN: no new mapping primitives):
+    // x from xForCol, y from the row-slot math every painted row uses (the
+    // CodeEditorAccessible characterRect formula). A popup FLIPS above its
+    // anchor row when it would run past the bottom edge, then clamps into
+    // the editor rect; a fully visible popup is never moved by the clamp
+    // (that identity is what makes anchor assertions exact). Scroll and
+    // resize RE-PLACE (popups track their frozen anchors).
+    //
+    // Auto-hide (PLAN): ANY key press in the editor, ANY mouse press (on
+    // the editor OR on a popup — they are display-only), and focus leaving
+    // the editor. An EMPTY payload on either show door HIDES (a glue
+    // re-trigger with nothing to show is the same dismissal). Neither door
+    // ever takes focus from the editor (WA_ShowWithoutActivating + NoFocus
+    // on the popup and its content).
+    struct CompletionItem {
+        QString label;  // the row's primary text
+        QString detail; // appended after two spaces when set (plain text)
+
+        bool operator==(const CompletionItem&) const = default; // test round-trips
+    };
+    struct HoverRange {
+        int startLine = 0;
+        int startCol = 0; // model frame: line + utf-16 columns, [start, end)
+        int endLine = 0;  // — the same frame Diagnostic/TextEdit use
+        int endCol = 0;
+
+        bool operator==(const HoverRange&) const = default;
+    };
+    // The list anchors at the CARET's position AT SHOW TIME — later caret
+    // moves never drag it (the dismissal is a hide, not a follow). An empty
+    // list hides. Re-showing while visible replaces the rows IN PLACE.
+    void showCompletionList(const QVector<CompletionItem>& items);
+    void hideCompletionList();
+    bool completionListVisible() const;
+    // The hover aligns with the range START (x, via xForCol) and hangs below
+    // the row of the range END — the whole anchor stays uncovered. Empty
+    // text hides; re-showing replaces the text in place.
+    void showHover(const HoverRange& range, const QString& plainText);
+    void hideHover();
+    bool hoverVisible() const;
+
     // Overview ruler (M7, Phase E1) — the minimap substitute: a right-edge
     // strip in which the WHOLE document is scaled to pixels (model px
     // space [0, 2*padding + lineCount*lineHeight) maps linearly onto the
@@ -1219,6 +1269,20 @@ private:
     void recomputeFindMatches(); // full per-line scan (the DoD math)
     void syncFindBarLabel() const; // bar count label after state moves
     bool replaceRange(const MatchRange& m, const QString& replacement);
+
+    // --- M8 machine 6 popup state (semantics: public API comments) ---
+    // QWidget* members only, again the FindBar pattern: the popup classes
+    // live in CodeEditor.cpp and receive their GEOMETRY — the anchor math
+    // reads the private slot/scroll state on THIS side, the widgets never
+    // do. Anchors freeze at show time; scroll/resize re-place against them.
+    QWidget* hoverPopup_ = nullptr;      // lazy child via showHover/hideHover
+    QWidget* completionPopup_ = nullptr; // lazy child via the completion doors
+    HoverRange hoverAnchor_;             // the range the visible hover tracks
+    TextPosition completionAnchor_;      // the caret frozen at show time
+    void placeHoverPopup();      // anchor math + bounds clamp (shared rect
+    void placeCompletionPopup(); // helper lives beside the classes in .cpp)
+    void repositionPopups();       // setVScroll/setHScroll/resizeEvent hooks
+    void hidePopupsForInteraction(); // keyPress/mousePress/focusOut auto-hide
 
     // --- M7 overview ruler state (semantics: public API comments) ---
     bool rulerEnabled_ = true; // Monaco-minimap-parity default (the

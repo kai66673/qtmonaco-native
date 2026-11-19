@@ -1119,6 +1119,49 @@ the fakeserver judges both halves from its side (`APPLYREQ-OK`,
 `APPLYCHECK-OK`, `APPLYREFUSE-OK`, `MSGREQ-OK`/`MSGREQ-NULL-OK` ride the
 didSave-marker + stderr channel, since client→server answers are traffic
 the test cannot see).
+Machine 6 (the POPUPS + the `willSaveWaitUntil` save path) ✅ (2026-11-19):
+  lsp binary at 60 slots, ctest still 5 entries. The VIEW side (surface
+  widened additively again): nested records `CompletionItem{label,detail}` +
+  `HoverRange{startLine,startCol,endLine,endCol}` and six doors
+  (`showCompletionList`/`hideCompletionList`/`completionListVisible`,
+  `showHover(range,plainText)`/`hideHover`/`hoverVisible`); the popups are
+  `FindBar`-style view-internal widgets in CodeEditor.cpp — display-only and
+  FOCUS-INERT (`Qt::NoFocus` + `WA_ShowWithoutActivating`, and
+  `WA_TransparentForMouseEvents` on the list AND its viewport, else the list
+  swallows the click and the auto-hide contract breaks on REAL clicks —
+  QTest-on-the-popup alone never catches that), a selectable hover label
+  would too; press on EITHER popup dismisses BOTH. Anchors ride EXISTING
+  geometry only (the a11y characterRect y-formula + `xForCol`): the
+  completion anchor freezes at SHOW time, scroll/resize RE-PLACE a visible
+  popup, the wheel never hides one (documented choice), the shared placer
+  FLIPS above when the below branch overflows; empty payload HIDES, re-show
+  REPLACES in place. +3 tst_codeeditor slots (the visible-door pins need
+  `editor->show()` — `isVisible()` is false under a hidden ancestor, the M6
+  findBar trap again). The SAVE path is HUB-side, not syncer-side: the
+  `textDocumentSync` OPTIONS-OBJECT gate (`willSaveWaitUntil:true` — the
+  integer change form can never carry it) → flush → request (reason 1) →
+  the reply decodes as bare `TextEdit[]` OR `WorkspaceEdit` → the applier
+  (its `endServerEdit` full sync rides BEFORE the didSave, so the server
+  saves the EDITED model) → didSave → `markSaved` rides the REPLY; refusal
+  or failure never vetoes the save; no capability = byte-identical
+  synchronous door. The fakeserver `wswu` flag declares the options object
+  and runs the drills (bare list replies applied to its own model + the
+  `g_applyVerify` oracle reused; the REFUSE drill answers a
+  WorkspaceEdit naming a not-open uri — honest deviation: the spec's
+  result is `TextEdit[]|null`, only this shape can carry a refusal the
+  uri/version guards act on); tripwires exit 2 if a wswu request reaches a
+  server that never advertised it or if didSave overtakes the sync
+  (`WSWU-SAVE-OK`/`WSWU-REFUSE-SAVE-OK`). The binding's three copies grew
+  BOTH records (typesystem + two `_generated` TU names, 14→16; the codegen
+  CLI rode the already-listed `CodeEditor.hpp`) — and the drift tripwire
+  earned its keep: forgetting the CMake TU entries configured CLEANLY,
+  ninja silently skipped compiling them, and smoke died at import with
+  `undefined symbol: init_qmn_view_CodeEditor_CompletionItem`. Probed from
+  the container build tree (shown editor): the doors bind camelCase and
+  work; records are built default-ctor + field assignment — kwargs being
+  silently swallowed is shiboken UNIVERSAL (PySide6's own
+  `QPointF(x=1.5,y=2.5)` reads back 0.0/0.0, and our v1.5 `TextPosition`
+  behaves identically), not a machine-6 regression.
 
 - **Layers:** `src/protocol/` (QtCore+QtNetwork, zero view — Framing with
   full header-block parse + 64 MiB upper bound that fails as a transport

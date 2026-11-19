@@ -19,7 +19,9 @@
 #include <QImage>
 #include <QInputMethodEvent>
 #include <QInputMethodQueryEvent>
+#include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QMenu>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -280,6 +282,14 @@ private slots:
     void findBarStaysTopRightOnResize();
     void paintMatchQuadsNumericProbe();
     void paintZeroWidthMatchPhantomCell();
+
+    // M8 machine 6: hover + completion popups (doors/semantics: the public
+    // API comments on CodeEditor.hpp). Numeric-anchor assertions ride the
+    // SAME geometry doors the a11y rect test uses (xForCol,
+    // visibleIndexOfModelLine, padding, lineHeight): no new primitives.
+    void popupDoorsShowHideReplaceEmptyAndFocusSafe();
+    void popupsAutoHideOnKeyMouseAndFocus();
+    void popupAnchorsTrackCaretFreezeScrollResizeAndFlip();
 
     // Overview ruler (M7, Phase E1). DoD: ruler geometry state tests
     // (numeric mapping contract), the click/drag scroll gesture (state
@@ -6444,6 +6454,253 @@ void TestCodeEditor::paintZeroWidthMatchPhantomCell()
 
     editor->setFindText(QString()); // control: every quad gone
     QCOMPARE(warmQuadPixels(editor->grab().toImage(), x0, pad, pad + lh), 0);
+}
+
+// --- M8 machine 6: hover + completion popups -----------------------------
+
+void TestCodeEditor::popupDoorsShowHideReplaceEmptyAndFocusSafe()
+{
+    // Door semantics (the public API comments). The editor must be SHOWN:
+    // completionListVisible()/hoverVisible() read QWidget::isVisible(), which
+    // is false while any ancestor hides (the same findBarVisible trap M6
+    // pinned).
+    editor->show();
+    editor->setPlainText(QStringLiteral("alpha\nbeta"));
+    QVERIFY(!editor->completionListVisible());
+    QVERIFY(!editor->hoverVisible()); // doors are safe before any widget exists
+
+    using CI = CodeEditor::CompletionItem;
+    editor->showCompletionList({
+        CI{QStringLiteral("alpha"), QStringLiteral("first of the betas")},
+        CI{QStringLiteral("alphabet"), QString()}});
+    QVERIFY(editor->completionListVisible());
+    QListWidget* list =
+        editor->findChild<QListWidget*>(QStringLiteral("qmn-completion-list"));
+    QVERIFY(list);
+    QCOMPARE(list->count(), 2);
+    // Rows are plain "label  detail" strings (detail is decoration only in
+    // v1: no accept/navigation path, PLAN's display contract).
+    QCOMPARE(list->item(0)->text(), QStringLiteral("alpha  first of the betas"));
+    QCOMPARE(list->item(1)->text(), QStringLiteral("alphabet"));
+
+    // Re-show while visible REPLACES the rows in place: same widget, new
+    // rows (no hide/show flicker, never a second popup).
+    editor->showCompletionList({CI{QStringLiteral("beta"), QString()}});
+    QVERIFY(editor->completionListVisible());
+    QCOMPARE(list->count(), 1);
+    QCOMPARE(editor->findChildren<QWidget*>(
+                 QStringLiteral("qmn-completion-popup")).size(), 1);
+
+    // An EMPTY payload hides (a glue re-trigger with nothing to show is the
+    // same dismissal).
+    editor->showCompletionList({});
+    QVERIFY(!editor->completionListVisible());
+
+    // Hover: PLAIN text only (PLAN: no markdown — the app hands the string
+    // it already extracted from the hover markup).
+    using HR = CodeEditor::HoverRange;
+    editor->showHover(HR{1, 0, 1, 4}, QStringLiteral("beta - the second line"));
+    QVERIFY(editor->hoverVisible());
+    QLabel* lab = editor->findChild<QLabel*>(QStringLiteral("qmn-hover-label"));
+    QVERIFY(lab);
+    QCOMPARE(lab->text(), QStringLiteral("beta - the second line"));
+    editor->showHover(HR{1, 0, 1, 4}, QStringLiteral("replaced in place"));
+    QCOMPARE(lab->text(), QStringLiteral("replaced in place"));
+    QVERIFY(editor->hoverVisible());
+    editor->showHover(HR{0, 0, 0, 1}, QString()); // empty text hides
+    QVERIFY(!editor->hoverVisible());
+
+    // FOCUS-SAFE (PLAN): showing either popup NEVER takes focus from the
+    // editor (WA_ShowWithoutActivating + NoFocus on the popups AND their
+    // content); the editor keeps typing. focusWidget() is only non-null
+    // while a window is ACTIVE, and the offscreen platform never activates
+    // one on its own — QApplication::setActiveWindow installs the activation
+    // state directly (the same bookkeeping the window system would feed).
+    editor->show();
+    QApplication::setActiveWindow(editor);
+    editor->setFocus();
+    QApplication::processEvents();
+    QCOMPARE(QApplication::focusWidget(), editor); // the pin's precondition
+    editor->showCompletionList({CI{QStringLiteral("x"), QString()}});
+    editor->showHover(HR{0, 0, 0, 1}, QStringLiteral("still here"));
+    QVERIFY(editor->completionListVisible());
+    QVERIFY(editor->hoverVisible());
+    QCOMPARE(QApplication::focusWidget(), editor); // popups never take focus
+    QApplication::setActiveWindow(nullptr); // do not leak the activation state
+}
+
+void TestCodeEditor::popupsAutoHideOnKeyMouseAndFocus()
+{
+    // Auto-hide contract (the public API comments): ANY key press, ANY mouse
+    // press (a press on EITHER popup dismisses BOTH — auto-hide is an
+    // interaction rule, not a widget-local one), and focus leaving the
+    // editor. The popups are focus-inert children, so every editor key
+    // arrives through keyPressEvent: hiding there is exhaustive.
+    editor->show();
+    editor->setFocus();
+    editor->setPlainText(QStringLiteral("hello world\nsecond line"));
+    using CI = CodeEditor::CompletionItem;
+    using HR = CodeEditor::HoverRange;
+    auto arm = [&] {
+        editor->showCompletionList({
+            CI{QStringLiteral("one"), QStringLiteral("d1")},
+            CI{QStringLiteral("two"), QString()}});
+        editor->showHover(HR{0, 0, 1, 0}, QStringLiteral("hover text"));
+        QVERIFY(editor->completionListVisible());
+        QVERIFY(editor->hoverVisible());
+    };
+
+    arm();
+    QTest::keyClick(editor, Qt::Key_X); // ANY key dismisses (the glue re-
+                                        // triggers a fresh popup if wanted)
+    QVERIFY(!editor->completionListVisible());
+    QVERIFY(!editor->hoverVisible());
+
+    arm();
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, QPoint(120, 24));
+    QVERIFY(!editor->completionListVisible());
+    QVERIFY(!editor->hoverVisible());
+
+    // A press ON a popup (the editor never sees it — the popups are child
+    // widgets, so each popup's own mousePressEvent runs the same rule):
+    arm();
+    QWidget* cp = editor->findChild<QWidget*>(QStringLiteral("qmn-completion-popup"));
+    QVERIFY(cp);
+    QTest::mousePress(cp, Qt::LeftButton, Qt::NoModifier, cp->rect().center());
+    QVERIFY(!editor->completionListVisible());
+    QVERIFY(!editor->hoverVisible());
+    arm();
+    QWidget* hp = editor->findChild<QWidget*>(QStringLiteral("qmn-hover-popup"));
+    QVERIFY(hp);
+    QTest::mousePress(hp, Qt::LeftButton, Qt::NoModifier, hp->rect().center());
+    QVERIFY(!editor->completionListVisible());
+    QVERIFY(!editor->hoverVisible());
+
+    // Focus leaves the editor. A SYNTHETIC FocusOut rides the same
+    // deterministic event channel the rest of this file uses for input
+    // (offscreen focus moves are flaky; the handler only ever sees the
+    // event).
+    arm();
+    QFocusEvent out(QEvent::FocusOut);
+    QVERIFY(QApplication::sendEvent(editor, &out));
+    QVERIFY(!editor->completionListVisible());
+    QVERIFY(!editor->hoverVisible());
+}
+
+void TestCodeEditor::popupAnchorsTrackCaretFreezeScrollResizeAndFlip()
+{
+    // EXACT anchor formulas (the public API comments): completion x =
+    // xForCol of the CARET at show time, top = the row slot BELOW the
+    // caret's row; hover aligns to the range START's x and hangs below the
+    // range END's slot. The y formulas are the a11y characterRect ones
+    // (padding + slot*lineHeight - vScroll) — the test re-computes with the
+    // SAME public doors (xForCol, visibleIndexOfModelLine, padding,
+    // lineHeight): no new view geometry primitives exist to pin.
+    editor->show();
+    QStringList lines;
+    for (int i = 0; i < 60; ++i)
+        lines << QStringLiteral("l%1 one two").arg(i, 2, 10, QLatin1Char('0'));
+    editor->setPlainText(lines.join(QLatin1Char('\n')));
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    QCOMPARE(editor->verticalScrollOffset(), 0);
+
+    using CI = CodeEditor::CompletionItem;
+    using HR = CodeEditor::HoverRange;
+    editor->setPosition({5, 2});
+    editor->showCompletionList(
+        {CI{QStringLiteral("one.two.three"), QStringLiteral("detail")}});
+    QWidget* cp = editor->findChild<QWidget*>(QStringLiteral("qmn-completion-popup"));
+    QVERIFY(cp);
+    const int xWant = int(std::floor(editor->xForCol(5, 2)));
+    const int slot5 = editor->visibleIndexOfModelLine(5);
+    QCOMPARE(slot5, 5); // no folds, no wrap: the slot map is the identity
+    QCOMPARE(cp->x(), xWant);
+    QCOMPARE(cp->y(), pad + (slot5 + 1) * lh); // BELOW the caret row
+    QVERIFY(cp->geometry().bottom() < editor->height()); // the no-flip branch
+
+    // The anchor FREEZES at show time: a later caret move never RE-ANCHORS
+    // the visible popup (dismissal is hide, not follow). A caret move that
+    // scrolls re-PLACES the popup (scroll contract) — the formula below
+    // reads the live vScroll, so it pins BOTH: still line 5's anchor, and
+    // tracking the scroll a caret-forced reveal produced. A fresh show DOES
+    // re-anchor to the current caret (the show-time rule).
+    editor->setPosition({20, 0});
+    const int vsAfterReveal = editor->verticalScrollOffset(); // line 20 sits
+                                                              // partly past
+                                                              // the bottom
+                                                              // edge: > 0
+    QVERIFY(vsAfterReveal > 0);
+    QCOMPARE(cp->pos(), QPoint(xWant, pad + (slot5 + 1) * lh - vsAfterReveal));
+    // A fresh show RE-ANCHORS to the current caret (the show-time rule).
+    // Line 10 sits fully inside the revealed viewport, so ensureCaretVisible
+    // does not touch the scroll and the BELOW branch (no flip) keeps the
+    // formula linear.
+    editor->setPosition({10, 0});
+    QCOMPARE(editor->verticalScrollOffset(), vsAfterReveal);
+    editor->showCompletionList({CI{QStringLiteral("other"), QString()}});
+    const int slot10 = editor->visibleIndexOfModelLine(10);
+    QCOMPARE(cp->x(), int(std::floor(editor->xForCol(10, 0))));
+    QCOMPARE(cp->y(), pad + (slot10 + 1) * lh - vsAfterReveal);
+
+    // Hover anchors: x from the range START, y below the range END's slot
+    // (the whole range stays uncovered — the PLAN hover shape).
+    editor->showHover(HR{3, 1, 4, 2}, QStringLiteral("spans two lines"));
+    QWidget* hp = editor->findChild<QWidget*>(QStringLiteral("qmn-hover-popup"));
+    QVERIFY(hp);
+    QCOMPARE(hp->x(), int(std::floor(editor->xForCol(3, 1))));
+    QCOMPARE(hp->y(), pad + (editor->visibleIndexOfModelLine(4) + 1) * lh
+                         - vsAfterReveal); // hover TRACKS the live scroll too
+    editor->hideHover();
+
+    // SCROLL RE-PLACES (documented choice, pin the contract): the wheel
+    // moves the popup with its frozen anchor instead of hiding it.
+    QWheelEvent wheel(QPointF(300, 200), QPointF(300, 200), QPoint(0, 0),
+                      QPoint(0, -360), Qt::NoButton, Qt::NoModifier,
+                      Qt::NoScrollPhase, false);
+    QVERIFY(QApplication::sendEvent(editor, &wheel));
+    const int vs = editor->verticalScrollOffset();
+    QVERIFY(vs > 0);
+    QCOMPARE(cp->x(), int(std::floor(editor->xForCol(10, 0)))); // unchanged
+    QCOMPARE(cp->y(), pad + (slot10 + 1) * lh - vs);
+
+    // RESIZE RE-PLACES (the FindBar place() precedent) and x CLAMPS into
+    // the editor rect (never clips): shrink JUST past the anchor, so the
+    // clamp must bite (the width cut lands left of the anchor x).
+    const int cpW = cp->width();
+    const int xAtResize = cp->x(); // the live anchor x (hScroll is 0)
+    editor->resize(xAtResize + cpW - 10, editor->height());
+    QVERIFY(cpW <= editor->width()); // the clamp is reachable, the popup fits
+    QCOMPARE(cp->x(), editor->width() - cpW); // pinned flush to the right edge
+    QCOMPARE(cp->x(), xAtResize - 10); // the clamp bit by exactly the cut
+    QVERIFY(cp->x() >= 0);
+    QVERIFY(cp->geometry().right() <= editor->width() - 1);
+    QCOMPARE(cp->y(), pad + (slot10 + 1) * lh - vs); // height unchanged: y too
+
+    // BOTTOM-EDGE FLIP: when the popup would run past the editor's bottom
+    // edge BELOW its anchor row, it hangs ABOVE the row instead — the test
+    // finds the first line where the below branch overflows and the above
+    // branch fits, then pins the flipped formula (one line above the other
+    // branch of the SAME placement rule).
+    editor->hideCompletionList();
+    const int popupH = cp->height();
+    int flipLine = -1;
+    for (int line = 0; line < 60; ++line) {
+        const int slot = editor->visibleIndexOfModelLine(line);
+        const int belowY = pad + (slot + 1) * lh - vs;
+        const int aboveY = pad + slot * lh - vs - popupH;
+        if (belowY + popupH > editor->height() && aboveY >= 0) {
+            flipLine = line;
+            break;
+        }
+    }
+    QVERIFY2(flipLine >= 0, "no line overflows the bottom edge: flip untested");
+    editor->setPosition({flipLine, 2});
+    editor->showCompletionList({CI{QStringLiteral("flip"), QString()}});
+    QCOMPARE(cp->height(), popupH);
+    QCOMPARE(cp->y(), pad + editor->visibleIndexOfModelLine(flipLine) * lh - vs
+                          - popupH);
+    QVERIFY(cp->y() >= 0); // fully inside: the clamp never moved it (identity)
 }
 
 // --- Overview ruler (M7, Phase E1) ---------------------------------------

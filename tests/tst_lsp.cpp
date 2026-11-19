@@ -3691,6 +3691,160 @@ private slots:
         }
     }
 
+    // --- M8 machine 6: the willSaveWaitUntil save detour (PLAN) -----------
+    // The server advertises textDocumentSync.willSaveWaitUntil; saveDocument
+    // then routes: flush -> textDocument/willSaveWaitUntil -> the applier (its
+    // endServerEdit full sync rides BEFORE the didSave) -> didSave ->
+    // markSaved. The ORDERING proof is server-side: the fakeserver arms its
+    // own apply oracle when answering and only the client's full sync may
+    // clear it, so "the oracle was consumed before didSave landed" is
+    // exactly what the WSWU-SAVE-OK marker reports.
+    void willSaveWaitUntilEditsLandBeforeDidSave()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("wswu")});
+        h.installSpec(QStringLiteral("wsrv"), {QStringLiteral("wslang")});
+        const QString uri = QStringLiteral("file:///m6-wswu.wsl");
+        const QString text = QStringLiteral("WSWU alpha\nbeta");
+        qmn::view::CodeEditor editor;
+        editor.setPlainText(text);
+        QVERIFY(h.hub.openDocument(&editor, uri, QStringLiteral("wslang")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("wsrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        qmn::lsp::DocumentSyncer* syncer = h.hub.syncerFor(&editor);
+        QVERIFY(syncer);
+        syncer->setDebounceMs(5000);
+        syncer->setTypingCapMs(20000);
+
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+
+        QVERIFY(editor.document()->isModified()); // an edit happened before
+                                                  // the save (open alone never
+                                                  // sets the flag)
+        h.hub.saveDocument(&editor); // the detour STARTS here; it finishes
+                                     // when the reply round completes
+        QVERIFY(editor.document()->isModified()); // the async path: markSaved
+                                                  // rides the REPLY, not the
+                                                  // door
+        QVERIFY2(waitUntil([&] {
+            return editor.toPlainText().contains(
+                QStringLiteral("wswu-applied"));
+        }), qPrintable(QStringLiteral("the server's pre-save edit never "
+                                      "reached the document: %1")
+                         .arg(stderrDump(stderrSpy))));
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("APPLYCHECK-OK")),
+                 qPrintable(stderrDump(stderrSpy))); // the client's full sync
+                                                     // echoed the server's own
+                                                     // replay
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("WSWU-SAVE-OK")),
+                 qPrintable(stderrDump(stderrSpy))); // didSave found the
+                                                     // EDITED model: the
+                                                     // ordering PLAN pins
+        const QString served = QStringLiteral("wswu-applied\n") + text;
+        QCOMPARE(editor.toPlainText(), served);
+        QVERIFY(!editor.document()->isModified()); // markSaved rode the reply
+        QCOMPARE(syncer->version(), qint64(1)); // the open sat current (the
+                                                // pre-request flush burned
+                                                // nothing), the applier's
+                                                // endServerEdit sync bumped
+                                                // once
+        QJsonObject verdict = assertSyncModel(client, uri, served, 1);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        QCOMPARE(verdict.value(QStringLiteral("saves")).toInt(), 1);
+
+        // The pre-save edit is ONE user undo step, like every applier action.
+        editor.undo();
+        QCOMPARE(editor.toPlainText(), text);
+        syncer->flush();
+        verdict = assertSyncModel(client, uri, text, 2);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+    }
+
+    // The capability gate's OTHER side: no textDocumentSync options object,
+    // no request on the wire, and the save stays the synchronous machine-4
+    // door. The tripwire runs LOUD: the fakeserver exits 2 if a
+    // willSaveWaitUntil request ever reaches a server that never advertised
+    // it — a dead spawn would surface in the restart counter pinned below.
+    void saveWithoutTheCapabilityNeverAsksAndStaysSynchronous()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16")});
+        h.installSpec(QStringLiteral("plainrv"), {QStringLiteral("wslang")});
+        const QString uri = QStringLiteral("file:///m6-nowswu.wsl");
+        // The SAME drill marker text: a hub that wrongly detoured would have
+        // gotten an EDIT (or killed the server on the tripwire) here instead
+        // of an ordinary save.
+        const QString text = QStringLiteral("WSWU alpha\nbeta");
+        qmn::view::CodeEditor editor;
+        editor.setPlainText(text);
+        QVERIFY(h.hub.openDocument(&editor, uri, QStringLiteral("wslang")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("plainrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+
+        h.hub.saveDocument(&editor);
+        QVERIFY(!editor.document()->isModified()); // SYNCHRONOUS: the flag
+                                                   // flipped inside the door
+        QCOMPARE(editor.toPlainText(), text); // nothing asked, nothing moved
+        QJsonObject verdict = assertSyncModel(client, uri, text, 0);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        QCOMPARE(verdict.value(QStringLiteral("saves")).toInt(), 1);
+        QVERIFY(client->isReady()); // the tripwire would have killed it…
+        QCOMPARE(h.spawnCount, 1); // …and forced a restart: neither happened
+    }
+
+    // A refused wswu round: the fakeserver answers the REFUSE-drill document
+    // with a WorkspaceEdit naming a document this hub does not hold open
+    // (the honest deviation note lives in the fakeserver's handler). The
+    // applier refuses the WHOLE batch, the model stays byte-stable, and the
+    // SAVE PROCEEDS: the round trip is a courtesy, never a veto.
+    void refusedWillSaveWaitUntilKeepsModelWholeButSaveProceeds()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("wswu")});
+        h.installSpec(QStringLiteral("wsrv2"), {QStringLiteral("wslang")});
+        const QString uri = QStringLiteral("file:///m6-wswurefuse.wsl");
+        const QString text = QStringLiteral("WSWU-REFUSE alpha\nbeta");
+        qmn::view::CodeEditor editor;
+        editor.setPlainText(text);
+        QVERIFY(h.hub.openDocument(&editor, uri, QStringLiteral("wslang")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("wsrv2"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        qmn::lsp::DocumentSyncer* syncer = h.hub.syncerFor(&editor);
+        QVERIFY(syncer);
+        syncer->setDebounceMs(5000);
+        syncer->setTypingCapMs(20000);
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+
+        h.hub.saveDocument(&editor);
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("WSWU-REFUSE-SAVE-OK")),
+                 qPrintable(stderrDump(stderrSpy))); // the didSave found the
+                                                     // PRISTINE model: the
+                                                     // refusal held on both
+                                                     // sides of the wire
+        QCOMPARE(editor.toPlainText(), text); // nothing moved on the client
+        QVERIFY(!editor.document()->isModified()); // the save still rode the
+                                                   // reply: markSaved after
+                                                   // the refusal, never
+                                                   // instead of it
+        QCOMPARE(syncer->version(), qint64(0)); // no flush to do, no edit, no
+                                                // full sync: no version
+                                                // burned
+        QJsonObject verdict = assertSyncModel(client, uri, text, 0);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        QCOMPARE(verdict.value(QStringLiteral("saves")).toInt(), 1);
+    }
+
 };
 
 QTEST_MAIN(TstLsp) // NOT guiless any more: machine 4's hub slots drive a real

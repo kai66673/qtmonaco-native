@@ -110,6 +110,15 @@ public:
                       const QString& serverName = QString());
     void closeDocument(qmn::view::CodeEditor* editor); // didClose + release
     // The app's save: flush-then-didSave, then markSaved (v1 modified door).
+    // When the serving server's initialize capabilities carry
+    // textDocumentSync.willSaveWaitUntil (M8 machine 6), the save takes an
+    // ASYNC detour: flush -> textDocument/willSaveWaitUntil -> the reply's
+    // edits land through the applier (its endServerEdit emits the full sync,
+    // so the didSave sees the EDITED model) -> didSave -> markSaved. The
+    // request answers EXACTLY ONCE (timeout/transport-death included: PLAN's
+    // RpcClient rule), and a refused or failed edit round NEVER blocks the
+    // save — it proceeds exactly like the plain path. No capability, no
+    // server, hub closing: byte-identical to the plain synchronous save.
     void saveDocument(qmn::view::CodeEditor* editor);
 
     // Test/feature doors: the syncer for a registered editor (null when the

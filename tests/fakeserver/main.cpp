@@ -124,6 +124,9 @@ bool g_features = false;     // argv flag (rides sync): the machine-5 provider
 bool g_completionOnly = false; // argv flag (rides features): advertise ONLY
                                // completionProvider, WITHOUT resolveProvider:
                                // the nested capability gate's refusal pin
+bool g_wswu = false; // argv flag (rides sync): declares
+                     // textDocumentSync.willSaveWaitUntil and answers the
+                     // pre-save round trip (M8 machine 6)
 bool g_advertisesResolve = false; // features && !completiononly, decided at
                                   // initialize; the resolve tripwire's oracle
 // Server-PRIMED requests, id -> method: a machine-5 pin lives on the SERVER
@@ -544,6 +547,9 @@ void publishDiagsFor(const QString& uri); // forward: the handlers below call it
 void featureDidSave(const QString& uri, ModelDoc& d); // forward (features mode,
                                                       // machine 5's didSave
                                                       // markers)
+void featureWillSaveWaitUntil(const QJsonValue& id,
+                              const QJsonObject& params); // forward (M8 m6)
+void wswuDidSavePin(const ModelDoc& d); // forward (M8 m6 didSave-time pins)
 
 void syncDidOpen(const QJsonValue& paramsValue)
 {
@@ -653,6 +659,8 @@ void syncDidSave(const QJsonValue& paramsValue)
     if (g_features && !g_completionOnly)
         featureDidSave(uri, found.value()); // the write-path markers stay OFF
                                            // for the completion-only pin
+    if (g_wswu)
+        wswuDidSavePin(found.value()); // M8 m6: the ordering pins ride the save
 }
 
 // The server's OWN encoder (the mirror of specOffset): model-frame
@@ -1415,6 +1423,87 @@ void featureDidSave(const QString& uri, ModelDoc& d)
     }
 }
 
+// The pre-save round trip (M8 machine 6): hub.saveDocument asked because this
+// server advertised it. The reply shape is the spec's BARE TextEdit[]; this
+// file applies the SAME edits to its OWN model first and arms the full-sync
+// oracle (g_applyVerify), so the client's endServerEdit echo is checked by
+// APPLYCHECK exactly like the machine-5 write path. Col 0 of line 0 is col 0
+// in EVERY negotiated frame: the edit's anchor needs no encoding luck.
+void featureWillSaveWaitUntil(const QJsonValue& id, const QJsonObject& params)
+{
+    if (params.value(QStringLiteral("reason")).toInt() != 1)
+        fail(QStringLiteral("willSaveWaitUntil reason is %1, expected 1 "
+                            "(TextDocumentSaveReason.Manual)")
+                 .arg(params.value(QStringLiteral("reason")).toInt()));
+    const QString uri = params.value(QStringLiteral("textDocument"))
+                            .toObject()
+                            .value(QStringLiteral("uri"))
+                            .toString();
+    auto found = g_docs.find(uri);
+    if (found == g_docs.end())
+        fail(QStringLiteral("willSaveWaitUntil for a document that is not open"));
+    ModelDoc& d = found.value();
+    if (!d.text.contains(QLatin1String("WSWU")))
+        fail(QStringLiteral("willSaveWaitUntil asked about a document without "
+                            "the drill marker"));
+    if (d.text.contains(QLatin1String("WSWU-REFUSE"))) {
+        // The REFUSE drill. Honest note: the spec says the willSaveWaitUntil
+        // result is TextEdit[]|null — a WorkspaceEdit is NOT a legal answer
+        // to THIS request. It is the only shape that can carry a refusal the
+        // hub's uri/version guards act on (a bare list names no document to
+        // refuse), and the hub's decode branch (array vs WorkspaceEdit)
+        // accepts both by design. This deviation buys the all-or-nothing
+        // refusal proof; the LEGAL bare-list path is proven by the plain
+        // WSWU drill above.
+        QJsonObject ghostDoc{{QStringLiteral("uri"),
+                              QStringLiteral("file:///qmn-not-open.cpp")}};
+        QJsonObject change{{QStringLiteral("textDocument"), ghostDoc},
+                           {QStringLiteral("version"), 0.0}};
+        change.insert(
+            QStringLiteral("edits"),
+            QJsonArray{textEditWire(QStringLiteral("sibling unit"), 0, 0, 0, 7,
+                                    QStringLiteral("nope"))});
+        QJsonObject result;
+        result.insert(QStringLiteral("documentChanges"), QJsonArray{change});
+        send(response(id, result));
+        return;
+    }
+    const QJsonArray edits
+        = {textEditWire(d.text, 0, 0, 0, 0, QStringLiteral("wswu-applied\n"))};
+    applyWireEdits(d, edits);
+    g_applyVerify = d.text;
+    send(response(id, edits));
+}
+
+// The didSave-time pins (M8 machine 6): the ORDERING full-sync-before-didSave
+// is exactly what is observable HERE — if didSave arrives while this server's
+// model still holds the PRE-edit text, the hub's save raced ahead of the edit
+// round trip (a structural lie: exit 2). A refused batch must leave the model
+// untouched by the wswu path.
+void wswuDidSavePin(const ModelDoc& d)
+{
+    if (!d.text.contains(QLatin1String("WSWU")))
+        return; // not a drill document: an ordinary save
+    if (d.text.contains(QLatin1String("WSWU-REFUSE"))) {
+        const bool whole = !d.text.contains(QLatin1String("wswu-applied"));
+        std::fprintf(stderr, "WSWU-REFUSE-SAVE-%s\n", whole ? "OK" : "FAIL");
+        std::fflush(stderr);
+        if (!whole)
+            _exit(2); // a refused edit reached the model on ONE side of the
+                      // wire anyway: the all-or-nothing gate broke
+        return;
+    }
+    // The ORDERING proof: the reply handler armed g_applyVerify and only the
+    // client's full-sync didChange (the endServerEdit echo) may clear it. If
+    // the oracle is still armed when didSave lands, the didSave overtook the
+    // sync the applier emitted — the server saw the PRE-edit model saved.
+    const bool syncedFirst = g_applyVerify.isEmpty();
+    std::fprintf(stderr, "WSWU-SAVE-%s\n", syncedFirst ? "OK" : "FAIL");
+    std::fflush(stderr);
+    if (!syncedFirst)
+        _exit(2); // didSave beat the edit round trip
+}
+
 // The SERVER-side half of the machine-5 write-path pins: what the client
 // answered to OUR request is traffic the tst cannot observe, so this file
 // judges it. A wrong answer is a structural wire lie: exit 2.
@@ -1532,6 +1621,19 @@ void handleInitialize(const QJsonObject& request)
                                          false}});
     } else {
         capabilities.insert(QStringLiteral("hoverProvider"), true);
+    }
+    if (g_wswu) {
+        // The M8 machine 6 declaration: TextDocumentSyncOptions shape — the
+        // integer change form can NEVER carry willSaveWaitUntil, and the
+        // hub's save detour opens only for this object with the key true.
+        // This server's sync behavior is unchanged either way: the client's
+        // syncer never reads this capability (the machine-4 proof).
+        capabilities.insert(QStringLiteral("textDocumentSync"),
+                            QJsonObject{{QStringLiteral("openClose"), true},
+                                        {QStringLiteral("change"), 2}, // Incremental
+                                        {QStringLiteral("willSave"), true},
+                                        {QStringLiteral("willSaveWaitUntil"),
+                                         true}});
     }
     send(response(request.value(QStringLiteral("id")),
                   QJsonObject{{QStringLiteral("capabilities"), capabilities},
@@ -1680,6 +1782,13 @@ void runLoop()
                 } else if (g_mode == QLatin1String("sync")
                            && method == QLatin1String("test/initializeParams")) {
                     handleInitializeParams(id);
+                } else if (method == QLatin1String("textDocument/willSaveWaitUntil")) {
+                    if (!g_wswu)
+                        fail(QStringLiteral(
+                            "textDocument/willSaveWaitUntil reached a server "
+                            "that never advertised it: the hub's save detour "
+                            "ignored the capability gate"));
+                    featureWillSaveWaitUntil(id, params.toObject());
                 } else if ((g_features)
                            && method == QLatin1String("completionItem/resolve")) {
                     featureResolveItem(id, params); // gate tripwires FIRST
@@ -1753,7 +1862,8 @@ int main(int argc, char** argv)
         else if (enc != QLatin1String("crashonce")
                  && enc != QLatin1String("diags")
                  && enc != QLatin1String("features")
-                 && enc != QLatin1String("completiononly"))
+                 && enc != QLatin1String("completiononly")
+                 && enc != QLatin1String("wswu"))
             fail(QStringLiteral("sync mode: bad encoding \"%1\"").arg(enc));
         for (int i = 2; i < args.size(); ++i) {
             if (args.at(i) == QLatin1String("crashonce"))
@@ -1766,6 +1876,8 @@ int main(int argc, char** argv)
                 g_completionOnly = g_features = true; // rides the features
                 // machinery, but the provider set is ONLY completionProvider
                 // without resolveProvider — the nested gate's refusal pin
+            else if (args.at(i) == QLatin1String("wswu"))
+                g_wswu = true;
         }
     }
     if (g_mode != QLatin1String("basic") && g_mode != QLatin1String("stderr")

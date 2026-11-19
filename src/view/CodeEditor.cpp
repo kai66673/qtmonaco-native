@@ -34,6 +34,7 @@ using Role = qmn::view::CodeEditorTheme::Role;
 #include <QKeySequence>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget> // M8 m6: the completion popup's list
 #include <QMenu>
 #include <QMimeData>
 #include <QMouseEvent>
@@ -1926,6 +1927,7 @@ void CodeEditor::setVScroll(int pixels)
     }
     scrollbarSync_ = false;
     update();
+    repositionPopups(); // M8 m6: visible popups track their anchors
 }
 
 // --- M9 horizontal scroll plumbing (one clamping writer, one contract
@@ -1971,6 +1973,7 @@ void CodeEditor::setHScroll(int pixels)
     }
     hScrollbarSync_ = false;
     update();
+    repositionPopups(); // M8 m6: visible popups track their anchors
 }
 
 void CodeEditor::setScrollBeyondLastLineEnabled(bool enabled)
@@ -6694,6 +6697,141 @@ private:
     QPushButton* close_;
 };
 
+// M8 machine 6 (PLAN's popup contract): the hover + completion popups.
+// Same internal-linkage pattern as FindBar just above — lazy children the
+// editor owns, classes never crossing the Shiboken boundary, chrome on
+// plain QPalette (the M24 scope note repeats: popups are NOT painted by
+// the CodeEditorTheme). They are DISPLAY plumbing: the anchor math reads
+// the private slot/scroll state on the editor side (place* helpers), so
+// these widgets only ever receive a setGeometry + their content. Focus
+// never moves here (NoFocus + WA_ShowWithoutActivating), and a press on
+// the popup itself dismisses it like a press on the text (auto-hide).
+class HoverPopup : public QWidget {
+public:
+    explicit HoverPopup(CodeEditor* editor)
+        : QWidget(editor), editor_(editor)
+    {
+        setObjectName(QStringLiteral("qmn-hover-popup"));
+        setAutoFillBackground(true);
+        QPalette pal = palette();
+        pal.setColor(QPalette::Window, pal.color(QPalette::Window).lighter(108));
+        setPalette(pal);
+        setFocusPolicy(Qt::NoFocus);
+        setAttribute(Qt::WA_ShowWithoutActivating, true);
+        auto* lay = new QVBoxLayout(this);
+        lay->setContentsMargins(6, 3, 6, 3);
+        label_ = new QLabel(this);
+        label_->setObjectName(QStringLiteral("qmn-hover-label"));
+        // NO TextSelectableByMouse (PLAN's display-only contract): a
+        // selectable label ACCEPTS the press and the popup's auto-hide
+        // mousePressEvent would never fire. Plain QLabel ignores presses,
+        // so they reach the popup widget (Qt widget-parent propagation).
+        lay->addWidget(label_);
+    }
+
+    // Plain text, no wrap (PLAN: plain-text content, no markdown): the one
+    // block sizes itself, the editor's place* then clamps into the rect.
+    void setPlainText(const QString& text)
+    {
+        label_->setText(text);
+        adjustSize();
+    }
+
+protected:
+    void mousePressEvent(QMouseEvent*) override
+    {
+        // A press on EITHER popup dismisses BOTH (auto-hide is an
+        // interaction rule, not a widget-local one).
+        editor_->hideHover();
+        editor_->hideCompletionList();
+    }
+
+private:
+    CodeEditor* editor_;
+    QLabel* label_;
+};
+
+class CompletionPopup : public QWidget {
+public:
+    explicit CompletionPopup(CodeEditor* editor)
+        : QWidget(editor), editor_(editor)
+    {
+        setObjectName(QStringLiteral("qmn-completion-popup"));
+        setAutoFillBackground(true);
+        QPalette pal = palette();
+        pal.setColor(QPalette::Window, pal.color(QPalette::Window).lighter(108));
+        setPalette(pal);
+        setFocusPolicy(Qt::NoFocus);
+        setAttribute(Qt::WA_ShowWithoutActivating, true);
+        auto* lay = new QVBoxLayout(this);
+        lay->setContentsMargins(4, 2, 4, 2);
+        list_ = new QListWidget(this);
+        list_->setObjectName(QStringLiteral("qmn-completion-list"));
+        list_->setFocusPolicy(Qt::NoFocus);
+        // Display-only (PLAN v1: no accept/navigation): the list is CLICK
+        // THROUGH — presses fall to the popup widget, whose mousePressEvent
+        // runs the auto-hide. Without this the list swallows the press and
+        // the "a press ANYWHERE dismisses" contract breaks on real clicks
+        // (QTest::mousePress on the popup alone would never catch it).
+        list_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        list_->viewport()->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        list_->setUniformItemSizes(true);
+        lay->addWidget(list_);
+    }
+
+    // Rows are PLAIN "label  detail" strings (detail is decoration-only in
+    // v1 — there is no accept/navigation path, PLAN's display contract).
+    // Size to content: the widest row's advance sets the width, uniform
+    // rows the height; the editor's place* clamps the result into bounds.
+    void setItems(const QVector<CodeEditor::CompletionItem>& items)
+    {
+        list_->clear();
+        for (const CodeEditor::CompletionItem& it : items) {
+            const QString row = it.detail.isEmpty()
+                ? it.label
+                : it.label + QStringLiteral("  ") + it.detail;
+            new QListWidgetItem(row, list_);
+        }
+        const QFontMetrics fm(list_->font());
+        int w = 80; // a floor so a one-row list still reads as a list
+        for (int i = 0; i < list_->count(); ++i)
+            w = std::max(w, fm.horizontalAdvance(list_->item(i)->text()));
+        const int rowH = std::max(1, list_->sizeHintForRow(0));
+        list_->setFixedSize(w + 8, list_->count() * rowH + 8);
+        adjustSize();
+    }
+
+protected:
+    void mousePressEvent(QMouseEvent*) override
+    {
+        editor_->hideHover(); // BOTH popups dismiss (see HoverPopup note)
+        editor_->hideCompletionList();
+    }
+
+private:
+    CodeEditor* editor_;
+    QListWidget* list_;
+};
+
+// Shared placement math (M8 machine 6): `x` is the widget-space anchor x
+// (xForCol already carries contentLeft() and the live hScroll), the two Ys
+// are the candidate tops from the row-slot formula the a11y characterRect
+// uses. The popup flips above when it would run past the bottom edge; if
+// NEITHER side fits it pins to the top and the clamp trims the tail. x
+// clamps into the editor; a popup that already fits is never moved — the
+// identity the anchor assertions pin.
+QRect placePopupIn(const QRect& bounds, int x, int belowY, int aboveY,
+                   const QSize& size)
+{
+    int y = belowY;
+    if (y + size.height() > bounds.height())
+        y = aboveY;
+    if (y < 0)
+        y = 0;
+    x = std::clamp(x, 0, std::max(0, bounds.width() - size.width()));
+    return QRect(QPoint(x, y), size);
+}
+
 } // namespace
 
 void CodeEditor::recomputeFindMatches()
@@ -6986,9 +7124,111 @@ void CodeEditor::clearFind()
     update();
 }
 
+// --- M8 machine 6: the popup doors (semantics: the public API comments) ---
+void CodeEditor::showCompletionList(const QVector<CompletionItem>& items)
+{
+    if (items.isEmpty()) { // the empty-payload hide (public contract)
+        hideCompletionList();
+        return;
+    }
+    if (!completionPopup_)
+        completionPopup_ = new CompletionPopup(this);
+    completionAnchor_ = caret_; // frozen at show time; scroll/resize follow
+    static_cast<CompletionPopup*>(completionPopup_)
+        ->setItems(items); // IN-PLACE replacement while visible
+    placeCompletionPopup();
+    completionPopup_->show();
+    completionPopup_->raise(); // last-shown popup sits on top of the other
+}
+
+void CodeEditor::hideCompletionList()
+{
+    if (completionPopup_)
+        completionPopup_->hide();
+}
+
+bool CodeEditor::completionListVisible() const
+{
+    return completionPopup_ && completionPopup_->isVisible();
+}
+
+void CodeEditor::showHover(const HoverRange& range, const QString& plainText)
+{
+    if (plainText.isEmpty()) { // the empty-payload hide (public contract)
+        hideHover();
+        return;
+    }
+    if (!hoverPopup_)
+        hoverPopup_ = new HoverPopup(this);
+    hoverAnchor_ = range;
+    static_cast<HoverPopup*>(hoverPopup_)
+        ->setPlainText(plainText); // IN-PLACE replacement while visible
+    placeHoverPopup();
+    hoverPopup_->show();
+    hoverPopup_->raise();
+}
+
+void CodeEditor::hideHover()
+{
+    if (hoverPopup_)
+        hoverPopup_->hide();
+}
+
+bool CodeEditor::hoverVisible() const
+{
+    return hoverPopup_ && hoverPopup_->isVisible();
+}
+
+void CodeEditor::placeCompletionPopup()
+{
+    if (!completionPopup_)
+        return;
+    const int slot = slotOfModelLine(completionAnchor_.line);
+    const int x = int(std::floor(xForCol(completionAnchor_.line,
+                                         completionAnchor_.col)));
+    const int belowY = padding_ + (slot + 1) * lineHeight_ - vScroll_;
+    const int aboveY = padding_ + slot * lineHeight_ - vScroll_
+                       - completionPopup_->height();
+    completionPopup_->setGeometry(placePopupIn(rect(), x, belowY, aboveY,
+                                               completionPopup_->size()));
+}
+
+void CodeEditor::placeHoverPopup()
+{
+    if (!hoverPopup_)
+        return;
+    const int slotStart = slotOfModelLine(hoverAnchor_.startLine);
+    const int slotEnd = slotOfModelLine(hoverAnchor_.endLine);
+    const int x = int(std::floor(xForCol(hoverAnchor_.startLine,
+                                         hoverAnchor_.startCol)));
+    const int belowY = padding_ + (slotEnd + 1) * lineHeight_ - vScroll_;
+    const int aboveY = padding_ + slotStart * lineHeight_ - vScroll_
+                       - hoverPopup_->height();
+    hoverPopup_->setGeometry(placePopupIn(rect(), x, belowY, aboveY,
+                                          hoverPopup_->size()));
+}
+
+void CodeEditor::repositionPopups()
+{
+    if (hoverPopup_ && hoverPopup_->isVisible())
+        placeHoverPopup();
+    if (completionPopup_ && completionPopup_->isVisible())
+        placeCompletionPopup();
+}
+
+void CodeEditor::hidePopupsForInteraction()
+{
+    if (completionPopup_)
+        completionPopup_->hide();
+    if (hoverPopup_)
+        hoverPopup_->hide();
+}
+
 void CodeEditor::keyPressEvent(QKeyEvent* event)
 {
     perfTimer_.start();
+    hidePopupsForInteraction(); // M8 m6: typing/navigation dismisses (PLAN
+                                // auto-hide; the glue re-triggers afresh)
     auto finish = [this] {
         if (perfTimer_.isValid()) {
             const qint64 ns = perfTimer_.nsecsElapsed();
@@ -7649,6 +7889,8 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
     // M22: any press invalidates the hover region (the dragLeave lesson:
     // the clear must not rely on a later leave/move arriving).
     clearFoldHoverState();
+    hidePopupsForInteraction(); // M8 m6: a press ANYWHERE (content, gutter,
+                                // ruler, popup) dismisses the feature popups
     // M7 ruler gesture FIRST (left = click/drag scroll, middle too: paste
     // in the chrome strip would surprise): the strip scrolls, the caret
     // never moves. The scrollbar child already swallows its own area.
@@ -8579,6 +8821,7 @@ void CodeEditor::resizeEvent(QResizeEvent*)
     updateScrollBarRange();
     if (findBar_) // the bar hugs the top-right corner (Monaco placement)
         static_cast<FindBar*>(findBar_)->place();
+    repositionPopups(); // M8 m6: popups re-place against their frozen anchors
 }
 
 namespace {
@@ -8723,6 +8966,7 @@ void CodeEditor::focusOutEvent(QFocusEvent*)
 {
     caretOn_ = false;
     blinkTimer_.stop();
+    hidePopupsForInteraction(); // M8 m6: popups die with the focus (PLAN)
     update();
 }
 

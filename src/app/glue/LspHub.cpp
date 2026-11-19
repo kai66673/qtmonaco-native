@@ -505,13 +505,75 @@ void LspHub::releaseRegistration(const QString& uri)
     }
 }
 
+namespace {
+// The willSaveWaitUntil half of the textDocumentSync capability (M8 machine
+// 6): an integer change form or an absent key never advertises it; only the
+// TextDocumentSyncOptions OBJECT with a true `willSaveWaitUntil` does.
+bool willSaveWaitUntilOffered(const qmn::lsp::LspClient* client)
+{
+    const QJsonValue sync = client->serverCapabilities().value(
+        QStringLiteral("textDocumentSync"));
+    if (!sync.isObject())
+        return false;
+    return sync.toObject().value(QStringLiteral("willSaveWaitUntil")).toBool();
+}
+} // namespace
+
 void LspHub::saveDocument(qmn::view::CodeEditor* editor)
 {
     qmn::lsp::DocumentSyncer* syncer = syncerFor(editor);
-    if (syncer)
-        syncer->save(); // flush-then-didSave (machine 3's door)
-    if (editor && editor->document())
-        editor->document()->markSaved(); // the modified flag is the document's
+    qmn::lsp::LspClient* client =
+        (syncer && !closingDown_) ? clientForUri(syncer->uri()) : nullptr;
+    if (!syncer || !client || !client->isReady()
+        || !willSaveWaitUntilOffered(client)) {
+        if (syncer)
+            syncer->save(); // flush-then-didSave (machine 3's door)
+        if (editor && editor->document())
+            editor->document()->markSaved(); // the modified flag is the
+                                             // document's
+        return;
+    }
+    // The advertised round trip (semantics: the door comment in the header).
+    // The flush FIRST is the same act that makes feature frames honest: the
+    // request's TextDocumentIdentifier rides a mirror that already holds
+    // every keystroke. reason 1 = TextDocumentSaveReason.Manual.
+    const QString uri = syncer->uri();
+    client->request(
+        QStringLiteral("textDocument/willSaveWaitUntil"),
+        QJsonObject{{QStringLiteral("textDocument"),
+                     QJsonObject{{QStringLiteral("uri"), uri}}},
+                    {QStringLiteral("reason"), 1}},
+        [this, uri](const qmn::protocol::RpcClient::Reply& reply) {
+            // RE-RESOLVE by uri: the editor may have died, the document may
+            // have closed, the client may have restarted since the request
+            // (the hub dtor releases every registration BEFORE stopping the
+            // clients, so a late reply finds an empty table and stops).
+            auto it = registrations_.constFind(uri);
+            qmn::view::CodeEditor* ed =
+                it == registrations_.constEnd() ? nullptr : it->editor;
+            qmn::lsp::DocumentSyncer* nowSyncer = syncerFor(ed);
+            if (!ed || !nowSyncer)
+                return; // the document is gone: nothing left to save
+            if (!reply.isError && !reply.result.isNull()) {
+                // The reply is a bare TextEdit[] in the machine-3 sync mode
+                // (formatting shape) — but a server may also answer a full
+                // WorkspaceEdit. The applier stays ALL-OR-NOTHING: a refused
+                // batch changes nothing, and the save proceeds regardless
+                // (PLAN: the round trip is a courtesy, not a veto).
+                const ApplyReport report =
+                    reply.result.isArray()
+                        ? applyTextEditList(ed, reply.result,
+                                            clientForUri(uri))
+                        : applyReplyEdit(reply.result, clientForUri(uri));
+                Q_UNUSED(report); // v1 does not surface wswu refusals: the
+                                  // didSave marker is the observable trail
+            }
+            nowSyncer->save(); // any applied edit's endServerEdit full sync
+                               // is already queued, so the didSave rides the
+                               // EDITED model — the ordering PLAN pins
+            if (ed->document())
+                ed->document()->markSaved();
+        });
 }
 
 qmn::lsp::DocumentSyncer* LspHub::syncerFor(

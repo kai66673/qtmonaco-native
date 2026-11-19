@@ -220,12 +220,18 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
   `build_in_container.sh --codegen`. The 1.6.1 run caught the drift for
   real: adding `CodeEditorTheme` to typesystem+CMake but not to the
   script's header list produced "type ... specified in typesystem, but not
-  defined" and NO theme wrapper TU. What the binding wraps today: the four
+  defined" and NO theme wrapper TU; the 1.7.0 machine-6 run caught the
+  OPPOSITE drift (typesystem yes, `_generated` TU list no) — that configures
+  CLEANLY and ninja silently compiles nothing for the type: it surfaces at
+  container smoke import as `undefined symbol: init_qmn_view_...`. What the
+  binding wraps today: the four
   QObjects (`CodeEditor`/`CodeEditorOptions`/`CodeEditorTheme`/
   `CodeDocument`, ctors removed — editor-owned; the M10 standalone
   `CodeDocument()` stays C++-only, the diff view's detached original is fed
-  through the string door instead), `TextPosition`, the five
-  decoration record structs and every nested enum; only `PerfStats` and the
+  through the string door instead), `TextPosition`, the eight nested record
+  structs (the five decoration records + M8 m5's `TextEdit` write record +
+  M8 m6's `CompletionItem`/`HoverRange` popup payloads) and every nested
+  enum; only `PerfStats` and the
   SlotEdit/UndoMark/std::function machinery stay unbound by design.
 - **Pins are load-bearing:** `PySide6-Essentials==6.12.0` /
   `shiboken6_generator==6.12.0` at build time, `~=6.12.0` at runtime — the

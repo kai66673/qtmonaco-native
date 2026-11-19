@@ -66,6 +66,12 @@
             <!-- The M8 machine-5 write record: the list element of the
                  applyTextEdits door. Same value shape as the records above. -->
             <value-type name="TextEdit"/>
+            <!-- The M8 machine-6 popup payloads: the list element of
+                 showCompletionList, and the hover anchor range of showHover.
+                 Same value shape; both carry a defaulted operator==, which
+                 binds as __eq__. -->
+            <value-type name="CompletionItem"/>
+            <value-type name="HoverRange"/>
             <enum-type name="TokenKind"/>
             <enum-type name="Severity"/>
             <enum-type name="RevealMode"/>

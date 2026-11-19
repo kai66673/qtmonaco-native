@@ -58,9 +58,10 @@ endif()
 # named after the typesystem package, i.e. _qmn/. One TU per bound type: the
 # four QObjects (editor, options, document, theme), the free TextPosition
 # struct, and one per nested record struct (HighlightSpan/Diagnostic/InlayHint/
-# MatchRange/FoldRange/TextEdit). The nested ENUMS (RevealMode, LineNumbersMode, the
-# theme's Role/Preset, ...) get no file of their own - since Shiboken 6.8 smart enums
-# are emitted inside the owning class's TU.
+# MatchRange/FoldRange/TextEdit/CompletionItem/HoverRange). The nested ENUMS
+# (RevealMode, LineNumbersMode, the theme's Role/Preset, ...) get no file of
+# their own - since Shiboken 6.8 smart enums are emitted inside the owning
+# class's TU.
 set(_gen_dir "${CMAKE_CURRENT_BINARY_DIR}/_qmn")
 set(_generated
     "${_gen_dir}/_qmn_module_wrapper.cpp"
@@ -76,7 +77,9 @@ set(_generated
     "${_gen_dir}/qmn_view_codeeditor_inlayhint_wrapper.cpp"
     "${_gen_dir}/qmn_view_codeeditor_matchrange_wrapper.cpp"
     "${_gen_dir}/qmn_view_codeeditor_foldrange_wrapper.cpp"
-    "${_gen_dir}/qmn_view_codeeditor_textedit_wrapper.cpp")
+    "${_gen_dir}/qmn_view_codeeditor_textedit_wrapper.cpp"
+    "${_gen_dir}/qmn_view_codeeditor_completionitem_wrapper.cpp"
+    "${_gen_dir}/qmn_view_codeeditor_hoverrange_wrapper.cpp")
 
 # The macro forwards -I only for the listed QT_MODULES, and Qt6::Widgets'
 # interface carries [include, include/QtWidgets]; CodeEditor.hpp itself includes
