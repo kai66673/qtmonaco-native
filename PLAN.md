@@ -834,6 +834,16 @@ space, so a late wrap would force a full revalidation round on diff tests.
 The wheel-parity leftovers ride their owning cars, they are not a car of
 their own.
 
+**Status at the 1.8.0 close (2026-11-19): wrap (M25), diff (M10 cars 1–3) and
+LSP (M8 machines 1–7) are SHIPPED.** DAP is the one car left open, and the
+deferred slivers ride it or their own follow-ons: M8b (signatureHelp, inlay
+hints, foldingRange over the M13 fold API, pull diagnostics via the
+registration registry), the glue-side popup TRIGGERING (the view doors exist,
+`cursorMoved`/`editApplied` → `showCompletionList`/`showHover` is app-side and
+not wired anywhere yet), M10b (inline word-level diff, wrap×diff budget math,
+original-side wrap), and the two pre-existing defects recorded verbatim below
+(the undo-mark drift on type-over-selection, the overview-ruler perf cliff).
+
 **Known pre-existing bug (recorded 2026-11-15, deferred to its own small
 car):** bracketed type-over-selection in `insertTextAtCaret` (the
 `beginEditGroup` bracket around `deleteSelection` + insert, found via a
@@ -1073,7 +1083,27 @@ this car).
   `diffOriginalChromeSyntaxHighlight` (Keyword+String inks in the read
   window + the live-edit re-color through the original doc's own door).
 
-### M8 — protocol core + LSP (car 3)
+### M8 — protocol core + LSP (car 3) — ✔ CLOSED 2026-11-19 (package 1.8.0)
+
+✔ **CLOSED 2026-11-19 (1.8.0, all seven machines landed):** 1 protocol
+7212000 → 2 `LspClient` + fakeserver 86fdeed → 3 syncer + position converter
+99e14d1 → 4 the `LspHub` app glue 089159f → 5 the write path f25640c → 6 the
+popups + `willSaveWaitUntil` 449e11c → 7 the qtmonaco parity wrap 23c537a.
+Gates at the close: ctest 5/5 with the `lsp` binary at 62 slots (grown inside
+ONE entry, per the 2026-11-17 amendment) and `tst_codeeditor` at 254; the
+consumer packaging smoke green against the WIDENED export set
+(`qmn::protocol` + `qmn::lsp` are real exports, `qmn_glue` is app code and
+ships nothing); the pinned container's `--wheel` green (codegen clean, smoke +
+qtmonaco parity against the REPAIRED 1.8.0 wheel); and the manual close-car
+clangd probe **PROBE-OK (7 steps)** against clangd 23.1.5 — the first run of
+this ritual, exactly as PLAN's 2026-11-18 decision required it. Two car-sized
+lessons survive in the code: the layer rule is now literal (nothing under
+`src/protocol|lsp` knows a widget, the hub is a CLIENT of both sides), and the
+fakeserver's exit code is an oracle no assertion can fake — it caught our own
+encoder counting CODE POINTS where the model counts UTF-16 CODE UNITS. What
+M8 deliberately did NOT do, all recorded above: no `set_lsp_header` pair, no
+semanticTokens painting (decoder-only), no markdown in the popups, glue-side
+popup TRIGGERING left to the app. DAP (car 4) is the one Gate-2 car left open.
 
 Machines built (2026-11-18): 1 `src/protocol/` ✅ → 2 `LspClient` + fakeserver
 oracle ✅ → 3 document syncer + position converter + the `sync`-mode fakeserver
@@ -1312,17 +1342,29 @@ asserts INVERT into behavior asserts):
   `renderSideBySide:false` documented as a divergence (inline mode is out
   of v1). The pointer door `setDiffDocuments(CodeDocument*,...)` stays
   C++-only for the same reason.
-- `set/get_lsp_header` — PURE PYTHON (the shim prepends/strips; the native
-  model text is header-free), mirroring qtmonaco's `_value` semantics.
-- `add_action` — new view door `addAction(QString id, QString label)` +
-  `actionTriggered(QString id)` signal into the M16 context menu; the shim
-  keeps the qtmonaco signature and IGNORES the `language` precondition
-  (native language scoping does the job) — decided divergence.
-- `update_workspace_configuration` — view door `setStoredWorkspaceConfiguration`
+- `set/get_lsp_header` — **NOT built, decided 2026-11-19** (this line used to
+  plan them as PURE PYTHON: the shim prepending/stripping a header while the
+  native model stayed header-free, mirroring qtmonaco's `_value`). The
+  reason it was dropped, in one sentence: every native LSP path rests on
+  "the server's document IS the editor's document", so a wire-only header is
+  a manual ±H shift in caret requests, response ranges, syncer deltas and
+  undo — and the all-or-nothing applier + version pins turn an off-by-one
+  into silent feature death. The honest `AttributeError` stays; extra server
+  context belongs in `initializationOptions`, the workspace configuration,
+  or a second document.
+- `add_action` — SHIPPED (M8 machine 7) as the view door
+  `addContextAction(QString id, QString label)` + `contextActionTriggered(QString
+  id)` into the M16 context menu (**renamed from the planned `addAction`,
+  which would hide `QWidget::addAction`**); the shim keeps the qtmonaco
+  signature and IGNORES the `language` precondition (native language
+  scoping does the job) — decided divergence.
+- `update_workspace_configuration` — SHIPPED (M8 machine 7) as the view door
+  `setStoredWorkspaceConfiguration`
   (compact JSON as `QString`; PySide6 6.12 has NO `QJsonObject` — verified
   in the container) + getter + `workspaceConfigurationChanged()` signal;
   the buffer lives on the view until app-side glue consumes it — qtmonaco's
-  buffered-until-init semantics without shipping any LSP client to Python.
+  buffered-until-init semantics without shipping any LSP client to Python
+  (the hub that consumes it is C++ app glue).
   Shiboken fact this rests on: **Python cannot emit a C++ signal**, so every
   parity signal stays Python-declared exactly as the three existing ones.
 - Binding routine: two new bound-QObject entries (`CodeDocument`, popup/

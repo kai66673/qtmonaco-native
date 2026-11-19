@@ -259,7 +259,11 @@ QJsonObject LspHub::buildInitializeParams(const ServerSpec& spec) const
                   QJsonObject{{QStringLiteral("name"),
                                QStringLiteral("qtmonaco-native")},
                               {QStringLiteral("version"),
-                               QStringLiteral("1.7.0")}});
+                               // Configured by CMake (QMN_PACKAGE_VERSION =
+                               // the project() VERSION), NOT typed here: the
+                               // 1.8.0 close caught a hand-kept literal riding
+                               // 1.7.0 while the project line still said 1.6.1.
+                               QStringLiteral(QMN_PACKAGE_VERSION)}});
     params.insert(QStringLiteral("locale"), QStringLiteral("en"));
     const QUrl rootUrl
         = workspaceRoot_.isEmpty() ? QUrl() : QUrl::fromLocalFile(workspaceRoot_);

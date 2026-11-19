@@ -5,13 +5,15 @@ Native code editor widget for Qt6, built from scratch on a raw `QWidget`
 QPlainTextEdit, no Chromium. Long-term hobby project; roadmap in `README.md`,
 phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
 
-## Current state (v1.7.0 in development) — gates and the frozen surface
+## Current state (v1.8.0 — M8 CLOSED 2026-11-19) — gates and the frozen surface
 
 - Gate 1 (editor v1) froze the public API at tag `v1.0`; Gate 1.5 (usability
   train M20–M24) closed 2026-11-12 at tag `v1.5.0`. **Gate 2 is the open
   train** since 2026-11-15, ordering decided: M25 soft wrap (SHIPPED) → M10
-  diff (cars 1–3 built: engine + view + chrome) → M8 LSP/protocol → DAP. The
-  full design record is the PLAN.md "GATE 2" section — read it before starting
+  diff (cars 1–3 built: engine + view + chrome) → M8 LSP/protocol (**CLOSED
+  2026-11-19**, seven machines — see the PLAN "M8 … CLOSED" paragraph) →
+  **DAP, the one Gate-2 car still open**. The full design record is the
+  PLAN.md "GATE 2" section — read it before starting
   a car. Never start work for a later gate while an earlier one is open.
 - The frozen surface widens **only additively** (Gate 1.5 precedent): no new
   view mapping/geometry primitives. The M5 decoration API already covers
@@ -19,10 +21,19 @@ phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
   (decided 2026-11-15, both in PLAN): the `CodeEditor::buffer_` value member
   moves into `CodeDocument` (ownership surgery, not API surgery), and the
   `visible*` row doors change UNITS (lines → visual slots) without adding
-  doors.
+  doors. M8 kept that rule literally: `applyTextEdits`, the six popup doors
+  and machine 7's four doors are ALL additive, and the popup anchors reuse
+  the existing `xForCol` + characterRect math.
 - Both deliverables ship: a C++ static package (export set `qmn::core` /
-  `qmn::view`, plus internal `qmn::internal_tree_sitter`) and a PySide6 wheel
+  `qmn::view`, plus internal `qmn::internal_tree_sitter`, and since M8 the
+  REAL exports `qmn::protocol` / `qmn::lsp` — `qmn_glue` is app code and
+  ships nothing) and a PySide6 wheel
   `qmn-native` (cp310-abi3, manylinux_2_34). See "Python bindings" below.
+- **The package version has exactly two literals** — `project(qtmonaco-native
+  VERSION …)` in `CMakeLists.txt` and `version` in `pyproject.toml` — and the
+  close ritual bumps BOTH in one commit (the 1.8.0 close found them drifted:
+  1.6.1 vs 1.7.0). The hub's LSP `initialize` `clientInfo.version` is
+  CONFIGURED from `PROJECT_VERSION`, never hand-kept.
 - **Keep public view API Shiboken-wrappable**: `Q_OBJECT`, plain Qt types in
   params/returns, no C++ templates or STL types crossing the API boundary
   (internals are unconstrained). The binding wraps only the **view** widget;
@@ -46,8 +57,9 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
   `qmn_lsp`, is NOT in any export set (app code, package surface unchanged)
   and `tst_lsp` links it. Still no view→lsp arrow anywhere: the hub is a
   *client* of both sides.
-- Gate-2 layers (decided 2026-11-15, built with the owning cars — contracts
-  NOW, code later): `src/diff/` — **QtCore ONLY** (line-diff + alignment,
+- Gate-2 layers (decided 2026-11-15, built with the owning cars — since M10
+  and M8 `src/diff/`, `src/protocol/` and `src/lsp/` are CODE, `src/dap/` is
+  still a contract until car 4): `src/diff/` — **QtCore ONLY** (line-diff + alignment,
   headless like core). `src/protocol/` — QtCore+QtNetwork, **never view**.
   `src/lsp/` and `src/dap/` — only `src/protocol/`, **never view**. The
   view/core never depend on protocol/lsp/dap; LSP/DAP *glue* (decoration

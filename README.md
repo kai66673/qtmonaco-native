@@ -44,11 +44,14 @@ The core is under constant property-test attack: 2,000 random
 insert/delete operations with a naive `QString` reference and a full
 treap-invariant check after **every** operation (`tests/tst_textbuffer.cpp`).
 
-Deliberately **not implemented yet** (see roadmap): soft wrap, horizontal
-scrolling, column memory, full
+Deliberately **not implemented yet** (see roadmap): full
 grapheme segmentation (`col` still counts UTF-16 code units even though
-arrow keys and edits snap to cluster boundaries), diff view, LSP, scrolling
-past the end.
+arrow keys and edits snap to cluster boundaries), DAP (the last Gate-2 car),
+markdown rendering in the hover popup (plain text by design) and
+semanticTokens PAINTING (the decoder exists, tree-sitter stays the paint
+master). Soft wrap, the diff view, horizontal scrolling with column memory,
+scrolling past the end and the whole LSP stack (protocol → client → syncer →
+app-side hub → popups) all shipped in 1.7.0 / 1.8.0.
 
 ## Layout & layering
 
@@ -57,11 +60,17 @@ src/core/   TextBuffer — pure Qt-based C++ (QtCore ONLY), headless, testable
 src/diff/   LineDiff — pure line diff + alignment table (QtCore ONLY too)
 src/protocol/ JsonFraming + transports + RpcClient (QtCore + QtNetwork, NEVER
             view/core — the M8 layer rule; LSP/DAP glue lives in src/app)
+src/lsp/    LspClient + DocumentSyncer + PositionConverter + WorkspaceEdit
+            (knows src/protocol ONLY, never view/core)
 src/view/   CodeEditor — the raw QWidget canvas (QPainter), depends on core
 src/app/    qmn-spike  — demo/bench harness, depends on view
             qmn-demo   — full demo app: tabbed editors + settings dialog
-tests/      five ctest entries: core/diff/lsp (guiless) + codeeditor/demo
-tools/      standalone micro-benches (model, highlight latency tree split)
+            glue/LspHub — the LSP glue (a CLIENT of view AND lsp; app code,
+            NOT in any export set, so the package surface never grows a hub)
+tests/      five ctest entries: textbuffer + diff are guiless, lsp +
+            codeeditor + demo run on QT_QPA_PLATFORM=offscreen
+tools/      standalone micro-benches (model, highlight latency tree split) +
+            probe_clangd.sh (the manual live-server ritual, never a CI gate)
 third_party/ vendored tree-sitter runtime + generated grammars (M4; the
             qmn_ts static lib links PRIVATE into qmn_view — tree-sitter
             never crosses src/core/ or the public view API)
@@ -204,7 +213,12 @@ Gate 1.5 — usability interlude (post-freeze minor train, see PLAN.md;
 
 Gate 2 — IDE surface (after the freeze):
 
-- [ ] M8 LSP client (stdio JSON-RPC via QProcess) — completion, diagnostics, hover
+- [x] M8 LSP client (stdio JSON-RPC via QProcess) — completion, diagnostics,
+      hover, plus the whole write path (the all-or-nothing `WorkspaceEdit`
+      applier, rename, formatting, the `willSaveWaitUntil` save round), the
+      view-side completion/hover popups, the app-side `LspHub` glue (server
+      matrix + `.qmn/lsp.json`) and the qtmonaco parity hooks (`add_action`,
+      `update_workspace_configuration`); live-clangd probe PROBE-OK 7/7
 - [x] M10 diff view → `open_diffs` parity (the line-diff engine + the two-
       column chrome + the wheel/shim crossing; inline word-level highlight,
       wrap×diff budget math and original-side wrap ride a follow-on M10b)

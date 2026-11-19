@@ -3,6 +3,160 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.8.0] — 2026-11-19 — M8 LSP CLOSED (Gate 2 car 3): the protocol stack, the LSP session, the app-side hub, the parity hooks
+
+### Added
+- **M8 machine 1 — the protocol layer** (`src/protocol/`, QtCore+QtNetwork,
+  ZERO view/core — the layer rule made literal; the 5th ctest entry `lsp`,
+  which then GREW machine by machine instead of adding entries):
+  `JsonFraming` (incremental `Content-Length` decode, lenient inbound header
+  forms while `encode()` always writes CRLF, dead-until-reset after any error
+  — a framing desync cannot be resynchronized mid-stream — and the 64 MiB
+  body bound fails as a TRANSPORT ERROR before an allocation, the declared
+  body simply never being read in); `Transport` + `ProcessTransport`
+  (QProcess stdio, terminate-3 s/kill-5 s escalation, `ServerDied` only for
+  unwanted deaths, one session per instance) + `TcpTransport`; `RpcClient`
+  (monotonic ids, every pending fulfilled EXACTLY once —
+  success/wire-error/timeout/cancel/eviction, erase-before-callback against
+  re-entrancy, per-door timeouts pinned at initialize 10 s / features 5 s
+  rather than a blanket, `$/cancelRequest` on BOTH supersede and timeout
+  then local fulfillment with the real LSP code `-32802`, the two-phase stop
+  barrier `shutdown`→`exit`, pending-eviction with an honest
+  transport-closed error, and the server→client "always answer, never lie"
+  MECHANISM: unregistered request → `-32601`, unknown notification ignored).
+  Client-side failures live in the invented `kErr* = -331xx` band and never
+  masquerade as wire codes. `qmn::protocol` joins the PUBLIC export set (a
+  real export, unlike the `internal_*` link-only mechanism) and
+  `Qt6::Network` joins `find_package` + `qmnConfig.cmake.in`.
+- **M8 machine 2 — the session owner** (`src/lsp/LspClient`): one
+  Transport+RpcClient pair per spawn, rebuilt WHOLE per session;
+  `initialize`→`initialized` on the pinned 10 s door; `ready()` re-fires on
+  every (re-)READY; an unwanted death auto-restarts EXACTLY ONCE (300 ms
+  backoff) then FAILED + the manual `restartServer()` door; a HANDSHAKE
+  failure never auto-restarts (a live-but-deaf server must not be spawned
+  twice); a transport that died before `opened()` burns no restart budget
+  (the typo'd-path no-retry-loop). The capability registry answers
+  `client/registerCapability` all-or-nothing (one unknown method → `-32803`,
+  registers NOTHING), `unregisterCapability` is idempotent; non-Ready
+  requests refuse locally with `-33103` and `notify()` drops silently.
+  `tests/fakeserver/` — the oracle server (a support binary, NOT a ctest
+  entry) whose exit code is the verdict: 0 clean, 7 crash, 2 contract lie,
+  3 watchdog.
+- **M8 machine 3 — the document sync** (`src/lsp/DocumentSyncer` +
+  `PositionConverter`): the UTF-16 mirror with deltas batched into ONE
+  `didChange` `contentChanges` array, 400 ms debounce + a typing cap,
+  version per flush, the FULL-sync fallback on any desync detector and after
+  server-primed edits, the re-`didOpen` self-heal riding `ready()`, and the
+  `beginServerEdit`/`endServerEdit` pair that keeps a server-driven edit from
+  echoing back as a delta. The converter honours the server's
+  `positionEncoding` (utf-8/utf-32 columns, spec default utf-16). The
+  fakeserver `sync` mode keeps a TRUE server-side text model and answers
+  VERIFY per flush — deltas are validated before the wire, Cyrillic/emoji
+  round-trips included.
+- **M8 machine 4 — the app-side glue** (`src/app/glue/LspHub`, the
+  `qmn_glue` STATIC lib — app code, NOT in any export set, so the package
+  surface is unchanged and no view→lsp arrow exists): the built-in server
+  matrix with `${WORKSPACE_ROOT}` expansion, the deep-merged `.qmn/lsp.json`
+  (objects recurse, arrays replace whole) loaded before anything starts,
+  lazy start on the first `didOpen` per language, one client per spec
+  serving many documents, the `editApplied`→`applyDelta` feed, the
+  `publishDiagnostics` decode into `CodeEditor::setDiagnostics`, the
+  `window/showMessage`/`logMessage` relays as SIGNALS (visible, not debug
+  prints), and the hub destructor owning the stop barrier.
+- **M8 machine 5 — the write path**: the four-shape `WorkspaceEdit` decoder
+  (including clangd's `command.arguments[0]` form) and an ALL-OR-NOTHING
+  applier — every uri gated BEFORE anything is touched, structure operations
+  (create/rename/delete file) handed to the app whole, version-pinned
+  `documentChanges` checked after a flush, cross-wire and readOnly and
+  overlapping-range refusals — then applied per document through the
+  server-edit pair (N documents = N undo steps, one undo reverses one
+  document's whole rename). The new view door `applyTextEdits` + the feature
+  doors that flush the syncer first and refuse LOCALLY (server code
+  `-32601`) when no spec claims the language, no live server serves the uri,
+  or the capability is absent (nested gates included). Fakeserver `features`
+  mode judges the whole battery from the server's side.
+- **M8 machine 6 — the popups + `willSaveWaitUntil`**: the view-internal,
+  FOCUS-INERT completion/hover popups (`FindBar` precedent) behind six doors
+  (`showCompletionList`/`hideCompletionList`/`completionListVisible`,
+  `showHover(range,plainText)`/`hideHover`/`hoverVisible`) and the two
+  nested records `CompletionItem{label,detail}` + `HoverRange{startLine,
+  startCol,endLine,endCol}`; anchors ride EXISTING geometry only
+  (`xForCol` + the a11y characterRect formula), scroll/resize RE-PLACE a
+  visible popup, press on either popup dismisses both. The SAVE path is
+  hub-side and gates on the `textDocumentSync` OPTIONS object carrying
+  `willSaveWaitUntil:true` (the integer change form can never carry it):
+  flush → request → decode (bare `TextEdit[]` OR `WorkspaceEdit`) → applier
+  → `didSave` → `markSaved`; a refusal never vetoes the save, and no
+  capability means a byte-identical synchronous door.
+- **M8 machine 7 — the qtmonaco parity hooks**: the view doors
+  `addContextAction(id,label)` + `contextActionIds()` (custom context-menu
+  items, appended below the built-ins, idempotent BY ID, an empty id refused
+  locally; deliberately NOT named `addAction`, which would hide
+  `QWidget::addAction`) and `setStoredWorkspaceConfiguration` /
+  `storedWorkspaceConfiguration` + `workspaceConfigurationChanged()` (the
+  view is the OPAQUE buffer; it never parses or applies it). The hub owns
+  "buffered until init": the buffer rides `LspClient::ready`, the document's
+  own `open`, and the view's change signal, always RE-READ from the view at
+  push time; an empty buffer means "never configured" and sends NOTHING, and
+  a non-object buffer is refused locally. Fakeserver `config` mode: config
+  before `initialized`, or an absent/empty `settings`, is a structural lie
+  (exit 2).
+- **The live-server probe** (`tools/probe_clangd.sh`, a manual CLOSE-CAR
+  ritual, never a CI gate — clangd versions drift and CI has no clangd).
+  Against the dev machine's clangd 23.1.5 at this close: **PROBE-OK (7
+  steps)** — handshake Ready, 4 `publishDiagnostics` decoded with the
+  undeclared-symbol error landing on line 4 in the utf-16 frame, hover on a
+  local, completion at a half-typed word, 5 real clang-format edits applied
+  and reversed by ONE undo, a version-pinned rename (2 edits) reversed by
+  ONE undo, and the save path clangd actually advertises
+  (`{"change":2,"openClose":true,"save":true}` → the plain synchronous
+  `didSave` round, no `willSaveWaitUntil`).
+- **M8 through the wheel (wheel 1.8.0).** The write path and the popups
+  cross: the nested `TextEdit` write record, `CompletionItem`/`HoverRange`
+  and the six popup doors, `applyTextEdits`, and machine 7's four doors
+  (no new type — plain `QString`/`QStringList` on the already-bound
+  `CodeEditor`). The shim gained `add_action(action_id, label, language=...)`
+  (the language precondition accepted-and-ignored — the native editor is
+  already scoped per document) and
+  `update_workspace_configuration(dict)` (the dict travels as SORTED COMPACT
+  JSON, the exact string the hub pushes), relaying
+  `context_menu_action_triggered(str)` and `workspace_config_updated(bool,
+  str)` where True reports the LOCAL accept, not a server round-trip
+  (documented divergence). `set_lsp_header`/`get_lsp_header` stay absent ON
+  PURPOSE even after M8: the header is text prepended to the document ON THE
+  WIRE ONLY, while all six native LSP paths rest on "the server's document
+  IS the editor's document" — a ±H offset tax on every path for a hack no
+  native stack needs (server context belongs in `initializationOptions`, the
+  workspace configuration, or a second document). The honest
+  `AttributeError` stands.
+
+### Changed
+- **The package version has one home now.** `project(qtmonaco-native VERSION
+  …)` had drifted (it still said 1.6.1 while the wheel's `pyproject.toml`
+  rode 1.7.0); both now say **1.8.0**, and the hub's `initialize`
+  `clientInfo.version` is CONFIGURED from `PROJECT_VERSION`
+  (`QMN_PACKAGE_VERSION`, private compile definition on `qmn_glue`) instead
+  of being hand-kept in the source.
+- **The frozen view surface widened ADDITIVELY only** (the Gate-1.5
+  precedent): the `applyTextEdits` door, the six popup doors,
+  `addContextAction`/`contextActionIds` and the stored-configuration doors —
+  no new view mapping or geometry primitive anywhere; popup anchors are the
+  existing `xForCol` + characterRect math.
+
+### Tests & gates
+- ctest **5/5** (`textbuffer`, `diff`, `lsp`, `codeeditor`, `demo`); the
+  `lsp` binary grew 23 → 62 slots across the seven machines (it drives real
+  `CodeEditor`s from machine 4 on, so it is widget-carrying with
+  `QT_QPA_PLATFORM=offscreen`), `tst_codeeditor` 252 → 254.
+- C++ packaging smoke green against the WIDENED export set:
+  `cmake --install` then the external `find_package(qmn)` consumer builds
+  and runs offscreen (41 units, 9 spans).
+- The Python wheel rebuilt from the pinned container: codegen clean (the new
+  doors wrap, nothing in the rejected log), smoke + qtmonaco parity against
+  the auditwheel-REPAIRED `cp310-abi3-manylinux_2_34` wheel with the repo off
+  `sys.path`, one `libQt6Core` in maps.
+- The close-car live-clangd probe (above) run green at HEAD of the car.
+
 ## [1.7.0] — 2026-11-17 — Gate 2 open; the M25 soft-wrap car landed, M10 diff built
 
 ### Added

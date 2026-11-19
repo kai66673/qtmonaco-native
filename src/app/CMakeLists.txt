@@ -26,3 +26,9 @@ add_library(qmn_glue STATIC
 target_include_directories(qmn_glue PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>)
 target_link_libraries(qmn_glue PUBLIC qmn_view qmn_lsp)
+# The initialize clientInfo version the hub announces rides the PACKAGE
+# version: the 1.8.0 close found a hand-maintained literal drifting (the
+# project() line still said 1.6.1 while pyproject rode 1.7.0), so this is
+# configured, not typed.
+target_compile_definitions(qmn_glue PRIVATE
+    QMN_PACKAGE_VERSION="${PROJECT_VERSION}")
