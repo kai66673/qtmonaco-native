@@ -857,7 +857,10 @@ pass VERBATIM (no markdown rendering, PLAN's popup shape); the hover frame is
 the server's `range`, else the word at the caret, against the syncer MIRROR.
 `tst_lsp` grew 62 -> 66 slots on the fakeserver's new `hoveron`/`reqlog`/
 `cancellog`/`completiondelay=` flags (plain-`features` pins byte-identical).
-ACCEPT still stays a further sliver.
+The LIVE demo path shipped with it: `qmn-demo --lsp` (hub OFF by default —
+`tst_demo` never spawns a server; clangd is not a CI guarantee), which wires
+openDocument + `setPopupTriggers(true)` for every c/cpp tab on the hub's
+built-in clangd spec. ACCEPT still stays a further sliver.
 
 **Known pre-existing bug (recorded 2026-11-15, deferred to its own small
 car):** bracketed type-over-selection in `insertTextAtCaret` (the

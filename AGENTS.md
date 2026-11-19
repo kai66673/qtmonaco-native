@@ -56,7 +56,13 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
   lsp/protocol** — `qmn_glue` (STATIC, `LspHub`) links `qmn_view` +
   `qmn_lsp`, is NOT in any export set (app code, package surface unchanged)
   and `tst_lsp` links it. Still no view→lsp arrow anywhere: the hub is a
-  *client* of both sides.
+  *client* of both sides. **Post-1.8.0 sliver (2026-11-19): `qmn_demo_app`
+  links `qmn_glue` PRIVATE too — qmn-demo's `--lsp` door** (built-in clangd
+  spec + `.qmn/lsp.json` + popup triggers on c/cpp tabs). The door is OFF by
+  default and MainWindow.hpp forward-declares `LspHub` behind a `unique_ptr`,
+  so `tst_demo` never sees an lsp type and never spawns a server (clangd is
+  not a CI guarantee; the one demo slot that arms the hub only opens
+  languages NO built-in spec claims).
 - Gate-2 layers (decided 2026-11-15, built with the owning cars — since M10
   and M8 `src/diff/`, `src/protocol/` and `src/lsp/` are CODE, `src/dap/` is
   still a contract until car 4): `src/diff/` — **QtCore ONLY** (line-diff + alignment,

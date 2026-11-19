@@ -357,6 +357,33 @@ private slots:
         window_->closeTabAt(-1);
         QCOMPARE(window_->editorCount(), 1);
     }
+
+    void lspDoorOffByDefaultAndUnclaimedLanguagesNeverSpawn()
+    {
+        // The --lsp door (the M8 popup-trigger demo path): the DEFAULT is
+        // OFF, and this remains the one demo slot that touches the hub at
+        // all — no OTHER drive may spawn a real server (clangd is not a CI
+        // guarantee). Even armed, only languages a built-in spec claims
+        // register: python/txt honestly stay plain editors, so this slot
+        // proves the hub never spawns anything here.
+        QVERIFY(!window_->lspEnabled());
+        QVERIFY(window_->openPath(writeFile(QStringLiteral("plain.txt"), "x")));
+        QVERIFY(!window_->lspEnabled()); // openPath never turns the door on
+
+        window_->setLspEnabled(true);
+        QVERIFY(window_->lspEnabled());
+        QVERIFY(window_->openPath(
+            writeFile(QStringLiteral("unclaimed.py"), "x = 1\n")));
+        window_->closeTabAt(0); // closeDocument for an UNregistered tab:
+                                // the documented no-op
+        QCOMPARE(window_->editorCount(), 1); // the plain.txt tab stays
+        window_->setLspEnabled(false);
+        QVERIFY(!window_->lspEnabled());
+        window_->setLspEnabled(true); // idempotent both ways: never a
+        window_->setLspEnabled(true); // second hub, never an early death
+        window_->setLspEnabled(false);
+        QVERIFY(!window_->lspEnabled());
+    }
 };
 
 QTEST_MAIN(TestDemo)

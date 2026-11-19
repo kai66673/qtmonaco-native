@@ -9,6 +9,8 @@
 
 #include <QMainWindow>
 
+#include <memory>
+
 #include "EditorSettings.hpp"
 
 class QLabel;
@@ -16,15 +18,28 @@ class QTabWidget;
 
 namespace qmn::app {
 
+class LspHub; // app/glue/LspHub.hpp; kept OUT of this header's include set so
+              // tst_demo never learns protocol/lsp types — it only links the
+              // static lib that does (AGENTS: the hub is an app-side client)
+
 class MainWindow : public QMainWindow {
     Q_OBJECT
 public:
     explicit MainWindow(QWidget* parent = nullptr);
+    ~MainWindow() override;
 
     // Reads the file (UTF-8, CRLF/CR normalized to LF) and adds a tab.
     // False + a status-bar message on failure — deliberately NO modal
     // warning, so the harness stays drivable offscreen.
     bool openPath(const QString& path);
+
+    // The --lsp door (the M8 close-train popup-trigger demo path): creates
+    // (or destroys) the LspHub. OFF by DEFAULT is load-bearing: tst_demo
+    // drives this window offscreen and must never spawn a real server. With
+    // a hub, every c/cpp tab gets openDocument + setPopupTriggers(true);
+    // languages no spec claims simply stay plain-editor tabs.
+    void setLspEnabled(bool enabled);
+    bool lspEnabled() const { return hub_ != nullptr; }
 
     // Stores the template AND pushes it to every open editor (the
     // dialog-accept door). Getter = the current template.
@@ -52,6 +67,8 @@ private:
     QLabel* statusLabel_ = nullptr; // permanent status widget
     EditorSettings settings_;       // template for new tabs
     QString lastDir_;               // dialog start dir once a file was picked
+    std::unique_ptr<LspHub> hub_;   // the --lsp door's hub; null = OFF (the
+                                    // DEFAULT: tst_demo never spawns servers)
 };
 
 } // namespace qmn::app

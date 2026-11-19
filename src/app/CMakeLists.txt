@@ -11,6 +11,11 @@ qt_add_library(qmn_demo_app STATIC
     EditorSettingsDialog.cpp
     MainWindow.cpp)
 target_link_libraries(qmn_demo_app PUBLIC qmn_view)
+# The --lsp door (the M8 popup-trigger demo path): MainWindow is a CLIENT of
+# the app-side hub — the AGENTS layering holds (glue is the only app target
+# that knows lsp/protocol; the demo links it PRIVATE, tst_demo never sees an
+# lsp type through MainWindow.hpp, only the hub behind a unique_ptr).
+target_link_libraries(qmn_demo_app PRIVATE qmn_glue)
 
 qt_add_executable(qmn-demo
     demo_main.cpp)

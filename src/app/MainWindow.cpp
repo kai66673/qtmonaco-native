@@ -1,5 +1,6 @@
 #include "MainWindow.hpp"
 
+#include "app/glue/LspHub.hpp"
 #include "EditorSettingsDialog.hpp"
 #include "view/CodeEditor.hpp"
 
@@ -12,6 +13,7 @@
 #include <QStatusBar>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QUrl>
 
 #include <memory>
 
@@ -96,6 +98,37 @@ MainWindow::MainWindow(QWidget* parent)
     updateStatusLabel();
 }
 
+// Defined out of line: the header forward-declares LspHub behind a
+// unique_ptr, so the destruction point must see the complete type (and it
+// also pins WHY the hub must die with the window — its registrations point
+// at the tab editors).
+MainWindow::~MainWindow() = default;
+
+void MainWindow::setLspEnabled(bool enabled)
+{
+    if (enabled == (hub_ != nullptr))
+        return;
+    if (!enabled) {
+        // ~LspHub is the honest teardown (didClose for every document, then
+        // shutdown/exit per server); the popups are view-side, so sweep
+        // them by hand — nobody is left to hide them.
+        for (int i = 0; i < tabs_->count(); ++i) {
+            if (CodeEditor* editor = editorAt(i)) {
+                editor->hideCompletionList();
+                editor->hideHover();
+            }
+        }
+        hub_.reset();
+        statusBar()->showMessage(QStringLiteral("LSP: серверы остановлены"));
+        return;
+    }
+    hub_ = std::make_unique<LspHub>(); // built-in specs only (clangd for
+                                       // c/cpp — the .qmn/lsp.json file, if
+                                       // any, is read once a workspace root
+                                       // exists, see openPath's first tab)
+    statusBar()->showMessage(QStringLiteral("LSP: включён (спеки из коробки)"));
+}
+
 bool MainWindow::openPath(const QString& path)
 {
     QString error;
@@ -174,6 +207,26 @@ void MainWindow::addEditorTab(const QString& path, const QString& text)
 
     connect(raw, &CodeEditor::cursorMoved, this, &MainWindow::updateStatusLabel);
     connect(raw, &CodeEditor::selectionChanged, this, &MainWindow::updateStatusLabel);
+
+    // The --lsp path (the M8 popup-trigger demo): the hub's built-in clangd
+    // spec claims c/cpp; every other language honestly goes unregistered
+    // (openDocument's documented no-op — a python tab stays a plain editor).
+    if (hub_) {
+        if (hub_->workspaceRoot().isEmpty()) {
+            // PLAN's config rule needs the root BEFORE anything starts, and
+            // the first opened file's directory is the honest demo root.
+            hub_->setWorkspaceRoot(QFileInfo(path).absolutePath());
+            hub_->loadConfig(); // <root>/.qmn/lsp.json deep-merges over the
+                                // built-ins; no file is a silent no-op
+        }
+        const QString uri
+            = QUrl::fromLocalFile(QFileInfo(path).absoluteFilePath()).toString();
+        if (hub_->openDocument(raw, uri, language))
+            hub_->setPopupTriggers(raw, true); // completion on typing, hover
+                                               // on idle caret moves (the M8
+                                               // close-train sliver, live)
+    }
+
     tabs_->setCurrentIndex(index); // currentChanged sets title + status
 }
 
@@ -183,6 +236,10 @@ void MainWindow::closeTabAt(int index)
     if (!page)
         return;
     tabs_->removeTab(index); // does NOT delete: the editor does, now
+    if (hub_) // didClose while the server is still alive (the editor's
+              // destroyed() would auto-release too — this is just the
+              // orderly version of it)
+        hub_->closeDocument(qobject_cast<CodeEditor*>(page));
     page->deleteLater();
     setCurrentTabTitle();
     updateStatusLabel();

@@ -22,9 +22,16 @@ int main(int argc, char* argv[])
                       QStringLiteral("Quit automatically after the given delay "
                                      "(headless smoke runs)"),
                       QStringLiteral("ms")});
+    parser.addOption({QStringLiteral("lsp"),
+                      QStringLiteral("Enable the LSP hub: built-in specs "
+                                     "(clangd for c/cpp) + .qmn/lsp.json, "
+                                     "completion/hover popups on typing and "
+                                     "idle caret moves")});
     parser.process(app);
 
     qmn::app::MainWindow window;
+    if (parser.isSet(QStringLiteral("lsp")))
+        window.setLspEnabled(true); // BEFORE the tabs: openPath wires them
     for (const QString& path : parser.positionalArguments())
         window.openPath(path); // CLI failures land in the status bar, like menu opens
     window.show();
