@@ -34,6 +34,7 @@
 #include "lsp/DocumentSyncer.hpp"
 #include "lsp/LspClient.hpp"
 #include "lsp/PositionConverter.hpp"
+#include "lsp/WorkspaceEdit.hpp"
 #include "protocol/JsonFraming.hpp"
 #include "protocol/ProcessTransport.hpp"
 #include "protocol/RpcClient.hpp"
@@ -358,6 +359,34 @@ bool waitUntil(Predicate predicate, int timeoutMs = 8000)
     return predicate();
 }
 
+// Machine 5's server-side verdicts (APPLYREQ-OK, APPLYCHECK-OK, ...) ride the
+// STDERR channel: a machine-5 pin judged by the fakeserver itself, because
+// what the CLIENT answered to a server-primed request is traffic no test on
+// this side can observe. An exit-2 structural lie shows up here as
+// FAKESERVER-FAIL, and the waits below fail with the whole channel in the
+// message.
+bool sawMarker(const QSignalSpy& stderrSpy, const QString& marker)
+{
+    for (const QList<QVariant>& args : stderrSpy)
+        if (args.at(0).toString().contains(marker))
+            return true;
+    return false;
+}
+
+bool waitMarker(const QSignalSpy& stderrSpy, const QString& marker,
+                int timeoutMs = 8000)
+{
+    return waitUntil([&] { return sawMarker(stderrSpy, marker); }, timeoutMs);
+}
+
+QString stderrDump(const QSignalSpy& stderrSpy)
+{
+    QStringList lines;
+    for (const QList<QVariant>& args : stderrSpy)
+        lines << args.at(0).toString();
+    return QStringLiteral("server stderr: [%1]").arg(lines.join(QLatin1String(" | ")));
+}
+
 // The machine-4 harness: the fakeserver spawn bookkeeping of TestHarness, but
 // the LspClients are the HUB's (one per spec, PLAN) and the mode argv comes
 // from the spec the test installs. `crashingSpawns` is the harness-side copy
@@ -432,6 +461,22 @@ struct HubHarness {
     {
         return spawnIndex < spawned.size() ? spawned.at(spawnIndex).exitCode
                                            : -1;
+    }
+};
+
+// Machine-5's reply probe for the hub's feature doors: the handler fires
+// EXACTLY ONCE (the door's own contract), so ONE capture is the whole
+// truth; arrived() distinguishes silence from a refusal.
+struct FeatureProbe {
+    bool arrived = false;
+    qmn::protocol::RpcClient::Reply reply;
+
+    qmn::app::LspHub::FeatureHandler handler()
+    {
+        return [this](const qmn::protocol::RpcClient::Reply& r) {
+            arrived = true;
+            reply = r;
+        };
     }
 };
 
@@ -2437,6 +2482,1213 @@ private slots:
             = assertSyncModel(client, uriC, third.toPlainText(), 1);
         QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
                  qPrintable(modelDump(verdict)));
+    }
+
+    // ------------------------------------------------- M5: the write path
+    // Machine 5's contract: the feature doors' FRAMES (what leaves the hub),
+    // the WorkspaceEdit decoder (headless, no session), and the applier —
+    // ONE undo group per document, all-or-nothing refusals, and the
+    // server-primed applyEdit round trip the fakeserver judges from ITS side.
+
+    // The decoder is a pure function over a QJsonValue (QtCore-only layer):
+    // no hub, no server, no view. Every shape, every refusal reason the
+    // applier will quote, and the pickiness that keeps the applier from ever
+    // guessing. (Every literal here is built one insert() at a time: a
+    // 6-deep brace-init list is how a brace-count bug is born.)
+    void workspaceEditDecoderWalksAllFourShapesAndReportsProblems()
+    {
+        using namespace qmn::lsp;
+        const auto posObj = [](int line, int character) {
+            return QJsonObject{{QStringLiteral("line"), line},
+                               {QStringLiteral("character"), character}};
+        };
+        const auto rangeObj = [&](int sl, int sc, int el, int ec) {
+            return QJsonObject{{QStringLiteral("start"), posObj(sl, sc)},
+                               {QStringLiteral("end"), posObj(el, ec)}};
+        };
+        const auto editObj = [&](int sl, int sc, int el, int ec,
+                                 const QString& text) {
+            QJsonObject edit;
+            edit.insert(QStringLiteral("range"), rangeObj(sl, sc, el, ec));
+            edit.insert(QStringLiteral("newText"), text);
+            return edit;
+        };
+        const auto changesOf = [](const QStringList& uris,
+                                  const QVector<QJsonArray>& edits) {
+            QJsonObject changes;
+            for (int i = 0; i < uris.size(); ++i)
+                changes.insert(uris.at(i), edits.at(i));
+            return changes;
+        };
+        const auto editMap = [&](const QStringList& uris,
+                                 const QVector<QJsonArray>& edits) {
+            return QJsonObject{{QStringLiteral("changes"),
+                                changesOf(uris, edits)}};
+        };
+
+        // Shape 1: the "changes" map. QMap-sorted key order is the
+        // applier's deterministic document sequence, pinned here.
+        {
+            const DecodedWorkspaceEdit d = WorkspaceEditWire::decode(
+                editMap({QStringLiteral("file:///b.py"),
+                         QStringLiteral("file:///a.py")},
+                        {QJsonArray{editObj(1, 0, 1, 2, QStringLiteral("B"))},
+                         QJsonArray{editObj(0, 0, 0, 1, QStringLiteral("A"))}}));
+            QVERIFY(d.wellFormed());
+            QCOMPARE(int(d.textEdits.size()), 2);
+            QCOMPARE(d.textEdits.at(0).uri,
+                     QStringLiteral("file:///a.py")); // QMap order
+            QCOMPARE(d.textEdits.at(0).endCol, 1);
+            QCOMPARE(d.textEdits.at(0).documentVersion, -1); // map: unpinned
+            QCOMPARE(d.textEdits.at(1).uri, QStringLiteral("file:///b.py"));
+        }
+        // Shapes 1+2 together: documentChanges land AFTER "changes" (the
+        // spec's own ordering), and the version pin rides every record of a
+        // versioned TextDocumentEdit...
+        {
+            QJsonObject doc;
+            doc.insert(QStringLiteral("uri"), QStringLiteral("file:///b.py"));
+            doc.insert(QStringLiteral("version"), 7);
+            QJsonObject textEditEntry;
+            textEditEntry.insert(QStringLiteral("textDocument"), doc);
+            textEditEntry.insert(
+                QStringLiteral("edits"),
+                QJsonArray{editObj(2, 1, 2, 3, QStringLiteral("pinned"))});
+            QJsonObject edit = editMap(
+                {QStringLiteral("file:///a.py")},
+                {QJsonArray{editObj(0, 0, 0, 0, QStringLiteral("first"))}});
+            edit.insert(QStringLiteral("documentChanges"),
+                        QJsonArray{textEditEntry});
+            const DecodedWorkspaceEdit d = WorkspaceEditWire::decode(edit);
+            QVERIFY(d.wellFormed());
+            QCOMPARE(int(d.textEdits.size()), 2);
+            QCOMPARE(d.textEdits.at(0).uri, QStringLiteral("file:///a.py"));
+            QCOMPARE(d.textEdits.at(0).documentVersion, -1);
+            QCOMPARE(d.textEdits.at(1).uri, QStringLiteral("file:///b.py"));
+            QCOMPARE(d.textEdits.at(1).documentVersion, 7);
+        }
+        // ...file operations decode into the structure records the applier
+        // refuses whole, and an "operations" edit (LSP 3.18) is v1-over.
+        {
+            QJsonArray entries;
+            QJsonObject create;
+            create.insert(QStringLiteral("kind"), QStringLiteral("create"));
+            create.insert(QStringLiteral("uri"), QStringLiteral("n.py"));
+            entries.append(create);
+            QJsonObject rename;
+            rename.insert(QStringLiteral("kind"), QStringLiteral("rename"));
+            rename.insert(QStringLiteral("oldUri"), QStringLiteral("o.py"));
+            rename.insert(QStringLiteral("newUri"), QStringLiteral("m.py"));
+            entries.append(rename);
+            QJsonObject del;
+            del.insert(QStringLiteral("kind"), QStringLiteral("delete"));
+            del.insert(QStringLiteral("uri"), QStringLiteral("d.py"));
+            entries.append(del);
+            QJsonObject unannotated; // versioned but "operations", not "edits"
+            QJsonObject versionedDoc;
+            versionedDoc.insert(QStringLiteral("uri"), QStringLiteral("p.py"));
+            versionedDoc.insert(QStringLiteral("version"), 3);
+            unannotated.insert(QStringLiteral("textDocument"), versionedDoc);
+            unannotated.insert(QStringLiteral("operations"), QJsonArray{});
+            entries.append(unannotated);
+            QJsonObject plainDoc;
+            plainDoc.insert(QStringLiteral("uri"), QStringLiteral("q.py"));
+            QJsonObject plain; // NO version: the edits still apply, unpinned
+            plain.insert(QStringLiteral("textDocument"), plainDoc);
+            plain.insert(QStringLiteral("edits"),
+                         QJsonArray{editObj(0, 0, 0, 0,
+                                            QStringLiteral("q-edit"))});
+            entries.append(plain);
+            QJsonObject bogus;
+            bogus.insert(QStringLiteral("kind"), QStringLiteral("frob"));
+            entries.append(bogus);
+            QJsonObject edit;
+            edit.insert(QStringLiteral("documentChanges"), entries);
+
+            const DecodedWorkspaceEdit d = WorkspaceEditWire::decode(edit);
+            QCOMPARE(int(d.fileOperations.size()), 3);
+            QCOMPARE(int(d.fileOperations.at(0).kind),
+                     int(WireFileOperation::Kind::Create));
+            QCOMPARE(d.fileOperations.at(0).newUri, QStringLiteral("n.py"));
+            QCOMPARE(int(d.fileOperations.at(1).kind),
+                     int(WireFileOperation::Kind::Rename));
+            QCOMPARE(d.fileOperations.at(1).oldUri, QStringLiteral("o.py"));
+            QCOMPARE(int(d.fileOperations.at(2).kind),
+                     int(WireFileOperation::Kind::Delete));
+            QCOMPARE(d.fileOperations.at(2).oldUri, QStringLiteral("d.py"));
+            QVERIFY(d.fileOperations.at(2).newUri.isEmpty());
+            QVERIFY(d.fileOperations.at(0).oldUri.isEmpty());
+            QCOMPARE(int(d.textEdits.size()), 1); // "operations" dropped, q.py kept
+            QCOMPARE(d.textEdits.at(0).uri, QStringLiteral("q.py"));
+            QCOMPARE(d.textEdits.at(0).documentVersion, -1); // unversioned doc
+            QCOMPARE(int(d.problems.size()), 2); // "operations" + frob
+            const QStringList kinds = d.unsupportedKinds();
+            QCOMPARE(int(kinds.size()), 3);
+            QVERIFY(kinds.at(0).startsWith(QStringLiteral("create-file")));
+            QVERIFY(kinds.at(1).startsWith(QStringLiteral("rename-file")));
+            QVERIFY(kinds.at(2).startsWith(QStringLiteral("delete-file")));
+        }
+        // Picky legs: a truncated Position or a missing newText is a
+        // PROBLEM, never a silent line-0 edit. A {} is the legal EMPTY edit;
+        // a value that carries neither map is a problem.
+        {
+            QJsonObject truncatedRange; // "end" is simply gone
+            truncatedRange.insert(QStringLiteral("start"), posObj(0, 0));
+            QJsonObject truncated;
+            truncated.insert(QStringLiteral("range"), truncatedRange);
+            truncated.insert(QStringLiteral("newText"), QStringLiteral("x"));
+            const DecodedWorkspaceEdit bad = WorkspaceEditWire::decode(
+                editMap({QStringLiteral("a.py")}, {QJsonArray{truncated}}));
+            QCOMPARE(int(bad.textEdits.size()), 0);
+            QCOMPARE(int(bad.problems.size()), 1);
+            QVERIFY(bad.problems.at(0).contains(QStringLiteral("Position pair")));
+
+            QJsonObject noText; // a complete Range, no newText at all
+            noText.insert(QStringLiteral("range"), rangeObj(0, 0, 0, 0));
+            const DecodedWorkspaceEdit missing = WorkspaceEditWire::decode(
+                editMap({QStringLiteral("a.py")}, {QJsonArray{noText}}));
+            QCOMPARE(int(missing.problems.size()), 1);
+            QVERIFY(missing.problems.at(0).contains(QStringLiteral("newText")));
+
+            const DecodedWorkspaceEdit empty
+                = WorkspaceEditWire::decode(QJsonObject{});
+            QVERIFY(empty.wellFormed()); // {} = nothing to do, nothing refused
+            QCOMPARE(int(empty.textEdits.size()), 0);
+
+            QJsonObject unrelated;
+            unrelated.insert(QStringLiteral("note"), QStringLiteral("hello"));
+            const DecodedWorkspaceEdit neither = WorkspaceEditWire::decode(
+                unrelated);
+            QCOMPARE(int(neither.problems.size()), 1);
+            QVERIFY(neither.problems.at(0).contains(QStringLiteral("neither")));
+
+            const DecodedWorkspaceEdit notObject
+                = WorkspaceEditWire::decode(QJsonValue(42));
+            QCOMPARE(int(notObject.problems.size()), 1);
+        }
+        // Shape 3: the codeAction door. `edit` WINS over the command shape;
+        // the command NAME is not matched (clangd tweak names change — the
+        // payload carries the work); an action with neither is a problem.
+        {
+            QJsonObject both;
+            both.insert(QStringLiteral("edit"),
+                        editMap({QStringLiteral("e.py")},
+                                {QJsonArray{editObj(0, 0, 0, 0,
+                                                    QStringLiteral("from-edit"))}}));
+            QJsonObject hiddenEdit = editMap(
+                {QStringLiteral("c.py")},
+                {QJsonArray{editObj(0, 0, 0, 0,
+                                    QStringLiteral("from-command"))}});
+            QJsonObject bothCommand;
+            bothCommand.insert(QStringLiteral("title"), QStringLiteral("t"));
+            bothCommand.insert(QStringLiteral("command"),
+                               QStringLiteral("clangd.tweak"));
+            bothCommand.insert(QStringLiteral("arguments"),
+                               QJsonArray{hiddenEdit});
+            both.insert(QStringLiteral("command"), bothCommand);
+            const DecodedWorkspaceEdit wins
+                = WorkspaceEditWire::decodeCodeAction(both);
+            QCOMPARE(int(wins.textEdits.size()), 1);
+            QCOMPARE(wins.textEdits.at(0).uri, QStringLiteral("e.py"));
+            QCOMPARE(wins.textEdits.at(0).newText,
+                     QStringLiteral("from-edit"));
+
+            QJsonObject commandOnly;
+            QJsonObject command;
+            command.insert(QStringLiteral("arguments"), QJsonArray{hiddenEdit});
+            commandOnly.insert(QStringLiteral("command"), command);
+            const DecodedWorkspaceEdit commandShape
+                = WorkspaceEditWire::decodeCodeAction(commandOnly);
+            QVERIFY(commandShape.wellFormed());
+            QCOMPARE(int(commandShape.textEdits.size()), 1);
+            QCOMPARE(commandShape.textEdits.at(0).uri, QStringLiteral("c.py"));
+
+            const DecodedWorkspaceEdit bare = WorkspaceEditWire::decodeCodeAction(
+                QJsonObject{{QStringLiteral("title"),
+                             QStringLiteral("nothing")}});
+            QCOMPARE(int(bare.problems.size()), 1);
+            QVERIFY(bare.problems.at(0).contains(QStringLiteral("neither")));
+        }
+        // Shape 4: the BARE TextEdit[] a formatting reply carries. null is
+        // the spec's own "nothing changed" (legal, empty); a non-array is a
+        // problem; entries get the CALLER's uri and no version pin.
+        {
+            const DecodedWorkspaceEdit nothing
+                = WorkspaceEditWire::decodeTextEditList(
+                    QJsonValue(QJsonValue::Null), QStringLiteral("f.py"));
+            QVERIFY(nothing.wellFormed());
+            QCOMPARE(int(nothing.textEdits.size()), 0);
+
+            const DecodedWorkspaceEdit list = WorkspaceEditWire::decodeTextEditList(
+                QJsonArray{editObj(0, 0, 0, 0, QStringLiteral("# head\n")),
+                           editObj(2, 4, 2, 4, QStringLiteral(" // tail"))},
+                QStringLiteral("f.py"));
+            QVERIFY(list.wellFormed());
+            QCOMPARE(int(list.textEdits.size()), 2);
+            QCOMPARE(list.textEdits.at(1).uri, QStringLiteral("f.py"));
+            QCOMPARE(list.textEdits.at(1).endLine, 2);
+            QCOMPARE(list.textEdits.at(1).documentVersion, -1);
+
+            const DecodedWorkspaceEdit notArray
+                = WorkspaceEditWire::decodeTextEditList(
+                    QJsonObject{}, QStringLiteral("f.py"));
+            QCOMPARE(int(notArray.problems.size()), 1);
+            QVERIFY(notArray.problems.at(0).contains(
+                QStringLiteral("not an array")));
+
+            const DecodedWorkspaceEdit nameless
+                = WorkspaceEditWire::decodeTextEditList(
+                    QJsonArray{editObj(0, 0, 0, 0, QStringLiteral("x"))},
+                    QString());
+            QCOMPARE(int(nameless.textEdits.size()), 0);
+            QCOMPARE(int(nameless.problems.size()), 1);
+            QVERIFY(nameless.problems.at(0).contains(
+                QStringLiteral("names no document")));
+        }
+    }
+
+    // The gates refuse LOCALLY with the codes a SERVER would have used: the
+    // handler fires on the spot, the door returns 0, and NOTHING reaches the
+    // wire. The features-mode fakeserver makes this observable from the
+    // other side too: its hoverProvider is FALSE, so a hover request that
+    // reached it would exit 2 and kill the session.
+    void featureDoorsRefuseLocallyWhenNotRegisteredNoServerOrNoProvider()
+    {
+        using namespace qmn::lsp;
+
+        { // an editor the hub never saw
+            HubHarness h(QStringList{QStringLiteral("sync"),
+                                     QStringLiteral("utf-16")});
+            h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+            qmn::view::CodeEditor editor;
+            QVERIFY(h.hub.syncerFor(&editor) == nullptr);
+            FeatureProbe probe;
+            QCOMPARE(h.hub.requestHover(&editor, qmn::view::TextPosition(0, 0),
+                                        probe.handler()),
+                     qint64(0));
+            QVERIFY(probe.arrived);
+            QVERIFY(probe.reply.isError);
+            QCOMPARE(probe.reply.code,
+                     int(LspClient::kWireServerNotInitialized));
+        }
+        { // a language no server spec claims: openDocument is the honest no-op
+            HubHarness h(QStringList{QStringLiteral("sync"),
+                                     QStringLiteral("utf-16")});
+            h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+            qmn::view::CodeEditor editor;
+            editor.setPlainText(QStringLiteral("no server for this one"));
+            QVERIFY(!h.hub.openDocument(&editor,
+                                        QStringLiteral("file:///m5-nospec.txt"),
+                                        QStringLiteral("plaintext")));
+            FeatureProbe probe;
+            QCOMPARE(h.hub.requestDefinition(&editor,
+                                             qmn::view::TextPosition(0, 0),
+                                             probe.handler()),
+                     qint64(0));
+            QVERIFY(probe.arrived);
+            QCOMPARE(probe.reply.code,
+                     int(LspClient::kWireServerNotInitialized));
+            QCOMPARE(h.spawnCount, 0); // and still nothing was ever spawned
+        }
+        { // a live session, but the capabilities do not offer this provider
+            HubHarness h(QStringList{QStringLiteral("sync"),
+                                     QStringLiteral("utf-16")});
+            h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+            h.hub.setDebounceMs(5000);
+            qmn::view::CodeEditor editor;
+            editor.setLanguage(QStringLiteral("python"));
+            editor.setPlainText(QStringLiteral("one\ntwo\nthree"));
+            QVERIFY(h.hub.openDocument(&editor,
+                                       QStringLiteral("file:///m5-gate.py"),
+                                       QStringLiteral("python")));
+            auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+            QVERIFY(client);
+            QVERIFY(waitReady(client));
+            // hoverProvider:true is the SYNC-mode set: the door WORKS (a
+            // reply arrives, not a refusal)...
+            FeatureProbe hover;
+            QVERIFY(h.hub.requestHover(&editor, qmn::view::TextPosition(0, 1),
+                                       hover.handler())
+                    > 0);
+            QVERIFY2(waitUntil([&hover] { return hover.arrived; }),
+                     "plain-sync hover never got its echo reply");
+            // ...while formatting and rename were never advertised: -32601.
+            FeatureProbe formatting;
+            QCOMPARE(h.hub.requestFormatting(&editor, formatting.handler()),
+                     qint64(0));
+            QVERIFY(formatting.arrived);
+            QVERIFY(formatting.reply.isError);
+            QCOMPARE(formatting.reply.code, -32601);
+            FeatureProbe rename;
+            QCOMPARE(h.hub.requestRename(&editor,
+                                         qmn::view::TextPosition(0, 1),
+                                         QStringLiteral("x"), rename.handler()),
+                     qint64(0));
+            QVERIFY(rename.arrived);
+            QCOMPARE(rename.reply.code, -32601);
+        }
+        { // the features-mode set: hoverProvider FALSE (the hub must refuse
+          // locally; the fakeserver exits 2 if anything reaches it) and a
+          // CLOSED document has no live session at all
+            HubHarness h(QStringList{QStringLiteral("sync"),
+                                     QStringLiteral("utf-16"),
+                                     QStringLiteral("features")});
+            h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+            h.hub.setDebounceMs(5000);
+            qmn::view::CodeEditor editor;
+            editor.setLanguage(QStringLiteral("python"));
+            editor.setPlainText(QStringLiteral("one\ntwo\nthree"));
+            QVERIFY(h.hub.openDocument(&editor,
+                                       QStringLiteral("file:///m5-off.py"),
+                                       QStringLiteral("python")));
+            auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+            QVERIFY(client);
+            QVERIFY(waitReady(client));
+            FeatureProbe hover;
+            QCOMPARE(h.hub.requestHover(&editor, qmn::view::TextPosition(0, 1),
+                                        hover.handler()),
+                     qint64(0));
+            QVERIFY(hover.arrived);
+            QCOMPARE(hover.reply.code, -32601);
+            h.hub.closeDocument(&editor);
+            FeatureProbe def;
+            QCOMPARE(h.hub.requestDefinition(&editor,
+                                             qmn::view::TextPosition(0, 1),
+                                             def.handler()),
+                     qint64(0));
+            QVERIFY(def.arrived);
+            QCOMPARE(def.reply.code,
+                     int(LspClient::kWireServerNotInitialized));
+        }
+    }
+
+    // THE machine-5 frame pin: the hub builds wire Positions against the
+    // syncer's MIRROR, and the fakeserver decodes them with its OWN frame
+    // table and reports the offset it landed on. A one-unit encoder bug in
+    // any negotiated encoding shows up as an off-target proof, never a
+    // matching pair of the same bug.
+    void featureFrameMatchesMirrorAcrossEncodings()
+    {
+        const QString text = QStringLiteral("one\ntwo\nx")
+            + QString::fromUtf8("\xc3\xa9\xf0\x9f\x98\x80") // é + one astral
+            + QStringLiteral("yz");
+        const char* encodings[] = {"utf-16", "utf-8", "utf-32"};
+        // model-frame truth, computed the naive way (QString indices):
+        // model-frame truth (QString/utf-16 indices): "one" is 0..3, "two"
+        // starts at 4, line 2 starts at 8 and is x(8) é(9) U+1F600(10,11)
+        // y(12) z(13) -- col 4 lands just PAST the surrogate pair.
+        const QVector<int> expectedOff{3, 5, 12};
+        const QVector<qmn::view::TextPosition> carets{
+            qmn::view::TextPosition(0, 3), qmn::view::TextPosition(1, 1),
+            qmn::view::TextPosition(2, 4)};
+
+        for (const char* enc : encodings) {
+            HubHarness h(QStringList{QStringLiteral("sync"),
+                                     QString::fromLatin1(enc),
+                                     QStringLiteral("features")});
+            h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+            h.hub.setDebounceMs(5000);
+            qmn::view::CodeEditor editor;
+            editor.setLanguage(QStringLiteral("python"));
+            editor.setPlainText(text);
+            const QString uri = QStringLiteral("file:///m5-frame-%1.py")
+                                    .arg(QLatin1String(enc));
+            QVERIFY(h.hub.openDocument(&editor, uri,
+                                       QStringLiteral("python")));
+            auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+            QVERIFY(client);
+            QVERIFY2(waitReady(client), qPrintable(uri));
+            QCOMPARE(client->positionEncoding(),
+                     QString::fromLatin1(enc)); // the negotiated frame
+
+            for (int i = 0; i < carets.size(); ++i) {
+                FeatureProbe probe;
+                QVERIFY(h.hub.requestCompletion(&editor, carets.at(i),
+                                                probe.handler())
+                        > 0);
+                QVERIFY2(waitUntil([&probe] { return probe.arrived; }),
+                         qPrintable(QStringLiteral("%1 completion %2 never "
+                                                   "answered")
+                                        .arg(QLatin1String(enc)).arg(i)));
+                QVERIFY2(!probe.reply.isError,
+                         qPrintable(QStringLiteral("%1 reply error: %2")
+                                        .arg(QLatin1String(enc),
+                                             probe.reply.message)));
+                const QJsonArray items
+                    = probe.reply.result.toObject()
+                          .value(QStringLiteral("items")).toArray();
+                bool sawOff = false;
+                for (const QJsonValue& item : items) {
+                    const QString label
+                        = item.toObject().value(QStringLiteral("label"))
+                              .toString();
+                    if (!label.startsWith(QStringLiteral("off=")))
+                        continue;
+                    sawOff = true;
+                    QCOMPARE(label.mid(4).toInt(), expectedOff.at(i));
+                }
+                QVERIFY2(sawOff, qPrintable(QStringLiteral(
+                                      "%1 completion carried no offset proof")
+                                                .arg(QLatin1String(enc))));
+            }
+
+            // The definition reply rides the SAME frame the other way: the
+            // server reports its OWN decode as a Location, and decoding that
+            // Location back through the hub's converter table must land on
+            // the model word bounds exactly.
+            FeatureProbe probe;
+            QVERIFY(h.hub.requestDefinition(&editor,
+                                            qmn::view::TextPosition(1, 1),
+                                            probe.handler())
+                    > 0);
+            QVERIFY2(waitUntil([&probe] { return probe.arrived; }),
+                     "definition never answered");
+            QVERIFY(!probe.reply.isError);
+            const QJsonArray locations = probe.reply.result.toArray();
+            QCOMPARE(int(locations.size()), 1);
+            QCOMPARE(locations.at(0).toObject().value(QStringLiteral("uri"))
+                         .toString(),
+                     uri);
+            const QJsonObject range
+                = locations.at(0).toObject().value(QStringLiteral("range"))
+                      .toObject();
+            const QString mirror = h.hub.syncerFor(&editor)->mirrorText();
+            const auto encKind
+                = qmn::lsp::PositionConverter::fromWire(
+                    QString::fromLatin1(enc));
+            const qmn::lsp::ModelPosition from
+                = qmn::lsp::PositionConverter::toModelPosition(
+                    mirror,
+                    range.value(QStringLiteral("start"))
+                        .toObject()
+                        .value(QStringLiteral("line"))
+                        .toInt(),
+                    range.value(QStringLiteral("start"))
+                        .toObject()
+                        .value(QStringLiteral("character"))
+                        .toInt(),
+                    encKind);
+            const qmn::lsp::ModelPosition to
+                = qmn::lsp::PositionConverter::toModelPosition(
+                    mirror,
+                    range.value(QStringLiteral("end"))
+                        .toObject()
+                        .value(QStringLiteral("line"))
+                        .toInt(),
+                    range.value(QStringLiteral("end"))
+                        .toObject()
+                        .value(QStringLiteral("character"))
+                        .toInt(),
+                    encKind);
+            QCOMPARE(int(from.line), 1); // the word "two"
+            QCOMPARE(int(from.col), 0);
+            QCOMPARE(int(to.line), 1);
+            QCOMPARE(int(to.col), 3);
+            const int fromOff = qmn::lsp::PositionConverter::fromModelPosition(
+                mirror, from);
+            const int toOff = qmn::lsp::PositionConverter::fromModelPosition(
+                mirror, to);
+            QCOMPARE(mirror.mid(fromOff, toOff - fromOff),
+                     QStringLiteral("two"));
+        }
+    }
+
+    // Completion is the ONE feature whose reply is a LIST OF DATA the app
+    // hands straight back (resolve's params ARE the item), so the round trip
+    // is part of the contract: what the list sent, the resolve must survive.
+    void completionAndResolveRideTheItemRoundTrip()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        const QString text = QStringLiteral("alpha\nbeta");
+        qmn::view::CodeEditor editor;
+        editor.setPlainText(text);
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///m5-compl.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+
+        // The Invoked form: triggerKind 1 and NO triggerCharacter (the
+        // fakeserver exits 2 if a character rides kind 1). Its labels are the
+        // frame pin (offset 2 in the mirror) plus the kind echo.
+        FeatureProbe invoked;
+        QVERIFY(h.hub.requestCompletion(&editor, qmn::view::TextPosition(0, 2),
+                                        invoked.handler())
+                > 0);
+        QVERIFY2(waitUntil([&] { return invoked.arrived; }),
+                 "Invoked completion never answered");
+        QVERIFY(!invoked.reply.isError);
+        const QJsonObject list = invoked.reply.result.toObject();
+        QVERIFY(!list.value(QStringLiteral("isIncomplete")).toBool());
+        const QJsonArray items = list.value(QStringLiteral("items")).toArray();
+        QCOMPARE(int(items.size()), 3); // alpha, tk=1, off= — no tc= item
+        QCOMPARE(items.at(0).toObject().value(QStringLiteral("label")).toString(),
+                 QStringLiteral("alpha"));
+        QCOMPARE(items.at(0).toObject().value(QStringLiteral("kind")).toInt(),
+                 14);
+        QVERIFY(items.at(0).toObject().value(QStringLiteral("data")).isObject());
+        QCOMPARE(items.at(1).toObject().value(QStringLiteral("label")).toString(),
+                 QStringLiteral("tk=1"));
+        QCOMPARE(items.at(2).toObject().value(QStringLiteral("label")).toString(),
+                 QStringLiteral("off=2"));
+
+        // The trigger-character form: kind 2 carries the character, and the
+        // server refuses a character it never advertised.
+        FeatureProbe typed;
+        QVERIFY(h.hub.requestCompletion(&editor, qmn::view::TextPosition(1, 1),
+                                        typed.handler(),
+                                        QStringLiteral("."))
+                > 0);
+        QVERIFY2(waitUntil([&] { return typed.arrived; }),
+                 "trigger-character completion never answered");
+        QVERIFY(!typed.reply.isError);
+        const QJsonArray typedItems
+            = typed.reply.result.toObject().value(QStringLiteral("items"))
+                  .toArray();
+        QCOMPARE(int(typedItems.size()), 4); // alpha, tk=2, tc=., off=
+        QCOMPARE(typedItems.at(1).toObject().value(QStringLiteral("label"))
+                     .toString(),
+                 QStringLiteral("tk=2"));
+        QCOMPARE(typedItems.at(2).toObject().value(QStringLiteral("label"))
+                     .toString(),
+                 QStringLiteral("tc=."));
+        QCOMPARE(typedItems.at(3).toObject().value(QStringLiteral("label"))
+                     .toString(),
+                 QStringLiteral("off=7")); // line 1 starts at 6
+
+        // completionItem/resolve: the app hands back the item the LIST sent,
+        // and the server refuses an item that lost the "data" it was given —
+        // so this round trip is pinned from both ends.
+        const QJsonObject item = items.at(0).toObject();
+        FeatureProbe resolved;
+        QVERIFY(h.hub.resolveCompletionItem(&editor, item, resolved.handler())
+                > 0);
+        QVERIFY2(waitUntil([&] { return resolved.arrived; }),
+                 "completionItem/resolve never answered");
+        QVERIFY2(!resolved.reply.isError,
+                 qPrintable(resolved.reply.message));
+        const QJsonObject filled = resolved.reply.result.toObject();
+        QCOMPARE(filled.value(QStringLiteral("label")).toString(),
+                 QStringLiteral("alpha")); // the SAME item, filled in
+        QCOMPARE(filled.value(QStringLiteral("kind")).toInt(), 14);
+        QCOMPARE(filled.value(QStringLiteral("detail")).toString(),
+                 QStringLiteral("resolved:alpha"));
+        QCOMPARE(filled.value(QStringLiteral("documentation")).toString(),
+                 QStringLiteral("docs for alpha"));
+
+        // A feature REPLY is not an edit: the document did not move, and no
+        // didChange burned a version on the way.
+        QCOMPARE(editor.toPlainText(), text);
+        QCOMPARE(h.hub.syncerFor(&editor)->version(), qint64(0));
+    }
+
+    // The NESTED capability gate: completionProvider WITHOUT resolveProvider
+    // must still open the completion door, and must refuse the resolve door
+    // LOCALLY — the fakeserver exits 2 if a resolve ever reaches it, so the
+    // session being alive afterwards is the proof nothing went out.
+    void nestedResolveRefusesLocallyWhenTheProviderOmitsIt()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("completiononly")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setPlainText(QStringLiteral("alpha\nbeta"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///m5-resolve.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+
+        const QJsonObject capabilities = client->serverCapabilities();
+        QVERIFY(capabilities.contains(QStringLiteral("completionProvider")));
+        QVERIFY(!capabilities.contains(QStringLiteral("definitionProvider")));
+        QVERIFY(!capabilities.value(QStringLiteral("completionProvider"))
+                     .toObject()
+                     .contains(QStringLiteral("resolveProvider")));
+
+        FeatureProbe completion;
+        QVERIFY(h.hub.requestCompletion(&editor, qmn::view::TextPosition(0, 0),
+                                        completion.handler())
+                > 0);
+        QVERIFY2(waitUntil([&] { return completion.arrived; }),
+                 "the advertised half of completionProvider never answered");
+        QVERIFY(!completion.reply.isError);
+
+        // The un-advertised nested half: refused on the spot, code -32601, id
+        // 0 (nothing went out to wait for).
+        const QJsonObject item
+            = completion.reply.result.toObject()
+                  .value(QStringLiteral("items"))
+                  .toArray()
+                  .at(0)
+                  .toObject();
+        FeatureProbe resolve;
+        QCOMPARE(h.hub.resolveCompletionItem(&editor, item, resolve.handler()),
+                 qint64(0));
+        QVERIFY(resolve.arrived);
+        QVERIFY(resolve.reply.isError);
+        QCOMPARE(resolve.reply.code, -32601);
+        QVERIFY(resolve.reply.message.contains(
+            QStringLiteral("completionProvider.resolveProvider")));
+
+        // The tripwire's other half: the server is still standing, still
+        // Ready, still holding this document open — a resolve that had
+        // reached it would have killed the session (exit 2).
+        QVERIFY(client->isReady());
+        QCOMPARE(serverDocumentCount(client), 1);
+    }
+
+    // Formatting answers a BARE TextEdit[] — no uri, no version — so the
+    // document comes from the EDITOR the app asked about. The applier door's
+    // whole chain: the options pin (SERVER-side, exit 2), the shape, the
+    // bottom-up walk, and the one undo group that reverses both edits at
+    // once.
+    void formattingReplyAppliesAsOneUndoGroup()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        const QString text = QStringLiteral("alpha\nbeta\ngamma");
+        const QString uri = QStringLiteral("file:///m5-fmt.py");
+        qmn::view::CodeEditor editor;
+        editor.setPlainText(text);
+
+        // A bare TextEdit[] names no document unless the hub knows the
+        // editor: refused with a reason, never applied to "the last document".
+        qmn::view::CodeEditor stranger;
+        stranger.setPlainText(QStringLiteral("never registered"));
+        const qmn::app::LspHub::ApplyReport homeless
+            = h.hub.applyTextEditList(&stranger, QJsonArray{});
+        QVERIFY(!homeless.applied);
+        QCOMPARE(int(homeless.refused.size()), 1);
+        QVERIFY(homeless.refused.at(0).contains(
+            QStringLiteral("not registered with the hub")));
+
+        QVERIFY(h.hub.openDocument(&editor, uri, QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        // The pump discipline: every didChange is the TEST's own flush. The
+        // debounce is raised and the typing cap above the drill's length, so
+        // no unsolicited sync can jump the version pins below.
+        qmn::lsp::DocumentSyncer* syncer = h.hub.syncerFor(&editor);
+        QVERIFY(syncer);
+        syncer->setDebounceMs(5000);
+        syncer->setTypingCapMs(20000);
+
+        FeatureProbe fmt;
+        QVERIFY(h.hub.requestFormatting(&editor, fmt.handler()) > 0);
+        QVERIFY2(waitUntil([&] { return fmt.arrived; }),
+                 "formatting never answered");
+        QVERIFY2(!fmt.reply.isError, qPrintable(fmt.reply.message));
+        QVERIFY2(fmt.reply.result.isArray(),
+                 "the formatting result is not the spec's bare TextEdit[]");
+        QCOMPARE(int(fmt.reply.result.toArray().size()), 2);
+
+        // The spec's own "nothing changed": a null reply is the legal EMPTY
+        // list — applied, with nothing to do.
+        const qmn::app::LspHub::ApplyReport nothing
+            = h.hub.applyTextEditList(&editor, QJsonValue(QJsonValue::Null),
+                                      client);
+        QVERIFY(nothing.applied);
+        QCOMPARE(nothing.documentsChanged, 0);
+        QCOMPARE(nothing.editsApplied, 0);
+        QVERIFY(nothing.refused.isEmpty());
+        QCOMPARE(editor.toPlainText(), text);
+
+        const qmn::app::LspHub::ApplyReport report
+            = h.hub.applyTextEditList(&editor, fmt.reply.result, client);
+        QVERIFY2(report.applied,
+                 qPrintable(QStringLiteral("formatting refused: %1")
+                                .arg(report.refused.join(QLatin1String("; ")))));
+        QCOMPARE(report.documentsChanged, 1);
+        QCOMPARE(report.editsApplied, 2);
+        QVERIFY(report.refused.isEmpty());
+        const QString formatted = QStringLiteral("# fmt\n") + text
+            + QStringLiteral(" // fmt");
+        QCOMPARE(editor.toPlainText(), formatted);
+
+        // ONE undo group: the whole format is one user action, and the redo
+        // replays it as one.
+        editor.undo();
+        QCOMPARE(editor.toPlainText(), text);
+        QVERIFY(!editor.canUndo()); // the format was the ONLY step in the stack
+        QVERIFY(editor.canRedo());
+        editor.redo();
+        QCOMPARE(editor.toPlainText(), formatted);
+        editor.undo();
+
+        // The mirror followed: the applier's endServerEdit full sync carried
+        // the formatted text (v1) — asked BEFORE the undo's deltas go out, so
+        // the stream's own ordering IS the synchronization — and the undo's
+        // delta stream carried the original back (v2). The server's own model
+        // verdicts, not our mirror.
+        QJsonObject verdict = assertSyncModel(client, uri, formatted, 1);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        syncer->flush();
+        verdict = assertSyncModel(client, uri, text, 2);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+    }
+
+    // The codeAction door, end to end: the request frame (zero-width range +
+    // the hub's OWN decoded diagnostics re-encoded into context), then the
+    // applier walking the four shapes the server answers — plain `edit`,
+    // clangd's command payload, a structure edit v1 refuses whole, and an
+    // action that carries nothing to apply.
+    void codeActionResultEditsApplyThroughTheApplier()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"), QStringLiteral("utf-16"),
+                                 QStringLiteral("features"),
+                                 QStringLiteral("diags")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        const QString text = QStringLiteral("alpha\nbeta bug\ngamma");
+        const QString uri = QStringLiteral("file:///m5-act.py");
+        qmn::view::CodeEditor editor;
+        editor.setPlainText(text);
+        QVERIFY(h.hub.openDocument(&editor, uri, QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        qmn::lsp::DocumentSyncer* syncer = h.hub.syncerFor(&editor);
+        QVERIFY(syncer);
+        syncer->setDebounceMs(5000);
+        syncer->setTypingCapMs(20000);
+
+        // The relay half of M4 first: the server's publishDiagnostics landed
+        // on the editor, decoded into the MODEL frame. The codeAction request
+        // carries them BACK, and this fakeserver compares context.diagnostics
+        // against its own fresh scan — an off-by-one severity or a frame that
+        // does not round trip is exit 2 on the server.
+        QVERIFY2(waitUntil([&] { return !editor.diagnostics().isEmpty(); }),
+                 "the diagnostics never reached the editor to be re-encoded");
+        QCOMPARE(int(editor.diagnostics().size()), 1);
+
+        FeatureProbe probe;
+        QVERIFY(h.hub.requestCodeActions(&editor, qmn::view::TextPosition(0, 2),
+                                         probe.handler())
+                > 0);
+        QVERIFY2(waitUntil([&] { return probe.arrived; }),
+                 "codeAction never answered (a diagnostics re-encode desync "
+                 "kills the fakeserver: look for FAKESERVER-FAIL)");
+        QVERIFY2(!probe.reply.isError, qPrintable(probe.reply.message));
+        const QJsonArray actions = probe.reply.result.toArray();
+        QCOMPARE(int(actions.size()), 4);
+
+        // 1. The plain shape: `edit` on the action itself.
+        const qmn::app::LspHub::ApplyReport withEdit
+            = h.hub.applyCodeAction(actions.at(0).toObject(), client);
+        QVERIFY2(withEdit.applied,
+                 qPrintable(withEdit.refused.join(QLatin1String("; "))));
+        QCOMPARE(withEdit.documentsChanged, 1);
+        QCOMPARE(withEdit.editsApplied, 1);
+        const QString acted = QStringLiteral("# act\n") + text;
+        QCOMPARE(editor.toPlainText(), acted);
+        QCOMPARE(syncer->version(), qint64(1)); // endServerEdit's full sync
+        QJsonObject verdict = assertSyncModel(client, uri, acted, 1);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        editor.undo(); // the action is ONE user step
+        QCOMPARE(editor.toPlainText(), text);
+        syncer->flush();
+        verdict = assertSyncModel(client, uri, text, 2);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+
+        // 2. clangd's shape: the work hides in command.arguments[0], and the
+        //    command NAME is never matched.
+        const qmn::app::LspHub::ApplyReport viaCommand
+            = h.hub.applyCodeAction(actions.at(1).toObject(), client);
+        QVERIFY2(viaCommand.applied,
+                 qPrintable(viaCommand.refused.join(QLatin1String("; "))));
+        QCOMPARE(viaCommand.editsApplied, 1);
+        const QString commanded = text + QStringLiteral(" // cmd");
+        QCOMPARE(editor.toPlainText(), commanded);
+        verdict = assertSyncModel(client, uri, commanded, 3);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        editor.undo();
+        syncer->flush();
+        verdict = assertSyncModel(client, uri, text, 4);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+
+        // 3. A create-file documentChange: v1 has no workspace/file model, so
+        //    ALL of it is refused — the text edits it carried included.
+        const qmn::app::LspHub::ApplyReport structure
+            = h.hub.applyCodeAction(actions.at(2).toObject(), client);
+        QVERIFY(!structure.applied);
+        QCOMPARE(structure.documentsChanged, 0);
+        QCOMPARE(structure.editsApplied, 0);
+        QVERIFY(std::any_of(structure.refused.cbegin(), structure.refused.cend(),
+                            [](const QString& why) {
+                                return why.contains(QStringLiteral("create-file"))
+                                    && why.contains(
+                                        QStringLiteral("handed to the app"));
+                            }));
+        QCOMPARE(editor.toPlainText(), text); // nothing moved, half-apply
+                                              // impossible
+
+        // 4. Neither shape: the decoder's reason, not a silent success.
+        const qmn::app::LspHub::ApplyReport emptyHanded
+            = h.hub.applyCodeAction(actions.at(3).toObject(), client);
+        QVERIFY(!emptyHanded.applied);
+        QCOMPARE(int(emptyHanded.refused.size()), 1);
+        QVERIFY(emptyHanded.refused.at(0).contains(QStringLiteral("neither")));
+        QCOMPARE(editor.toPlainText(), text);
+
+        // Two refusals burned no version: the server still sits where the
+        // undo stream left it.
+        QCOMPARE(syncer->version(), qint64(4));
+        verdict = assertSyncModel(client, uri, text, 4);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+    }
+
+    // Rename answers a WorkspaceEdit (changes map, or versioned
+    // documentChanges). Every occurrence of the word lands in ONE undo group;
+    // a document the hub does not hold open, or a version pin the client is
+    // not at, refuses the WHOLE edit instead of half a rename.
+    void renameReplyAppliesEveryFileEditWithVersionPins()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        const QString uri = QStringLiteral("file:///m5-rename.py");
+        const QString text = QStringLiteral("alpha\nbeta alpha\ngamma alpha");
+        qmn::view::CodeEditor editor;
+        editor.setPlainText(text);
+        QVERIFY(h.hub.openDocument(&editor, uri, QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        qmn::lsp::DocumentSyncer* syncer = h.hub.syncerFor(&editor);
+        QVERIFY(syncer);
+        syncer->setDebounceMs(5000);
+        syncer->setTypingCapMs(20000);
+
+        // The door's honest null: a rename that renames nothing answers the
+        // spec's null, and the applier door reports it — never a crash, never
+        // an applied:true over an empty edit.
+        const qmn::app::LspHub::ApplyReport nullReply
+            = h.hub.applyReplyEdit(QJsonValue(QJsonValue::Null), client);
+        QVERIFY(!nullReply.applied);
+        QVERIFY(!nullReply.refused.isEmpty());
+        QVERIFY(nullReply.refused.at(0).contains(QStringLiteral("missing")));
+        QCOMPARE(editor.toPlainText(), text);
+
+        FeatureProbe probe;
+        QVERIFY(h.hub.requestRename(&editor, qmn::view::TextPosition(1, 6),
+                                    QStringLiteral("zeta"), probe.handler())
+                > 0);
+        QVERIFY2(waitUntil([&] { return probe.arrived; }),
+                 "rename never answered");
+        QVERIFY2(!probe.reply.isError, qPrintable(probe.reply.message));
+        const qmn::app::LspHub::ApplyReport renamed
+            = h.hub.applyReplyEdit(probe.reply.result, client);
+        QVERIFY2(renamed.applied,
+                 qPrintable(renamed.refused.join(QLatin1String("; "))));
+        QCOMPARE(renamed.documentsChanged, 1);
+        QCOMPARE(renamed.editsApplied, 3); // every occurrence, all in one step
+        const QString renamedText = QStringLiteral("zeta\nbeta zeta\ngamma zeta");
+        QCOMPARE(editor.toPlainText(), renamedText);
+        editor.undo(); // ONE undo group reverses the whole rename
+        QCOMPARE(editor.toPlainText(), text);
+        syncer->flush();
+        QJsonObject verdict = assertSyncModel(client, uri, text, 2);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+
+        // The multi-file shape: a sibling document this hub does not hold
+        // open. v1 hands workspace structure to the app, so this document's
+        // own edits are refused too — that is what makes a half-applied
+        // rename visible.
+        const QString multi = QStringLiteral("alpha RENAMEMULTI\nalpha");
+        editor.setPlainText(multi);
+        FeatureProbe multiProbe;
+        QVERIFY(h.hub.requestRename(&editor, qmn::view::TextPosition(0, 1),
+                                    QStringLiteral("x2"), multiProbe.handler())
+                > 0);
+        QVERIFY2(waitUntil([&] { return multiProbe.arrived; }),
+                 "the multi-file rename never answered");
+        QVERIFY(!multiProbe.reply.isError);
+        const qmn::app::LspHub::ApplyReport multiReport
+            = h.hub.applyReplyEdit(multiProbe.reply.result, client);
+        QVERIFY(!multiReport.applied);
+        QCOMPARE(multiReport.documentsChanged, 0);
+        QVERIFY(std::any_of(multiReport.refused.cbegin(),
+                            multiReport.refused.cend(),
+                            [](const QString& why) {
+                                return why.contains(
+                                    QStringLiteral("qmn-not-open.cpp"));
+                            }));
+        QCOMPARE(editor.toPlainText(), multi);
+        // The request's own flush carried the new text (v3); the refusal
+        // added no echo of its own.
+        QCOMPARE(syncer->version(), qint64(3));
+        verdict = assertSyncModel(client, uri, multi, 3);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+
+        // The version pin: this fakeserver answers documentChanges pinned
+        // SEVEN past its own model — which is the client's own version + 7,
+        // because both sides bump on the same flush. The refusal must name
+        // both numbers.
+        const QString pinned = QStringLiteral("alpha RENAMEVERSION\nalpha");
+        editor.setPlainText(pinned);
+        FeatureProbe pinProbe;
+        QVERIFY(h.hub.requestRename(&editor, qmn::view::TextPosition(0, 1),
+                                    QStringLiteral("x3"), pinProbe.handler())
+                > 0);
+        QVERIFY2(waitUntil([&] { return pinProbe.arrived; }),
+                 "the version-pinned rename never answered");
+        QVERIFY(!pinProbe.reply.isError);
+        const qmn::app::LspHub::ApplyReport pinReport
+            = h.hub.applyReplyEdit(pinProbe.reply.result, client);
+        QVERIFY(!pinReport.applied);
+        QCOMPARE(pinReport.documentsChanged, 0);
+        QVERIFY(std::any_of(pinReport.refused.cbegin(), pinReport.refused.cend(),
+                            [](const QString& why) {
+                                return why.contains(
+                                    QStringLiteral("pinned at version 11"))
+                                    && why.contains(
+                                        QStringLiteral("document is at version 4"));
+                            }));
+        QCOMPARE(editor.toPlainText(), pinned);
+        QCOMPARE(syncer->version(), qint64(4));
+        verdict = assertSyncModel(client, uri, pinned, 4);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+    }
+
+    // The SERVER-primed half of the write path: workspace/applyEdit arrives
+    // on its own (a didSave marker primes it), the hub's applier runs it and
+    // answers the truth, and the fakeserver judges BOTH halves from its side:
+    // the answer on the wire (APPLYREQ-OK) and its own applier's replay
+    // against the client's full-sync echo (APPLYCHECK-OK).
+    void serverInitiatedApplyEditRoundTripsAndReappliesInOneUndoStep()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        const QString text = QStringLiteral("APPLYEDIT alpha\nbeta");
+        const QString uri = QStringLiteral("file:///m5-applyedit.py");
+        qmn::view::CodeEditor editor;
+        editor.setPlainText(text);
+        QVERIFY(h.hub.openDocument(&editor, uri, QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        qmn::lsp::DocumentSyncer* syncer = h.hub.syncerFor(&editor);
+        QVERIFY(syncer);
+        syncer->setDebounceMs(5000);
+        syncer->setTypingCapMs(20000);
+
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        QSignalSpy refusedSpy(&h.hub, &qmn::app::LspHub::applyEditRefused);
+
+        h.hub.saveDocument(&editor); // the marker rides the saved text
+
+        QVERIFY2(waitUntil([&] { return editor.toPlainText().contains(
+                                      QStringLiteral("srv\n")); }),
+                 qPrintable(QStringLiteral("the server's edit never reached "
+                                           "the document: %1")
+                                .arg(stderrDump(stderrSpy))));
+        const QString served = QStringLiteral("srv\n") + text;
+        QCOMPARE(editor.toPlainText(), served);
+        QCOMPARE(refusedSpy.count(), 0); // this edit is legal in every gate
+
+        // The server's two verdicts: applied:true on the wire, and the
+        // endServerEdit full sync matching THIS file's own applier replay.
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("APPLYREQ-OK")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("APPLYCHECK-OK")),
+                 qPrintable(stderrDump(stderrSpy)));
+
+        // The pin the server sent was version 0 — the syncer's own number at
+        // that moment, which is only true because the save flushed nothing
+        // extra and the applier checked AFTER a flush.
+        QCOMPARE(syncer->version(), qint64(1));
+        QJsonObject verdict = assertSyncModel(client, uri, served, 1);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+
+        // One server edit = one user step: a single undo reverses it whole,
+        // and the delta stream carries the original back to the server.
+        editor.undo();
+        QCOMPARE(editor.toPlainText(), text);
+        QVERIFY(!editor.canUndo());
+        syncer->flush();
+        verdict = assertSyncModel(client, uri, text, 2);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        QVERIFY(!sawMarker(stderrSpy, QStringLiteral("APPLYCHECK-FAIL")));
+        QVERIFY(!sawMarker(stderrSpy, QStringLiteral("FAKESERVER-FAIL")));
+    }
+
+    // The same request, primed to be REFUSED: a legal edit for this document
+    // plus one for a uri the hub does not hold open. All-or-nothing means the
+    // honest applied:false the fakeserver checks (APPLYREFUSE-OK), the
+    // reasons on the hub's own signal, and a model that never moved.
+    void applyEditRefusedKeepsTheModelWhole()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        const QString text = QStringLiteral("APPLYREFUSE alpha\nbeta");
+        const QString uri = QStringLiteral("file:///m5-refuse.py");
+        qmn::view::CodeEditor editor;
+        editor.setPlainText(text);
+        QVERIFY(h.hub.openDocument(&editor, uri, QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        qmn::lsp::DocumentSyncer* syncer = h.hub.syncerFor(&editor);
+        QVERIFY(syncer);
+        syncer->setDebounceMs(5000);
+        syncer->setTypingCapMs(20000);
+
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        QSignalSpy refusedSpy(&h.hub, &qmn::app::LspHub::applyEditRefused);
+
+        h.hub.saveDocument(&editor);
+
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("APPLYREFUSE-OK")),
+                 qPrintable(QStringLiteral("the server never saw the honest "
+                                           "applied:false: %1")
+                                .arg(stderrDump(stderrSpy))));
+        QCOMPARE(refusedSpy.count(), 1);
+        QCOMPARE(qvariant_cast<QString>(refusedSpy.at(0).at(0)),
+                 QStringLiteral("pysrv"));
+        const QStringList reasons
+            = qvariant_cast<QStringList>(refusedSpy.at(0).at(1));
+        QVERIFY(!reasons.isEmpty());
+        QVERIFY(std::any_of(reasons.cbegin(), reasons.cend(),
+                            [](const QString& why) {
+                                return why.contains(
+                                    QStringLiteral("qmn-not-open.cpp"))
+                                    && why.contains(
+                                        QStringLiteral("is not a hub document"));
+                            }));
+
+        // Nothing moved, on either side — and NO endServerEdit echo went out
+        // for an edit that never happened (the version is the proof).
+        QCOMPARE(editor.toPlainText(), text);
+        QCOMPARE(syncer->version(), qint64(0));
+        syncer->flush(); // nothing pending: an honest no-op, no version burned
+        QCOMPARE(syncer->version(), qint64(0));
+        const QJsonObject verdict = assertSyncModel(client, uri, text, 0);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+    }
+
+    // window/showMessageRequest: the hub only RELAYS (the app picks the
+    // button), and the answer that arrives FIRST is the one the server gets.
+    // An app that never answers still gets the client layer's spec-legal Null
+    // default — both halves are judged by the fakeserver itself.
+    void showMessageRequestFirstAnswerWinsAndNullDefaultFollows()
+    {
+        { // the app answers inside the relay: the picked item wins
+            HubHarness h(QStringList{QStringLiteral("sync"),
+                                     QStringLiteral("utf-16"),
+                                     QStringLiteral("features")});
+            h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+            qmn::view::CodeEditor editor;
+            editor.setPlainText(QStringLiteral("MSGREQ-FIRST alpha"));
+            QVERIFY(h.hub.openDocument(
+                &editor, QStringLiteral("file:///m5-msgreq-first.py"),
+                QStringLiteral("python")));
+            QVERIFY(waitReady(h.hub.clientForSpec(QStringLiteral("pysrv"))));
+
+            int relayed = 0;
+            QObject::connect(
+                &h.hub, &qmn::app::LspHub::serverShowMessageRequest,
+                [&](const QString& spec, const QJsonValue& id,
+                    const QJsonValue& params) {
+                    ++relayed;
+                    QCOMPARE(spec, QStringLiteral("pysrv"));
+                    // The relay carried the params: the app picks its own
+                    // button out of the actions the server offered.
+                    const QJsonArray actions
+                        = params.toObject()
+                              .value(QStringLiteral("actions"))
+                              .toArray();
+                    QCOMPARE(int(actions.size()), 2);
+                    QJsonObject picked;
+                    for (const QJsonValue& action : actions) {
+                        if (action.toObject()
+                                    .value(QStringLiteral("title"))
+                                    .toString()
+                                == QLatin1String("FIRST"))
+                            picked = action.toObject();
+                    }
+                    QVERIFY(!picked.isEmpty());
+                    qmn::lsp::LspClient* answered
+                        = h.hub.clientForSpec(spec); // the relay's own way back
+                    QVERIFY(answered);
+                    answered->respondShowMessageRequest(id, picked);
+                });
+
+            auto* stderrClient = h.hub.clientForSpec(QStringLiteral("pysrv"));
+            QSignalSpy stderrSpy(stderrClient,
+                                 &qmn::lsp::LspClient::serverStderr);
+            h.hub.saveDocument(&editor);
+
+            QVERIFY2(waitUntil([&] { return relayed > 0; }),
+                     qPrintable(stderrDump(stderrSpy)));
+            // "FIRST" is the item the app picked, and the server confirms it
+            // won the race against this layer's own Null default (the answer
+            // that ARRIVES FIRST is the answer the server gets).
+            QVERIFY2(waitMarker(stderrSpy, QStringLiteral("MSGREQ-OK")),
+                     qPrintable(stderrDump(stderrSpy)));
+            QVERIFY(!sawMarker(stderrSpy, QStringLiteral("MSGREQ-NULL-OK")));
+        }
+        { // the app says nothing: the Null default answers, once
+            HubHarness h(QStringList{QStringLiteral("sync"),
+                                     QStringLiteral("utf-16"),
+                                     QStringLiteral("features")});
+            h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+            qmn::view::CodeEditor editor;
+            editor.setPlainText(QStringLiteral("MSGREQ-NULL alpha"));
+            QVERIFY(h.hub.openDocument(
+                &editor, QStringLiteral("file:///m5-msgreq-null.py"),
+                QStringLiteral("python")));
+            auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+            QVERIFY(client);
+            QVERIFY(waitReady(client));
+
+            int relayed = 0;
+            QObject::connect(
+                &h.hub, &qmn::app::LspHub::serverShowMessageRequest,
+                [&](const QString&, const QJsonValue&, const QJsonValue&) {
+                    ++relayed; // a modal-less app: it sees the request and
+                               // answers no one
+                });
+            QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+            h.hub.saveDocument(&editor);
+
+            QVERIFY2(waitUntil([&] { return relayed == 1; }),
+                     qPrintable(stderrDump(stderrSpy)));
+            QVERIFY2(waitMarker(stderrSpy, QStringLiteral("MSGREQ-NULL-OK")),
+                     qPrintable(stderrDump(stderrSpy)));
+            // The session is still standing: an unanswered request is not an
+            // error, and the default's answer closed the id.
+            QVERIFY(client->isReady());
+        }
     }
 
 };

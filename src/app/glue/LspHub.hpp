@@ -35,10 +35,12 @@
 #include <QStringList>
 
 #include "lsp/LspClient.hpp"
+#include "lsp/WorkspaceEdit.hpp" // the decoder's records cross the applier doors
 #include "protocol/Transport.hpp"
 
 namespace qmn::view {
 class CodeEditor;
+struct TextPosition; // the caret frame the feature doors take
 }
 
 namespace qmn::lsp {
@@ -124,6 +126,112 @@ public:
     void setDebounceMs(int ms); // applied to syncers created from now on...
     int debounceMs() const { return debounceMs_; }
 
+    // --- feature doors v1 (M8 machine 5, PLAN's list) --------------------
+    // A door takes the DOCUMENT (the app holds the editor) and a position in
+    // the MODEL frame the view speaks — line + utf-16 column, exactly what
+    // position()/cursorMoved() report. The handler fires EXACTLY ONCE: a
+    // request refused on the spot answers with the code a SERVER would have
+    // used (-32002 = no live server serves this document; -32601 = its
+    // initialize capabilities do not offer this provider), never with silence
+    // (the M2 rule for a non-Ready door). The return is the request id (>0)
+    // when the request went out, 0 when it was refused locally.
+    //
+    // Every door's FIRST act is the syncer's flush(): a feature request asks
+    // about the text the user is LOOKING AT, and the wire Position is built
+    // against the syncer's mirror — the ONE text the server agrees with. The
+    // version pin of a versioned documentChanges entry (see the applier) is
+    // the pin that proves the flush really ran.
+    //
+    // The v1 feature gates are the initialize CAPABILITIES (the registration
+    // registry M2 built is the pull-model half, M8b): a provider key counts as
+    // offered when it is present and is not `false` — the object form counts
+    // ({"workDoneProgress":true}, renameProvider's {"prepareProvider":...}).
+    using FeatureHandler = std::function<void(
+        const qmn::protocol::RpcClient::Reply&)>;
+
+    qint64 requestHover(qmn::view::CodeEditor* editor,
+                        const qmn::view::TextPosition& position,
+                        const FeatureHandler& onReply);
+    qint64 requestDefinition(qmn::view::CodeEditor* editor,
+                             const qmn::view::TextPosition& position,
+                             const FeatureHandler& onReply);
+    qint64 requestReferences(qmn::view::CodeEditor* editor,
+                             const qmn::view::TextPosition& position,
+                             bool includeDeclaration,
+                             const FeatureHandler& onReply);
+    // triggerCharacter empty = CompletionTriggerKind::Invoked (1); a character
+    // = TriggerForCharacter (2) and the character travels with it.
+    qint64 requestCompletion(qmn::view::CodeEditor* editor,
+                             const qmn::view::TextPosition& position,
+                             const FeatureHandler& onReply,
+                             const QString& triggerCharacter = QString());
+    // completionItem/resolve: params ARE the item (spec), so the app hands
+    // back the item it got from the completion list.
+    qint64 resolveCompletionItem(qmn::view::CodeEditor* editor,
+                                 const QJsonObject& item,
+                                 const FeatureHandler& onReply);
+    // The v1 codeAction request is the zero-width range AT the position plus
+    // this document's CURRENT diagnostics in context (clangd's quickfixes
+    // depend on them — the hub re-encodes its own decoded set).
+    qint64 requestCodeActions(qmn::view::CodeEditor* editor,
+                              const qmn::view::TextPosition& position,
+                              const FeatureHandler& onReply);
+    qint64 requestFormatting(qmn::view::CodeEditor* editor,
+                             const FeatureHandler& onReply);
+    qint64 requestRename(qmn::view::CodeEditor* editor,
+                         const qmn::view::TextPosition& position,
+                         const QString& newName, const FeatureHandler& onReply);
+
+    // --- the write path: WorkspaceEdit application ------------------------
+    // Both directions of the same machinery: a SERVER-primed edit
+    // (workspace/applyEdit, relayed below and answered for real) and the
+    // app's own results (a codeAction, a formatting or a rename reply).
+    //
+    // ALL-OR-NOTHING, and the reasons come back instead of a partial edit:
+    // the structure must be well-formed, NO entry may name a file-level
+    // operation (v1 has no workspace/file model — that structure is handed to
+    // the app, PLAN's rule for a multi-file rename), every uri must be a hub
+    // document with a live server (and, when `servingClient` is given, served
+    // by THAT client: a cross-wire edit is refused like a cross-wire publish),
+    // every versioned documentChange must pin the version our syncer is at,
+    // and no two ranges of one document may overlap. A half-applied server
+    // edit would make the ONE-undo-group promise a lie.
+    //
+    // Applying: per document, the syncer's beginServerEdit/endServerEdit pair
+    // (the echo suppression PLAN pins) around CodeEditor::applyTextEdits —
+    // which is ONE undo group and walks bottom-up — then ONE full-text sync.
+    // N documents = N undo steps (each document is its own action); the
+    // documents land in uri order (deterministic, pinnable).
+    struct ApplyReport {
+        bool applied = false;
+        int documentsChanged = 0;
+        int editsApplied = 0;
+        QStringList refused; // WHY nothing was applied (empty when applied)
+    };
+    ApplyReport applyWorkspaceEdit(const QJsonValue& workspaceEdit,
+                                   const qmn::lsp::LspClient* servingClient =
+                                       nullptr);
+    // The codeAction form: its `edit`, or the WorkspaceEdit hidden in
+    // command.arguments[0] (clangd's apply-tweak shape).
+    ApplyReport applyCodeAction(const QJsonObject& codeAction,
+                                const qmn::lsp::LspClient* servingClient =
+                                    nullptr);
+    // PLAN's feature-door half: the same door the app uses for a rename or a
+    // codeAction result, fed from a reply the app already holds. `result` is
+    // the raw request result when that result IS a WorkspaceEdit (rename,
+    // willSaveWaitUntil).
+    ApplyReport applyReplyEdit(const QJsonValue& result,
+                               const qmn::lsp::LspClient* servingClient =
+                                   nullptr);
+    // The SIBLING shape: formatting / rangeFormatting / onTypeFormatting
+    // answer a BARE TextEdit[] (no uri, no version), so the document is the
+    // one the app ASKED about — named here by its editor. Same applier, same
+    // all-or-nothing gates, same servingClient guard.
+    ApplyReport applyTextEditList(qmn::view::CodeEditor* editor,
+                                  const QJsonValue& textEditsResult,
+                                  const qmn::lsp::LspClient* servingClient =
+                                      nullptr);
+
 signals:
     // Relays of the per-server channels (PLAN: separate PROTOCOL/STDERR
     // logs; showMessage is a SIGNAL, visible — the app renders it).
@@ -134,6 +242,20 @@ signals:
     // Unwanted death with BOTH budgets spent (auto + never manual): the app
     // surfaces this and offers restartServer.
     void serverFailed(const QString& spec, const QString& reason);
+    // window/showMessageRequest RELAY (machine 5): the hub never picks an
+    // action itself — the app answers through
+    // clientForSpec(spec)->respondShowMessageRequest(id, item). The relay
+    // lands BEFORE LspClient's Null default and RpcClient refuses a second
+    // answer, so an app that answers inside this relay (a modal dialog
+    // answered on the spot) wins the choice; a later, non-modal answer
+    // would need the default deferred (an M8b decision).
+    void serverShowMessageRequest(const QString& spec, const QJsonValue& id,
+                                  const QJsonValue& params);
+    // A SERVER-PRIMED workspace/applyEdit that the applier refused: the hub
+    // has already answered the server applied:false (all-or-nothing is the
+    // rule — a half-applied edit would make the one-undo-group promise a
+    // lie), and the reasons come here so the app can show them.
+    void applyEditRefused(const QString& spec, const QStringList& reasons);
 
 private:
     struct SpecClient {
@@ -157,6 +279,32 @@ private:
     QString expand(const QString& text) const; // ${WORKSPACE_ROOT}
     void mergeSpecObject(const QString& name, const QJsonObject& patch);
     void onDiagnostics(const QString& specName, const QJsonObject& params);
+    // The server-primed write path (machine 5): decode + gate + apply, then
+    // answer the server with the truth and relay any refusal reasons.
+    void onApplyEdit(const QString& specName, const QJsonValue& id,
+                     const QJsonValue& editValue);
+    // The shared body behind applyWorkspaceEdit/applyCodeAction/applyReplyEdit
+    // (they differ only in which decoder shape produced the records).
+    ApplyReport applyDecoded(const qmn::lsp::DecodedWorkspaceEdit& decoded,
+                             const qmn::lsp::LspClient* servingClient);
+    // The shared preamble of every feature door: resolve the document, refuse
+    // locally (firing onReply with the SERVER's code: -32002 no live server,
+    // -32601 capability not offered) or FLUSH the syncer and hand back the
+    // pair the params builder needs. False = the refusal already fired.
+    struct FeatureTarget {
+        qmn::lsp::DocumentSyncer* syncer = nullptr;
+        qmn::lsp::LspClient* client = nullptr;
+    };
+    bool featureGate(qmn::view::CodeEditor* editor,
+                     const QString& capabilityKey,
+                     const FeatureHandler& onReply, FeatureTarget* target);
+    // Model frame -> wire frame against the syncer's MIRROR — the ONE text
+    // the server agrees with (which is why featureGate flushes first).
+    QJsonObject wirePosition(const qmn::lsp::DocumentSyncer* syncer,
+                             const qmn::view::TextPosition& pos) const;
+    QJsonObject wireDocumentPosition(
+        const qmn::lsp::DocumentSyncer* syncer,
+        const qmn::view::TextPosition& pos) const;
     void registerClient(const QString& specName, SpecClient& entry);
     void releaseRegistration(const QString& uri);
     QString resolveUri(qmn::view::CodeEditor* editor, const QString& uri);

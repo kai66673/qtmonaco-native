@@ -103,6 +103,13 @@ public:
 
     // Glue answers the applyEdit request (machine 5's applier does).
     void respondApplyEdit(const QJsonValue& id, bool applied);
+    // Glue answers a window/showMessageRequest with the chosen MessageActionItem
+    // (an object carrying "title"); Null = dismissed. Ordering is the point:
+    // serverShowMessageRequest fires BEFORE this layer's own Null default, and
+    // RpcClient never sends a SECOND answer to one id — so glue that answers
+    // from inside the signal wins, and glue that does not gets the default.
+    void respondShowMessageRequest(const QJsonValue& id,
+                                   const QJsonValue& actionItem);
 
 signals:
     // Fires on EVERY (re-)READY — the syncer's re-didOpen self-heal trigger.
@@ -126,8 +133,9 @@ signals:
     void serverProgress(const QJsonValue& token, const QJsonValue& value);
     // workDoneProgress/create: answered null, glue may track the token.
     void createWorkDoneProgress(const QJsonValue& token);
-    // window/showMessageRequest: answered null (no action picked); glue that
-    // shows real buttons answers via respondShowMessageRequest (machine 5/6).
+    // window/showMessageRequest: delivered BEFORE this layer's Null default,
+    // so glue that shows real buttons wins the answer (the first answer to an
+    // id is the one that travels — RpcClient never sends a second).
     void serverShowMessageRequest(const QJsonValue& id, const QJsonValue& params);
     void registrationsChanged();
     // workspace/applyEdit: the applier's turn (machine 5), answer with

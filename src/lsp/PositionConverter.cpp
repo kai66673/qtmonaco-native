@@ -170,4 +170,33 @@ ModelPosition PositionConverter::toModelPosition(
     return ModelPosition{outLine, offset - lineStart};
 }
 
+int PositionConverter::fromModelPosition(const QString& text,
+                                         const ModelPosition& pos)
+{
+    // Line clamped into the document, then the column clamped to that line's
+    // length — the two clamps toOffset applies, spelled in the model frame.
+    int target = qMax(0, pos.line);
+    int lineStart = 0;
+    for (int l = 0; l < target; ++l) {
+        int nl = text.indexOf(QChar(u'\n'), lineStart);
+        if (nl < 0) {
+            lineStart = text.size(); // past the last line: the document's end
+            break;
+        }
+        lineStart = nl + 1;
+    }
+    int lineEnd = lineStart;
+    while (lineEnd < text.size() && text.at(lineEnd) != u'\n')
+        ++lineEnd;
+    int offset = lineStart + qMin(qMax(0, pos.col), lineEnd - lineStart);
+    // Never land inside a surrogate pair (the same rule toOffset enforces for
+    // utf-8/utf-32 columns): a caret that would split a code point sits
+    // before it, so the Position the server reads names the same character.
+    if (offset > 0 && offset < text.size()
+        && text.at(offset).isLowSurrogate()
+        && text.at(offset - 1).isHighSurrogate())
+        --offset;
+    return offset;
+}
+
 } // namespace qmn::lsp

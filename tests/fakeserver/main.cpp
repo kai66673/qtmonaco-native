@@ -51,7 +51,26 @@
 //            self-heal then rides the client's auto-restart. "diags"
 //            publishes textDocument/publishDiagnostics (the "bug"-marker
 //            scan, ranges in the NEGOTIATED frame) after every open/change
-//            — machine 4's decoder path through the hub.
+//            — machine 4's decoder path through the hub. "features" rides the
+//            sync model and advertises the machine-5 provider set, answering
+//            the feature requests with PROOF objects: this server decodes the
+//            caret/positions in ITS OWN frame and reports the offset it
+//            landed on, so a client encoder bug shows up as an off-target
+//            proof instead of passing quietly. Two deliberately OFF provider
+//            shapes ride it: "hoverProvider:false" and a completionProvider
+//            object WITHOUT resolveProvider (the "completiononly" flag
+//            advertises that provider alone) — both must be refused LOCALLY
+//            by the hub, and a request for either that reaches THIS server is
+//            a gate bug: exit 2. In features mode a didSave whose text
+//            contains "APPLYEDIT" primes a workspace/applyEdit (the server
+//            applies the same edit to its OWN model first, then compares the
+//            client's next full sync: APPLYCHECK-OK), "APPLYREFUSE" primes an
+//            edit that MUST be refused (APPLYREFUSE-OK), "MSGREQ-FIRST" and
+//            "MSGREQ-NULL" prime a window/showMessageRequest whose answer this
+//            server validates (MSGREQ-OK). Feature replies are PROOF objects,
+//            not spec-shaped payloads: machine 5 pins the FRAME the hub sends
+//            and the write path; the real Hover/Location/CompletionList
+//            decoding joins with machine 6's popups.
 //
 // The exit code IS the oracle for the answers the client side cannot see
 // (the battery's wire shapes); tst_lsp asserts exitCode 0 where the mode's
@@ -99,6 +118,25 @@ struct ModelDoc {
 QMap<QString, ModelDoc> g_docs;
 bool g_publishDiags = false; // argv flag: publish diagnostics on every
                              // didOpen/didChange of an open document
+bool g_features = false;     // argv flag (rides sync): the machine-5 provider
+                             // set + feature-request answers + the
+                             // server-primed write path
+bool g_completionOnly = false; // argv flag (rides features): advertise ONLY
+                               // completionProvider, WITHOUT resolveProvider:
+                               // the nested capability gate's refusal pin
+bool g_advertisesResolve = false; // features && !completiononly, decided at
+                                  // initialize; the resolve tripwire's oracle
+// Server-PRIMED requests, id -> method: a machine-5 pin lives on the SERVER
+// side too (what the CLIENT answered to our own request is traffic the test
+// cannot see), so the runLoop's response branch validates it here.
+QMap<QString, QString> g_outstanding;
+QString g_applyVerify;      // features mode: the text the client's NEXT full
+                            // sync must carry after a server-primed applyEdit
+                            // (the REFUSED branch needs no such oracle: the
+                            // tst pins "no spurious echo" from the VERSION
+                            // side, and the model check rides the response)
+int g_featureSaveSeq = 0;   // features mode: unique ids for the didSave-primed
+                            // server requests (one marker per didSave text)
 QJsonObject g_initializeParams; // the params the handshake received (the
                                 // M4 test echo door: the hub's built params
                                 // ride it back to the test)
@@ -503,6 +541,9 @@ int specOffset(const QString& text, int line, int character)
 }
 
 void publishDiagsFor(const QString& uri); // forward: the handlers below call it
+void featureDidSave(const QString& uri, ModelDoc& d); // forward (features mode,
+                                                      // machine 5's didSave
+                                                      // markers)
 
 void syncDidOpen(const QJsonValue& paramsValue)
 {
@@ -567,6 +608,22 @@ void syncDidChange(const QJsonValue& paramsValue)
         d.text.replace(startOffset, endOffset - startOffset, text);
     }
     d.version = qint64(version);
+    if (!g_applyVerify.isEmpty()) {
+        // The server-primed applyEdit's full-sync echo (features mode): the
+        // client's endServerEdit tells this server its replay landed exactly
+        // as this file's OWN applier replayed it. A desync here is the whole
+        // machine-5 write path breaking, so it goes out LOUD.
+        const bool matched = d.text == g_applyVerify;
+        std::fprintf(stderr, "APPLYCHECK-%s\n", matched ? "OK" : "FAIL");
+        std::fflush(stderr);
+        if (!matched) {
+            std::fprintf(stderr, "  expected %s\n  model    %s\n",
+                         qPrintable(g_applyVerify), qPrintable(d.text));
+            std::fflush(stderr);
+            _exit(2);
+        }
+        g_applyVerify.clear();
+    }
     if (g_publishDiags)
         publishDiagsFor(uri);
 }
@@ -593,6 +650,9 @@ void syncDidSave(const QJsonValue& paramsValue)
     if (found == g_docs.end())
         fail(QStringLiteral("didSave for a document that is not open"));
     ++found.value().saves;
+    if (g_features && !g_completionOnly)
+        featureDidSave(uri, found.value()); // the write-path markers stay OFF
+                                           // for the completion-only pin
 }
 
 // The server's OWN encoder (the mirror of specOffset): model-frame
@@ -659,9 +719,11 @@ struct Marker {
 const Marker kMarkers[] = {
     {"bug", 1},  {"warn", 2},  {"note", 3}, {"hint", 4},
 };
-void publishDiagsFor(const QString& uri)
+// The scan, split from the publish so the codeAction door can compare the
+// hub's re-encoded context.diagnostics against this server's own fresh scan
+// of the same text (machine 5's frame pin).
+QJsonArray diagsFor(const QString& text)
 {
-    const QString& text = g_docs.value(uri).text;
     QJsonArray diags;
     int line = 0;
     int lineStart = 0;
@@ -703,9 +765,16 @@ void publishDiagsFor(const QString& uri)
             lineStart = i + 1;
         }
     }
+    return diags;
+}
+
+void publishDiagsFor(const QString& uri)
+{
     notify(QStringLiteral("textDocument/publishDiagnostics"),
-           QJsonObject{{QStringLiteral("uri"), uri},
-                       {QStringLiteral("diagnostics"), diags}});
+           QJsonObject{
+               {QStringLiteral("uri"), uri},
+               {QStringLiteral("diagnostics"),
+                diagsFor(g_docs.value(uri).text)}});
 }
 
 // The TEST-ONLY door: answers {ok,model,version,saves,open} for one uri
@@ -753,6 +822,673 @@ void handleInitializeParams(const QJsonValue& id)
     send(response(id, g_initializeParams));
 }
 
+// ------------------------------------------------- the model-edit applier
+// features mode applies a WorkspaceEdit to its OWN model with the rules the
+// client's view door states: decode every range through specOffset (total
+// clamping, the surrogate-safe stop), swap an inverted pair, walk DESCENDING,
+// replace. An OVERLAP here is a bug in THIS file's own edit builders, so it
+// goes out LOUD: a silent skip would let an apply bug hide behind a model
+// that matches for the wrong reason.
+void applyWireEdits(ModelDoc& d, const QJsonArray& edits)
+{
+    struct Applied {
+        int from;
+        int to;
+        QString text;
+    };
+    QVector<Applied> list;
+    list.reserve(edits.size());
+    for (const QJsonValue& editValue : edits) {
+        const QJsonObject edit = editValue.toObject();
+        const QJsonObject range = edit.value(QStringLiteral("range")).toObject();
+        const QJsonObject start = range.value(QStringLiteral("start")).toObject();
+        const QJsonObject end = range.value(QStringLiteral("end")).toObject();
+        int from = specOffset(d.text, start.value(QStringLiteral("line")).toInt(),
+                              start.value(QStringLiteral("character")).toInt());
+        int to = specOffset(d.text, end.value(QStringLiteral("line")).toInt(),
+                            end.value(QStringLiteral("character")).toInt());
+        if (from > to)
+            qSwap(from, to);
+        list.append(
+            Applied{from, to, edit.value(QStringLiteral("newText")).toString()});
+    }
+    std::sort(list.begin(), list.end(), [](const Applied& a, const Applied& b) {
+        if (a.from != b.from)
+            return a.from > b.from;
+        return a.to > b.to;
+    });
+    for (int i = 1; i < list.size(); ++i) {
+        if (list.at(i - 1).from < list.at(i).to)
+            fail(QStringLiteral("fakeserver's own TextEdit batch overlaps at "
+                                "offset %1 (descending walk)")
+                     .arg(list.at(i).to));
+    }
+    for (const Applied& a : list)
+        d.text.replace(a.from, a.to - a.from, a.text);
+}
+
+// A TextEdit in the NEGOTIATED wire frame, encoded through THIS server's own
+// wirePosition from MODEL coordinates: proof both ways (the client must decode
+// these back onto the model offsets the test aims at).
+// A Range in the NEGOTIATED wire frame, encoded from MODEL coordinates through
+// THIS server's own wirePosition.
+QJsonObject rangeWire(const QString& text, int fromLine, int fromCol,
+                      int toLine, int toCol)
+{
+    const WirePos from = wirePosition(text, fromLine, fromCol);
+    const WirePos to = wirePosition(text, toLine, toCol);
+    return QJsonObject{
+        {QStringLiteral("start"),
+         QJsonObject{{QStringLiteral("line"), from.line},
+                     {QStringLiteral("character"), from.character}}},
+        {QStringLiteral("end"),
+         QJsonObject{{QStringLiteral("line"), to.line},
+                     {QStringLiteral("character"), to.character}}}};
+}
+
+QJsonObject textEditWire(const QString& text, int fromLine, int fromCol,
+                         int toLine, int toCol, const QString& newText)
+{
+    return QJsonObject{{QStringLiteral("range"),
+                        rangeWire(text, fromLine, fromCol, toLine, toCol)},
+                       {QStringLiteral("newText"), newText}};
+}
+
+// split('\n'), NEVER mid(text,0,pos): the view counts lines by '\n' only, so
+// cutting at a '\r' would make this oracle's columns disagree with the view's
+// (the same CRLF discipline machine 3's own line walk follows).
+QStringList modelLines(const QString& text) { return text.split(u'\n'); }
+
+// The MODEL (line, col-in-utf-16-units) of a model offset.
+void rowColAt(const QStringList& lines, int offset, int* line, int* col)
+{
+    int seen = 0;
+    for (int i = 0; i < lines.size(); ++i) {
+        const int span = lines.at(i).size() + 1; // the '\n' rides the span
+        if (offset < seen + span || i == lines.size() - 1) {
+            *line = i;
+            *col = offset - seen;
+            return;
+        }
+        seen += span;
+    }
+}
+
+// The identifier run around `offset` ([A-Za-z0-9_], the run the client's
+// rename door assumes too). A caret just PAST a word's end still means that
+// word (the caret sits between units). Empty = no word at that caret.
+QString wordAt(const QString& text, int offset, int* startOut, int* endOut)
+{
+    *startOut = *endOut = -1;
+    auto isWord = [](QChar c) { return c == u'_' || c.isLetterOrNumber(); };
+    int probe = offset;
+    if (probe >= text.size())
+        probe = text.size() - 1;
+    if (probe < 0 || !isWord(text.at(probe)))
+        --probe;
+    if (probe < 0 || probe >= text.size() || !isWord(text.at(probe)))
+        return QString();
+    int start = probe;
+    while (start > 0 && isWord(text.at(start - 1)))
+        --start;
+    int end = probe + 1;
+    while (end < text.size() && isWord(text.at(end)))
+        ++end;
+    *startOut = start;
+    *endOut = end;
+    return text.mid(start, end - start);
+}
+
+// Non-overlapping occurrences of `word` (model offsets, ascending).
+QVector<int> occurrences(const QString& text, const QString& word)
+{
+    QVector<int> out;
+    int from = 0;
+    for (;;) {
+        const int at = text.indexOf(word, from);
+        if (at < 0)
+            return out;
+        out.append(at);
+        from = at + qMax(1, word.size());
+    }
+}
+
+// ------------------------------------------------- feature providers (M5)
+// Every reply is built from THIS server's own decode (specOffset) and encode
+// (wirePosition) paths — the sync-mode oracle rule carried into the feature
+// frames: a client encoder bug lands the reply off-target or trips one of the
+// param-shape fail()s below, it never cancels out into a green test. The
+// payloads are the SPEC shapes (Location[], CompletionList, CodeAction[],
+// TextEdit[], WorkspaceEdit) kept deliberately minimal: what machine 5 pins is
+// the FRAME, and machine 6's popups decode the markup for real.
+ModelDoc& featureDoc(const QJsonObject& params, const QString& methodName)
+{
+    const QString uri = params.value(QStringLiteral("textDocument"))
+                            .toObject()
+                            .value(QStringLiteral("uri"))
+                            .toString();
+    auto found = g_docs.find(uri);
+    if (found == g_docs.end())
+        fail(QStringLiteral("%1 names a document this server does not hold "
+                            "open: \"%2\"")
+                 .arg(methodName, uri));
+    return found.value();
+}
+
+// The caret a feature request aims at, decoded in THIS server's frame.
+int featureOffset(const ModelDoc& d, const QJsonObject& params,
+                  const QString& methodName)
+{
+    const QJsonObject position = params.value(QStringLiteral("position")).toObject();
+    if (!position.value(QStringLiteral("line")).isDouble()
+        || !position.value(QStringLiteral("character")).isDouble())
+        fail(QStringLiteral("%1 carries no numeric Position").arg(methodName));
+    return specOffset(d.text, position.value(QStringLiteral("line")).toInt(),
+                      position.value(QStringLiteral("character")).toInt());
+}
+
+void featureDefinition(const QJsonValue& id, const QJsonObject& params)
+{
+    ModelDoc& d = featureDoc(params, QStringLiteral("textDocument/definition"));
+    const int offset = featureOffset(d, params, QStringLiteral("textDocument/definition"));
+    int wordStart = -1;
+    int wordEnd = -1;
+    const QString word = wordAt(d.text, offset, &wordStart, &wordEnd);
+    QJsonArray locations; // Location[] (spec): the word the caret landed ON
+    if (!word.isEmpty()) {
+        const QStringList lines = modelLines(d.text);
+        int line = 0;
+        int col = 0;
+        rowColAt(lines, wordStart, &line, &col);
+        locations.append(QJsonObject{
+            {QStringLiteral("uri"),
+             params.value(QStringLiteral("textDocument"))
+                 .toObject()
+                 .value(QStringLiteral("uri"))
+                 .toString()},
+            {QStringLiteral("range"),
+             rangeWire(d.text, line, col, line, col + word.size())}});
+    }
+    send(response(id, locations));
+}
+
+void featureReferences(const QJsonValue& id, const QJsonObject& params)
+{
+    ModelDoc& d = featureDoc(params, QStringLiteral("textDocument/references"));
+    const int offset = featureOffset(d, params, QStringLiteral("textDocument/references"));
+    const QJsonObject context = params.value(QStringLiteral("context")).toObject();
+    if (!context.contains(QStringLiteral("includeDeclaration")))
+        fail(QStringLiteral("textDocument/references context has no "
+                            "\"includeDeclaration\""));
+    const bool includeDeclaration
+        = context.value(QStringLiteral("includeDeclaration")).toBool();
+    int wordStart = -1;
+    int wordEnd = -1;
+    const QString word = wordAt(d.text, offset, &wordStart, &wordEnd);
+    const QString uri = params.value(QStringLiteral("textDocument"))
+                            .toObject()
+                            .value(QStringLiteral("uri"))
+                            .toString();
+    const QStringList lines = modelLines(d.text);
+    const QVector<int> hits = occurrences(d.text, word);
+    QJsonArray locations;
+    for (int i = 0; i < hits.size(); ++i) {
+        if (!includeDeclaration && i == 0)
+            continue; // THIS fake's declaration is its first occurrence: the
+                      // flag's whole point is that it drops exactly that one
+        int line = 0;
+        int col = 0;
+        rowColAt(lines, hits.at(i), &line, &col);
+        locations.append(QJsonObject{
+            {QStringLiteral("uri"), uri},
+            {QStringLiteral("range"),
+             rangeWire(d.text, line, col, line, col + word.size())}});
+    }
+    send(response(id, locations));
+}
+
+void featureCompletion(const QJsonValue& id, const QJsonObject& params)
+{
+    ModelDoc& d = featureDoc(params, QStringLiteral("textDocument/completion"));
+    const int offset = featureOffset(d, params, QStringLiteral("textDocument/completion"));
+    const QJsonObject context = params.value(QStringLiteral("context")).toObject();
+    const QJsonValue kindValue = context.value(QStringLiteral("triggerKind"));
+    if (!kindValue.isDouble())
+        fail(QStringLiteral("textDocument/completion context has no "
+                            "\"triggerKind\""));
+    const int triggerKind = kindValue.toInt();
+    const QString triggerCharacter
+        = context.value(QStringLiteral("triggerCharacter")).toString();
+    if (triggerKind != 1 && triggerKind != 2)
+        fail(QStringLiteral("completion triggerKind %1 is neither Invoked (1) "
+                            "nor TriggerForCharacter (2)")
+                 .arg(triggerKind));
+    if (triggerKind == 1 && !triggerCharacter.isEmpty())
+        fail(QStringLiteral("completion triggerKind 1 carried a "
+                            "\"triggerCharacter\" (\"%1\")")
+                 .arg(triggerCharacter));
+    if (triggerKind == 2 && triggerCharacter.isEmpty())
+        fail(QStringLiteral("completion triggerKind 2 without a "
+                            "\"triggerCharacter\""));
+    if (triggerKind == 2 && triggerCharacter != QLatin1String("."))
+        fail(QStringLiteral("completion triggered by \"%1\": the only "
+                            "advertised triggerCharacters is [\".\"]")
+                 .arg(triggerCharacter));
+    // The proof rides LEGAL fields: labels this test pins verbatim, so the
+    // frame the hub built is visible in the reply itself.
+    QJsonArray items;
+    items.append(QJsonObject{
+        {QStringLiteral("label"), QStringLiteral("alpha")},
+        {QStringLiteral("kind"), 14}, // Variable: the kind table rides along
+        {QStringLiteral("data"),
+         QJsonObject{{QStringLiteral("origin"), QStringLiteral("list")}}}});
+    items.append(QJsonObject{{QStringLiteral("label"), QStringLiteral("tk=")
+                                                               + QString::number(triggerKind)}});
+    if (triggerKind == 2)
+        items.append(QJsonObject{{QStringLiteral("label"),
+                                  QStringLiteral("tc=") + triggerCharacter}});
+    items.append(QJsonObject{{QStringLiteral("label"),
+                              QStringLiteral("off=") + QString::number(offset)}});
+    send(response(id, QJsonObject{{QStringLiteral("isIncomplete"), false},
+                                  {QStringLiteral("items"), items}}));
+}
+
+void featureResolveItem(const QJsonValue& id, const QJsonValue& paramsValue)
+{
+    if (!g_advertisesResolve)
+        fail(QStringLiteral("completionItem/resolve reached the server: the "
+                            "hub must refuse it locally when "
+                            "completionProvider has no resolveProvider"));
+    if (!paramsValue.isObject())
+        fail(QStringLiteral("completionItem/resolve params are not the item"));
+    const QJsonObject item = paramsValue.toObject();
+    const QString label = item.value(QStringLiteral("label")).toString();
+    if (label.isEmpty())
+        fail(QStringLiteral("completionItem/resolve item carries no \"label\""));
+    if (item.value(QStringLiteral("data")).toObject()
+            .value(QStringLiteral("origin"))
+            .toString()
+            .isEmpty())
+        fail(QStringLiteral("completionItem/resolve item lost the \"data\" the "
+                            "completion list gave it"));
+    QJsonObject resolved = item; // spec: the SAME item, filled in
+    resolved.insert(QStringLiteral("detail"),
+                    QStringLiteral("resolved:") + label);
+    resolved.insert(QStringLiteral("documentation"),
+                    QStringLiteral("docs for %1").arg(label));
+    send(response(id, resolved));
+}
+
+void featureCodeActions(const QJsonValue& id, const QJsonObject& params)
+{
+    ModelDoc& d = featureDoc(params, QStringLiteral("textDocument/codeAction"));
+    const QJsonObject range = params.value(QStringLiteral("range")).toObject();
+    const QJsonObject start = range.value(QStringLiteral("start")).toObject();
+    const QJsonObject end = range.value(QStringLiteral("end")).toObject();
+    if (!start.value(QStringLiteral("line")).isDouble()
+        || !end.value(QStringLiteral("line")).isDouble())
+        fail(QStringLiteral("textDocument/codeAction carries no Range"));
+    const int from
+        = specOffset(d.text, start.value(QStringLiteral("line")).toInt(),
+                     start.value(QStringLiteral("character")).toInt());
+    const int to = specOffset(d.text, end.value(QStringLiteral("line")).toInt(),
+                              end.value(QStringLiteral("character")).toInt());
+    if (from != to)
+        fail(QStringLiteral("codeAction range is not ZERO-WIDTH on this "
+                            "server's model: %1 vs %2").arg(from).arg(to));
+    // THE machine-5 frame pin for this door: context.diagnostics must be the
+    // CURRENT set the hub decoded, re-encoded back into the wire frame. The
+    // comparison is against this server's OWN fresh scan of the SAME text:
+    // every range, severity and message of a hub that re-encodes through a
+    // stale text, a wrong frame or a shifted severity table shows up here.
+    const QJsonObject context = params.value(QStringLiteral("context")).toObject();
+    if (!context.contains(QStringLiteral("diagnostics")))
+        fail(QStringLiteral("textDocument/codeAction context has no "
+                            "\"diagnostics\""));
+    const QJsonArray mine = diagsFor(d.text);
+    const QJsonArray theirs
+        = context.value(QStringLiteral("diagnostics")).toArray();
+    if (mine != theirs) {
+        std::fprintf(stderr,
+                     "FAKESERVER-FAIL codeAction context.diagnostics is not "
+                     "this server's own scan\n  server %s\n  client   %s\n",
+                     qPrintable(QString::fromUtf8(
+                         QJsonDocument(mine).toJson(QJsonDocument::Compact))),
+                     qPrintable(QString::fromUtf8(QJsonDocument(theirs)
+                                                      .toJson(
+                                                          QJsonDocument::Compact))));
+        std::fflush(stderr);
+        _exit(2);
+    }
+    const QString uri = params.value(QStringLiteral("textDocument"))
+                            .toObject()
+                            .value(QStringLiteral("uri"))
+                            .toString();
+    const QStringList lines = modelLines(d.text);
+    const int last = lines.size() - 1;
+    const int lastCol = lines.at(last).size();
+    QJsonArray actions;
+    // 1. The plain shape: a WorkspaceEdit on the action's "edit".
+    actions.append(QJsonObject{
+        {QStringLiteral("title"), QStringLiteral("indent the head")},
+        {QStringLiteral("kind"), QStringLiteral("quickfix")},
+        {QStringLiteral("edit"),
+         QJsonObject{{QStringLiteral("changes"),
+                      QJsonObject{{uri,
+                                   QJsonArray{textEditWire(
+                                       d.text, 0, 0, 0, 0,
+                                       QStringLiteral("# act\n"))}}}}}}});
+    // 2. clangd's shape: the WorkspaceEdit hides in command.arguments[0]
+    //    (the command NAME is noise; the payload carries the work).
+    QJsonArray cmdEdits;
+    cmdEdits.append(textEditWire(d.text, last, lastCol, last, lastCol,
+                                 QStringLiteral(" // cmd")));
+    QJsonObject cmdChanges;
+    cmdChanges.insert(uri, cmdEdits);
+    QJsonObject cmdEdit; // the WorkspaceEdit shape: just a "changes" map
+    cmdEdit.insert(QStringLiteral("changes"), cmdChanges);
+    QJsonObject cmdArgs; // the payload hides in arguments[0]
+    cmdArgs.insert(QStringLiteral("title"), QStringLiteral("apply"));
+    cmdArgs.insert(QStringLiteral("command"),
+                   QStringLiteral("qmn.fakeserver.append"));
+    cmdArgs.insert(QStringLiteral("arguments"), QJsonArray{cmdEdit});
+    QJsonObject cmdAction;
+    cmdAction.insert(QStringLiteral("title"), QStringLiteral("append the tail"));
+    cmdAction.insert(QStringLiteral("kind"), QStringLiteral("refactor"));
+    cmdAction.insert(QStringLiteral("command"), cmdArgs);
+    actions.append(cmdAction);
+    // 3. Structure v1 cannot do: a create-file documentChange.
+    actions.append(QJsonObject{
+        {QStringLiteral("title"), QStringLiteral("create a sidecar")},
+        {QStringLiteral("kind"), QStringLiteral("source")},
+        {QStringLiteral("edit"),
+         QJsonObject{{QStringLiteral("documentChanges"),
+                      QJsonArray{QJsonObject{
+                          {QStringLiteral("kind"), QStringLiteral("create")},
+                          {QStringLiteral("uri"),
+                           QStringLiteral("file:///qmn-sidecar.new")}}}}}}});
+    // 4. Neither shape at all: the decoder's "carries neither" problem.
+    actions.append(QJsonObject{{QStringLiteral("title"),
+                                QStringLiteral("nothing to apply")},
+                               {QStringLiteral("kind"),
+                                QStringLiteral("quickfix")}});
+    send(response(id, actions));
+}
+
+void featureFormatting(const QJsonValue& id, const QJsonObject& params)
+{
+    ModelDoc& d
+        = featureDoc(params, QStringLiteral("textDocument/formatting"));
+    const QJsonObject options = params.value(QStringLiteral("options")).toObject();
+    if (!params.value(QStringLiteral("options")).isObject())
+        fail(QStringLiteral("textDocument/formatting carries no formatting "
+                            "\"options\" object"));
+    // The hub's fixed FormattingOptions (the params pin: a hub that sends
+    // nothing, or a tab-formatted document, shows up here, not as a silent
+    // no-op formatting that "worked").
+    if (options.value(QStringLiteral("tabSize")).toInt(-1) != 4
+        || !options.value(QStringLiteral("insertSpaces")).toBool())
+        fail(QStringLiteral("formatting options are not the hub's fixed "
+                            "{tabSize:4, insertSpaces:true}: %1")
+                 .arg(QString::fromUtf8(QJsonDocument(options)
+                                            .toJson(QJsonDocument::Compact))));
+    // The spec's own result type: a BARE TextEdit[] (no uri, no version): the
+    // uri is the document this request named, which is why the hub's applier
+    // door takes the EDITOR and names it.
+    const QStringList lines = modelLines(d.text);
+    const int last = lines.size() - 1;
+    const int lastCol = lines.at(last).size();
+    QJsonArray edits;
+    edits.append(textEditWire(d.text, 0, 0, 0, 0, QStringLiteral("# fmt\n")));
+    edits.append(
+        textEditWire(d.text, last, lastCol, last, lastCol, QStringLiteral(" // fmt")));
+    send(response(id, edits));
+}
+
+void featureRename(const QJsonValue& id, const QJsonObject& params)
+{
+    ModelDoc& d = featureDoc(params, QStringLiteral("textDocument/rename"));
+    const int offset
+        = featureOffset(d, params, QStringLiteral("textDocument/rename"));
+    const QString newName = params.value(QStringLiteral("newName")).toString();
+    if (newName.isEmpty())
+        fail(QStringLiteral("textDocument/rename carries no \"newName\""));
+    int wordStart = -1;
+    int wordEnd = -1;
+    const QString word = wordAt(d.text, offset, &wordStart, &wordEnd);
+    const QString uri = params.value(QStringLiteral("textDocument"))
+                            .toObject()
+                            .value(QStringLiteral("uri"))
+                            .toString();
+    if (word.isEmpty()) {
+        send(response(id, QJsonValue(QJsonValue::Null))); // spec: null = this
+        return; // caret renames nothing
+    }
+    const QStringList lines = modelLines(d.text);
+    QJsonArray edits;
+    const QVector<int> hits = occurrences(d.text, word);
+    for (int at : hits) {
+        int line = 0;
+        int col = 0;
+        rowColAt(lines, at, &line, &col);
+        edits.append(textEditWire(d.text, line, col, line, col + word.size(),
+                                  newName));
+    }
+    if (d.text.contains(QLatin1String("RENAMEVERSION"))) {
+        // A version pin SEVEN ahead of this server's: the hub holds this
+        // document at THIS version, so the WHOLE edit must be refused.
+        QJsonArray docChanges;
+        docChanges.append(QJsonObject{
+            {QStringLiteral("textDocument"),
+             QJsonObject{{QStringLiteral("uri"), uri},
+                         {QStringLiteral("version"), double(d.version + 7)}}},
+            {QStringLiteral("edits"), edits}});
+        send(response(id,
+                      QJsonObject{{QStringLiteral("documentChanges"),
+                                   docChanges}}));
+        return;
+    }
+    QJsonObject changes;
+    changes.insert(uri, edits);
+    if (d.text.contains(QLatin1String("RENAMEMULTI"))) {
+        // The multi-file shape: the same rename in a document this hub does
+        // NOT hold open. v1 hands workspace structure to the app, so ALL of
+        // it must be refused — this document's own edits included, which is
+        // what makes a half-applied rename visible.
+        changes.insert(QStringLiteral("file:///qmn-not-open.cpp"),
+                       QJsonArray{textEditWire(QStringLiteral("sibling unit"),
+                                               0, 0, 0, 8, newName)});
+    }
+    send(response(id, QJsonObject{{QStringLiteral("changes"), changes}}));
+}
+
+void featureHover(const QJsonValue& /*id*/, const QJsonValue& /*params*/)
+{
+    // hoverProvider is advertised FALSE in features mode: the hub's gate must
+    // refuse this door LOCALLY. Traffic reaching this handler is a gate bug.
+    fail(QStringLiteral("textDocument/hover reached the server although "
+                        "hoverProvider is false"));
+}
+
+// The didSave markers (features mode): each primes ONE server-initiated
+// request whose answer this server validates itself (the client side of a
+// server-primed request is traffic the tst cannot see) and whose effect on
+// the model it pins. Version discipline: this server bumped its version on
+// the last didChange, exactly like the client's syncer did, so pinning
+// version = d.version here pins the SAME number the hub's syncer holds.
+void featureDidSave(const QString& uri, ModelDoc& d)
+{
+    const QString reqId = QStringLiteral("s-f%d-%1")
+                              .arg(++g_featureSaveSeq)
+                              .arg(uri);
+    if (d.text.contains(QLatin1String("APPLYEDIT"))) {
+        // The whole write path, one round trip: the server computes a
+        // WorkspaceEdit in its own frame, applies it to its OWN model with
+        // its own applier, stores the result as the full-sync expectation,
+        // and asks the client to do the same. Col 0 of line 0 is col 0 in
+        // EVERY negotiated frame: the edit's anchor needs no encoding luck.
+        const QJsonArray edits
+            = {textEditWire(d.text, 0, 0, 0, 0, QStringLiteral("srv\n"))};
+        applyWireEdits(d, edits);
+        g_applyVerify = d.text;
+        send(QJsonObject{
+            {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+            {QStringLiteral("id"), reqId},
+            {QStringLiteral("method"), QStringLiteral("workspace/applyEdit")},
+            {QStringLiteral("params"),
+             QJsonObject{
+                 {QStringLiteral("edit"),
+                  QJsonObject{
+                      {QStringLiteral("documentChanges"),
+                       QJsonArray{QJsonObject{
+                           {QStringLiteral("textDocument"),
+                            QJsonObject{{QStringLiteral("uri"), uri},
+                                        {QStringLiteral("version"),
+                                         double(d.version)}}},
+                           {QStringLiteral("edits"), edits}}}}}},
+                 {QStringLiteral("label"),
+                  QStringLiteral("fakeserver's own edit")}}}});
+        g_outstanding.insert(reqId, QStringLiteral("workspace/applyEdit"));
+        return;
+    }
+    if (d.text.contains(QLatin1String("APPLYREFUSE"))) {
+        // The refusal drill: the same legal edit PLUS a documentChanges
+        // entry for a uri this hub does not hold open. v1 hands workspace
+        // structure edits to the app, so ALL of it must be refused — the
+        // honest applied:false the client answers is checked in
+        // checkServerRequestResponse, and the model must not have moved.
+        QJsonArray docChanges;
+        docChanges.append(QJsonObject{
+            {QStringLiteral("textDocument"),
+             QJsonObject{{QStringLiteral("uri"), uri},
+                         {QStringLiteral("version"), double(d.version)}}},
+            {QStringLiteral("edits"),
+             QJsonArray{
+                 textEditWire(d.text, 0, 0, 0, 0,
+                              QStringLiteral("refused\n"))}}});
+        docChanges.append(QJsonObject{
+            {QStringLiteral("textDocument"),
+             QJsonObject{{QStringLiteral("uri"),
+                          QStringLiteral("file:///qmn-not-open.cpp")},
+                         {QStringLiteral("version"), 0.0}}},
+            {QStringLiteral("edits"),
+             QJsonArray{textEditWire(QStringLiteral("sibling"), 0, 0, 0, 7,
+                                     QStringLiteral("nope"))}}});
+        send(QJsonObject{
+            {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+            {QStringLiteral("id"), reqId},
+            {QStringLiteral("method"), QStringLiteral("workspace/applyEdit")},
+            {QStringLiteral("params"),
+             QJsonObject{{QStringLiteral("edit"),
+                          QJsonObject{{QStringLiteral("documentChanges"),
+                                       docChanges}}}}}});
+        g_outstanding.insert(
+            reqId, QStringLiteral("workspace/applyEdit-refuse:") + d.text);
+        return;
+    }
+    if (d.text.contains(QLatin1String("MSGREQ"))) {
+        // window/showMessageRequest: the tst answers the FIRST variant
+        // through the hub relay; the other variant stays silent and the
+        // client layer's own Null default must answer for it.
+        const bool first = d.text.contains(QLatin1String("MSGREQ-FIRST"));
+        QJsonArray actions;
+        actions.append(QJsonObject{{QStringLiteral("title"),
+                                    QStringLiteral("FIRST")}});
+        actions.append(QJsonObject{{QStringLiteral("title"),
+                                    QStringLiteral("SECOND")}});
+        send(QJsonObject{
+            {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+            {QStringLiteral("id"), reqId},
+            {QStringLiteral("method"),
+             QStringLiteral("window/showMessageRequest")},
+            {QStringLiteral("params"),
+             QJsonObject{{QStringLiteral("type"), 3},
+                         {QStringLiteral("message"),
+                          QStringLiteral("pick one")},
+                         {QStringLiteral("actions"), actions}}}});
+        g_outstanding.insert(reqId, first
+                                     ? QStringLiteral(
+                                           "showMessageRequest-first")
+                                     : QStringLiteral(
+                                           "showMessageRequest-null"));
+        return;
+    }
+}
+
+// The SERVER-side half of the machine-5 write-path pins: what the client
+// answered to OUR request is traffic the tst cannot observe, so this file
+// judges it. A wrong answer is a structural wire lie: exit 2.
+void checkServerRequestResponse(const QJsonObject& message)
+{
+    const QString id = message.value(QStringLiteral("id")).toString();
+    auto found = g_outstanding.find(id);
+    if (found == g_outstanding.end())
+        return; // not one of ours: leftover battery traffic, recorded only
+    const QString what = found.value();
+    g_outstanding.erase(found);
+    const bool isError = message.contains(QStringLiteral("error"));
+    const QJsonValue result = message.value(QStringLiteral("result"));
+    if (what == QLatin1String("workspace/applyEdit")) {
+        // LspClient's own answer is the spec's silent-until-told; the hub
+        // OVERRIDE is what the drill drives: it must answer applied:true.
+        if (isError || !result.toObject().value(QStringLiteral("applied"))
+                            .toBool())
+            fail(QStringLiteral("the client answered the server's applyEdit "
+                                "with applied:false (hub applier broken?)"));
+        std::fprintf(stderr, "APPLYREQ-OK\n");
+        std::fflush(stderr);
+        return;
+    }
+    if (what.startsWith(QLatin1String("workspace/applyEdit-refuse:"))) {
+        const QString untouched
+            = what.mid(int(qstrlen("workspace/applyEdit-refuse:")));
+        if (isError
+            || result.toObject().value(QStringLiteral("applied")).toBool())
+            fail(QStringLiteral("the client answered applied:true to an "
+                                "applyEdit it was supposed to REFUSE"));
+        // The refusal must have kept this server's model whole: the entry
+        // for a uri the hub does not hold open poisons the WHOLE edit, this
+        // document's own changes included (all-or-nothing is what makes a
+        // half-applied rename visible).
+        QString modelNow;
+        for (auto it = g_docs.cbegin(); it != g_docs.cend(); ++it) {
+            if (it.value().text == untouched) {
+                modelNow.clear();
+                break;
+            }
+            modelNow = it.value().text;
+        }
+        if (!modelNow.isEmpty())
+            fail(QStringLiteral("the refused applyEdit still moved the "
+                                "server model: \"%1\"")
+                     .arg(modelNow));
+        std::fprintf(stderr, "APPLYREFUSE-OK\n");
+        std::fflush(stderr);
+        return;
+    }
+    if (what == QLatin1String("showMessageRequest-first")) {
+        if (isError || result.isNull() || result.isUndefined()
+            || result.toObject().value(QStringLiteral("title")).toString()
+                   != QLatin1String("FIRST"))
+            fail(QStringLiteral("the first showMessageRequest answer was not "
+                                "the item \"FIRST\" (the client's default or "
+                                "a late answer won — first-answer-wins is "
+                                "broken)"));
+        std::fprintf(stderr, "MSGREQ-OK\n");
+        std::fflush(stderr);
+        return;
+    }
+    if (what == QLatin1String("showMessageRequest-null")) {
+        if (!isError && !result.isNull() && !result.isUndefined())
+            fail(QStringLiteral("somebody answered the showMessageRequest "
+                                "this test left silent: the client layer's "
+                                "Null default is broken"));
+        std::fprintf(stderr, "MSGREQ-NULL-OK\n");
+        std::fflush(stderr);
+        return;
+    }
+}
+
 // ------------------------------------------------------------- the server
 void handleInitialize(const QJsonObject& request)
 {
@@ -762,7 +1498,41 @@ void handleInitialize(const QJsonObject& request)
         fail(QStringLiteral("initialize params lack \"capabilities\""));
     g_initializeParams = request.value(QStringLiteral("params")).toObject();
     QJsonObject capabilities;
-    capabilities.insert(QStringLiteral("hoverProvider"), true);
+    if (g_completionOnly) {
+        // The nested capability gate's pin: completionProvider WITHOUT
+        // resolveProvider, and NOTHING else advertised. The completion door
+        // itself must still WORK (its reply is the plain list shape); the
+        // resolve door must be refused LOCALLY by the hub — if a resolve
+        // request reaches this server, featureResolveItem exits 2.
+        g_advertisesResolve = false;
+        QJsonObject completion;
+        completion.insert(QStringLiteral("triggerCharacters"),
+                          QJsonArray{QStringLiteral(".")});
+        capabilities.insert(QStringLiteral("completionProvider"), completion);
+    } else if (g_features) {
+        // The machine-5 provider set. One deliberately OFF shape rides it:
+        // hoverProvider FALSE (the hub must refuse hover locally; a hover
+        // request that reaches this server exits 2 below). Everything else
+        // is fully advertised so a missing capability can never mask a
+        // frame bug.
+        g_advertisesResolve = true;
+        capabilities.insert(QStringLiteral("hoverProvider"), false);
+        capabilities.insert(QStringLiteral("definitionProvider"),
+                            QJsonObject{}); // object shape: the truthy-door pin
+        capabilities.insert(QStringLiteral("referencesProvider"), true);
+        QJsonObject completion;
+        completion.insert(QStringLiteral("triggerCharacters"),
+                          QJsonArray{QStringLiteral(".")});
+        completion.insert(QStringLiteral("resolveProvider"), true);
+        capabilities.insert(QStringLiteral("completionProvider"), completion);
+        capabilities.insert(QStringLiteral("codeActionProvider"), true);
+        capabilities.insert(QStringLiteral("documentFormattingProvider"), true);
+        capabilities.insert(QStringLiteral("renameProvider"),
+                            QJsonObject{{QStringLiteral("prepareProvider"),
+                                         false}});
+    } else {
+        capabilities.insert(QStringLiteral("hoverProvider"), true);
+    }
     send(response(request.value(QStringLiteral("id")),
                   QJsonObject{{QStringLiteral("capabilities"), capabilities},
                               {QStringLiteral("positionEncoding"),
@@ -865,9 +1635,12 @@ void runLoop()
                 const QJsonValue methodValue
                     = message.value(QStringLiteral("method"));
                 if (methodValue.isUndefined()) {
-                    // A RESPONSE from the client (the battery consumes its
-                    // own through readNextMessage; anything landing here is
-                    // leftover traffic: recorded, ignored).
+                    // A RESPONSE from the client. The battery consumes its
+                    // own through readNextMessage; a machine-5 server-primed
+                    // request's answer is JUDGED here (the tst cannot see
+                    // this traffic); anything else is leftover: recorded,
+                    // ignored.
+                    checkServerRequestResponse(message);
                     continue;
                 }
                 const QString method = methodValue.toString();
@@ -907,6 +1680,31 @@ void runLoop()
                 } else if (g_mode == QLatin1String("sync")
                            && method == QLatin1String("test/initializeParams")) {
                     handleInitializeParams(id);
+                } else if ((g_features)
+                           && method == QLatin1String("completionItem/resolve")) {
+                    featureResolveItem(id, params); // gate tripwires FIRST
+                } else if ((g_features)
+                           && method == QLatin1String("textDocument/hover")) {
+                    featureHover(id, params.toObject()); // the OFF-provider
+                                                         // tripwire
+                } else if ((g_features)
+                           && method == QLatin1String("textDocument/definition")) {
+                    featureDefinition(id, params.toObject());
+                } else if ((g_features)
+                           && method == QLatin1String("textDocument/references")) {
+                    featureReferences(id, params.toObject());
+                } else if ((g_features)
+                           && method == QLatin1String("textDocument/completion")) {
+                    featureCompletion(id, params.toObject());
+                } else if ((g_features)
+                           && method == QLatin1String("textDocument/codeAction")) {
+                    featureCodeActions(id, params.toObject());
+                } else if ((g_features)
+                           && method == QLatin1String("textDocument/formatting")) {
+                    featureFormatting(id, params.toObject());
+                } else if ((g_features)
+                           && method == QLatin1String("textDocument/rename")) {
+                    featureRename(id, params.toObject());
                 } else if (!id.isUndefined()) {
                     if (g_mode == QLatin1String("basic")
                         || g_mode == QLatin1String("stderr"))
@@ -953,13 +1751,21 @@ int main(int argc, char** argv)
             || enc == QLatin1String("utf-32"))
             g_syncEncoding = enc;
         else if (enc != QLatin1String("crashonce")
-                 && enc != QLatin1String("diags"))
+                 && enc != QLatin1String("diags")
+                 && enc != QLatin1String("features")
+                 && enc != QLatin1String("completiononly"))
             fail(QStringLiteral("sync mode: bad encoding \"%1\"").arg(enc));
         for (int i = 2; i < args.size(); ++i) {
             if (args.at(i) == QLatin1String("crashonce"))
                 g_crashOnce = true;
             else if (args.at(i) == QLatin1String("diags"))
                 g_publishDiags = true;
+            else if (args.at(i) == QLatin1String("features"))
+                g_features = true;
+            else if (args.at(i) == QLatin1String("completiononly"))
+                g_completionOnly = g_features = true; // rides the features
+                // machinery, but the provider set is ONLY completionProvider
+                // without resolveProvider — the nested gate's refusal pin
         }
     }
     if (g_mode != QLatin1String("basic") && g_mode != QLatin1String("stderr")

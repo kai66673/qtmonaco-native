@@ -210,6 +210,12 @@ private slots:
     void parityDoorsAndEveryMutationPingTextChanged();
     void revealAtScrollsPerModeAndUnfoldsFolds();
 
+    // The M8 machine-5 batch edit door (the door every server-primed edit
+    // rides): bottom-up walk, ONE undo group, total clamping, overlap
+    // refusal, and the readOnly silence.
+    void applyTextEditsDoorWalksBottomUpInOneUndoGroup();
+    void applyTextEditsDoorClampsAndRefusesOverlapsAndLocks();
+
     // Multiple carets (Phase D1).
     void altClickAddsCaretsInDocOrder();
     void altClickInsideSelectionFollowsRules();
@@ -4939,6 +4945,105 @@ void TestCodeEditor::parityDoorsAndEveryMutationPingTextChanged()
     editor->redo();
     QCOMPARE(spy.count(), before);
     QCOMPARE(editor->toPlainText(), QStringLiteral("abab"));
+    editor->options()->setReadOnly(false);
+}
+
+void TestCodeEditor::applyTextEditsDoorWalksBottomUpInOneUndoGroup()
+{
+    // The M8 machine-5 door: every server-primed edit (applyEdit, codeAction,
+    // formatting, rename) lands here. The batch arrives in ASCENDING array
+    // order on purpose — a walk that applied the array as given would shift
+    // every range after the first edit it applied, so the expected text below
+    // is only reachable bottom-up.
+    editor->setPlainText(QStringLiteral("alpha beta gamma\nsecond line\nthird\n"));
+    QVERIFY(!editor->canUndo()); // setPlainText cleared the history: the ONE
+                                 // group the batch pushes is then countable
+    QSignalSpy editPings(editor, &CodeEditor::textChanged);
+
+    const QVector<CodeEditor::TextEdit> edits{
+        {0, 0, 0, 5, QStringLiteral("ALPHA")},  // "alpha"
+        {0, 6, 0, 10, QStringLiteral("BETA")},  // "beta"
+        {1, 0, 1, 6, QString()},                // "second" -> deleted
+        {2, 0, 2, 5, QStringLiteral("THIRD")},  // "third"
+    };
+    QCOMPARE(editor->applyTextEdits(edits), 4);
+    QCOMPARE(editor->toPlainText(),
+             QStringLiteral("ALPHA BETA gamma\n line\nTHIRD\n"));
+    // The caret parks just past the TOPMOST applied edit (the replaceAll
+    // rule), and setSelection reveals it minimally on the way.
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 5}));
+
+    // The delta stream the LSP syncer consumes: 7 primitive mutations (three
+    // remove+insert pairs + one pure delete), each in its OWN pre-op frame —
+    // walking bottom-up is what keeps those frames exact for the mirror.
+    QCOMPARE(editPings.count(), 7);
+
+    // ONE Ctrl+Z reverses the whole server action, and the caret mark that
+    // undo restores is the one from before the batch.
+    editor->undo();
+    QCOMPARE(editor->toPlainText(),
+             QStringLiteral("alpha beta gamma\nsecond line\nthird\n"));
+    QVERIFY(!editor->canUndo()); // exactly ONE group was pushed, not four
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+    editor->redo();
+    QCOMPARE(editor->toPlainText(),
+             QStringLiteral("ALPHA BETA gamma\n line\nTHIRD\n"));
+    QVERIFY(!editor->canRedo());
+
+    // Ranges that merely TOUCH are not an overlap (end-exclusive ranges).
+    editor->setPlainText(QStringLiteral("abcdef"));
+    QCOMPARE(editor->applyTextEdits({{0, 0, 0, 3, QStringLiteral("X")},
+                                     {0, 3, 0, 6, QStringLiteral("Y")}}),
+             2);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("XY"));
+}
+
+void TestCodeEditor::applyTextEditsDoorClampsAndRefusesOverlapsAndLocks()
+{
+    // Total clamping: a line past EOF lands on the last line, a column past
+    // EOL lands at the line end, an inverted pair is read the tolerant way
+    // (M4's diagnostics discipline).
+    editor->setPlainText(QStringLiteral("a\nb"));
+    QCOMPARE(editor->applyTextEdits({{5, 0, 9, 3, QStringLiteral("X")}}), 1);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("a\nX"));
+
+    editor->setPlainText(QStringLiteral("abcd"));
+    QCOMPARE(editor->applyTextEdits({{0, 3, 0, 1, QStringLiteral("Z")}}), 1);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("aZd"));
+
+    editor->setPlainText(QStringLiteral("hello world"));
+    QCOMPARE(editor->applyTextEdits({{0, 0, 0, 999, QStringLiteral("HI")}}), 1);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("HI"));
+
+    // Overlapping edits: refused WHOLE, nothing applied, no undo step pushed.
+    // An overlap means the sender and this document disagree about the ranges,
+    // and a half-applied server edit is worse than none.
+    editor->setPlainText(QStringLiteral("abcdef"));
+    QVERIFY(!editor->canUndo());
+    const auto caretBefore = editor->position();
+    QCOMPARE(editor->applyTextEdits({{0, 0, 0, 3, QStringLiteral("X")},
+                                     {0, 2, 0, 4, QStringLiteral("Y")}}),
+             0);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abcdef"));
+    QVERIFY(!editor->canUndo());
+    QCOMPARE(editor->position(), caretBefore);
+
+    // An empty batch applies nothing and pushes NO undo step (it must not
+    // fence the user's typing chain either).
+    QTest::keyClick(editor, Qt::Key_Q); // types 'q' at the caret: {0,1}
+    const auto caretTyped = editor->position();
+    QSignalSpy pingSpy(editor, &CodeEditor::textChanged);
+    QCOMPARE(editor->applyTextEdits({}), 0);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("qabcdef"));
+    QCOMPARE(pingSpy.count(), 0);
+    QCOMPARE(editor->position(), caretTyped);
+
+    // M19 readOnly: front-door silence, the batch is refused and the caret,
+    // the text and the history all stay put.
+    editor->options()->setReadOnly(true);
+    QCOMPARE(editor->applyTextEdits({{0, 0, 0, 1, QStringLiteral("N")}}), 0);
+    QCOMPARE(editor->toPlainText(), QStringLiteral("qabcdef"));
+    QCOMPARE(editor->position(), caretTyped);
     editor->options()->setReadOnly(false);
 }
 

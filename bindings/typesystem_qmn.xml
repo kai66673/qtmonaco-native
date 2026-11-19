@@ -24,8 +24,9 @@
       CodeEditor::document(); the model object (text doors, uri, modified
       flag, the editApplied delta signals).
     * the nested data structs (HighlightSpan, Diagnostic, InlayHint, MatchRange,
-      FoldRange) - the M4/M15/M16 decoration records the Python layer feeds.
-      They are value types: fields become attributes, operator== becomes __eq__.
+      FoldRange, TextEdit) - the M4/M15/M16 decoration records and the M8
+      machine-5 write record that the Python layer feeds. They are value
+      types: fields become attributes, operator== becomes __eq__.
     * the nested enums - written explicitly rather than relying on the
       generator's automatic enum pickup, so the audit trail in
       mjb_rejected_functions.log stays about the deliberately unbound parts.
@@ -62,6 +63,9 @@
             <value-type name="InlayHint"/>
             <value-type name="MatchRange"/>
             <value-type name="FoldRange"/>
+            <!-- The M8 machine-5 write record: the list element of the
+                 applyTextEdits door. Same value shape as the records above. -->
+            <value-type name="TextEdit"/>
             <enum-type name="TokenKind"/>
             <enum-type name="Severity"/>
             <enum-type name="RevealMode"/>

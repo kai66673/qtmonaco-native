@@ -16,11 +16,15 @@
 #include <QTimer>
 #include <QUrl>
 
+#include <algorithm>
+
 #include "lsp/DocumentSyncer.hpp"
 #include "lsp/PositionConverter.hpp"
+#include "lsp/WorkspaceEdit.hpp"
 #include "protocol/ProcessTransport.hpp"
 #include "view/CodeDocument.hpp"
 #include "view/CodeEditor.hpp"
+#include "view/CodeEditorOptions.hpp" // the readOnly door (M19): options-only
 
 namespace qmn::app {
 
@@ -345,6 +349,22 @@ void LspHub::registerClient(const QString& specName, SpecClient& entry)
             this, [this, specName](const QJsonObject& params) {
                 onDiagnostics(specName, params);
             });
+    // The server-primed write path (machine 5): the hub applies what it can
+    // (all-or-nothing), answers the server with the truth, and relays the
+    // refusal reasons.
+    connect(client, &qmn::lsp::LspClient::serverApplyEdit, this,
+            [this, specName](const QJsonValue& id, const QJsonValue& edit) {
+                onApplyEdit(specName, id, edit);
+            });
+    // window/showMessageRequest: the hub only RELAYS — it never picks an
+    // action. The relay lands before LspClient's Null default, so an app
+    // that answers clientForSpec(spec)->respondShowMessageRequest from
+    // inside this signal wins the choice (the first answer to an id is the
+    // one that travels).
+    connect(client, &qmn::lsp::LspClient::serverShowMessageRequest, this,
+            [this, specName](const QJsonValue& id, const QJsonValue& params) {
+                emit serverShowMessageRequest(specName, id, params);
+            });
 }
 
 LspHub::SpecClient* LspHub::specEntry(const QString& specName)
@@ -594,6 +614,455 @@ void LspHub::onDiagnostics(const QString& specName, const QJsonObject& params)
     }
     reg->editor->setDiagnostics(decoded); // M5's decoration door, no new
                                           // geometry
+}
+
+// ------------------------------------------------- feature doors (machine 5)
+namespace {
+// The LOCAL refusals speak the codes a SERVER would have used, so a feature
+// handler cannot tell a hub gate from a server answer: -32002 = no live
+// server serves this document, -32601 = the provider is not offered (the
+// M2 rule for a non-Ready door: a refusal answers EXACTLY ONCE, never
+// silence).
+constexpr int kRefusalNoServer = qmn::lsp::LspClient::kWireServerNotInitialized;
+constexpr int kRefusalNoProvider = -32601;
+
+qmn::protocol::RpcClient::Reply localRefusal(int code, const QString& message)
+{
+    qmn::protocol::RpcClient::Reply reply;
+    reply.isError = true;
+    reply.code = code;
+    reply.message = message;
+    return reply;
+}
+
+// The v1 feature gate is the initialize CAPABILITIES (the registration
+// registry M2 built is the pull-model half, M8b): the key counts as offered
+// when it is PRESENT and not `false` — the object/options form counts (a
+// server may answer {"workDoneProgress":true}; renameProvider is an object
+// when prepareProvider rides along).
+bool capabilityOffered(const qmn::lsp::LspClient* client, const QString& key)
+{
+    const QJsonValue value = client->serverCapabilities().value(key);
+    if (value.isUndefined() || value.isNull())
+        return false;
+    if (value.isBool())
+        return value.toBool();
+    return true;
+}
+} // namespace
+
+bool LspHub::featureGate(qmn::view::CodeEditor* editor,
+                         const QString& capabilityKey,
+                         const FeatureHandler& onReply, FeatureTarget* target)
+{
+    *target = FeatureTarget{};
+    if (closingDown_ || !editor) {
+        if (onReply)
+            onReply(localRefusal(kRefusalNoServer,
+                                 QStringLiteral("the hub is closing down")));
+        return false;
+    }
+    qmn::lsp::DocumentSyncer* syncer = syncerFor(editor);
+    qmn::lsp::LspClient* client =
+        syncer ? clientForUri(syncer->uri()) : nullptr;
+    if (!syncer || !syncer->isOpen() || !client || !client->isReady()) {
+        if (onReply) {
+            const QString what =
+                syncer ? syncer->uri() : QStringLiteral("document not registered");
+            onReply(localRefusal(kRefusalNoServer,
+                                 QStringLiteral("no live server serves %1").arg(what)));
+        }
+        return false;
+    }
+    if (!capabilityKey.isEmpty() && !capabilityOffered(client, capabilityKey)) {
+        if (onReply)
+            onReply(localRefusal(kRefusalNoProvider,
+                                 QStringLiteral("capability \"%1\" is not offered")
+                                     .arg(capabilityKey)));
+        return false;
+    }
+    syncer->flush(); // THE act that makes the frame honest: the wire Position
+                     // is built against the mirror, the text the server holds
+    target->syncer = syncer;
+    target->client = client;
+    return true;
+}
+
+// The one model-frame -> wire-frame hop the feature doors need (the caret's
+// line/col through PositionConverter against the mirror). Roundabout on
+// purpose: toPosition honors the NEGOTIATED encoding, and fromModelPosition
+// is the model-frame entry into the document's offset frame.
+QJsonObject LspHub::wirePosition(const qmn::lsp::DocumentSyncer* syncer,
+                                 const qmn::view::TextPosition& pos) const
+{
+    const QString text = syncer->mirrorText();
+    const int offset = qmn::lsp::PositionConverter::fromModelPosition(
+        text, qmn::lsp::ModelPosition{pos.line, pos.col});
+    const qmn::lsp::LspPosition wire = qmn::lsp::PositionConverter::toPosition(
+        text, offset, syncer->encoding());
+    return QJsonObject{{QStringLiteral("line"), wire.line},
+                       {QStringLiteral("character"), wire.character}};
+}
+
+QJsonObject LspHub::wireDocumentPosition(
+    const qmn::lsp::DocumentSyncer* syncer,
+    const qmn::view::TextPosition& pos) const
+{
+    return QJsonObject{{QStringLiteral("textDocument"),
+                        QJsonObject{{QStringLiteral("uri"), syncer->uri()}}},
+                       {QStringLiteral("position"), wirePosition(syncer, pos)}};
+}
+
+qint64 LspHub::requestHover(qmn::view::CodeEditor* editor,
+                            const qmn::view::TextPosition& position,
+                            const FeatureHandler& onReply)
+{
+    FeatureTarget t;
+    if (!featureGate(editor, QStringLiteral("hoverProvider"), onReply, &t))
+        return 0;
+    return t.client->request(QStringLiteral("textDocument/hover"),
+                             wireDocumentPosition(t.syncer, position), onReply);
+}
+
+qint64 LspHub::requestDefinition(qmn::view::CodeEditor* editor,
+                                 const qmn::view::TextPosition& position,
+                                 const FeatureHandler& onReply)
+{
+    FeatureTarget t;
+    if (!featureGate(editor, QStringLiteral("definitionProvider"), onReply, &t))
+        return 0;
+    return t.client->request(QStringLiteral("textDocument/definition"),
+                             wireDocumentPosition(t.syncer, position), onReply);
+}
+
+qint64 LspHub::requestReferences(qmn::view::CodeEditor* editor,
+                                 const qmn::view::TextPosition& position,
+                                 bool includeDeclaration,
+                                 const FeatureHandler& onReply)
+{
+    FeatureTarget t;
+    if (!featureGate(editor, QStringLiteral("referencesProvider"), onReply, &t))
+        return 0;
+    QJsonObject params = wireDocumentPosition(t.syncer, position);
+    params.insert(QStringLiteral("context"),
+                  QJsonObject{{QStringLiteral("includeDeclaration"),
+                               includeDeclaration}});
+    return t.client->request(QStringLiteral("textDocument/references"), params,
+                             onReply);
+}
+
+qint64 LspHub::requestCompletion(qmn::view::CodeEditor* editor,
+                                 const qmn::view::TextPosition& position,
+                                 const FeatureHandler& onReply,
+                                 const QString& triggerCharacter)
+{
+    FeatureTarget t;
+    if (!featureGate(editor, QStringLiteral("completionProvider"), onReply, &t))
+        return 0;
+    QJsonObject params = wireDocumentPosition(t.syncer, position);
+    QJsonObject context;
+    if (triggerCharacter.isEmpty()) {
+        context.insert(QStringLiteral("triggerKind"), 1); // Invoked
+    } else {
+        context.insert(QStringLiteral("triggerKind"), 2); // TriggerForCharacter
+        context.insert(QStringLiteral("triggerCharacter"), triggerCharacter);
+    }
+    params.insert(QStringLiteral("context"), context);
+    return t.client->request(QStringLiteral("textDocument/completion"), params,
+                             onReply);
+}
+
+qint64 LspHub::resolveCompletionItem(qmn::view::CodeEditor* editor,
+                                     const QJsonObject& item,
+                                     const FeatureHandler& onReply)
+{
+    FeatureTarget t;
+    if (!featureGate(editor, QStringLiteral("completionProvider"), onReply, &t))
+        return 0;
+    // resolveProvider is NESTED (completionProvider's object form; the spec
+    // defaults it to false), so the flat key gate above is not enough.
+    const QJsonValue completion =
+        t.client->serverCapabilities().value(QStringLiteral("completionProvider"));
+    if (!completion.isObject()
+        || !completion.toObject().value(QStringLiteral("resolveProvider")).toBool()) {
+        if (onReply)
+            onReply(localRefusal(kRefusalNoProvider,
+                                 QStringLiteral("capability "
+                                                "\"completionProvider.resolveProvider\" "
+                                                "is not offered")));
+        return 0;
+    }
+    // Params ARE the item (spec): the app hands back what the list sent.
+    return t.client->request(QStringLiteral("completionItem/resolve"),
+                             QJsonValue(item), onReply);
+}
+
+qint64 LspHub::requestCodeActions(qmn::view::CodeEditor* editor,
+                                  const qmn::view::TextPosition& position,
+                                  const FeatureHandler& onReply)
+{
+    FeatureTarget t;
+    if (!featureGate(editor, QStringLiteral("codeActionProvider"), onReply, &t))
+        return 0;
+    QJsonObject params = wireDocumentPosition(t.syncer, position);
+    const QJsonObject positionObject =
+        params.value(QStringLiteral("position")).toObject();
+    params.remove(QStringLiteral("position")); // the range shape wins here
+    params.insert(QStringLiteral("range"),
+                  QJsonObject{{QStringLiteral("start"), positionObject},
+                              {QStringLiteral("end"), positionObject}});
+    // context.diagnostics: the document's CURRENT decoded diagnostics,
+    // re-encoded through the mirror's wire frame — clangd's quickfixes key
+    // off them, and the hub is the only party holding the decoded set.
+    const QString text = t.syncer->mirrorText();
+    const qmn::lsp::PositionConverter::Encoding enc = t.syncer->encoding();
+    QJsonArray diagnostics;
+    const QVector<qmn::view::CodeEditor::Diagnostic> current =
+        editor->diagnostics();
+    for (const qmn::view::CodeEditor::Diagnostic& diag : current) {
+        const qmn::lsp::LspPosition from = qmn::lsp::PositionConverter::toPosition(
+            text,
+            qmn::lsp::PositionConverter::fromModelPosition(
+                text, qmn::lsp::ModelPosition{diag.startLine, diag.startCol}),
+            enc);
+        const qmn::lsp::LspPosition to = qmn::lsp::PositionConverter::toPosition(
+            text,
+            qmn::lsp::PositionConverter::fromModelPosition(
+                text, qmn::lsp::ModelPosition{diag.endLine, diag.endCol}),
+            enc);
+        diagnostics.append(QJsonObject{
+            {QStringLiteral("range"),
+             QJsonObject{{QStringLiteral("start"),
+                          QJsonObject{{QStringLiteral("line"), from.line},
+                                      {QStringLiteral("character"), from.character}}},
+                         {QStringLiteral("end"),
+                          QJsonObject{{QStringLiteral("line"), to.line},
+                                      {QStringLiteral("character"), to.character}}}}},
+            {QStringLiteral("severity"), static_cast<int>(diag.severity) + 1},
+            {QStringLiteral("message"), diag.message}});
+    }
+    params.insert(QStringLiteral("context"),
+                  QJsonObject{{QStringLiteral("diagnostics"), diagnostics}});
+    return t.client->request(QStringLiteral("textDocument/codeAction"), params,
+                             onReply);
+}
+
+qint64 LspHub::requestFormatting(qmn::view::CodeEditor* editor,
+                                 const FeatureHandler& onReply)
+{
+    FeatureTarget t;
+    if (!featureGate(editor, QStringLiteral("documentFormattingProvider"),
+                     onReply, &t))
+        return 0;
+    // v1 sends fixed options (the view indents with literal tabs; there is
+    // no formatter-settings surface yet — that joins with the popup train).
+    return t.client->request(
+        QStringLiteral("textDocument/formatting"),
+        QJsonObject{{QStringLiteral("textDocument"),
+                     QJsonObject{{QStringLiteral("uri"), t.syncer->uri()}}},
+                    {QStringLiteral("options"),
+                     QJsonObject{{QStringLiteral("tabSize"), 4},
+                                 {QStringLiteral("insertSpaces"), true}}}},
+        onReply);
+}
+
+qint64 LspHub::requestRename(qmn::view::CodeEditor* editor,
+                             const qmn::view::TextPosition& position,
+                             const QString& newName,
+                             const FeatureHandler& onReply)
+{
+    FeatureTarget t;
+    if (!featureGate(editor, QStringLiteral("renameProvider"), onReply, &t))
+        return 0;
+    QJsonObject params = wireDocumentPosition(t.syncer, position);
+    params.insert(QStringLiteral("newName"), newName);
+    return t.client->request(QStringLiteral("textDocument/rename"), params,
+                             onReply);
+}
+
+// --------------------------------------------------- the write path (M5)
+LspHub::ApplyReport LspHub::applyDecoded(
+    const qmn::lsp::DecodedWorkspaceEdit& decoded,
+    const qmn::lsp::LspClient* servingClient)
+{
+    ApplyReport report;
+    report.refused = decoded.problems;
+
+    // v1 has no workspace/file model: a create/rename/delete documentChange
+    // is STRUCTURE the app owns (PLAN's rule for a multi-file rename). The
+    // text edits of such an edit are NOT applied half — all-or-nothing.
+    for (const QString& kind : decoded.unsupportedKinds())
+        report.refused << QStringLiteral(
+            "workspace structure change \"%1\" is handed to the app "
+            "(v1 applies text edits only)")
+                           .arg(kind);
+
+    // Group per document in the model frame, gating EVERY uri first: the
+    // reason list comes back whole, never one refusal at a time.
+    struct Gate {
+        qmn::view::CodeEditor* editor = nullptr;
+        qmn::lsp::DocumentSyncer* syncer = nullptr;
+    };
+    QMap<QString, QVector<qmn::view::CodeEditor::TextEdit>> byDoc;
+    QMap<QString, Gate> gates;
+    for (const qmn::lsp::WireTextEdit& wire : decoded.textEdits) {
+        auto reg = registrations_.constFind(wire.uri);
+        if (reg == registrations_.constEnd()) {
+            report.refused << QStringLiteral("\"%1\" is not a hub document")
+                               .arg(wire.uri);
+            continue;
+        }
+        qmn::lsp::LspClient* client = clientForUri(wire.uri);
+        if (!client || !client->isReady()) {
+            report.refused << QStringLiteral("no live server serves \"%1\"")
+                               .arg(wire.uri);
+            continue;
+        }
+        if (servingClient && client != servingClient) {
+            // The write-path cross-wire guard (M4's publish rule, told the
+            // other way): an edit naming a document that THIS client does
+            // not serve is a wire lie.
+            report.refused << QStringLiteral("\"%1\" is served by a "
+                                             "different server")
+                               .arg(wire.uri);
+            continue;
+        }
+        reg->syncer->flush(); // the server-side frame BEFORE the pin check:
+                              // version() tracks what the server holds, and
+                              // the mirror (== the editor's text) is the
+                              // decode frame only once everything went out
+        if (wire.documentVersion >= 0
+            && qint64(wire.documentVersion) != reg->syncer->version()) {
+            report.refused << QStringLiteral(
+                "\"%1\" edit pinned at version %2, the document is at version %3")
+                               .arg(wire.uri)
+                               .arg(wire.documentVersion)
+                               .arg(reg->syncer->version());
+            continue;
+        }
+        if (reg->editor->options()->isReadOnly()) {
+            // M19 rule: readOnly lives on the options object, not a flat
+            // editor door. A locked document refuses the WHOLE edit.
+            report.refused << QStringLiteral("\"%1\" is read-only").arg(wire.uri);
+            continue;
+        }
+        // Wire -> model, against the mirror (the clamping frame M4 taught:
+        // PositionConverter clamps total, an inverted pair is swapped).
+        const QString text = reg->syncer->mirrorText();
+        const qmn::lsp::PositionConverter::Encoding enc = reg->syncer->encoding();
+        qmn::lsp::ModelPosition from = qmn::lsp::PositionConverter::toModelPosition(
+            text, wire.startLine, wire.startCol, enc);
+        qmn::lsp::ModelPosition to = qmn::lsp::PositionConverter::toModelPosition(
+            text, wire.endLine, wire.endCol, enc);
+        if (to.line < from.line || (to.line == from.line && to.col < from.col))
+            std::swap(from, to);
+        qmn::view::CodeEditor::TextEdit edit;
+        edit.startLine = from.line;
+        edit.startCol = from.col;
+        edit.endLine = to.line;
+        edit.endCol = to.col;
+        edit.newText = wire.newText;
+        byDoc[wire.uri].append(edit);
+        gates.insert(wire.uri, Gate{reg->editor, reg->syncer});
+    }
+
+    // Overlap pre-check on the mirror frame — mirror == editor text after
+    // the flush, so these offsets are EXACTLY what the view door computes;
+    // catching it here is what keeps the refusal ALL-OR-NOTHING across
+    // documents (the view would only refuse ONE document's batch).
+    for (auto it = byDoc.constBegin(); it != byDoc.constEnd(); ++it) {
+        const QString text = gates.value(it.key()).syncer->mirrorText();
+        QVector<QPair<int, int>> ranges;
+        ranges.reserve(it->size());
+        for (const qmn::view::CodeEditor::TextEdit& edit : it.value()) {
+            const int a = qmn::lsp::PositionConverter::fromModelPosition(
+                text, qmn::lsp::ModelPosition{edit.startLine, edit.startCol});
+            const int b = qmn::lsp::PositionConverter::fromModelPosition(
+                text, qmn::lsp::ModelPosition{edit.endLine, edit.endCol});
+            ranges.append(a <= b ? qMakePair(a, b) : qMakePair(b, a));
+        }
+        std::sort(ranges.begin(), ranges.end());
+        for (int i = 1; i < ranges.size(); ++i) {
+            if (ranges[i - 1].second > ranges[i].first) {
+                report.refused << QStringLiteral(
+                    "\"%1\" carries overlapping TextEdit ranges").arg(it.key());
+                break; // one reason per document is enough
+            }
+        }
+    }
+
+    if (!report.refused.isEmpty())
+        return report; // nothing was touched: the reasons are the report
+
+    // Apply: uri order (QMap's own) -> deterministic, pinnable. The
+    // begin/endServerEdit pair suppresses the echo and closes with ONE full
+    // sync; applyTextEdits is ONE undo group per document, walking bottom-up
+    // (N documents = N undo steps: each document is its own action).
+    for (auto it = byDoc.constBegin(); it != byDoc.constEnd(); ++it) {
+        const Gate gate = gates.value(it.key());
+        gate.syncer->beginServerEdit();
+        const int applied = gate.editor->applyTextEdits(it.value());
+        gate.syncer->endServerEdit();
+        if (applied > 0) {
+            report.documentsChanged += 1;
+            report.editsApplied += applied;
+        }
+    }
+    report.applied = true;
+    return report;
+}
+
+LspHub::ApplyReport LspHub::applyWorkspaceEdit(
+    const QJsonValue& workspaceEdit, const qmn::lsp::LspClient* servingClient)
+{
+    return applyDecoded(qmn::lsp::WorkspaceEditWire::decode(workspaceEdit),
+                        servingClient);
+}
+
+LspHub::ApplyReport LspHub::applyCodeAction(const QJsonObject& codeAction,
+                                            const qmn::lsp::LspClient* servingClient)
+{
+    return applyDecoded(qmn::lsp::WorkspaceEditWire::decodeCodeAction(codeAction),
+                        servingClient);
+}
+
+LspHub::ApplyReport LspHub::applyReplyEdit(const QJsonValue& result,
+                                           const qmn::lsp::LspClient* servingClient)
+{
+    return applyDecoded(qmn::lsp::WorkspaceEditWire::decode(result),
+                        servingClient);
+}
+
+LspHub::ApplyReport LspHub::applyTextEditList(
+    qmn::view::CodeEditor* editor, const QJsonValue& textEditsResult,
+    const qmn::lsp::LspClient* servingClient)
+{
+    qmn::lsp::DocumentSyncer* syncer = syncerFor(editor);
+    if (!syncer) {
+        ApplyReport report;
+        report.refused << QStringLiteral(
+            "this document is not registered with the hub, so a bare "
+            "TextEdit[] reply names no document to apply to");
+        return report;
+    }
+    return applyDecoded(qmn::lsp::WorkspaceEditWire::decodeTextEditList(
+                            textEditsResult, syncer->uri()),
+                        servingClient);
+}
+
+void LspHub::onApplyEdit(const QString& specName, const QJsonValue& id,
+                         const QJsonValue& editValue)
+{
+    qmn::lsp::LspClient* client = clientForSpec(specName);
+    if (!client)
+        return; // the session died mid-request: RpcClient's id is gone anyway
+    // servingClient = the SENDER: every uri this edit names must be served
+    // by this very client (the cross-wire guard for the write path).
+    const ApplyReport report =
+        applyDecoded(qmn::lsp::WorkspaceEditWire::decode(editValue), client);
+    client->respondApplyEdit(id, report.applied); // the truth, either way
+    if (!report.applied && !report.refused.isEmpty())
+        emit applyEditRefused(specName, report.refused);
 }
 
 } // namespace qmn::app

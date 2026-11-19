@@ -1718,6 +1718,70 @@ void CodeEditor::deleteLineAt(int line)
     reconcileUndoMarks(pre);
 }
 
+int CodeEditor::applyTextEdits(const QVector<TextEdit>& edits)
+{
+    if (readOnly_ || edits.isEmpty())
+        return 0; // M19 front-door silence (the caret stays put); an empty
+                  // batch applies nothing and pushes NO undo step
+
+    // Normalize into the document's own frame: offsetOf clamps the column to
+    // the line length, the line is clamped to the document, and removeRange
+    // already swaps an inverted pair — so a generous or inverted range is read
+    // the way a tolerant editor reads it (M4's diagnostics discipline), never
+    // a fault. Offsets, not line/col pairs, are what the walk orders and
+    // applies: they are the ONE frame the batch is valid in.
+    struct Op {
+        int start;
+        int end;
+        QString text;
+    };
+    QVector<Op> ops;
+    ops.reserve(edits.size());
+    const int lastLine = buffer_.lineCount() - 1;
+    for (const TextEdit& ed : edits) {
+        Op op;
+        const int a = buffer_.offsetOf(qBound(0, ed.startLine, lastLine),
+                                       qMax(0, ed.startCol));
+        const int b = buffer_.offsetOf(qBound(0, ed.endLine, lastLine),
+                                       qMax(0, ed.endCol));
+        op.start = qMin(a, b); // inverted pair: the tolerant reading
+        op.end = qMax(a, b);
+        op.text = ed.newText;
+        ops.append(op);
+    }
+    std::sort(ops.begin(), ops.end(), [](const Op& l, const Op& r) {
+        return l.start != r.start ? l.start < r.start : l.end < r.end;
+    });
+    // Overlapping edits are refused WHOLE, not applied in some order: an
+    // overlap means the sender and this document disagree about what the
+    // ranges mean, and a half-applied server edit is worse than none (the
+    // applier's all-or-nothing rule starts here, at the walk). Ranges are
+    // end-exclusive, so touching (end == next start) is legal.
+    for (int i = 1; i < ops.size(); ++i) {
+        if (ops[i - 1].end > ops[i].start)
+            return 0;
+    }
+
+    const UndoMark pre = captureEditMark();
+    buffer_.beginEditGroup(); // ONE undo group for the whole batch
+    for (int i = ops.size() - 1; i >= 0; --i) { // bottom-up: nothing shifts
+        const Op& op = ops[i];
+        if (op.end > op.start)
+            buffer_.removeRange(op.start, op.end);
+        if (!op.text.isEmpty())
+            buffer_.insertAtOffset(op.start, op.text);
+    }
+    buffer_.endEditGroup();
+    // Single caret (the replaceAll rule: a batch is not a multi-caret
+    // action), parked just past the TOPMOST edit's text. setSelection
+    // reveals it minimally, so the server action is on screen after all.
+    const auto atLc = buffer_.lineColAt(ops.first().start + ops.first().text.size());
+    const TextPosition at{atLc.line, atLc.col};
+    setSelection(at, at);
+    reconcileUndoMarks(pre);
+    return int(ops.size());
+}
+
 void CodeEditor::revealAt(TextPosition pos, RevealMode mode)
 {
     const TextPosition p = clampPos(pos);

@@ -1091,7 +1091,34 @@ answered its `exit`, "QProcess: Destroyed while process is still running");
 and the fakeserver's OWN encoder counted CODE POINTS where the model frame
 counts utf-16 CODE UNITS — one character per surrogate pair of drift, caught
 by the two-sided design on the first utf-8 diagnostics run. Machine 5
-(feature doors + the hover/completion popups) is next.
+(the WRITE path — feature request doors + the four-shape `WorkspaceEdit`
+decoder + an ALL-OR-NOTHING applier + the view door `CodeEditor::applyTextEdits`
++ the fakeserver `features` mode) ✅ (2026-11-19): lsp binary at 57 slots,
+ctest still 5 entries. It is also the FIRST M8 machine to widen the VIEW
+surface — the binding's three copies grew the nested `TextEdit` record
+(typesystem entry + a `_generated` TU name; the codegen CLI rides the
+already-listed `CodeEditor.hpp`), `--codegen` rejected-log clean for
+`applyTextEdits`, and the door was probed from the container build tree
+(list in, bottom-up walk, ONE undo group reverses it). The hover/completion
+POPUPS and `willSaveWaitUntil` slide to machine 6 — the write path ships
+without them. Rules machine 5 decided (in code now): every feature door
+flushes the syncer first and refuses LOCALLY (SERVER code `-32601` on the
+reply, id 0) when no spec claims the language, no live server serves the
+uri, or the capability is absent — nested gates included
+(`completionProvider.resolveProvider`); the applier gates EVERY uri of a
+decoded edit before touching anything — structure operations (create/rename/
+delete file) hand to the app whole, version-pinned `documentChanges` are
+checked AFTER a flush (version == what the server holds), cross-wire
+(`servingClient`) guard, readOnly and overlapping-range refusals — and then
+applies per document via the `beginServerEdit`/`endServerEdit` pair
+(N documents = N undo steps); the hub answers the server's OWN
+`workspace/applyEdit` with the truth (`respondApplyEdit`) and relays
+`window/showMessageRequest` WITHOUT answering — the first answer to
+`respondShowMessageRequest` wins over the client layer's Null default, and
+the fakeserver judges both halves from its side (`APPLYREQ-OK`,
+`APPLYCHECK-OK`, `APPLYREFUSE-OK`, `MSGREQ-OK`/`MSGREQ-NULL-OK` ride the
+didSave-marker + stderr channel, since client→server answers are traffic
+the test cannot see).
 
 - **Layers:** `src/protocol/` (QtCore+QtNetwork, zero view — Framing with
   full header-block parse + 64 MiB upper bound that fails as a transport

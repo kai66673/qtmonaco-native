@@ -168,6 +168,31 @@ public:
     void insertTextAt(TextPosition pos, const QString& text);
     void deleteLineAt(int line);
 
+    // M8 machine 5: the BATCH range-replacement door behind every edit a
+    // SERVER primes (workspace/applyEdit, codeAction, formatting, rename).
+    // It is replaceAll()'s walk made general: the batch is applied bottom-up
+    // (DESCENDING by start offset), so the ranges still to come never shift,
+    // and the whole batch is ONE undo group — one Ctrl+Z reverses a whole
+    // server action. Ranges are the model frame (line + utf-16 column) and
+    // end-EXCLUSIVE, exactly like Diagnostic/MatchRange; clamping is total
+    // (line clamped into the document, column into the line, an inverted pair
+    // swapped — M4's diagnostics discipline), so a generous range is read the
+    // way a tolerant editor reads it and never faults. Multi-caret collapses
+    // to one caret parked just past the TOPMOST applied edit (the replaceAll
+    // rule); an empty batch applies nothing and pushes NO undo step. Returns
+    // how many edits were applied — 0 when the batch is empty or the M19
+    // readOnly lock holds (front-door silence, the caret stays put).
+    struct TextEdit {
+        int startLine = 0;
+        int startCol = 0;
+        int endLine = 0;
+        int endCol = 0;
+        QString newText;
+
+        bool operator==(const TextEdit&) const = default; // test round-trips
+    };
+    int applyTextEdits(const QVector<TextEdit>& edits);
+
     // The qtmonaco set_cursor `moveToPosition` door. revealAt is reveal-
     // ONLY (never moves the caret — the binding calls setPosition first):
     // M13 fold-unfold of the target line, then vertical scroll per mode.

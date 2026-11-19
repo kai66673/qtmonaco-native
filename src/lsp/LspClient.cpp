@@ -317,15 +317,18 @@ void LspClient::registerPolicyHandlers(RpcClient* rpc)
     // ---- requests: always answer ----
     rpc->setRequestHandler(QStringLiteral("window/showMessageRequest"),
                            [rpc, this](const QJsonObject& request) {
-                               // v1 policy: answered null = no action picked
-                               // (spec-legal); the button UI lands with the
-                               // popups (machines 5/6) via respondApplyEdit-
-                               // style glue.
-                               rpc->respond(request.value(QStringLiteral("id")),
-                                            QJsonValue(QJsonValue::Null));
+                               // M5 decision: GLUE GETS THE FIRST TURN. The
+                               // signal fires BEFORE this layer's default, and
+                               // RpcClient::respond refuses a second answer to
+                               // the same id — so the first answer to arrive is
+                               // the one the server gets. Null (= no action
+                               // picked, spec-legal) is the default the app
+                               // does not beat when it shows no buttons.
+                               const QJsonValue id
+                                   = request.value(QStringLiteral("id"));
                                emit serverShowMessageRequest(
-                                   request.value(QStringLiteral("id")),
-                                   request.value(QStringLiteral("params")));
+                                   id, request.value(QStringLiteral("params")));
+                               rpc->respond(id, QJsonValue(QJsonValue::Null));
                            });
     // The M4 config layer answers these for real; the honest v1 answer is a
     // per-item null array / null folders (spec: null = no settings).
@@ -489,6 +492,20 @@ void LspClient::respondApplyEdit(const QJsonValue& id, bool applied)
         return;
     session_->rpc->respond(
         id, QJsonObject{{QStringLiteral("applied"), applied}});
+}
+
+void LspClient::respondShowMessageRequest(const QJsonValue& id,
+                                          const QJsonValue& actionItem)
+{
+    if (!session_)
+        return;
+    // An empty/Null item = dismissed (the spec's own reading). The answer only
+    // travels while the id is still open: after this layer's Null default the
+    // respond() below is refused, which is the documented "first answer wins".
+    session_->rpc->respond(
+        id, actionItem.isNull() || actionItem.isUndefined()
+                ? QJsonValue(QJsonValue::Null)
+                : actionItem);
 }
 
 } // namespace qmn::lsp

@@ -62,6 +62,14 @@ public:
     static ModelPosition toModelPosition(const QString& text, int line,
                                          int character, Encoding enc);
 
+    // The model frame (line + utf-16 column) -> the document's UTF-16 offset:
+    // toModelPosition read backwards, with the same total clamping (line into
+    // the document, column into the line) and the same surrogate discipline
+    // (an offset that would split a pair stops BEFORE it). M5's feature
+    // requests build their wire Position through here — against the syncer's
+    // MIRROR text, the text the server actually has.
+    static int fromModelPosition(const QString& text, const ModelPosition& pos);
+
     // Width, in `enc` units, of one code point (0..0x10FFFF) — the per-unit
     // count the line walks accumulate. Public for the round-trip tests.
     static int unitWidth(unsigned codePoint, Encoding enc);
