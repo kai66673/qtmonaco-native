@@ -96,6 +96,13 @@ public:
     void notify(const QString& method,
                 const QJsonValue& params = QJsonValue(QJsonValue::Undefined));
 
+    // The $/cancelRequest passthrough (the M8 close-train popup trigger
+    // supersedes its own in-flight requests): forwards to the live
+    // session's RpcClient::cancel — the wire notification plus the immediate
+    // LOCAL -32802 fulfillment, the late server reply then dropped. A no-op
+    // when no live session can take it (the pending requests died with it).
+    void cancel(qint64 requestId);
+
     // The capability registry (PLAN-decided, the real thing): true while at
     // least one live registration of the LSP method exists. initialize
     // capabilities are NOT merged here (statics are feature gates, machine 5).

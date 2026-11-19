@@ -52,6 +52,80 @@ QJsonObject deepMerge(const QJsonObject& base, const QJsonObject& patch)
 }
 } // namespace
 
+// The popup-trigger state (the M8 close-train sliver): defined early because
+// releaseRegistration already tears it down long before the trigger member
+// functions further down.
+struct LspHub::TriggerState {
+    QTimer completionTimer; // single-shot -> fireCompletionTrigger
+    QTimer hoverTimer;      // single-shot -> fireHoverTrigger
+    bool on = false;
+    QChar typedChar;                // the one unit to classify at fire time
+    bool pendingTypingMove = false; // an editApplied just fired: the next
+                                    // cursorMoved is THAT edit's own move
+                                    // (unmatched: one skipped hover cycle —
+                                    // an edit that never moves the caret,
+                                    // harmless and documented)
+    qint64 pendingCompletion = 0;   // 0 = nothing in flight (local refusals
+                                    // return 0 from the door, -1 from the
+                                    // client — neither is a cancelable id)
+};
+
+namespace {
+
+// The ONE identifier predicate the trigger shares: the completion
+// classifier (an identifier unit completes Invoked) and the fallback hover
+// word bounds walk with it.
+bool isTriggerUnit(QChar c)
+{
+    return c.isLetterOrNumber() || c == QLatin1Char('_');
+}
+
+// LSP's hover contents shapes — string | MarkupContent | MarkedString |
+// (string | MarkedString)[] — collapse into the popup's ONE plain string
+// (PLAN: no markdown rendering; markup VALUES pass VERBATIM, the view paints
+// plain text). Arrays join with newlines, exactly like an editor shows them.
+QString hoverPlainText(const QJsonValue& contents)
+{
+    if (contents.isString())
+        return contents.toString();
+    if (contents.isArray()) {
+        QStringList parts;
+        for (const QJsonValue& value : contents.toArray()) {
+            if (value.isString())
+                parts << value.toString();
+            else if (value.isObject())
+                parts << value.toObject().value(QStringLiteral("value")).toString();
+        }
+        return parts.join(QLatin1Char('\n'));
+    }
+    if (contents.isObject())
+        return contents.toObject().value(QStringLiteral("value")).toString();
+    return QString();
+}
+
+// The fallback hover frame: the WORD at the caret (no word = a zero-width
+// caret range). Clamped into the mirror text — the frame the server answered
+// against.
+qmn::view::CodeEditor::HoverRange wordRangeAt(const QString& mirrorText,
+                                              qmn::view::TextPosition caret)
+{
+    const QStringList lines = mirrorText.split(QLatin1Char('\n'));
+    if (caret.line >= lines.size())
+        caret.line = lines.isEmpty() ? 0 : lines.size() - 1;
+    const QString line = lines.value(caret.line);
+    if (caret.col > line.size())
+        caret.col = line.size();
+    int from = caret.col;
+    while (from > 0 && isTriggerUnit(line.at(from - 1)))
+        --from;
+    int to = caret.col;
+    while (to < line.size() && isTriggerUnit(line.at(to)))
+        ++to;
+    return {caret.line, from, caret.line, to};
+}
+
+} // namespace
+
 LspHub::LspHub(QObject* parent)
     : QObject(parent)
 {
@@ -496,6 +570,19 @@ bool LspHub::openDocument(qmn::view::CodeEditor* editor, const QString& uri,
     // re-register the same editor) can never double-send on one change.
     connect(editor, &qmn::view::CodeEditor::workspaceConfigurationChanged,
             reg.syncer, [this, key] { pushWorkspaceConfiguration(key); });
+    // The popup-trigger taps (M8 close-train): connected for EVERY
+    // registration, cheap, and inert until setPopupTriggers says otherwise —
+    // the slots re-look-up the per-key state and honor its `on` bit. The
+    // context is again the syncer: a re-open (release + re-register the same
+    // editor) can never double-fire on one signal.
+    connect(doc, &qmn::view::CodeDocument::editApplied, reg.syncer,
+            [this, key](int start, int end, const QString& inserted) {
+                onTriggerEdit(key, start, end, inserted);
+            });
+    connect(editor, &qmn::view::CodeEditor::cursorMoved, reg.syncer,
+            [this, key](qmn::view::TextPosition pos) {
+                onTriggerCaretMoved(key, pos);
+            });
 
     reg.syncer->open(doc->toPlainText(), languageId); // didOpen now, or on
                                                       // ready() if the server
@@ -522,8 +609,23 @@ void LspHub::releaseRegistration(const QString& uri)
     auto it = registrations_.find(uri);
     if (it == registrations_.end())
         return;
+    qmn::lsp::LspClient* client = clientForUri(uri); // BEFORE the erase
     Registration reg = it.value();
     registrations_.erase(it);
+    // The trigger state dies with the registration: timers off, and an
+    // in-flight completion gets canceled so its handler (which re-looks-up
+    // this registration and finds it gone) can never show into a closed
+    // document. MOVE the state out before erasing, and erase BEFORE the
+    // cancel: cancel() fires the stale handler synchronously, and that
+    // handler must already find no state/registration to touch.
+    std::unique_ptr<TriggerState> trig;
+    auto tit = triggers_.find(uri);
+    if (tit != triggers_.end()) {
+        trig = std::move(tit->second);
+        triggers_.erase(tit);
+    }
+    if (trig && trig->pendingCompletion != 0 && client)
+        client->cancel(trig->pendingCompletion);
     if (reg.syncer) {
         reg.syncer->close(); // didClose (a stopped server drops it silently,
                              // the M2 notify rule)
@@ -1000,6 +1102,264 @@ qint64 LspHub::requestRename(qmn::view::CodeEditor* editor,
     params.insert(QStringLiteral("newName"), newName);
     return t.client->request(QStringLiteral("textDocument/rename"), params,
                              onReply);
+}
+
+// ------------------------------------------------- popup triggering (M8 sliver)
+// PLAN always assigned this half to the app side ("All triggering is
+// glue-side (cursorMoved/editApplied)"); the M8 close-train wired it into
+// the hub, where the feature doors, the syncer mirror and the registration
+// bookkeeping already live. The view stays display-only: only the DECISION
+// of when to ask moved here. Everything is opt-in per editor — a hub that
+// never calls setPopupTriggers changes not one wire byte. (The state struct
+// and the decode helpers sit up top, where releaseRegistration needs them.)
+
+LspHub::TriggerState* LspHub::triggerEntry(const QString& uri)
+{
+    auto it = triggers_.find(uri);
+    if (it != triggers_.end())
+        return it->second.get();
+    auto state = std::make_unique<TriggerState>();
+    TriggerState* raw = state.get();
+    raw->completionTimer.setSingleShot(true);
+    raw->hoverTimer.setSingleShot(true);
+    connect(&raw->completionTimer, &QTimer::timeout, this,
+            [this, uri] { fireCompletionTrigger(uri); });
+    connect(&raw->hoverTimer, &QTimer::timeout, this,
+            [this, uri] { fireHoverTrigger(uri); });
+    triggers_.emplace(uri, std::move(state));
+    return raw;
+}
+
+LspHub::TriggerState* LspHub::triggerFor(const QString& uri) const
+{
+    auto it = triggers_.find(uri);
+    return it == triggers_.end() ? nullptr : it->second.get();
+}
+
+void LspHub::setPopupTriggers(qmn::view::CodeEditor* editor, bool on)
+{
+    if (!editor || closingDown_)
+        return;
+    qmn::lsp::DocumentSyncer* syncer = syncerFor(editor);
+    if (!syncer)
+        return; // no OPEN hub document: there is no registration to arm
+    TriggerState* t = on ? triggerEntry(syncer->uri())
+                         : triggerFor(syncer->uri());
+    if (!t) { // OFF for a never-armed editor is still a dismissal, nothing more
+        editor->hideCompletionList();
+        editor->hideHover();
+        return;
+    }
+    if (!on) {
+        t->on = false;
+        t->completionTimer.stop();
+        t->hoverTimer.stop();
+        t->pendingTypingMove = false;
+        if (t->pendingCompletion != 0) {
+            if (qmn::lsp::LspClient* client = clientForUri(syncer->uri()))
+                client->cancel(t->pendingCompletion);
+            t->pendingCompletion = 0;
+        }
+        editor->hideCompletionList();
+        editor->hideHover();
+        return;
+    }
+    t->on = true;
+}
+
+bool LspHub::popupTriggersEnabled(qmn::view::CodeEditor* editor) const
+{
+    if (!editor)
+        return false;
+    const qmn::lsp::DocumentSyncer* syncer = syncerFor(editor);
+    const TriggerState* t = syncer ? triggerFor(syncer->uri()) : nullptr;
+    return t && t->on;
+}
+
+void LspHub::onTriggerEdit(const QString& uri, int start, int end,
+                           const QString& inserted)
+{
+    TriggerState* t = triggerFor(uri);
+    if (!t || !t->on)
+        return;
+    // The edit's OWN cursorMoved follows (the buffer mutation emitted this
+    // editApplied, and the view re-emits cursorMoved once the caret is
+    // remapped): typing never hovers.
+    t->pendingTypingMove = true;
+    if (end != start || inserted.size() != 1)
+        return; // only TYPING counts: a pure one-unit insertion
+    t->typedChar = inserted.at(0);
+    t->completionTimer.start(kCompletionTriggerMs); // every keystroke
+                                                    // RE-ARMS the debounce:
+                                                    // a burst coalesces into
+                                                    // one request
+}
+
+void LspHub::onTriggerCaretMoved(const QString& uri,
+                                 const qmn::view::TextPosition& pos)
+{
+    Q_UNUSED(pos); // the caret itself is read at fire time — the LATEST one
+    TriggerState* t = triggerFor(uri);
+    if (!t || !t->on)
+        return;
+    if (t->pendingTypingMove) {
+        t->pendingTypingMove = false; // the edit's own move: no hover
+        return;
+    }
+    t->hoverTimer.start(kHoverTriggerMs); // every non-typing move RE-ARMS:
+                                          // the hover fires when the caret
+                                          // sits still
+}
+
+void LspHub::fireCompletionTrigger(const QString& uri)
+{
+    TriggerState* t = triggerFor(uri);
+    if (!t || !t->on)
+        return;
+    auto reg = registrations_.constFind(uri);
+    if (reg == registrations_.constEnd() || !reg->editor)
+        return; // the document is gone: nothing to ask, nothing to show
+    qmn::lsp::LspClient* client = clientForUri(uri);
+    // SUPERSEDE: the cancel fulfills the stale request LOCALLY with -32802
+    // right here (its handler below shows nothing) and tells the server not
+    // to bother — one popup, never a late reply clobbering a newer one.
+    if (t->pendingCompletion != 0) {
+        if (client)
+            client->cancel(t->pendingCompletion);
+        t->pendingCompletion = 0;
+    }
+    // Is the typed unit a REASON to complete? An identifier unit is always
+    // Invoked (kind 1); anything else only when it is one of the
+    // completionProvider's triggerCharacters (kind 2, the char rides);
+    // anything else fires NOTHING (typing a space hides and stays hidden).
+    const QChar unit = t->typedChar;
+    QString triggerCharacter;
+    if (!isTriggerUnit(unit)) {
+        QStringList advertised;
+        if (client) {
+            const QJsonArray chars
+                = client->serverCapabilities()
+                      .value(QStringLiteral("completionProvider"))
+                      .toObject()
+                      .value(QStringLiteral("triggerCharacters"))
+                      .toArray();
+            for (const QJsonValue& value : chars)
+                advertised << value.toString();
+        }
+        if (!advertised.contains(QString(unit)))
+            return;
+        triggerCharacter = QString(unit);
+    }
+    const qint64 id = requestCompletion(
+        reg->editor, reg->editor->position(),
+        [this, uri](const qmn::protocol::RpcClient::Reply& reply) {
+            if (TriggerState* s = triggerFor(uri))
+                s->pendingCompletion = 0; // THIS request is over, by whatever
+                                          // route (reply, -32802, timeout, refusal)
+            auto reg2 = registrations_.constFind(uri);
+            if (reg2 == registrations_.constEnd() || !reg2->editor)
+                return; // nowhere to show
+            if (reply.isError)
+                return; // refusals/cancels/timeouts show NOTHING (the
+                        // superseded request never touches the popup)
+            // The result is CompletionItem[] OR a CompletionList object —
+            // both legal per spec; only label+detail cross into the view
+            // (PLAN: no resolve path), capped at kMaxCompletionRows.
+            QJsonArray items;
+            if (reply.result.isArray())
+                items = reply.result.toArray();
+            else if (reply.result.isObject())
+                items = reply.result.toObject()
+                            .value(QStringLiteral("items"))
+                            .toArray();
+            QVector<qmn::view::CodeEditor::CompletionItem> rows;
+            for (const QJsonValue& value : items) {
+                if (!value.isObject())
+                    continue;
+                const QJsonObject item = value.toObject();
+                const QString label
+                    = item.value(QStringLiteral("label")).toString();
+                if (label.isEmpty())
+                    continue; // a row without a label is no row
+                rows.append({label,
+                             item.value(QStringLiteral("detail")).toString()});
+                if (rows.size() >= kMaxCompletionRows)
+                    break;
+            }
+            reg2->editor->showCompletionList(rows); // EMPTY rows = hide
+        },
+        triggerCharacter);
+    t->pendingCompletion = id > 0 ? id : 0; // 0 = locally refused: nothing
+                                            // in flight to supersede
+}
+
+void LspHub::fireHoverTrigger(const QString& uri)
+{
+    TriggerState* t = triggerFor(uri);
+    if (!t || !t->on)
+        return;
+    auto reg = registrations_.constFind(uri);
+    if (reg == registrations_.constEnd() || !reg->editor)
+        return;
+    qmn::view::CodeEditor* editor = reg->editor;
+    // Completion and hover NEVER share the moment: the hover is skipped
+    // while completion owns the popup — in flight or visible.
+    if (editor->completionListVisible() || t->pendingCompletion != 0)
+        return;
+    const qmn::view::TextPosition caret = editor->position();
+    requestHover(
+        editor, caret,
+        [this, uri, caret](const qmn::protocol::RpcClient::Reply& reply) {
+            auto reg2 = registrations_.constFind(uri);
+            if (reg2 == registrations_.constEnd() || !reg2->editor)
+                return;
+            qmn::view::CodeEditor* ed = reg2->editor;
+            if (reply.isError)
+                return; // refusal/cancel/timeout: an OLD popup stays as-is
+            if (reply.result.isNull() || !reply.result.isObject()) {
+                ed->hideHover(); // a null result is the official no-hover
+                return;
+            }
+            const QJsonObject hover = reply.result.toObject();
+            const QString plain = hoverPlainText(
+                hover.value(QStringLiteral("contents")));
+            if (plain.isEmpty()) {
+                ed->hideHover();
+                return;
+            }
+            // The FRAME decodes against the MIRROR — the one text the
+            // server answered against (featureGate flushed it before the
+            // request). The server's `range` wins; else the word at the
+            // caret; else the zero-width caret range.
+            const QString text = reg2->syncer ? reg2->syncer->mirrorText()
+                                              : QString();
+            const qmn::lsp::PositionConverter::Encoding encoding
+                = reg2->syncer ? reg2->syncer->encoding()
+                               : qmn::lsp::PositionConverter::Encoding::Utf16;
+            qmn::view::CodeEditor::HoverRange range;
+            const QJsonObject rangeWire =
+                hover.value(QStringLiteral("range")).toObject();
+            if (!rangeWire.isEmpty()) {
+                const QJsonObject from
+                    = rangeWire.value(QStringLiteral("start")).toObject();
+                const QJsonObject to
+                    = rangeWire.value(QStringLiteral("end")).toObject();
+                const qmn::lsp::ModelPosition fromPos
+                    = qmn::lsp::PositionConverter::toModelPosition(
+                        text, from.value(QStringLiteral("line")).toInt(),
+                        from.value(QStringLiteral("character")).toInt(),
+                        encoding);
+                const qmn::lsp::ModelPosition toPos
+                    = qmn::lsp::PositionConverter::toModelPosition(
+                        text, to.value(QStringLiteral("line")).toInt(),
+                        to.value(QStringLiteral("character")).toInt(),
+                        encoding);
+                range = {fromPos.line, fromPos.col, toPos.line, toPos.col};
+            } else {
+                range = wordRangeAt(text, caret);
+            }
+            ed->showHover(range, plain);
+        });
 }
 
 // --------------------------------------------------- the write path (M5)

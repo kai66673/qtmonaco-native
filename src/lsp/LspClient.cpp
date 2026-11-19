@@ -486,6 +486,14 @@ void LspClient::notify(const QString& method, const QJsonValue& params)
     session_->rpc->notify(method, params);
 }
 
+void LspClient::cancel(qint64 requestId)
+{
+    if (!session_ || session_->rpc->isGone())
+        return; // the pending requests died with the session: nothing to
+                // cancel, and RpcClient would only speak into a dead pipe
+    session_->rpc->cancel(requestId);
+}
+
 void LspClient::respondApplyEdit(const QJsonValue& id, bool applied)
 {
     if (!session_)

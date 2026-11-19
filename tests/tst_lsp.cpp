@@ -21,6 +21,8 @@
 #include <QJsonArray>
 #include <QJsonDocument>
 #include <QJsonObject>
+#include <QLabel>
+#include <QListWidget>
 #include <QTcpServer>
 #include <QTcpSocket>
 #include <QTemporaryDir>
@@ -4005,6 +4007,249 @@ private slots:
         QCOMPARE(shown.at(0), QStringLiteral("CONFIG-1 {\"k\":1}"));
         QVERIFY(client->isReady()); // spawn #2 is clean
         QCOMPARE(h.spawnCount, 3);
+    }
+
+    // --- M8 close-train sliver: glue-side popup TRIGGERING -----------------
+    // The hub decides WHEN the two view popups show; the fakeserver's `reqlog`
+    // stderr channel is the traffic oracle (a trigger that fires nothing shows
+    // nothing), and the reply's own labels pin the frame the hub built.
+
+    // Completion by TYPING: identifier unit -> Invoked (tk=1), advertised
+    // trigger char -> TriggerForCharacter (tk=2 + tc=), caret captured at FIRE
+    // time (off=), debounce coalescing every keystroke into one request.
+    void hubTriggerCompletionOnTypingAndTriggerChar()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000); // the wire stays spare: only feature REQs
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("beta"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///trig-c.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show(); // the visibility getters read QWidget::isVisible (M6 trap)
+        editor.setPosition({0, 4});
+        h.hub.setPopupTriggers(&editor, true);
+        QVERIFY(h.hub.popupTriggersEnabled(&editor));
+
+        QTest::keyClick(&editor, Qt::Key_A); // identifier unit at the caret
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/completion")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return editor.completionListVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QListWidget* list = editor.findChild<QListWidget*>(
+            QStringLiteral("qmn-completion-list"));
+        QVERIFY(list);
+        QCOMPARE(list->count(), 3); // alpha, tk=1, off=5 — the caret AT FIRE
+                                    // TIME (the typed 'a' sits at offset 4)
+        QCOMPARE(list->item(0)->text(), QStringLiteral("alpha"));
+        QCOMPARE(list->item(1)->text(), QStringLiteral("tk=1"));
+        QCOMPARE(list->item(2)->text(), QStringLiteral("off=5"));
+        QCOMPARE(stderrSpy.count(), 1); // ONE request for one qualifying burst
+
+        QTest::keyClick(&editor, Qt::Key_Period); // the ONLY advertised
+                                                  // triggerCharacters item
+        QVERIFY2(waitUntil(
+                     [&] {
+                         int reqs = 0;
+                         for (const QList<QVariant>& args : stderrSpy)
+                             if (args.at(0).toString()
+                                     .contains(QStringLiteral(
+                                         "REQ textDocument/completion")))
+                                 ++reqs;
+                         return reqs == 2;
+                     }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return editor.completionListVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QCOMPARE(list->count(), 4); // alpha, tk=2, tc=., off=6
+        QCOMPARE(list->item(1)->text(), QStringLiteral("tk=2"));
+        QCOMPARE(list->item(2)->text(), QStringLiteral("tc=."));
+        QCOMPARE(list->item(3)->text(), QStringLiteral("off=6"));
+    }
+
+    // SUPERSEDE: with 600 ms of server-side latency the first request is
+    // still in flight when the next keystroke fires a new one — the hub
+    // $/cancelRequests the stale id (one CANCELREQ) and only the NEWEST
+    // reply ever reaches the popup.
+    void hubTriggerSupersedesInFlightCompletion()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features"),
+                                 QStringLiteral("reqlog"),
+                                 QStringLiteral("cancellog"),
+                                 QStringLiteral("completiondelay=600")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("beta"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///trig-s.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        editor.setPosition({0, 4});
+        h.hub.setPopupTriggers(&editor, true);
+
+        QTest::keyClick(&editor, Qt::Key_A);
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/completion")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY(!editor.completionListVisible()); // the reply is still brewing
+
+        QTest::keyClick(&editor, Qt::Key_B); // supersede while IN FLIGHT
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("CANCELREQ")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil(
+                     [&] {
+                         int reqs = 0;
+                         for (const QList<QVariant>& args : stderrSpy)
+                             if (args.at(0).toString()
+                                     .contains(QStringLiteral(
+                                         "REQ textDocument/completion")))
+                                 ++reqs;
+                         return reqs == 2;
+                     }),
+                 qPrintable(stderrDump(stderrSpy)));
+        int cancels = 0;
+        for (const QList<QVariant>& args : stderrSpy)
+            if (args.at(0).toString().contains(QStringLiteral("CANCELREQ")))
+                ++cancels;
+        QCOMPARE(cancels, 1); // exactly the one stale request
+
+        // The delayed FIRST reply lands too — and must show NOTHING; only
+        // the newest reply paints the popup.
+        QVERIFY2(waitUntil([&] { return editor.completionListVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QListWidget* list = editor.findChild<QListWidget*>(
+            QStringLiteral("qmn-completion-list"));
+        QVERIFY(list);
+        QCOMPARE(list->count(), 3);
+        QCOMPARE(list->item(2)->text(),
+                 QStringLiteral("off=6")); // the SECOND request's caret
+        QTest::qWait(700); // the past due: no further traffic, no re-show
+        QCOMPARE(cancels, 1);
+    }
+
+    // Hover: a NON-typing idle caret move asks after kHoverTriggerMs; the
+    // server's answer (contents + range) becomes the popup verbatim; typing
+    // NEVER hovers; and while completion owns the popup, hover is skipped.
+    void hubTriggerHoverOnIdleCaretAndTypingNeverHovers()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features"),
+                                 QStringLiteral("hoveron"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("alpha beta\ngamma"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///trig-h.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        editor.setPosition({0, 0});
+        h.hub.setPopupTriggers(&editor, true);
+
+        editor.setPosition({0, 7}); // INSIDE the word "beta"
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("REQ textDocument/hover")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return editor.hoverVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QLabel* label =
+            editor.findChild<QLabel*>(QStringLiteral("qmn-hover-label"));
+        QVERIFY(label);
+        QCOMPARE(label->text(), QStringLiteral("HOVER beta off=7"));
+        QTest::qWait(300);
+        QCOMPARE(stderrSpy.count(), 1); // ONE idle move, ONE ask
+
+        QTest::keyClick(&editor, Qt::Key_X); // TYPING: the cursorMoved paired
+                                             // with the edit is its own move
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/completion")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return editor.completionListVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY(!editor.hoverVisible()); // typing dismissed it (view auto-hide)
+
+        editor.setPosition({1, 1}); // INSIDE "gamma": a NON-typing move, but
+                                    // completion owns the popup -> hover skipped
+        QTest::qWait(900); // past the 500 ms hover debounce + margin
+        int hovers = 0;
+        for (const QList<QVariant>& args : stderrSpy)
+            if (args.at(0).toString()
+                    .contains(QStringLiteral("REQ textDocument/hover")))
+                ++hovers;
+        QCOMPARE(hovers, 1); // still the one ask from the idle move
+        QVERIFY(!editor.hoverVisible());
+    }
+
+    // OFF is the DEFAULT and the cheap path: an unarmed editor produces ZERO
+    // feature traffic; arming works; disarming hides NOW and goes silent.
+    void hubTriggersOffByDefaultAndDisarmHidesInstantly()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("beta"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///trig-off.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        QVERIFY(!h.hub.popupTriggersEnabled(&editor)); // the DEFAULT
+
+        QTest::keyClick(&editor, Qt::Key_A); // typing AND a deliberate move...
+        editor.setPosition({0, 0});
+        QTest::qWait(900); // ...past BOTH debounces (150 + 500 + margin)
+        QVERIFY(stderrSpy.empty()); // never armed: not one feature request
+        QVERIFY(!editor.completionListVisible());
+        QVERIFY(!editor.hoverVisible());
+        h.hub.setPopupTriggers(&editor, false); // OFF for a never-armed editor:
+                                                // a dismissal, not an error
+        QVERIFY(!h.hub.popupTriggersEnabled(&editor));
+
+        h.hub.setPopupTriggers(&editor, true); // NOW the same gesture asks
+        QTest::keyClick(&editor, Qt::Key_A);
+        QVERIFY2(waitUntil([&] { return editor.completionListVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+
+        h.hub.setPopupTriggers(&editor, false); // hide is INSTANT
+        QVERIFY(!editor.completionListVisible());
+        QVERIFY(!h.hub.popupTriggersEnabled(&editor));
+        const int armedReqs = stderrSpy.count();
+        QVERIFY(armedReqs > 0);
+        QTest::keyClick(&editor, Qt::Key_Z); // and the taps went quiet too
+        QTest::qWait(600);
+        QCOMPARE(stderrSpy.count(), armedReqs);
     }
 
 };

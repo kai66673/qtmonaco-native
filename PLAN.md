@@ -838,11 +838,26 @@ their own.
 LSP (M8 machines 1–7) are SHIPPED.** DAP is the one car left open, and the
 deferred slivers ride it or their own follow-ons: M8b (signatureHelp, inlay
 hints, foldingRange over the M13 fold API, pull diagnostics via the
-registration registry), the glue-side popup TRIGGERING (the view doors exist,
-`cursorMoved`/`editApplied` → `showCompletionList`/`showHover` is app-side and
-not wired anywhere yet), M10b (inline word-level diff, wrap×diff budget math,
+registration registry), M10b (inline word-level diff, wrap×diff budget math,
 original-side wrap), and the two pre-existing defects recorded verbatim below
 (the undo-mark drift on type-over-selection, the overview-ruler perf cliff).
+**The first deferred sliver is already BUILT (2026-11-19, right after the
+close, no version bump): the glue-side popup TRIGGERING.** The hub owns the
+DECISION, the view popups stay display-only: `LspHub::setPopupTriggers(editor,
+bool)` (opt-in per OPEN document, OFF default = zero wire-byte change for
+every existing test) taps `editApplied`/`cursorMoved` per registration; typing
+a unit debounces `kCompletionTriggerMs` and classifies at fire time
+(identifier -> Invoked, an advertised `triggerCharacters` char ->
+TriggerForCharacter, anything else fires nothing), a superseded in-flight
+completion is `$/cancelRequest`'d (`LspClient::cancel`, local -32802, the late
+reply never clobbers a newer popup), and hover asks after `kHoverTriggerMs` of
+idle NON-typing caret moves — skipped while completion owns the popup.
+Completion rows decode to `{label, detail}` capped at 100; hover contents
+pass VERBATIM (no markdown rendering, PLAN's popup shape); the hover frame is
+the server's `range`, else the word at the caret, against the syncer MIRROR.
+`tst_lsp` grew 62 -> 66 slots on the fakeserver's new `hoveron`/`reqlog`/
+`cancellog`/`completiondelay=` flags (plain-`features` pins byte-identical).
+ACCEPT still stays a further sliver.
 
 **Known pre-existing bug (recorded 2026-11-15, deferred to its own small
 car):** bracketed type-over-selection in `insertTextAtCaret` (the
@@ -1103,7 +1118,9 @@ fakeserver's exit code is an oracle no assertion can fake — it caught our own
 encoder counting CODE POINTS where the model counts UTF-16 CODE UNITS. What
 M8 deliberately did NOT do, all recorded above: no `set_lsp_header` pair, no
 semanticTokens painting (decoder-only), no markdown in the popups, glue-side
-popup TRIGGERING left to the app. DAP (car 4) is the one Gate-2 car left open.
+popup TRIGGERING left to the app — that last one is WIRED post-close (see the
+status paragraph above: `setPopupTriggers`, 62 -> 66 slots). DAP (car 4) is
+the one Gate-2 car left open.
 
 Machines built (2026-11-18): 1 `src/protocol/` ✅ → 2 `LspClient` + fakeserver
 oracle ✅ → 3 document syncer + position converter + the `sync`-mode fakeserver

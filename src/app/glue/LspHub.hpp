@@ -28,6 +28,8 @@
 // arrow view -> protocol/lsp stays unbuilt; the hub is a CLIENT of both.
 
 #include <functional>
+#include <map>
+#include <memory>
 #include <QJsonObject>
 #include <QMap>
 #include <QObject>
@@ -191,6 +193,45 @@ public:
                          const qmn::view::TextPosition& position,
                          const QString& newName, const FeatureHandler& onReply);
 
+    // --- popup TRIGGERING (the M8 close-train sliver, PLAN: "All triggering
+    //     is glue-side (cursorMoved/editApplied)") ---------------------------
+    // With triggers ON for an OPEN document, the hub watches the view's own
+    // signals and feeds the two SHOW doors itself — the view popups stay
+    // display-only, only the DECISION moves here:
+    //
+    //   completion — a qualifying TYPING edit (a pure insertion of exactly
+    //   one UTF-16 unit) restarts a kCompletionTriggerMs debounce; at fire
+    //   time the unit is an identifier char (TriggerKind Invoked) or one of
+    //   completionProvider's triggerCharacters (TriggerForCharacter + the
+    //   char), anything else fires NOTHING. A superseded in-flight request
+    //   is $/cancelRequest'd (its handler fulfills locally with -32802 and
+    //   shows nothing) — one popup, never a late reply overwriting a newer.
+    //   hover — a NON-typing caret move that sits idle for kHoverTriggerMs.
+    //   The cursorMoved that pairs with an editApplied is the edit's OWN
+    //   move (typing never hovers), and hover is skipped while a completion
+    //   is in flight or visible.
+    //
+    // Decoded feeds (the view doors are plain-Qt payloads, PLAN's popup
+    // shape): completion items -> {label, detail}, the list capped at
+    // kMaxCompletionRows (the popup is a list, not an indexer); the hover
+    // contents (string / MarkupContent / MarkedString, arrays joined by
+    // newlines) pass VERBATIM — markup values are NOT rendered, the view
+    // shows plain text; an empty or absent result HIDES. The hover frame is
+    // the server's `range` when it sends one, else the word at the caret,
+    // else a zero-width caret range — all decoded against the syncer's
+    // MIRROR, the one text the server agrees with.
+    //
+    // OFF by default, per editor: a hub that never opts in changes not one
+    // wire byte (every existing test's traffic stays byte-identical). The
+    // door needs an OPEN document (triggers ride the registration); turning
+    // OFF stops the timers, cancels the in-flight completion and hides both
+    // popups. ACCEPT stays out of scope (the further M8 sliver list).
+    static constexpr int kCompletionTriggerMs = 150;
+    static constexpr int kHoverTriggerMs = 500;
+    static constexpr int kMaxCompletionRows = 100;
+    void setPopupTriggers(qmn::view::CodeEditor* editor, bool on);
+    bool popupTriggersEnabled(qmn::view::CodeEditor* editor) const;
+
     // --- the write path: WorkspaceEdit application ------------------------
     // Both directions of the same machinery: a SERVER-primed edit
     // (workspace/applyEdit, relayed below and answered for real) and the
@@ -324,6 +365,21 @@ private:
     void registerClient(const QString& specName, SpecClient& entry);
     void releaseRegistration(const QString& uri);
     QString resolveUri(qmn::view::CodeEditor* editor, const QString& uri);
+    // The popup trigger machinery (the doors above): state lives per
+    // registration key, born with the first setPopupTriggers(true) and gone
+    // with the registration. The editApplied/cursorMoved taps connect in
+    // openDocument (context = the registration's syncer, the same
+    // die-with-the-registration trick the edit feed uses), so the slots
+    // below only ever see a lookup.
+    struct TriggerState; // timers + bookkeeping; defined in the .cpp
+    TriggerState* triggerEntry(const QString& uri); // creates + wires timers
+    TriggerState* triggerFor(const QString& uri) const;
+    void onTriggerEdit(const QString& uri, int start, int end,
+                       const QString& inserted);
+    void onTriggerCaretMoved(const QString& uri,
+                             const qmn::view::TextPosition& pos);
+    void fireCompletionTrigger(const QString& uri);
+    void fireHoverTrigger(const QString& uri);
     // Pump (bounded by kStopBarrierMs) until every client lands a terminal
     // state: the ONLY way the destructor can promise the servers are gone.
     void waitForStops();
@@ -334,6 +390,9 @@ private:
     QMap<QString, QString> languageToSpec_; // language id -> spec name
     QMap<QString, SpecClient> clients_; // spec name -> live client
     QMap<QString, Registration> registrations_; // uri -> document wiring
+    // uri -> trigger state. std::map (NOT QMap/QHash): the values are
+    // move-only, and Qt 6.9+'s detachable containers need copyable ones.
+    std::map<QString, std::unique_ptr<TriggerState>> triggers_;
     int debounceMs_ = 400; // PLAN default; the hub's test seam
     int nextUntitled_ = 0; // uris the app never set get an "untitled:" key
     bool closingDown_ = false;

@@ -138,6 +138,20 @@ bool g_configPin = false; // argv flag (rides sync): watches the M8 machine-7
                           // workspace/didChangeConfiguration feed (ordering +
                           // payload), and echoes every settings object back
                           // as a window/showMessage CONFIG-<n> marker
+bool g_hoverOn = false;   // argv flag (rides features): FLIPS hoverProvider
+                          // to true and answers hover for real — the popup-
+                          // trigger sliver's door. Without it the machine-5
+                          // OFF-provider tripwire stands (hover reaching the
+                          // server still exits 2).
+bool g_reqLog = false;    // argv flag: every feature request logs
+                          // "REQ <method>" to stderr (the hub-relayed STDERR
+                          // channel: the trigger tests' traffic oracle)
+bool g_cancelLog = false; // argv flag: every $/cancelRequest logs
+                          // "CANCELREQ <id>" to stderr
+int g_completionDelayMs = 0; // argv "completiondelay=<N>": N ms of latency
+                             // BEFORE the completion reply, so a test can
+                             // supersede an IN-FLIGHT request (the hub's
+                             // $/cancelRequest path)
 bool g_initializedSeen = false; // the `initialized` notification landed
 int g_configsSeen = 0;          // configs this server has accepted
 bool g_advertisesResolve = false; // features && !completiononly, decided at
@@ -1145,8 +1159,19 @@ void featureCompletion(const QJsonValue& id, const QJsonObject& params)
                                   QStringLiteral("tc=") + triggerCharacter}});
     items.append(QJsonObject{{QStringLiteral("label"),
                               QStringLiteral("off=") + QString::number(offset)}});
-    send(response(id, QJsonObject{{QStringLiteral("isIncomplete"), false},
-                                  {QStringLiteral("items"), items}}));
+    const QJsonObject result{
+        {QStringLiteral("isIncomplete"), false},
+        {QStringLiteral("items"), items}};
+    if (g_completionDelayMs > 0) {
+        // Latency ON PURPOSE (popup triggers): the request stays in flight
+        // long enough for the test to supersede it and watch the hub's
+        // $/cancelRequest.
+        QTimer::singleShot(g_completionDelayMs, [id, result] {
+            send(response(id, result));
+        });
+    } else {
+        send(response(id, result));
+    }
 }
 
 void featureResolveItem(const QJsonValue& id, const QJsonValue& paramsValue)
@@ -1358,12 +1383,52 @@ void featureRename(const QJsonValue& id, const QJsonObject& params)
     send(response(id, QJsonObject{{QStringLiteral("changes"), changes}}));
 }
 
-void featureHover(const QJsonValue& /*id*/, const QJsonValue& /*params*/)
+void featureHover(const QJsonValue& id, const QJsonValue& paramsValue)
 {
-    // hoverProvider is advertised FALSE in features mode: the hub's gate must
-    // refuse this door LOCALLY. Traffic reaching this handler is a gate bug.
-    fail(QStringLiteral("textDocument/hover reached the server although "
-                        "hoverProvider is false"));
+    if (!g_hoverOn)
+        // hoverProvider is advertised FALSE in plain features mode: the
+        // hub's gate must refuse this door LOCALLY. Traffic reaching this
+        // handler is a gate bug.
+        fail(QStringLiteral("textDocument/hover reached the server although "
+                            "hoverProvider is false"));
+    // The `hoveron` branch (popup triggers): hover is REAL. The proof rides
+    // LEGAL fields: the word the caret sits on, the offset the request
+    // carried (this server decoding its OWN wire frame), and the word's
+    // range — so the hub's decoded popup text is pinned verbatim by the tst.
+    ModelDoc& d = featureDoc(paramsValue.toObject(),
+                             QStringLiteral("textDocument/hover"));
+    const int offset
+        = featureOffset(d, paramsValue.toObject(),
+                        QStringLiteral("textDocument/hover"));
+    int wordStart = -1;
+    int wordEnd = -1;
+    const QString word = wordAt(d.text, offset, &wordStart, &wordEnd);
+    QJsonValue contents; // both contents shapes ride: MARKUPCONTENT by
+                         // default, contents-ARRAY (MarkedString object +
+                         // plain string) when the doc says ARRAYHOVER
+    if (d.text.contains(QLatin1String("ARRAYHOVER"))) {
+        contents = QJsonArray{
+            QJsonObject{{QStringLiteral("language"), QStringLiteral("python")},
+                        {QStringLiteral("value"),
+                         QStringLiteral("lang one")}},
+            QStringLiteral("plain two")};
+    } else {
+        contents = QJsonObject{
+            {QStringLiteral("kind"), QStringLiteral("markdown")},
+            {QStringLiteral("value"),
+             QStringLiteral("HOVER %1 off=%2").arg(word,
+                                                   QString::number(offset))}};
+    }
+    QJsonObject result{{QStringLiteral("contents"), contents}};
+    if (!word.isEmpty()) {
+        const QStringList lines = modelLines(d.text);
+        int line = 0;
+        int col = 0;
+        rowColAt(lines, wordStart, &line, &col);
+        result.insert(QStringLiteral("range"),
+                      rangeWire(d.text, line, col, line, col + word.size()));
+    }
+    send(response(id, result));
 }
 
 // The didSave markers (features mode): each primes ONE server-initiated
@@ -1649,11 +1714,12 @@ void handleInitialize(const QJsonObject& request)
     } else if (g_features) {
         // The machine-5 provider set. One deliberately OFF shape rides it:
         // hoverProvider FALSE (the hub must refuse hover locally; a hover
-        // request that reaches this server exits 2 below). Everything else
-        // is fully advertised so a missing capability can never mask a
-        // frame bug.
+        // request that reaches this server exits 2 below) — UNLESS `hoveron`
+        // rides too (the popup-trigger sliver: provider true, real answers).
+        // Everything else is fully advertised so a missing capability can
+        // never mask a frame bug.
         g_advertisesResolve = true;
-        capabilities.insert(QStringLiteral("hoverProvider"), false);
+        capabilities.insert(QStringLiteral("hoverProvider"), g_hoverOn);
         capabilities.insert(QStringLiteral("definitionProvider"),
                             QJsonObject{}); // object shape: the truthy-door pin
         capabilities.insert(QStringLiteral("referencesProvider"), true);
@@ -1799,6 +1865,16 @@ void runLoop()
                 const QJsonValue id = message.value(QStringLiteral("id"));
                 const QJsonValue params = message.value(QStringLiteral("params"));
 
+                if (g_reqLog && !id.isUndefined()
+                    && method.startsWith(QLatin1String("textDocument/"))) {
+                    // The trigger tests' traffic oracle: EVERY feature
+                    // request the hub actually sends shows on the STDERR
+                    // channel (a trigger that fires nothing shows nothing).
+                    std::fprintf(stderr, "REQ %s\n",
+                                 method.toUtf8().constData());
+                    std::fflush(stderr);
+                }
+
                 if (method == QLatin1String("initialize")) {
                     if (g_mode != QLatin1String("deaf"))
                         handleInitialize(message);
@@ -1810,6 +1886,18 @@ void runLoop()
                     if (g_mode != QLatin1String("requests"))
                         _exit(0);
                 } else if (method == QLatin1String("$/cancelRequest")) {
+                    if (g_cancelLog) {
+                        // The supersede oracle for the popup-trigger tests:
+                        // the cancelled request's id on the STDERR channel.
+                        std::fprintf(stderr, "CANCELREQ %s\n",
+                                     params.toObject()
+                                         .value(QStringLiteral("id"))
+                                         .toVariant()
+                                         .toString()
+                                         .toUtf8()
+                                         .constData());
+                        std::fflush(stderr);
+                    }
                     // spec-silent
                 } else if (g_mode == QLatin1String("sync")
                            && method == QLatin1String("textDocument/didOpen")) {
@@ -1918,7 +2006,11 @@ int main(int argc, char** argv)
                  && enc != QLatin1String("features")
                  && enc != QLatin1String("completiononly")
                  && enc != QLatin1String("wswu")
-                 && enc != QLatin1String("config"))
+                 && enc != QLatin1String("config")
+                 && enc != QLatin1String("hoveron")
+                 && enc != QLatin1String("reqlog")
+                 && enc != QLatin1String("cancellog")
+                 && !enc.startsWith(QLatin1String("completiondelay=")))
             fail(QStringLiteral("sync mode: bad encoding \"%1\"").arg(enc));
         for (int i = 2; i < args.size(); ++i) {
             if (args.at(i) == QLatin1String("crashonce"))
@@ -1935,6 +2027,23 @@ int main(int argc, char** argv)
                 g_wswu = true;
             else if (args.at(i) == QLatin1String("config"))
                 g_configPin = true;
+            else if (args.at(i) == QLatin1String("hoveron"))
+                g_hoverOn = true; // rides features: hoverProvider TRUE +
+                                  // a real hover answer (popup triggers)
+            else if (args.at(i) == QLatin1String("reqlog"))
+                g_reqLog = true;
+            else if (args.at(i) == QLatin1String("cancellog"))
+                g_cancelLog = true;
+            else if (args.at(i).startsWith(QLatin1String("completiondelay="))) {
+                bool ok = false;
+                const int ms
+                    = args.at(i).mid(int(qstrlen("completiondelay="))).toInt(&ok);
+                if (!ok || ms < 0)
+                    fail(QStringLiteral("completiondelay wants a "
+                                        "non-negative number, got \"%1\"")
+                             .arg(args.at(i)));
+                g_completionDelayMs = ms;
+            }
         }
     }
     if (g_mode != QLatin1String("basic") && g_mode != QLatin1String("stderr")
