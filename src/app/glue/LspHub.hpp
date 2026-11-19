@@ -288,6 +288,13 @@ private:
     QString expand(const QString& text) const; // ${WORKSPACE_ROOT}
     void mergeSpecObject(const QString& name, const QJsonObject& patch);
     void onDiagnostics(const QString& specName, const QJsonObject& params);
+    // M8 machine 7: pushes one document's view-side stored configuration to
+    // its server as workspace/didChangeConfiguration (the view is the BUFFER,
+    // the hub the only consumer). Never called by the app: the edges are the
+    // view's workspaceConfigurationChanged, this client's ready(), and the
+    // document's own open. An empty or unparseable buffer sends nothing
+    // (full rules at the definition).
+    void pushWorkspaceConfiguration(const QString& uri);
     // The server-primed write path (machine 5): decode + gate + apply, then
     // answer the server with the truth and relay any refusal reasons.
     void onApplyEdit(const QString& specName, const QJsonValue& id,

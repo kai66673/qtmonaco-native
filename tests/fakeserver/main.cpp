@@ -70,7 +70,14 @@
 //            server validates (MSGREQ-OK). Feature replies are PROOF objects,
 //            not spec-shaped payloads: machine 5 pins the FRAME the hub sends
 //            and the write path; the real Hover/Location/CompletionList
-//            decoding joins with machine 6's popups.
+//            decoding joins with machine 6's popups. The "config" flag rides
+//            the sync model and watches machine 7's
+//            workspace/didChangeConfiguration feed: a config that arrives
+//            BEFORE the `initialized` notification, or a params/settings
+//            object that is absent or empty, is a structural lie (exit 2),
+//            and every accepted settings object echoes back as a
+//            window/showMessage "CONFIG-<n> <compact-json>" so the test sees
+//            the payload and the order of what actually crossed the wire.
 //
 // The exit code IS the oracle for the answers the client side cannot see
 // (the battery's wire shapes); tst_lsp asserts exitCode 0 where the mode's
@@ -127,6 +134,12 @@ bool g_completionOnly = false; // argv flag (rides features): advertise ONLY
 bool g_wswu = false; // argv flag (rides sync): declares
                      // textDocumentSync.willSaveWaitUntil and answers the
                      // pre-save round trip (M8 machine 6)
+bool g_configPin = false; // argv flag (rides sync): watches the M8 machine-7
+                          // workspace/didChangeConfiguration feed (ordering +
+                          // payload), and echoes every settings object back
+                          // as a window/showMessage CONFIG-<n> marker
+bool g_initializedSeen = false; // the `initialized` notification landed
+int g_configsSeen = 0;          // configs this server has accepted
 bool g_advertisesResolve = false; // features && !completiononly, decided at
                                   // initialize; the resolve tripwire's oracle
 // Server-PRIMED requests, id -> method: a machine-5 pin lives on the SERVER
@@ -661,6 +674,41 @@ void syncDidSave(const QJsonValue& paramsValue)
                                            // for the completion-only pin
     if (g_wswu)
         wswuDidSavePin(found.value()); // M8 m6: the ordering pins ride the save
+}
+
+// M8 machine 7: the hub's stored-configuration feed. This mode's whole point
+// is ORDER and PAYLOAD: a config that reached the server before `initialized`
+// means the hub raced its own handshake, and a settings object that is not
+// the view's buffer means the push mangled it. Every accepted config echoes
+// back through window/showMessage (the hub relays it as serverShowMessage),
+// so the test sees the exact object that crossed the wire, in order.
+void syncDidChangeConfiguration(const QJsonValue& paramsValue)
+{
+    if (!g_initializedSeen)
+        fail(QStringLiteral("workspace/didChangeConfiguration before "
+                             "initialized: the configuration must be buffered "
+                             "until the handshake is done"));
+    ++g_configsSeen;
+    if (!paramsValue.isObject())
+        fail(QStringLiteral("workspace/didChangeConfiguration without an "
+                             "object params (an empty buffer must send "
+                             "NOTHING)"));
+    const QJsonValue settings
+        = paramsValue.toObject().value(QStringLiteral("settings"));
+    if (!settings.isObject() || settings.toObject().isEmpty())
+        fail(QStringLiteral("workspace/didChangeConfiguration with an empty "
+                             "settings object: \"never configured\" must not "
+                             "travel as \"no settings\""));
+    // QJsonObject iterates keys sorted, so the Compact rendering is a
+    // deterministic string: the test compares it byte for byte.
+    const QByteArray rendered
+        = QJsonDocument(settings.toObject()).toJson(QJsonDocument::Compact);
+    notify(QStringLiteral("window/showMessage"),
+           QJsonObject{{QStringLiteral("type"), 3},
+                       {QStringLiteral("message"),
+                        QStringLiteral("CONFIG-%1 %2")
+                            .arg(g_configsSeen)
+                            .arg(QString::fromUtf8(rendered))}});
 }
 
 // The server's OWN encoder (the mirror of specOffset): model-frame
@@ -1646,6 +1694,8 @@ void handleInitialize(const QJsonObject& request)
 
 void handleInitialized()
 {
+    g_initializedSeen = true; // M8 machine 7: the ordering pin's reference
+                              // point (a config that beats this is exit 2)
     if (g_mode == QLatin1String("sync") && g_crashOnce && !g_firstHandshakeDone) {
         // The self-heal drill: ONLY the first session dies right after the
         // handshake; the client's one auto-restart then re-runs it, ready()
@@ -1773,6 +1823,10 @@ void runLoop()
                 } else if (g_mode == QLatin1String("sync")
                            && method == QLatin1String("textDocument/didSave")) {
                     syncDidSave(params);
+                } else if (g_mode == QLatin1String("sync") && g_configPin
+                           && method == QLatin1String(
+                                  "workspace/didChangeConfiguration")) {
+                    syncDidChangeConfiguration(params); // M8 m7: order + payload
                 } else if (g_mode == QLatin1String("sync")
                            && method == QLatin1String("test/assertModel")) {
                     handleAssertModel(id, params);
@@ -1863,7 +1917,8 @@ int main(int argc, char** argv)
                  && enc != QLatin1String("diags")
                  && enc != QLatin1String("features")
                  && enc != QLatin1String("completiononly")
-                 && enc != QLatin1String("wswu"))
+                 && enc != QLatin1String("wswu")
+                 && enc != QLatin1String("config"))
             fail(QStringLiteral("sync mode: bad encoding \"%1\"").arg(enc));
         for (int i = 2; i < args.size(); ++i) {
             if (args.at(i) == QLatin1String("crashonce"))
@@ -1878,6 +1933,8 @@ int main(int argc, char** argv)
                 // without resolveProvider — the nested gate's refusal pin
             else if (args.at(i) == QLatin1String("wswu"))
                 g_wswu = true;
+            else if (args.at(i) == QLatin1String("config"))
+                g_configPin = true;
         }
     }
     if (g_mode != QLatin1String("basic") && g_mode != QLatin1String("stderr")

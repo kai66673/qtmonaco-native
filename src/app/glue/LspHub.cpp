@@ -365,6 +365,18 @@ void LspHub::registerClient(const QString& specName, SpecClient& entry)
             [this, specName](const QJsonValue& id, const QJsonValue& params) {
                 emit serverShowMessageRequest(specName, id, params);
             });
+    // M8 machine 7 (the stored-configuration feed): a document opened before
+    // this session was READY kept its buffer on the VIEW — this is the edge
+    // that finally delivers it (qtmonaco's "buffered until init", living in
+    // the hub, not the widget). ready() re-fires on every (re-)READY, so a
+    // restarted server is re-told the settings too.
+    connect(client, &qmn::lsp::LspClient::ready, this, [this, specName] {
+        for (auto it = registrations_.constBegin();
+             it != registrations_.constEnd(); ++it) {
+            if (it->specName == specName)
+                pushWorkspaceConfiguration(it.key());
+        }
+    });
 }
 
 LspHub::SpecClient* LspHub::specEntry(const QString& specName)
@@ -474,10 +486,20 @@ bool LspHub::openDocument(qmn::view::CodeEditor* editor, const QString& uri,
     connect(editor, &QObject::destroyed, this, [this, key] {
         releaseRegistration(key);
     });
+    // M8 machine 7: the live re-push of the view's stored workspace
+    // configuration (qtmonaco's `update_workspace_configuration`). Context is
+    // the SYNCER: it dies with this registration, so a re-open (release +
+    // re-register the same editor) can never double-send on one change.
+    connect(editor, &qmn::view::CodeEditor::workspaceConfigurationChanged,
+            reg.syncer, [this, key] { pushWorkspaceConfiguration(key); });
 
     reg.syncer->open(doc->toPlainText(), languageId); // didOpen now, or on
                                                       // ready() if the server
                                                       // is still coming up
+    // A buffer set BEFORE this document was registered: the session may
+    // already be READY (another document of this language opened first), so
+    // the open is a push edge too. An empty buffer makes it a no-op.
+    pushWorkspaceConfiguration(key);
     return true;
 }
 
@@ -503,6 +525,40 @@ void LspHub::releaseRegistration(const QString& uri)
                              // the M2 notify rule)
         reg.syncer->deleteLater();
     }
+}
+
+// M8 machine 7: the stored workspace configuration — the VIEW's buffer
+// (setStoredWorkspaceConfiguration) pushed to the wire. The rules are the
+// honest ones:
+//   - no registration / no live client / not READY: NOTHING goes out. The
+//     buffer waits on the view and this door is re-knocked by ready() (which
+//     re-fires on every (re-)READY) and by the view's own change signal;
+//   - an EMPTY buffer means "never configured" = the spec default, so the
+//     hub sends NOTHING: an empty settings object would tell the server "no
+//     settings", which is not the same claim as "I have no opinion";
+//   - a buffer that is not a JSON OBJECT is refused locally: there is no
+//     legal params shape for it (the Python shim's json.dumps always
+//     produces one; a hand-fed non-object must not reach the server).
+void LspHub::pushWorkspaceConfiguration(const QString& uri)
+{
+    if (closingDown_)
+        return; // teardown in flight: no new wire traffic
+    const auto it = registrations_.constFind(uri);
+    if (it == registrations_.constEnd() || !it->editor)
+        return; // released between the signal and the delivery
+    qmn::lsp::LspClient* client = clientForUri(uri);
+    if (!client || !client->isReady())
+        return;
+    const QString json = it->editor->storedWorkspaceConfiguration();
+    if (json.trimmed().isEmpty())
+        return;
+    QJsonParseError err{};
+    const QJsonDocument parsed = QJsonDocument::fromJson(json.toUtf8(), &err);
+    if (err.error != QJsonParseError::NoError || !parsed.isObject())
+        return;
+    QJsonObject params;
+    params.insert(QStringLiteral("settings"), parsed.object());
+    client->notify(QStringLiteral("workspace/didChangeConfiguration"), params);
 }
 
 namespace {

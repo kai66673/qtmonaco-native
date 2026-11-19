@@ -231,7 +231,9 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
   through the string door instead), `TextPosition`, the eight nested record
   structs (the five decoration records + M8 m5's `TextEdit` write record +
   M8 m6's `CompletionItem`/`HoverRange` popup payloads) and every nested
-  enum; only `PerfStats` and the
+  enum (M8 m7 added NO new type — its doors are plain
+  `QString`/`QStringList` on the already-bound `CodeEditor`, so the three
+  copies were untouched); only `PerfStats` and the
   SlotEdit/UndoMark/std::function machinery stay unbound by design.
 - **Pins are load-bearing:** `PySide6-Essentials==6.12.0` /
   `shiboken6_generator==6.12.0` at build time, `~=6.12.0` at runtime — the
@@ -272,8 +274,15 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
   (vim mode is out of scope forever — never implement it);
   `set_minimap_enabled` maps to the overview ruler, never a Chromium-style
   minimap; `open_diffs` SHIPPED with M10 (the plain-QString door + the
-  shim; uri/options params accepted-and-ignored); the LSP hooks stay absent
-  until M8 — an honest `AttributeError` beats a silent no-op.
+  shim; uri/options params accepted-and-ignored); the M8 m7 pair
+  (`add_action`, `update_workspace_configuration`) SHIPPED in 1.8.0 on the
+  view doors `addContextAction`/`setStoredWorkspaceConfiguration` (m7's
+  precedent: plain-Qt-typed doors on an ALREADY-bound class need NO
+  three-copies edit — only new record types do);
+  `set_lsp_header`/`get_lsp_header` stay absent ON PURPOSE even after M8 —
+  an honest `AttributeError` beats a silent no-op (the reason is recorded in
+  PLAN's M8 machine-7 paragraph: a wire-only prepended header is a ±H offset
+  tax on all six LSP paths).
 
 ## Model micro-benchmark (`tools/bench_model.cpp`)
 

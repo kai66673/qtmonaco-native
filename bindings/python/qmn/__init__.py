@@ -27,9 +27,21 @@ Deliberate, documented divergences (PLAN.md "Decided divergences"):
 * ``set_minimap_enabled`` maps onto the overview ruler; no Chromium-style
   minimap is ever built.
 * ``open_diffs`` shipped with M10 (Gate 2): the two-column native diff view,
-  with the uri/options params accepted-and-ignored (see its docstring). The
-  LSP hooks are still NOT present at all (M8 is the next car): an
-  ``AttributeError`` there is honest, a silent no-op would not be.
+  with the uri/options params accepted-and-ignored (see its docstring).
+* The M8 parity wrap (1.8.0) added ``add_action`` and
+  ``update_workspace_configuration``. qtmonaco's other LSP hooks existed only
+  to drive ITS built-in Chromium client and have no counterpart here: the
+  native LSP client and hub are C++ app-side glue (``src/app/glue``, NOT part
+  of the wheel by design), while the view's popup doors (``showCompletionList``
+  / ``showHover``) ARE bound, so an app that owns a client can paint them.
+  ``set_lsp_header`` / ``get_lsp_header`` stay absent ON PURPOSE: qtmonaco's
+  "header" is text prepended to the document ON THE WIRE ONLY, while every
+  native LSP path (diagnostics, hover, completion, rename, formatting,
+  willSaveWaitUntil) rests on the one invariant "the server's document IS the
+  editor's document" - a per-path offset tax on all six paths for a hack no
+  native stack needs. Extra context for a server belongs in
+  ``initializationOptions``, in the workspace configuration (below), or in a
+  second document.
 
 Attribute access (not ``from _qmn.qmn.view import ...``) is on purpose: the
 namespace shims are attributes created by the extension at import time, not
@@ -37,6 +49,7 @@ real submodules, so the import-statement form would go through the import
 machinery and fail.
 """
 
+import json
 import warnings
 
 # Imported first on purpose: the generated wrapper resolves its QWidget base
@@ -64,12 +77,19 @@ class Monaco(CodeEditor):
     relayed from the C++ ``textChanged`` ping with a last-value echo guard
     (qtmonaco's ``set_text`` returns early on an identical value, so an
     identical relaunch must not ping twice); ``language_changed`` and
-    ``theme_changed`` fire from the setters below.
+    ``theme_changed`` fire from the setters below;
+    ``context_menu_action_triggered(str)`` relays the C++
+    ``contextActionTriggered`` (an app's custom context-menu action, the M8
+    parity wrap); ``workspace_config_updated(bool, str)`` keeps qtmonaco's
+    shape but reports the LOCAL accept only — see
+    ``update_workspace_configuration``.
     """
 
     text_changed = Signal(str)
     language_changed = Signal(str)
     theme_changed = Signal(str)
+    context_menu_action_triggered = Signal(str)
+    workspace_config_updated = Signal(bool, str)
 
     def __init__(self, parent=None):
         super().__init__(parent)
@@ -79,6 +99,7 @@ class Monaco(CodeEditor):
         self._last_text = self.toPlainText()
         self.cursorMoved.connect(self._relay_cursor)
         self.textChanged.connect(self._relay_text)
+        self.contextActionTriggered.connect(self._relay_context_action)
 
     # --- relay plumbing ----------------------------------------------------
 
@@ -97,6 +118,11 @@ class Monaco(CodeEditor):
             return
         self._last_text = text
         self.text_changed.emit(text)
+
+    def _relay_context_action(self, action_id):
+        # The C++ door announces by ID (labels live in the menu only), so the
+        # relay is the straight qtmonaco name for the same event.
+        self.context_menu_action_triggered.emit(action_id)
 
     def _check_writable(self, what):
         if self.options().isReadOnly():
@@ -306,6 +332,53 @@ class Monaco(CodeEditor):
 
     def clear_highlighted_lines(self):
         self.clearHighlightedLines()
+
+    # --- M8 parity wrap: custom actions + workspace configuration ----------
+
+    def add_action(self, action_id, label, language="python"):
+        """Appends a custom item to the context menu (qtmonaco's
+        ``add_action``); triggering it fires ``context_menu_action_triggered``
+        with the id. IDEMPOTENT by id: the same id replaces its label and
+        keeps its slot.
+
+        ``language`` is accepted-and-ignored (the PLAN-decided divergence):
+        qtmonaco encodes it as a Monaco context-key precondition, while the
+        native editor is already scoped per document — an app that wants
+        per-language items registers them per editor (``set_language``), and
+        the native door (``addContextAction``) takes no such parameter.
+        ``contextActionIds()`` (the native door) lists the ids on record.
+        """
+        if not isinstance(action_id, str) or not action_id:
+            raise ValueError("action_id must be a non-empty string.")
+        if not isinstance(label, str):
+            raise TypeError("label must be a string.")
+        self.addContextAction(action_id, label)
+
+    def update_workspace_configuration(self, settings):
+        """Buffers the workspace configuration on the WIDGET (qtmonaco handed
+        the dict to its Chromium bridge). The dict goes to the native door as
+        sorted compact JSON, and the widget keeps it OPAQUE — it never parses
+        or applies it.
+
+        The one reader is the app-side LSP glue (the C++ ``LspHub``, not part
+        of this wheel): it pushes the buffer to a live server as
+        ``workspace/didChangeConfiguration`` once the handshake is done and
+        re-pushes on every real change, so qtmonaco's "buffered until init"
+        semantics hold — in a bare ``Monaco`` with no hub the buffer simply
+        waits. ``workspace_config_updated(True, "")`` therefore reports that
+        the buffer was ACCEPTED LOCALLY, not that a server confirmed it: v1
+        has no server round-trip to report (a decided divergence, PLAN).
+        """
+        if not isinstance(settings, dict):
+            raise TypeError("settings must be a dict.")
+        try:
+            payload = json.dumps(settings, sort_keys=True,
+                                 separators=(",", ":"))
+        except (TypeError, ValueError) as exc:
+            self.workspace_config_updated.emit(False, str(exc))
+            raise TypeError(f"settings are not JSON-serializable: {exc}") from exc
+        self.setStoredWorkspaceConfiguration(payload)
+        self.workspace_config_updated.emit(True, "")
 
     # --- decided divergences ----------------------------------------------------------
 

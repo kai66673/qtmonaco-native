@@ -212,18 +212,68 @@ def check_parity() -> int:
         warnings.simplefilter("always")
         ed.set_vim_mode_enabled(True)  # must NOT raise AttributeError
     assert len(caught) == 1 and "vim mode" in str(caught[0].message), caught
-    # The rest of qtmonaco's Gate-2 surface stays unbound ON PURPOSE (PLAN.md):
-    # every LSP hook of qtmonaco is absent, so callers get an honest
-    # AttributeError instead of a silent no-op that would pretend the feature
-    # exists. (open_diffs shipped with M10 — it lives in the diff section at
-    # the end of this file.)
+    # What STILL stays unbound on purpose (PLAN.md): qtmonaco's two "header"
+    # hooks, whose whole job was to prepend text to the document ON THE WIRE
+    # for its Chromium client. Every native LSP path (diagnostics, hover,
+    # completion, rename, formatting, willSaveWaitUntil) rests on the
+    # invariant "the server's document IS the editor's document", so a wire-
+    # only header would be a +H/-H offset tax on all six paths at once — for a
+    # hack no native stack needs (extra server context belongs in
+    # initializationOptions, in the workspace configuration below, or in a
+    # second document). An honest AttributeError beats a silent no-op.
     for gate2 in (
         "set_lsp_header",
         "get_lsp_header",
-        "add_action",
-        "update_workspace_configuration",
     ):
         assert not hasattr(ed, gate2), gate2
+
+    # --- M8 parity wrap (1.8.0): custom actions + workspace config ---------
+    # The two hooks whose semantics survive the native stack. The trigger
+    # itself is a Qt-menu event that would block an offscreen run in
+    # QMenu::exec, so parity pins the registration + the id bookkeeping here;
+    # the trigger relay itself is pinned in tst_codeeditor (menuAction +
+    # trigger() on the built menu, no exec).
+    triggers = []
+    ed.context_menu_action_triggered.connect(triggers.append)
+    ed.add_action("add_scan", "Add Scan")
+    ed.add_action("fmt", "Format File", language="cpp")  # accepted, ignored
+    ed.add_action("add_scan", "Re-scan")  # idempotent by id: slot kept
+    assert ed.contextActionIds() == ["add_scan", "fmt"], ed.contextActionIds()
+    assert triggers == [], triggers  # the menu never opened in this process
+    try:
+        ed.add_action("", "no id")
+        raise AssertionError("expected ValueError for an empty id")
+    except ValueError:
+        pass
+
+    config = []
+    # NOT `connect(config.append)`: this signal carries TWO args and
+    # `list.append` takes one, so the slot raises TypeError INSIDE the emit —
+    # PySide prints it and keeps going, the list stays empty and every pin
+    # below reads as "the signal never fired" (this run caught that).
+    ed.workspace_config_updated.connect(
+        lambda ok, message: config.append((ok, message)))
+    ed.update_workspace_configuration({"python": {"fmtOnSave": True}, "b": 2})
+    # The dict lands on the native door as SORTED COMPACT JSON: that exact
+    # string is what the C++ LspHub pushes as workspace/didChangeConfiguration
+    # (the tst_lsp slot pins the wire echo byte for byte).
+    assert ed.storedWorkspaceConfiguration() == \
+        '{"b":2,"python":{"fmtOnSave":true}}', ed.storedWorkspaceConfiguration()
+    assert config == [(True, "")], config  # the LOCAL accept (documented divergence)
+    try:
+        ed.update_workspace_configuration("not a dict")
+        raise AssertionError("expected TypeError for a non-dict")
+    except TypeError:
+        pass
+    try:
+        ed.update_workspace_configuration({"bad": object()})
+        raise AssertionError("expected TypeError for an unserializable dict")
+    except TypeError:
+        pass
+    # TWO entries only: a non-dict raises BEFORE anything is announced (the
+    # buffer is untouched, no False-frame either), while an unserializable dict
+    # announces the refusal and then raises.
+    assert len(config) == 2 and config[1][0] is False and config[1][1], config
 
     # --- language routing -----------------------------------------------------
     langs = []

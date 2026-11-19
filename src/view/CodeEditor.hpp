@@ -864,6 +864,37 @@ public:
     void zoomOut() { setZoomFactor(zoomFactor_ / kZoomFactorStep); }
     void resetZoom() { setZoomFactor(1.0); }
 
+    // --- M8 parity wrap (2026-11-19): custom actions + stored config ------
+    // addContextAction(id, label): appends a custom item after the built-in
+    // block of the M16 context menu; triggering it fires
+    // contextActionTriggered(id). IDEMPOTENT by id: re-adding an id only
+    // REPLACES its label, the entry keeps its slot (one entry per id; the
+    // trigger key never changes). Actions carry no state — the consumer owns
+    // every verb. An EMPTY id is the honest silent local refuse (an action
+    // that could never announce itself). NOTE the deliberate name: NOT
+    // `addAction`, which would hide QWidget's addAction overloads — the
+    // qtmonaco door `add_action` maps here in the Python shim. qtmonaco's
+    // `language` precondition is a SHIM parameter and deliberately absent
+    // from this door (the native language scoping does the job — the
+    // PLAN-decided divergence).
+    void addContextAction(const QString& id, const QString& label);
+    // The ids in registration order — the cheap readable seam (ids are the
+    // trigger keys; labels are visible in the menu itself). QStringList, no
+    // new record type crosses the API.
+    QStringList contextActionIds() const;
+
+    // The stored workspace-configuration buffer — the view door behind
+    // qtmonaco's `update_workspace_configuration(dict)`. The buffer is a
+    // compact-JSON QString; the view NEVER parses or applies it. The ONE
+    // consumer is the app-side LSP glue (LspHub): it pushes the buffer to
+    // the server as `workspace/didChangeConfiguration` after the session's
+    // READY and RE-pushes on this signal — qtmonaco's "buffered until
+    // init" semantics live HUB-side (lazy start: the buffer waits on the
+    // view until the client comes up), not here. Default empty = never set
+    // = the spec default (the glue sends NOTHING for an empty buffer).
+    void setStoredWorkspaceConfiguration(const QString& settingsJson);
+    QString storedWorkspaceConfiguration() const { return storedConfig_; }
+
     PerfStats perfStats() const { return perf_; }
     void resetPerfStats() { perf_ = {}; }
 
@@ -875,6 +906,13 @@ signals:
     // primitive mutation, none on no-op sets). The detail-free change ping
     // the parity binding mirrors into qtmonaco's `text_changed(str)`.
     void textChanged();
+    // M8 parity wrap: the id of a triggered custom context-menu action
+    // (the relay source for qtmonaco's `context_menu_action_triggered`).
+    void contextActionTriggered(const QString& id);
+    // The stored workspace-configuration buffer fired EXACTLY on a real
+    // change (the M23 changed-not-touched discipline). This is the signal
+    // the LSP glue turns into a live didChangeConfiguration re-push.
+    void workspaceConfigurationChanged();
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -1199,6 +1237,16 @@ private:
     TextPosition dropCaret_;
     bool dropCaretActive_ = false;
     QString preedit_; // IME composition string, display-only: never in buffer_
+    // M8 parity wrap: the custom context-menu actions in INSERTION order
+    // (addContextAction idempotency replaces the label in place, never the
+    // slot). Ids are the trigger keys of contextActionTriggered.
+    struct ContextActionEntry {
+        QString id;
+        QString label;
+    };
+    QVector<ContextActionEntry> contextActions_;
+    QString storedConfig_; // the raw compact-JSON buffer (header comment at
+                           // the door: the view never parses it)
     QScrollBar* vBar_ = nullptr;
     bool scrollbarSync_ = false;
 

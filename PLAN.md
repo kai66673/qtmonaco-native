@@ -502,7 +502,7 @@ defaults documented on the setters (freeze-bound).
   | `set_minimap_enabled` | no minimap by design | E1 ruler (**maps to it**, decided), ✔ bound |
   | `set_vim_mode_enabled` | out of scope | binding **warns, never implements** — ✔ stub exists |
   | `open_diffs` | none | **Gate 2 (design decided 2026-11-15)**: M10 door `setDiffDocuments` + shim; binds at the diff car; until then the honest AttributeError stands |
-  | LSP hooks (`update_workspace_configuration`, `add_action`, lsp header) | none | **Gate 2 (design decided 2026-11-15)**: config-buffer door + `addAction` door + pure-Python header; ride the M8 car; until then the honest AttributeError stands |
+  | LSP hooks (`update_workspace_configuration`, `add_action`, lsp header) | none | **Gate 2 (design decided 2026-11-15, M8 machine 7 SHIPPED 2026-11-19)**: config-buffer door (`setStoredWorkspaceConfiguration` — the view holds it OPAQUE, the app-side hub pushes it) and `addContextAction(id,label)` (**renamed from the planned `addAction`**: that name would hide `QWidget::addAction`) + the trigger signal, ✔ bound; `set_lsp_header`/`get_lsp_header` stay ABSENT ON PURPOSE (decided 2026-11-19: the header is wire-only prepended text, and a ±H offset tax on all six LSP paths buys nothing a native stack needs — the honest AttributeError stands) |
 
 - **Freeze:** bump `SOVERSION`, CHANGELOG discipline, then the v1 tag.
   ✔ Done at freeze: package VERSION 1.0.0 (SOVERSION is a no-op for the
@@ -1162,6 +1162,49 @@ Machine 6 (the POPUPS + the `willSaveWaitUntil` save path) ✅ (2026-11-19):
   silently swallowed is shiboken UNIVERSAL (PySide6's own
   `QPointF(x=1.5,y=2.5)` reads back 0.0/0.0, and our v1.5 `TextPosition`
   behaves identically), not a machine-6 regression.
+Machine 7 (the PARITY WRAP — qtmonaco's `add_action` +
+  `update_workspace_configuration`) ✅ (2026-11-19): lsp binary 60→62 slots,
+  tst_codeeditor 252→254, ctest still 5 entries. The VIEW side (surface widened
+  additively): doors `addContextAction(id, label)` +
+  `storedWorkspaceConfiguration()`/`setStoredWorkspaceConfiguration(QString)`
+  and signals `contextActionTriggered(QString)` +
+  `workspaceConfigurationChanged()`; custom items append BELOW a separator
+  under the built-ins in registration order, re-adding an id REPLACES its
+  label and keeps the slot, an empty id is a local refuse, and the read seam
+  is `QStringList contextActionIds()` — deliberately NO new bound record type
+  (a record would grow the binding's three copies for one string). Naming
+  divergence (decided): the door is `addContextAction`, NOT `addAction`,
+  which would hide `QWidget::addAction(QAction*)` from every C++ consumer.
+  The qtmonaco `language` precondition stays a SHIM-only accepted-and-ignored
+  parameter — the native editor is already scoped per document. The VIEW is
+  the OPAQUE BUFFER (it never parses, never applies — the glue is the only
+  reader); the HUB owns "buffered until init": `LspClient::ready` pushes the
+  buffer for that spec's registrations, `openDocument` pushes after `open`,
+  and the live re-push connect's context is `reg.syncer` so it dies with the
+  registration and a re-OPEN cannot double-send. Two refusals are LOCAL and
+  silent: an EMPTY buffer means "never configured" and sends NOTHING (an
+  empty `settings` object would claim "no settings", a different thing), and
+  a buffer that is not a JSON object has no legal params shape. The
+  fakeserver `config` flag judges the wire from its side — config before
+  `initialized`, or absent/non-object params, or an absent/empty `settings`,
+  is exit 2 — and echoes every accepted object as `CONFIG-<n> <compact json>`
+  through `window/showMessage`, so order AND payload are pinned byte for
+  byte; the second slot runs machine 4's crash ladder (buffer set while the
+  client is FAILED → nothing travels → the app's `restartServer` re-reads the
+  VIEW, not a hub-side cache). No new bound type, so no codegen run owed for
+  this machine. Shim side: `add_action(action_id, label, language=...)` and
+  `update_workspace_configuration(dict)` (dict → sorted compact JSON, the
+  exact string the hub pushes), relaying `context_menu_action_triggered(str)`
+  and `workspace_config_updated(bool, str)` — where `True` means the buffer
+  was accepted LOCALLY, not that a server confirmed it (v1 has no round-trip
+  to report, decided divergence). And `set_lsp_header`/`get_lsp_header` stay
+  ABSENT ON PURPOSE: qtmonaco's header is text prepended to the document ON
+  THE WIRE ONLY, while all six native LSP paths rest on the invariant "the
+  server's document IS the editor's document" — caret requests, response
+  ranges, syncer deltas and undo would each pay a manual ±H shift, and the
+  all-or-nothing applier + version pins turn any off-by-one into silent
+  feature death; server context belongs in `initializationOptions`, the
+  workspace configuration, or a second document.
 
 - **Layers:** `src/protocol/` (QtCore+QtNetwork, zero view — Framing with
   full header-block parse + 64 MiB upper bound that fails as a transport

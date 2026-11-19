@@ -3845,6 +3845,168 @@ private slots:
         QCOMPARE(verdict.value(QStringLiteral("saves")).toInt(), 1);
     }
 
+    // --- M8 machine 7: the stored workspace configuration (qtmonaco parity) --
+    // The VIEW is the buffer (its door is a plain QString; the dict->JSON
+    // conversion lives in the Python shim), and the HUB is its only consumer.
+    // The fakeserver's "config" mode judges the wire from ITS side: a config
+    // that arrives before the `initialized` notification, or a params/settings
+    // object that is absent or not an object, is a structural lie (exit 2).
+    // That oracle is DEFENSIVE — the client layer's own non-Ready notify rule
+    // (machine 2) already drops early traffic — and every accepted settings
+    // object echoes back as a CONFIG-<n> window/showMessage, so the test sees
+    // what actually crossed the wire, in order and byte for byte. What the
+    // client side pins is the DELIVERY EDGE: the buffer waits on the view
+    // until the session comes up, then follows every real change.
+    void storedWorkspaceConfigurationBuffersUntilReadyThenFollowsTheView()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("config")});
+        h.installSpec(QStringLiteral("cfgrv"), {QStringLiteral("cfglang")});
+        const QString uri = QStringLiteral("file:///m7-config.cfg");
+        const QString text = QStringLiteral("cfg alpha");
+
+        QStringList shown; // the server's echoes, in the order they arrived
+        QObject::connect(
+            &h.hub, &qmn::app::LspHub::serverShowMessage,
+            [&](const QString& spec, int type, const QString& message) {
+                QCOMPARE(spec, QStringLiteral("cfgrv"));
+                QCOMPARE(type, 3);
+                shown << message;
+            });
+
+        qmn::view::CodeEditor editor;
+        editor.setPlainText(text);
+        // The buffer is set BEFORE the document is even registered: the
+        // "buffered until init" half of the qtmonaco semantics — the view
+        // holds it, the hub delivers it when the session comes up.
+        editor.setStoredWorkspaceConfiguration(
+            QStringLiteral("{\"python\":{\"fmtOnSave\":true}}"));
+        QVERIFY(h.hub.openDocument(&editor, uri, QStringLiteral("cfglang")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("cfgrv"));
+        QVERIFY(client);
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        QCOMPARE(shown.size(), 0); // the session is still coming up: the
+                                   // buffer travels on the wire, not ahead of it
+        QVERIFY(waitReady(client));
+        QVERIFY2(waitUntil([&] { return shown.size() == 1; }),
+                 qPrintable(QStringLiteral("READY brought no configuration: %1")
+                                .arg(stderrDump(stderrSpy))));
+        QCOMPARE(shown.at(0), QStringLiteral(
+                                  "CONFIG-1 {\"python\":{\"fmtOnSave\":true}}"));
+
+        // The live re-push: the view's signal travels to the wire at once
+        // (QJsonObject renders keys sorted, so the compact echo is exact).
+        editor.setStoredWorkspaceConfiguration(
+            QStringLiteral("{\"python\":{\"fmtOnSave\":false},\"x\":1}"));
+        QVERIFY2(waitUntil([&] { return shown.size() == 2; }),
+                 qPrintable(QStringLiteral("a configuration change never "
+                                           "reached the server: %1")
+                                .arg(stderrDump(stderrSpy))));
+        QCOMPARE(shown.at(1), QStringLiteral(
+                                  "CONFIG-2 {\"python\":{\"fmtOnSave\":false},"
+                                  "\"x\":1}"));
+
+        // The two honest LOCAL refuses, both proven by real traffic around
+        // them (the session is alive and saving, only the config is held):
+        //   - an EMPTY buffer = "never configured" = send NOTHING (an empty
+        //     settings object would claim "no settings", a different thing);
+        //   - a buffer that is not a JSON object has no legal params shape.
+        editor.setStoredWorkspaceConfiguration(QString());
+        h.hub.saveDocument(&editor); // didSave rides: the wire is talking
+        QJsonObject verdict = assertSyncModel(client, uri, text, 0);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        QCOMPARE(verdict.value(QStringLiteral("saves")).toInt(), 1);
+        QCOMPARE(shown.size(), 2); // the empty buffer produced NO traffic
+        editor.setStoredWorkspaceConfiguration(QStringLiteral("plain, not json"));
+        h.hub.saveDocument(&editor);
+        verdict = assertSyncModel(client, uri, text, 0);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+        QCOMPARE(verdict.value(QStringLiteral("saves")).toInt(), 2);
+        QCOMPARE(shown.size(), 2); // a non-object has no legal params shape
+        // A legal object again, and the feed resumes.
+        editor.setStoredWorkspaceConfiguration(QStringLiteral("{\"n\":2}"));
+        QVERIFY2(waitUntil([&] { return shown.size() == 3; }),
+                 qPrintable(QStringLiteral("the refused-then-fixed buffer never "
+                                           "arrived: %1")
+                                .arg(stderrDump(stderrSpy))));
+        QCOMPARE(shown.at(2), QStringLiteral("CONFIG-3 {\"n\":2}"));
+
+        // The OPEN edge: a document registered on a session that is ALREADY
+        // ready gets its own buffer pushed at open time (each document owns
+        // its buffer — the settings are the editor's, the wire is shared).
+        qmn::view::CodeEditor other;
+        other.setPlainText(QStringLiteral("cfg beta"));
+        other.setStoredWorkspaceConfiguration(QStringLiteral("{\"d\":1}"));
+        const QString uri2 = QStringLiteral("file:///m7-config2.cfg");
+        QVERIFY(h.hub.openDocument(&other, uri2, QStringLiteral("cfglang")));
+        QVERIFY2(waitUntil([&] { return shown.size() == 4; }),
+                 qPrintable(QStringLiteral("the open of a document on a live "
+                                           "session never pushed its buffer: %1")
+                                .arg(stderrDump(stderrSpy))));
+        QCOMPARE(shown.at(3), QStringLiteral("CONFIG-4 {\"d\":1}"));
+        QCOMPARE(serverDocumentCount(client), 2);
+
+        // The tripwire's other side: this is still the ONE spawn we started.
+        // A structural lie in the config mode exits 2, which would have shown
+        // up as a dead session plus a restart here.
+        QVERIFY(client->isReady());
+        QCOMPARE(h.spawnCount, 1);
+    }
+
+    // The same buffer's other half: it is NOT lost when the session dies. The
+    // drill is machine 4's lifecycle ladder (the first TWO spawns die right
+    // after their handshake, the manual restartServer door starts a clean
+    // third one), and the buffer is set while the session is FAILED — so the
+    // hub must send NOTHING, then deliver it on the next READY. A hub that
+    // cached the settings instead of reading the view would deliver nothing
+    // here, and a hub that ignored the lifecycle would throw at a dead wire.
+    void storedWorkspaceConfigurationSurvivesAFailedSessionAndRidesRestart()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("config")});
+        h.installSpec(QStringLiteral("cfgrv2"), {QStringLiteral("cfglang")});
+        h.crashSpawnCount = 2; // spawns #0 and #1 die after their handshake
+        const QString uri = QStringLiteral("file:///m7-config-restart.cfg");
+
+        QStringList shown;
+        QObject::connect(&h.hub, &qmn::app::LspHub::serverShowMessage,
+                         [&](const QString&, int, const QString& message) {
+                             shown << message;
+                         });
+
+        qmn::view::CodeEditor editor;
+        editor.setPlainText(QStringLiteral("cfg alpha"));
+        QVERIFY(h.hub.openDocument(&editor, uri, QStringLiteral("cfglang")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("cfgrv2"));
+        QVERIFY(client);
+        QVERIFY2(waitUntil([&] { return client->state()
+                                           == qmn::lsp::LspClient::State::Failed; }),
+                 qPrintable(QStringLiteral(
+                     "the two-spawn crash ladder never left the client FAILED")));
+        QCOMPARE(h.spawnCount, 2); // the one auto-restart is spent
+
+        // DEAD wire: the buffer is set now, and nothing may travel.
+        editor.setStoredWorkspaceConfiguration(QStringLiteral("{\"k\":1}"));
+        QTest::qWait(200); // a real settle: the wire had its chance
+        QVERIFY(shown.isEmpty());
+
+        // The app's own restart: ready() re-fires and the view's buffer rides
+        // it — the settings are re-read from the VIEW, not replayed from a
+        // hub-side copy.
+        h.hub.restartServer(QStringLiteral("cfgrv2"));
+        QVERIFY2(waitUntil([&] { return shown.size() == 1; }),
+                 qPrintable(QStringLiteral(
+                     "the restart never brought the buffered configuration to "
+                     "the wire")));
+        QCOMPARE(shown.at(0), QStringLiteral("CONFIG-1 {\"k\":1}"));
+        QVERIFY(client->isReady()); // spawn #2 is clean
+        QCOMPARE(h.spawnCount, 3);
+    }
+
 };
 
 QTEST_MAIN(TstLsp) // NOT guiless any more: machine 4's hub slots drive a real

@@ -419,6 +419,10 @@ private slots:
     void diffOriginalChromeSyntaxHighlight();
     void standaloneCodeDocumentSignalsFire();
 
+    // M8 machine 7 (the qtmonaco parity wrap on the view).
+    void contextMenuCustomActionsAppendAndTriggerById();
+    void storedWorkspaceConfigurationStaysOpaqueAndSignalsOnce();
+
 private:
     CodeEditor* editor = nullptr;
 };
@@ -10867,6 +10871,89 @@ void TestCodeEditor::standaloneCodeDocumentSignalsFire()
     doc.markSaved();
     QVERIFY(!doc.isModified());
     QCOMPARE(doc.toPlainText(), QStringLiteral("a\nb"));
+}
+
+// --- M8 machine 7: the parity wrap (custom actions + stored config) --------
+// The app's custom context-menu actions ride BELOW the built-in block; the
+// trigger key is the ID, so idempotency by id replaces the label but keeps
+// the slot (the id never changes, and the trigger never announces a stale one).
+void TestCodeEditor::contextMenuCustomActionsAppendAndTriggerById()
+{
+    MenuProbe probe;
+    probe.resize(600, 400);
+    probe.setPlainText(QStringLiteral("abc\ndef"));
+    probe.setPosition({0, 0});
+
+    QSignalSpy triggered(&probe, &CodeEditor::contextActionTriggered);
+    QVERIFY(probe.contextActionIds().isEmpty());
+    probe.addContextAction(QString(), QStringLiteral("idless")); // the honest
+    // local refuse: an action with no id could never announce itself
+    probe.addContextAction(QStringLiteral("scan"), QStringLiteral("Add Scan"));
+    probe.addContextAction(QStringLiteral("fmt"), QStringLiteral("Format File"));
+    QCOMPARE(probe.contextActionIds(),
+             (QStringList{QStringLiteral("scan"), QStringLiteral("fmt")}));
+    probe.addContextAction(QStringLiteral("scan"), QStringLiteral("Re-scan"));
+    QCOMPARE(probe.contextActionIds(),
+             (QStringList{QStringLiteral("scan"), QStringLiteral("fmt")}));
+
+    QMenu* menu = probe.createContextMenu();
+    QAction* scan = menuAction(menu, QStringLiteral("Re-scan"));
+    QAction* fmt = menuAction(menu, QStringLiteral("Format File"));
+    QAction* all = menuAction(menu, QStringLiteral("Select All"));
+    QVERIFY(scan && fmt && all);
+    QVERIFY(!menuAction(menu, QStringLiteral("Add Scan"))); // the REPLACED
+                                                            // label is gone
+    // Below the built-ins, in REGISTRATION order (the app's list, not the
+    // menu's alphabet).
+    const QList<QAction*> acts = menu->actions();
+    QVERIFY(acts.indexOf(scan) > acts.indexOf(all));
+    QVERIFY(acts.indexOf(fmt) > acts.indexOf(scan));
+
+    scan->trigger();
+    fmt->trigger();
+    QCOMPARE(triggered.size(), 2);
+    QCOMPARE(triggered.at(0).at(0).toString(), QStringLiteral("scan"));
+    QCOMPARE(triggered.at(1).at(0).toString(), QStringLiteral("fmt"));
+    delete menu;
+
+    // A fresh menu REBUILDS its QActions (the menu and its actions die with
+    // every exec — the M16 pattern the paired-run segfault proved): the ids
+    // survive the rebuild and the trigger still carries the id.
+    QMenu* again = probe.createContextMenu();
+    QAction* againScan = menuAction(again, QStringLiteral("Re-scan"));
+    QVERIFY(againScan);
+    againScan->trigger();
+    QCOMPARE(triggered.size(), 3);
+    QCOMPARE(triggered.at(2).at(0).toString(), QStringLiteral("scan"));
+    delete again;
+}
+
+// The stored workspace configuration: the view is the OPAQUE BUFFER (it never
+// parses and never applies — the app-side LSP glue is the only reader), and
+// the signal rides a REAL change only (the M23 changed-not-touched rule).
+void TestCodeEditor::storedWorkspaceConfigurationStaysOpaqueAndSignalsOnce()
+{
+    CodeEditor widget; // a fresh one: the fixture editor stays untouched
+    widget.resize(600, 400);
+    QSignalSpy changed(&widget, &CodeEditor::workspaceConfigurationChanged);
+    QVERIFY(widget.storedWorkspaceConfiguration().isEmpty()); // never set = the
+                                                              // spec default
+    widget.setStoredWorkspaceConfiguration(QStringLiteral("{\"a\":1}"));
+    QCOMPARE(changed.size(), 1);
+    QCOMPARE(widget.storedWorkspaceConfiguration(), QStringLiteral("{\"a\":1}"));
+    widget.setStoredWorkspaceConfiguration(QStringLiteral("{\"a\":1}"));
+    QCOMPARE(changed.size(), 1); // changed-not-touched: no signal, no re-push
+
+    // OPAQUE is contractual: even a value that is not JSON at all is stored
+    // verbatim (the glue refuses it at push time; the view has no opinion).
+    widget.setStoredWorkspaceConfiguration(QStringLiteral("plain, not json"));
+    QCOMPARE(widget.storedWorkspaceConfiguration(),
+             QStringLiteral("plain, not json"));
+    QCOMPARE(changed.size(), 2);
+    // Empty again = "never configured" (the glue then sends NOTHING).
+    widget.setStoredWorkspaceConfiguration(QString());
+    QVERIFY(widget.storedWorkspaceConfiguration().isEmpty());
+    QCOMPARE(changed.size(), 3);
 }
 
 QTEST_MAIN(TestCodeEditor)

@@ -8526,7 +8526,49 @@ QMenu* CodeEditor::createContextMenu()
     connect(menu->addAction(tr("Select All")), &QAction::triggered, this, [this] {
         selectAll();
     });
+    // M8 parity wrap: the consumer's custom actions ride BELOW the built-in
+    // block, separated. The lambda captures the id BY VALUE: the menu and
+    // its actions die with every exec (deleteLater), and the action list is
+    // rebuilt fresh each time, so no captured QAction can ever dangle.
+    if (!contextActions_.isEmpty()) {
+        menu->addSeparator();
+        for (const ContextActionEntry& action : contextActions_)
+            connect(menu->addAction(action.label), &QAction::triggered, this,
+                    [this, id = action.id] { emit contextActionTriggered(id); });
+    }
     return menu;
+}
+
+// The M8 parity wrap doors (public API comments at the header).
+void CodeEditor::addContextAction(const QString& id, const QString& label)
+{
+    if (id.isEmpty())
+        return; // the trigger key IS the id: an action without one could
+                // never announce itself — the honest silent local refuse
+    for (ContextActionEntry& action : contextActions_) {
+        if (action.id == id) {
+            action.label = label; // idempotent: same id, fresh label, slot kept
+            return;
+        }
+    }
+    contextActions_.push_back(ContextActionEntry{id, label});
+}
+
+QStringList CodeEditor::contextActionIds() const
+{
+    QStringList ids;
+    ids.reserve(contextActions_.size());
+    for (const ContextActionEntry& action : contextActions_)
+        ids << action.id;
+    return ids;
+}
+
+void CodeEditor::setStoredWorkspaceConfiguration(const QString& settingsJson)
+{
+    if (storedConfig_ == settingsJson)
+        return;
+    storedConfig_ = settingsJson;
+    emit workspaceConfigurationChanged();
 }
 
 void CodeEditor::startSelectionDrag()
