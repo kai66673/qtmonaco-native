@@ -1408,6 +1408,11 @@ private slots:
 
     void lspCapabilityRegistryAndApplyEditDoor()
     {
+        // The timeouts on this slot's QTRYs ride 30000, NOT the usual 5000:
+        // the battery's registration flips (9006/9007 rounds) and the
+        // applyEdit door's answer are ordinary traffic, and a starved host
+        // (measured: 8 busy loops on 12 cores broke the 5000 window twice
+        // and the 15000 one) must read as slow, not as broken.
         TestHarness h(QStringLiteral("requests"));
         h.modeArgs << QStringLiteral("noapply"); // the applyEdit answer is
                                                  // the TEST's door, not the
@@ -1425,7 +1430,7 @@ private slots:
                                                       == QLatin1String("battery edit"));
                          });
         h.client->start(TestHarness::initParams());
-        QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 30000);
 
         // The registry flips as the battery's registrations come and go:
         // 9006 registers hover (flip #1), 9007 unregisters it (flip #2).
@@ -1454,11 +1459,11 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(hoverFlips,
                                   (QStringList{QStringLiteral("on"),
                                                QStringLiteral("off")}),
-                                  5000);
+                                  30000);
         QCOMPARE(h.client->isRegistered(QStringLiteral("textDocument/magic")),
                  false); // the veto left NOTHING registered
 
-        QTRY_COMPARE_WITH_TIMEOUT(applySpy.count(), 1, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(applySpy.count(), 1, 30000);
         QCOMPARE(qvariant_cast<QJsonValue>(applySpy.at(0).at(0)).toInt(), 9009);
         QCOMPARE(qvariant_cast<QJsonValue>(applySpy.at(0).at(1))
                      .toObject()
@@ -1470,12 +1475,12 @@ private slots:
         // (BATTERY-PASS): only THEN stop — the battery server exits on the
         // stdin EOF that transport->stop() causes, and an EOF mid-battery
         // would be the fakeserver's exit-2 hang instead of a clean exit 0.
-        QTRY_VERIFY_WITH_TIMEOUT(batteryPassed(stderrSpy), 8000);
+        QTRY_VERIFY_WITH_TIMEOUT(batteryPassed(stderrSpy), 30000);
         h.client->stop();
         QTRY_COMPARE_WITH_TIMEOUT(h.client->state(),
-                                  qmn::lsp::LspClient::State::Stopped, 5000);
+                                  qmn::lsp::LspClient::State::Stopped, 30000);
         QTRY_COMPARE_WITH_TIMEOUT(h.exitCodeOf(0), 0,
-                                  5000); // the door's {applied:true} landed
+                                  30000); // the door's {applied:true} landed
         QCOMPARE(h.client->isRegistered(QStringLiteral("textDocument/hover")),
                  false); // the battery's own unregister round flipped it
                          // off (registrations_ is the client's cross-session
