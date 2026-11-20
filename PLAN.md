@@ -50,6 +50,14 @@ every completed milestone gets a git tag `v0.x` and an alpha wheel from the
 container into `dist/` (its `cp311` tag stays cosmetic until Phase F's real
 abi3 retag). Keeps the wheel pipeline hot and progress tangible.
 
+**License** (owner decision, 2026-11-21): **BSD-3-Clause**, copyright
+`kai66673`, one `LICENSE` file covering BOTH deliverables (the C++ package
+and the `qmn-native` wheel; the wheel declares it via PEP 639 metadata).
+Chosen to match the parent qtmonaco; the vendored tree-sitter + grammars
+keep their own MIT licenses, every upstream `LICENSE` staying in place under
+`third_party/tree-sitter/` (VENDORED.md already records the set). Before
+this, the README said "TBD" — a hard blocker for any third-party use.
+
 **Hard ordering rules inside Gate 1:**
 - **M2 graphemes before any binding widening** — position semantics change;
   API-freeze rule (risk #6).

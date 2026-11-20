@@ -19,6 +19,11 @@ requires = [
 name = "qmn-native"
 version = "1.8.0"
 description = "Native Qt6 code-editor widget exposed to PySide6 (drop-in target for qtmonaco.Monaco)"
+# PEP 639: the wheel's license covers OUR code only (the C++ package carries
+# the same LICENSE); PySide6/Qt and the vendored MIT tree-sitter keep their
+# own terms, exactly as the README's License section spells out.
+license = "BSD-3-Clause"
+license-files = ["LICENSE"]
 requires-python = ">=3.10"
 # ~=6.12.0 is not fussiness, it is how the extension links: DT_NEEDED carries
 # the versioned SONAMEs libpyside6.abi3.so.6.12 + libshiboken6.abi3.so.6.12,

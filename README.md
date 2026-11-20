@@ -229,7 +229,12 @@ Out of scope by design: vim mode. The `set_vim_mode_enabled` setter is still
 exposed by the Python binding for API compatibility, but only warns (see
 *PLAN.md*).
 
-License: TBD (parent project qtmonaco is BSD-3-Clause).
+License: BSD-3-Clause (see `LICENSE`; the parent project qtmonaco is
+BSD-3-Clause too). The vendored tree-sitter runtime and grammars stay under
+their own MIT licenses - every upstream `LICENSE` file is kept in place under
+`third_party/tree-sitter/` (see its `VENDORED.md`). The PySide6 wheel carries
+this same BSD-3-Clause over our code only; consumers link PySide6/Qt under
+their own licenses, as usual.
 
 ## Model micro-benchmark
 
