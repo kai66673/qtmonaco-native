@@ -46,12 +46,14 @@ treap-invariant check after **every** operation (`tests/tst_textbuffer.cpp`).
 
 Deliberately **not implemented yet** (see roadmap): full
 grapheme segmentation (`col` still counts UTF-16 code units even though
-arrow keys and edits snap to cluster boundaries), DAP (the last Gate-2 car),
-markdown rendering in the hover popup (plain text by design) and
-semanticTokens PAINTING (the decoder exists, tree-sitter stays the paint
-master). Soft wrap, the diff view, horizontal scrolling with column memory,
-scrolling past the end and the whole LSP stack (protocol → client → syncer →
-app-side hub → popups) all shipped in 1.7.0 / 1.8.0.
+arrow keys and edits snap to cluster boundaries), markdown rendering in
+the hover popup (plain text by design) and semanticTokens PAINTING (the
+decoder exists, tree-sitter stays the paint master). Soft wrap, the diff
+view, horizontal scrolling with column memory, scrolling past the end,
+the whole LSP stack (protocol → client → syncer → app-side hub → popups)
+and the whole DAP stack (codec seam → dap layer → DapHub on the glue
+shelf, breakpoints/frames/value hints via the M5 decorations) all shipped
+in 1.7.0 – 1.9.1.
 
 ## Layout & layering
 
@@ -148,7 +150,8 @@ house style for it (the setup used against the Arch `code` OSS build):
 
 Milestones, in build order. **Gate 1** (editor v1: M1b…M13 + M12 completion)
 ships a self-contained editor usable from C++ and PySide6; **Gate 2** (IDE
-surface) starts only after the v1 API freeze — details in *PLAN.md*.
+surface) starts only after the v1 API freeze — it CLOSED 2026-11-21 with
+tags `v1.9.0`/`v1.9.1`; details in *PLAN.md*.
 
 Gate 1 — Code Editor v1:
 
@@ -176,7 +179,7 @@ Gate 1 — Code Editor v1:
 - [x] M13 code folding (tree-sitter `@fold` ranges + indent fallback; gutter
       ▾/▸ toggles + Ctrl+Shift+[/] chords; ONE view-line map routing paint,
       caret nav, selection, gutter, ruler and the v-scroll space)
-- [ ] E3 usability polish before the freeze: M14 Tab/auto-indent ✔ · M15 ✔
+- [x] E3 usability polish before the freeze: M14 Tab/auto-indent ✔ · M15 ✔
       (smart Home + double/triple-click + Ctrl+D) · M16 context menu + text
       DnD ✔ · M17 font/zoom API ✔ · M18 auto-close pairs + long-line ruler +
       current-line style ✔ · M19 CodeEditorOptions settings object ✔
@@ -215,7 +218,8 @@ Gate 1.5 — usability interlude (post-freeze minor train, see PLAN.md;
       explicit Light/Dark presets and a kind tracker; all "set_theme
       routes it" inks finally routed; demo dialog theme combo)
 
-Gate 2 — IDE surface (after the freeze):
+Gate 2 — IDE surface (after the freeze; **CLOSED 2026-11-21**, v1.9.0 +
+v1.9.1):
 
 - [x] M8 LSP client (stdio JSON-RPC via QProcess) — completion, diagnostics,
       hover, plus the whole write path (the all-or-nothing `WorkspaceEdit`
@@ -254,7 +258,15 @@ Gate 2 — IDE surface (after the freeze):
       AUTOMATIC LSP half (config fold, lazy start, sync, diagnostics, popup
       triggers, accept, server-primed applyEdits + relays) is Python-live;
       the callback-carrying feature doors stay C++-only, honest absence
-- [ ] DAP features via decorations (breakpoints, current frame, value hints)
+- [x] DAP features via decorations (car 4, the last Gate-2 machine): the
+      `src/dap/` layer over the protocol envelope seam (`EnvelopeCodec` —
+      LSP bytes byte-identical) + `DapHub` on the glue shelf: verified
+      breakpoint dots via `setBreakpointLines` (unverified ones become
+      `source:"dap"` Warnings, the desired store survives sessions), the
+      caret + frame band at stopped (`setPosition` + `setHighlightedLines`),
+      scope values as `setInlayHints` at word-end; the demo `--dap` door
+      and the live-adapter probe ritual (lldb-dap AND gdb green); DAP does
+      NOT cross the wheel yet — the hub doors are shiboken-shaped by design
 
 Out of scope by design: vim mode. The `set_vim_mode_enabled` setter is still
 exposed by the Python binding for API compatibility, but only warns (see

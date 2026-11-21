@@ -827,7 +827,7 @@ container AT the tag is the owner's release step; it carries the
 options-mirror/theme/language doors into Python for the first time.
 **Gate 1.5 CLOSED — Gate 2 may open.**
 
-# GATE 2 — IDE surface (open since 2026-11-15)
+# GATE 2 — IDE surface (opened 2026-11-15) — ✔ CLOSED (v1.9.0 + v1.9.1, 2026-11-21)
 
 Everything here is a *consumer* of the frozen v1 widget API; none of it may
 require new view primitives (if it does, that is a Gate-1 design bug to fix,
@@ -2150,6 +2150,17 @@ had mirrored the WRONG shapes and the tests went tautological:
   `initialized` + `capabilities` events arrive late, mid-launch.
 `QMN_GLUE_VERSION` stays 1.0.0 (every D4 shelf change is additive); the
 PACKAGE close ritual bumps BOTH literals in one commit — car 4 CLOSED.
+
+**Gate 2 CLOSED 2026-11-21** — all four ordered cars (M25 wrap, M10 diff,
+M8 LSP, car 4 DAP) plus the glue G-train (G1+G2+G3) shipped; the train
+ships as tags `v1.9.0` (the car-4 close) and `v1.9.1` (the hotfix close —
+the 1.6.0→1.6.1 precedent, see CHANGELOG). No later gate is designed yet;
+the deferred shelf is Gate 3's input: M8b (signatureHelp, LSP inlay hints,
+foldingRange over M13, pull diagnostics), M10b (word-level inline diff,
+wrap×diff budgets, original-side wrap), the two verbatim-recorded defects
+(the undo-mark drift on type-over-selection, the overview-ruler perf
+cliff), DAP-at-the-wheel, a multi-observer core for two editors on one
+buffer, and the missing PyPI/Qt-bootstrap half of the cibuildwheel flow.
 
 ### Gate 2 at the wheel boundary (rides the owning cars)
 

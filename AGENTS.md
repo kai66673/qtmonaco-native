@@ -5,18 +5,19 @@ Native code editor widget for Qt6, built from scratch on a raw `QWidget`
 QPlainTextEdit, no Chromium. Long-term hobby project; roadmap in `README.md`,
 phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
 
-## Current state (v1.8.0 — M8 CLOSED 2026-11-19) — gates and the frozen surface
+## Current state (v1.9.1 — GATE 2 CLOSED 2026-11-21) — gates and the frozen surface
 
 - Gate 1 (editor v1) froze the public API at tag `v1.0`; Gate 1.5 (usability
-  train M20–M24) closed 2026-11-12 at tag `v1.5.0`. **Gate 2 is the open
-  train** since 2026-11-15, ordering decided: M25 soft wrap (SHIPPED) → M10
-  diff (cars 1–3 built: engine + view + chrome) → M8 LSP/protocol (**CLOSED
-  2026-11-19**, seven machines — see the PLAN "M8 … CLOSED" paragraph) →
-  **the glue shelf G1+G2 (DECIDED 2026-11-21, ordered BEFORE car 4 by the
-  user — see the PLAN "glue shelf + ProjectSession" record)** →
-  **DAP, the one Gate-2 car still open**. The full design record is the
-  PLAN.md "GATE 2" section — read it before starting
-  a car. Never start work for a later gate while an earlier one is open.
+  train M20–M24) closed 2026-11-12 at tag `v1.5.0`; **GATE 2 CLOSED
+  2026-11-21** at tags `v1.9.0` + `v1.9.1` — the whole ordered train
+  shipped: M25 soft wrap → M10 diff → M8 LSP/protocol (seven machines) →
+  the glue shelf G1–G3 → **car 4 DAP (machines D1–D4, probe ritual green
+  on lldb-dap AND gdb)**. No later gate is designed yet; the deferred
+  slivers (M8b, M10b, the two recorded defects, DAP-at-the-wheel) are the
+  next design pass's input — the PLAN "Gate 2 CLOSED" closer lists them.
+  The full design record is the PLAN.md "GATE 2" section — read it before
+  starting a car. Never start work for a later gate while an earlier one
+  is open.
 - The frozen surface widens **only additively** (Gate 1.5 precedent): no new
   view mapping/geometry primitives. The M5 decoration API already covers
   diagnostics, breakpoints and inlay hints. Two sanctioned Gate-2 deviations
