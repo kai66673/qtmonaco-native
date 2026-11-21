@@ -203,6 +203,7 @@ private slots:
     // Accessibility bridge (M11).
     void accessibleInterfaceMirrorsRoleStateAndText();
     void accessibleTextOffsetsMapDocumentAndDriveCaret();
+    void accessibleEditDoorsKeepTheUndoMirrorAligned();
     void accessibleBoundariesFollowTheLineModel();
     void accessibleCharRectAndPointHitRoundTrip();
 
@@ -4620,6 +4621,66 @@ void TestCodeEditor::accessibleTextOffsetsMapDocumentAndDriveCaret()
     QCOMPARE(ti->characterCount(), before + 1);
     QCOMPARE(ti->text(ti->cursorPosition() - 1, ti->cursorPosition()),
              QStringLiteral("z")); // (keyClick lands lowercase)
+}
+
+void TestCodeEditor::accessibleEditDoorsKeepTheUndoMirrorAligned()
+{
+    // Car 0 defect 1 tripwire (the bug PLAN records from v1.6.1): the a11y
+    // deleteText door used to ride deleteSelection() BARE — a core undo
+    // group with no matching view UndoMark — so undoMarks_ lagged the core
+    // history by one entry forever after: every later undo restored the
+    // PREVIOUS action's caret (stale carets), the last undo was refused
+    // while canUndo() stayed true, and any following edit's
+    // reconcileUndoMarks tripped its (Debug-only) size-equality Q_ASSERT.
+    // The mirror discipline (captureEditMark + reconcileUndoMarks around
+    // every action) is frozen Gate-1 undo mechanics; this slot pins it from
+    // PUBLIC doors only, Release-observable: three a11y actions must equal
+    // three complete undo steps, each restoring text, caret AND selection.
+    editor->setPlainText(QStringLiteral("abc\nde\nfghi"));
+    QAccessibleInterface* iface = QAccessible::queryAccessibleInterface(editor);
+    QAccessibleEditableTextInterface* et = iface->editableTextInterface();
+    QVERIFY(et);
+
+    et->insertText(0, QStringLiteral("X"));     // "Xabc\nde\nfghi"
+    et->replaceText(2, 5, QStringLiteral("Y")); // "bc\n" -> "Y" (cross-line type-over)
+    et->deleteText(1, 3);                       // "aY" goes (the bare door)
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Xde\nfghi"));
+    QVERIFY(editor->canUndo());
+
+    // Undo #1 restores the deleteText group together with the state the
+    // DOOR entered with — the door selects before deleting, so the
+    // restored selection is offsets 1..3, caret on the ACTIVE end.
+    editor->undo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("XaYde\nfghi"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3}));
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("aY"));
+
+    // Undo #2 restores the type-over's compound group (one step for the
+    // delete+insert pair, selection "bc\n" back as it stood).
+    editor->undo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Xabc\nde\nfghi"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0}));
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("bc\n"));
+
+    // Undo #3 must reach the ORIGINAL document: pre-fix the marks ran one
+    // short and the third undo was silently refused here (text stayed at
+    // "Xabc\nde\nfghi" with canUndo() stuck true below).
+    editor->undo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abc\nde\nfghi"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+    QVERIFY(!editor->canUndo()); // exactly three groups, no stale residue
+
+    // The redo leg rides the same 1:1 pairing (undo's `current` states).
+    QVERIFY(editor->canRedo());
+    editor->redo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Xabc\nde\nfghi"));
+    editor->redo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("XaYde\nfghi"));
+    editor->redo();
+    QCOMPARE(editor->toPlainText(), QStringLiteral("Xde\nfghi"));
+    QVERIFY(!editor->canRedo());
 }
 
 void TestCodeEditor::accessibleBoundariesFollowTheLineModel()

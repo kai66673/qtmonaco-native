@@ -5,6 +5,10 @@
 #include <algorithm>
 #include <cassert>
 
+#if defined(__SSE2__) // buildNewlines' newline scan; scalar loop elsewhere (see there)
+#include <emmintrin.h>
+#endif
+
 namespace qmn::core {
 
 namespace {
@@ -30,7 +34,11 @@ quint32 TextBuffer::nextRand()
 
 int TextBuffer::pieceLines(const Piece& p) const
 {
-    const QString& buf = buffers_[p.buf];
+    // The plain count (GCC turns the if-increment into branchless SIMD).
+    // The lazy discipline of car 0: this is what a FRESH node pays at
+    // creation (the v1 setText cost, unchanged), while the queryable list
+    // below is only built when a line read or a piece split first needs it.
+    const QString& buf = buffers_[static_cast<std::size_t>(p.buf)];
     int count = 0;
     for (int i = p.start; i < p.start + p.len; ++i) {
         if (buf.at(i) == kNewline)
@@ -39,9 +47,88 @@ int TextBuffer::pieceLines(const Piece& p) const
     return count;
 }
 
+void TextBuffer::ensureNewlineList(int i)
+{
+    // Materialize one unbuilt node (nl == nullptr sentinel). The piece is
+    // immutable, so the list is a pure function of the piece: every window
+    // a later split derives from it stays consistent. Not const: this is
+    // a private mutable cache (the const query doors const_cast through
+    // it, exactly like the view's other lazies).
+    Node& n = nodes_[static_cast<std::size_t>(i)];
+    if (n.nl)
+        return;
+    auto list = buildNewlines(n.piece);
+    assert(static_cast<int>(list->size()) == n.lines); // count and list agree
+    n.nl = std::move(list);
+    n.nlLo = 0;
+    n.nlHi = static_cast<int>(n.nl->size());
+}
+
+std::shared_ptr<const std::vector<int>> TextBuffer::buildNewlines(const Piece& p) const
+{
+    // One scan of the (immutable) piece range. Positions are
+    // BUFFER-absolute so sibling windows created by a piece split can
+    // share this exact list. WHY the loop is SIMD + std::vector and not
+    // the obvious code — both measured at the car-0 A/B on the 61 MiB
+    // bench doc (a '\n' every ~62 bytes): a QVector::append fill loop
+    // cost ~50 ms per build (the d->size member chain, ~6x the scan —
+    // NEVER regress this list to QVector append), and glibc memchr-per-
+    // hit paid ~12 ns of call setup per ~1M hits (~12 ms per pass). The
+    // SSE2 pass below streams 8 units per compare and extracts hits
+    // with movemask+ctz; list build only happens ONCE per piece (lazy),
+    // never per keystroke: splits re-cut windows on the shared list.
+    const QString& buf = buffers_[static_cast<std::size_t>(p.buf)];
+    auto list = std::make_shared<std::vector<int>>();
+    const char16_t* units = reinterpret_cast<const char16_t*>(buf.constData()) + p.start;
+#if defined(__SSE2__) // x86-64 baseline (all shipping targets); scalar loop below elsewhere
+    {
+        const __m128i nlv = _mm_set1_epi16(0x000A); // u'\n'
+        int i = 0;
+        for (; i + 8 <= p.len; i += 8) {
+            const __m128i chunk = _mm_loadu_si128(reinterpret_cast<const __m128i*>(units + i));
+            // movemask sets BOTH bytes of each equal unit: unit j occupies
+            // bits 2j (low byte) and 2j+1 (high byte), and cmpeq makes them
+            // equal — so masking to the even bits leaves bit 2k set iff
+            // unit k == u'\n', and the unit index is ctz >> 1.
+            unsigned m =
+                static_cast<unsigned>(_mm_movemask_epi8(_mm_cmpeq_epi16(chunk, nlv))) & 0x5555u;
+            while (m) {
+                list->push_back(p.start + i + (__builtin_ctz(m) >> 1));
+                m &= m - 1;
+            }
+        }
+        for (; i < p.len; ++i) {
+            if (units[i] == u'\n')
+                list->push_back(p.start + i);
+        }
+    }
+#else
+    for (int i = 0; i < p.len; ++i) {
+        if (units[i] == u'\n')
+            list->push_back(p.start + i);
+    }
+#endif
+    return std::shared_ptr<const std::vector<int>>(std::move(list));
+}
+
 int TextBuffer::newNode(const Piece& p)
 {
+    // Fresh pieces start UNBUILT: the eager line COUNT rides this scan
+    // (branchless, the v1 setText cost), the list materializes at the
+    // first line query that lands on the node (ensureNewlineList; splits
+    // of an unbuilt piece keep the count-scan cost, see splitChars).
     assert(p.len > 0);
+    const int lines = pieceLines(p);
+    return newNodeShared(p, nullptr, 0, lines);
+}
+
+int TextBuffer::newNodeShared(const Piece& p, std::shared_ptr<const std::vector<int>> nl, int lo, int hi)
+{
+    assert(p.len > 0);
+    if (nl)
+        assert(lo >= 0 && hi >= lo && hi <= static_cast<int>(nl->size()));
+    else
+        assert(lo == 0 && hi == pieceLines(p)); // unbuilt sentinel window
     int i;
     if (freeHead_ != kNull) {
         i = freeHead_;
@@ -55,7 +142,10 @@ int TextBuffer::newNode(const Piece& p)
     n.prio = nextRand();
     n.left = n.right = kNull;
     n.chars = p.len;
-    n.lines = pieceLines(p);
+    n.nl = std::move(nl); // overwrites any stale list of a recycled node
+    n.nlLo = lo;
+    n.nlHi = hi;
+    n.lines = hi - lo;
     n.subChars = p.len;
     n.subLines = n.lines;
     n.subCount = 1;
@@ -157,12 +247,43 @@ void TextBuffer::splitChars(int root, int k, int& a, int& b)
 
     // The cut point falls inside this node's piece: split the piece in two.
     const int i = k - leftChars; // 0 < i < ownChars
+    // Copy everything needed BEFORE the newNodes: the pool may reallocate
+    // (the note at this function's head), and nothing here holds a Node&
+    // across the calls.
     const Piece p = nodes_[static_cast<std::size_t>(root)].piece;
     const quint32 oldPrio = nodes_[static_cast<std::size_t>(root)].prio;
+    const int parentLines = nodes_[static_cast<std::size_t>(root)].lines;
+    std::shared_ptr<const std::vector<int>> parentNl = nodes_[static_cast<std::size_t>(root)].nl;
+    const int lo = nodes_[static_cast<std::size_t>(root)].nlLo;
+    const int hi = nodes_[static_cast<std::size_t>(root)].nlHi;
     const Piece lp{p.buf, p.start, i};
     const Piece rp{p.buf, p.start + i, p.len - i};
-    const int ln = newNode(lp);
-    const int rn = newNode(rp);
+    int ln = 0;
+    int rn = 0;
+    if (parentNl) {
+        // Built list: cut the shared window BETWEEN the children — one
+        // lower_bound on the shared list (buffer coordinates, the cut
+        // offset is exactly the right boundary), no scan, no copy. This
+        // is the fix for pieceLines' old per-split O(half document)
+        // re-scan — typing into a list-queried (or once-split) loaded
+        // document no longer rescans per keystroke.
+        const int cut = p.start + i; // buffer coordinate of the cut
+        const int mid = static_cast<int>(
+            std::lower_bound(parentNl->cbegin() + lo, parentNl->cbegin() + hi, cut) - parentNl->cbegin());
+        ln = newNodeShared(lp, parentNl, lo, mid);
+        rn = newNodeShared(rp, std::move(parentNl), mid, hi);
+    } else {
+        // UNBUILT piece (lazy sentinel): keep the shipping cost exactly —
+        // a half-count with subtraction (one ride-along scan, NO parent-
+        // wide list materialization: materializing at split pushed the
+        // first-keystroke spike on a loaded 61 MiB doc to ~45 ms in the
+        // car-0 A/B, vs the ~26 ms today's users see). The list stays
+        // deferred until a line query lands here (offsetOfNthNewline's
+        // ensure); from then on splits ride the windows above.
+        const int lcount = pieceLines(lp); // scans the left half exactly
+        ln = newNodeShared(lp, nullptr, 0, lcount);
+        rn = newNodeShared(rp, nullptr, 0, parentLines - lcount);
+    }
     // Inherit the cut node's heap priority: fresh random priorities could
     // exceed ancestors when the split recursion unwinds and re-attaches
     // these subtrees below existing nodes (which merge() would not see).
@@ -492,11 +613,16 @@ int TextBuffer::lineCount() const
 
 int TextBuffer::offsetOfNthNewline(int k) const
 {
-    // k is 1-based, in [1, subLines(root_)].
+    // k is 1-based, in [1, subLines(root_)]. The descent prunes by subtree
+    // line counts; the landing is O(1): the node's window over its shared
+    // newline list is DIRECTLY indexed (pre-car-0 this scanned from the
+    // piece start, which on a loaded one-piece document is O(doc) per
+    // call — the v1.6.1 overview-ruler cliff, ~1 ms x ~400 stripe samples
+    // per paint; PLAN records the measurement).
     int cur = root_;
     int charBase = 0;
     while (cur != kNull) {
-        const Node& n = nodes_[static_cast<std::size_t>(cur)]; // re-index below after descent
+        const Node& n = nodes_[static_cast<std::size_t>(cur)];
         const int leftLines = subLines(n.left);
         if (k <= leftLines) {
             cur = n.left;
@@ -505,16 +631,17 @@ int TextBuffer::offsetOfNthNewline(int k) const
         k -= leftLines;
         const int start = charBase + subChars(n.left);
         if (k <= n.lines) {
-            const QString& buf = buffers_[static_cast<std::size_t>(n.piece.buf)];
-            int seen = 0;
-            for (int j = 0; j < n.chars; ++j) {
-                if (buf.at(n.piece.start + j) == kNewline) {
-                    ++seen;
-                    if (seen == k)
-                        return start + j;
-                }
+            if (!n.nl) {
+                // The lazy materialization point: the one mutation behind
+                // this const door (private cache; treap shape is not
+                // touched, so the descent below just re-reads the node).
+                const_cast<TextBuffer*>(this)->ensureNewlineList(cur);
+                const Node& built = nodes_[static_cast<std::size_t>(cur)];
+                const int bufPos = built.nl->at(static_cast<std::size_t>(built.nlLo + k - 1));
+                return start + (bufPos - built.piece.start);
             }
-            Q_UNREACHABLE();
+            const int bufPos = n.nl->at(static_cast<std::size_t>(n.nlLo + k - 1));
+            return start + (bufPos - n.piece.start);
         }
         k -= n.lines;
         charBase = start + n.chars;
@@ -673,8 +800,30 @@ int TextBuffer::checkSubtree(int root, bool& ok) const
     const QString& buf = buffers_[static_cast<std::size_t>(n.piece.buf)];
     if (n.piece.buf <= 0 || n.piece.start < 0 || n.piece.start + n.piece.len > static_cast<int>(buf.size()))
         fail("piece out of buffer", root);
-    if (n.lines != pieceLines(n.piece))
+    if (n.lines != n.nlHi - n.nlLo)
         fail("stale line count", root);
+    // Car 0: the newline list IS the line index. Built nodes: the window
+    // must enumerate exactly the piece's '\n' positions (one ride-along
+    // scan, the same pieceLines cost the check paid before). Unbuilt
+    // nodes (the lazy sentinel, nl == nullptr): a full-piece window and a
+    // ride-along count against the piece text.
+    if (!n.nl) {
+        if (n.nlLo != 0 || n.lines != pieceLines(n.piece))
+            fail("unbuilt node desync", root);
+    } else {
+        int w = n.nlLo;
+        bool listOk = w >= 0 && w <= n.nlHi;
+        for (int j = 0; listOk && j < n.chars; ++j) {
+            const bool real = buf.at(n.piece.start + j) == kNewline;
+            const bool listed = w < n.nlHi && n.nl->at(static_cast<std::size_t>(w)) == n.piece.start + j;
+            if (real != listed)
+                listOk = false;
+            else if (listed)
+                ++w;
+        }
+        if (!listOk || w != n.nlHi)
+            fail("newline window desync", root);
+    }
     const int l = checkSubtree(n.left, ok);
     const int r = checkSubtree(n.right, ok);
     if (n.left != kNull && nodes_[static_cast<std::size_t>(n.left)].prio > n.prio)

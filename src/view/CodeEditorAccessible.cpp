@@ -483,7 +483,17 @@ void CodeEditorAccessible::deleteText(int startOffset, int endOffset)
     const qmn::core::TextBuffer::LineCol sa = editor_->buffer_.lineColAt(a);
     const qmn::core::TextBuffer::LineCol sb = editor_->buffer_.lineColAt(b);
     editor_->setSelection(TextPosition{sa.line, sa.col}, TextPosition{sb.line, sb.col});
+    // Same mirror discipline as every view edit action (deleteLineAt is the
+    // sibling pattern): deleteSelection() pushes a core undo group but owns
+    // no view UndoMark itself — an action that rides it bare leaves
+    // undoMarks_ one entry behind the core forever (the drift PLAN records
+    // from v1.6.1: stale undo carets, a refused final undo while canUndo()
+    // stays true, and the reconcileUndoMarks Q_ASSERT in Debug builds).
+    const CodeEditor::UndoMark pre = editor_->captureEditMark(); // AFTER the
+    // setSelection above: the door's own selection is part of the pre-state
+    // undo must restore (undoLineAt captures after its setSelection too).
     editor_->deleteSelection(); // surrogate-safe view-level delete
+    editor_->reconcileUndoMarks(pre);
 }
 
 void CodeEditorAccessible::replaceText(int startOffset, int endOffset, const QString& text)

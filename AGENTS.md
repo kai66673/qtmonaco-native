@@ -14,7 +14,8 @@ phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
   the glue shelf G1–G3 → **car 4 DAP (machines D1–D4, probe ritual green
   on lldb-dap AND gdb)**. **GATE 3 IS THE OPEN TRAIN since 2026-11-21**
   (decided the day Gate 2 closed): debt paydown + the live showcase —
-  eight ordered cars: defect pair (→1.9.2 patch) → M10b → M8b →
+  eight ordered cars: defect pair (CLOSED at 1.9.2 — the core now carries
+the lazy per-piece newline index) → M10b → M8b →
   multi-observer core → wheel-2 (DAP across + answer routes) → S1
   (qmn-demo grows into the showcase, NO second binary) → S2 (pydemo
   mirrors it door-for-door) → PyPI/cibuildwheel. Grapheme segmentation

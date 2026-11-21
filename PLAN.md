@@ -2296,6 +2296,36 @@ Two verbatim records above, one car, both fixes independently testable:
   timing-sensitive tests (failure mode never a false fail), plus the
   textbuffer property suite unchanged.
 
+**Car 0 CLOSED (2026-11-22, 1.9.2).** Both records dead, with dated
+corrections: the undo drift did NOT ride the view typeover (a core trace
+showed the bracketed typeover pushes exactly ONE group — the record's
+"two groups" theory is superseded); the drift is one mark per accessible
+`deleteText` call (`replaceText` rides it), fixed IN the a11y door with
+`deleteLineAt`'s capture/ride/reconcile pattern, `deleteSelection` staying
+a bare helper with the contract recorded in the header; tripwire
+`accessibleEditDoorsKeepTheUndoMirrorAligned` (codeeditor 258→259, red on
+the old door: caret `{1,0}` vs `{0,3}`). The ruler cliff died in the core
+as the record demanded: each treap node carries `nl`, an immutable
+buffer-absolute newline-offset list + window `[nlLo, nlHi)`, LAZILY
+materialized once per piece at the first line read that lands on it
+(the eager line-COUNT scan of v1 stays — A/B found materializing at load
+or split regressed setText/first-keystroke instead); splits of a BUILT
+piece re-cut windows with one `lower_bound` (also erasing the old
+per-keystroke O(half-document) line-count re-scan on loaded docs);
+`offsetOfNthNewline` indexes directly. Bench tripwire
+`rulerLineReadsStayIndexedOnOnePieceDoc` (vacuous-pass style, best-of-3
+600 probes < 30 ms): old core measured 601 ms against that budget, the
+new ~9 ms; `newlineWindowsSurvivePieceSplits` pins the window algebra;
+`checkSubtree` now verifies every window against the piece text through
+the property suite. A/B perf gates held: setText 7.7→8–10 ms, 20k random
+ops 12.5→11.7 µs/op mean — and the A/B recorded three traps the shipping
+shape had to dodge (QVector::append list storage ~50 ms/build, memchr-per-
+hit loops ~12 ms/pass at the bench doc's density, materialize-at-split
+first-keystroke spikes); the built scan is one SSE2 cmpeq_epi16 pass +
+std::vector, scalar only off-x86. The wheel half of the close ritual ran
+(the 1.9.1 lesson): container rebuild/repair/smoke/parity green, pydemo's
+fourth literal re-pointed, headless pydemo green.
+
 ### Car B — M10b (diff follow-on)
 
 Word-level inline highlight inside hunks, the wrap×diff budget math, and

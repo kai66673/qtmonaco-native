@@ -3,6 +3,7 @@
 #include <QString>
 #include <deque>
 #include <functional>
+#include <memory>
 #include <vector>
 
 namespace qmn::core {
@@ -152,6 +153,26 @@ private:
         int right = kNull;
         int chars = 0;     // own code units
         int lines = 0;     // own '\n' count
+        // Car 0 defect 2 (the v1.6.1 ruler cliff): the per-piece newline
+        // index. `nl` is an IMMUTABLE, buffer-absolute list of the '\n'
+        // offsets of a piece range; [nlLo, nlHi) is THIS piece's window
+        // into it (lines == nlHi - nlLo). nl == nullptr is the LAZY
+        // sentinel: the list is not built yet (the line COUNT rides the
+        // eager pieceLines scan — the v1 setText cost — and splits of an
+        // unbuilt piece keep the shipping count-scan cost; the list
+        // materializes ONCE, at the first line query that lands on the
+        // node; ensureNewlineList. From then on every split of a BUILT
+        // piece re-cuts windows for free — typing into a ruler-queried
+        // document stops rescanning per keystroke). A piece never mutates
+        // once created, and a piece split only re-cuts the windows (shared
+        // list, O(log) boundary seek, no text or list copy), so
+        // offsetOfNthNewline DIRECTLY indexes the k-th '\n' instead of
+        // scanning from the holding piece's start — a loaded one-piece
+        // document (ONE list, ~1M ints for 1M lines) stops costing
+        // O(doc) per line read.
+        std::shared_ptr<const std::vector<int>> nl;
+        int nlLo = 0;
+        int nlHi = 0;
         int subChars = 0;  // subtree
         int subLines = 0;  // subtree
         int subCount = 0;  // subtree node count
@@ -160,9 +181,18 @@ private:
     static constexpr int kNull = 0;
 
     int pieceChars(const Piece& p) const { return p.len; }
-    int pieceLines(const Piece& p) const;
+    int pieceLines(const Piece& p) const; // the eager line count (see Node::nl)
+    // The lazy list (see Node::nl): build once per piece. ensureNewlineList
+    // is the only mutator; the const query doors const_cast to reach it.
+    void ensureNewlineList(int nodeIdx);
+    // One SIMD scan of the piece: the '\n' positions in BUFFER coordinates
+    // (ascending), shared immutably across piece splits.
+    std::shared_ptr<const std::vector<int>> buildNewlines(const Piece& p) const;
 
-    int newNode(const Piece& p);
+    int newNode(const Piece& p); // fresh: eager count, list left UNBUILT
+    // Split path: inherit a shared list + window, NO re-scan (the fix for
+    // the hidden per-keystroke pieceLines re-scan on loaded documents).
+    int newNodeShared(const Piece& p, std::shared_ptr<const std::vector<int>> nl, int lo, int hi);
     void freeNode(int i);
     void recycleTree(int root);
     void update(int i);

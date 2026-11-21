@@ -1,7 +1,7 @@
 cmake_minimum_required(VERSION 3.22)
 
 project(qtmonaco-native
-    VERSION 1.9.1
+    VERSION 1.9.2
     DESCRIPTION "Native code editor widget for Qt6, built from scratch on a raw QWidget"
     LANGUAGES CXX)
 

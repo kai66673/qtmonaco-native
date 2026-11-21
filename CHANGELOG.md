@@ -3,6 +3,73 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.9.2] — 2026-11-22 — GATE 3 car 0 close: the recorded defect pair — the a11y undo-mark drift and the overview-ruler O(doc) cliff
+
+### Fixed
+- **The accessibility edit doors drifted the undo mirror** (recorded
+  2026-11-15, Debug symptom: `ASSERT: "undoMarks_.size() == …"` in
+  `accessibleTextOffsetsMapDocumentAndDriveCaret`; release symptom: undo
+  restores a stale caret). The route: `QAccessibleTextInterface::deleteText`
+  (which `replaceText` rides) called `setSelection` + `deleteSelection`
+  with no mark around the mutation, so each call left the core's history
+  one group ahead of `undoMarks_` forever. The fix mirrors `deleteLineAt`'s
+  pattern in the a11y door: capture `captureEditMark()`, ride
+  `deleteSelection()`, `reconcileUndoMarks(pre)` — and `deleteSelection`
+  itself stays a bare helper with that contract recorded in the header
+  (which is why every caller brackets it). Tripwire:
+  `accessibleEditDoorsKeepTheUndoMirrorAligned` (codeeditor 258→259) pins
+  the mirror + caret through the public a11y doors for both `deleteText`
+  and `replaceText`; it fails red on the old door (caret lands `{1,0}`
+  instead of `{0,3}` after an undo chain). The original record's theory
+  ("type-over pushes TWO undo groups") was superseded by a core trace —
+  the view typeover pushes exactly ONE; the drift is one mark per a11y
+  `deleteText` call.
+- **The overview-ruler paint cliff on loaded documents** (recorded
+  2026-11-16: ~230 ms per paint on a 12k-line/6 MiB single-piece file,
+  shipped since v1.6.1). `offsetOfNthNewline` scanned WITHIN the holding
+  piece from the piece start — O(doc) per sample on a never-fragmented
+  document. The fix is the core line index the record called for: every
+  treap node now carries `nl`, an immutable buffer-absolute newline-offset
+  LIST plus its window `[nlLo, nlHi)` (lines == nlHi − nlLo). The list is
+  LAZY: fresh nodes keep the v1 eager line-COUNT scan (setText cost
+  unchanged), the list materializes ONCE per piece at the first line read
+  that lands on the node, and a piece split re-cuts the windows with one
+  `lower_bound` — no text scan, no list copy. `offsetOfNthNewline` then
+  indexes the k-th `\n` directly. Tripwire:
+  `rulerLineReadsStayIndexedOnOnePieceDoc` (textbuffer 19→21, two new
+  slots; the vacuous-pass timing style, best-of-3 600 spread
+  `offsetOfLine` probes < 30 ms): the OLD core measured **601 ms**
+  against that budget, the new one ~9 ms total; `newlineWindowsSurvivePieceSplits` pins the window
+  algebra through mid-line cuts, cut-AT-newline, whole-line deletes and
+  undo re-creation, and the property suite's `checkSubtree` now verifies
+  every node's window against its piece text on all 2,000 random ops.
+  A correctness pin rides the same release: piece splits no longer
+  re-count lines by scanning (old hidden cost: per-keystroke O(half
+  document) on loaded docs).
+- **Perf A/B on the 61 MiB / 1M-line bench doc** (car-0 measurements,
+  recorded in code comments so they never regress silently): setText
+  stays at its v1 cost (7.7 → 8–10 ms — the eager COUNT scan only), the
+  20k random-op suite stays at baseline (12.5 → 11.7 µs/op mean, the
+  first-split half-piece count scan unchanged as the max-op spike), and
+  the one-time per-piece list build rides the first line read (SSE2 scan
+  ~15–25 ms at 1M lines, then every ruler sample is O(log n)). The A/B
+  pinned two traps the fix must never re-enter: `QVector::append` as the
+  list storage (~50 ms per build — the d->size member chain) and a
+  memchr-per-hit scan loop (~12 ms per pass at the bench doc's ~62-byte
+  newline density) — the shipping shape is one SSE2 `_mm_cmpeq_epi16`
+  pass + `std::vector` push_back, with the scalar loop only off-x86.
+  Materializing the list at LOAD or at SPLIT was tried and REJECTED:
+  both regressed setText or the first-keystroke spike.
+
+### Meta
+- Both package literals bumped 1.9.1 → 1.9.2 in the close commit;
+  `QMN_GLUE_VERSION` stays 1.0.0 (the shelf untouched — the fix is
+  core-internal, no new public view/glue doors, three-copies and the
+  codegen rejected-log unaffected). The wheel half of the close ritual:
+  1.9.2 rebuilt/repaired/smoked/parity-green in the container, pydemo's
+  fourth literal re-pointed, headless pydemo green. ctest 7/7 on the
+  host (the `lsp` flake settled as host load).
+
 ## [1.9.1] — 2026-11-21 — hotfix close: the wheel half the 1.9.0 close forgot, and the GCC-<12 compile break its rebuild exposed
 
 ### Fixed

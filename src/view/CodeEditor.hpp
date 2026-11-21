@@ -1188,7 +1188,10 @@ private:
     void setCaret(TextPosition pos); // always collapses the selection
     void moveCaret(TextPosition target, bool extend);
     void setSelection(TextPosition anchor, TextPosition caret);
-    bool deleteSelection(); // true if a selection was removed
+    bool deleteSelection(); // true if a selection was removed; pushes a
+    // core undo group but appends NO UndoMark — the enclosing action owns
+    // the mirror (captureEditMark + reconcileUndoMarks; see deleteLineAt,
+    // and the a11y deleteText door fixed in car 0 for the bare-ride drift)
     // Sorted ends of the current selection (valid only if hasSelection_).
     TextPosition selStart() const;
     TextPosition selEnd() const;

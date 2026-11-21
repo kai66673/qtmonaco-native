@@ -272,10 +272,12 @@ v1.9.1):
 Gate 3 — debt paydown and the live showcase (opened 2026-11-21, the day
 Gate 2 closed; see PLAN.md for the car-by-car design record):
 
-- [ ] Car 0 — the recorded defect pair (→ 1.9.2 patch): the undo-mark
-      drift on bracketed type-over-selection + the overview-ruler perf
-      cliff on one-piece docs (the fix rides a CORE line index, with a
-      bench tripwire)
+- [x] Car 0 — the recorded defect pair (CLOSED, 1.9.2): the undo-mark
+      drift (it rides the accessible deleteText/replaceText door, the
+      record's typeover theory superseded) + the overview-ruler perf
+      cliff on one-piece docs (fixed in the CORE: lazy per-piece
+      newline-offset lists + window re-cuts at splits, bench tripwire
+      601 ms → indexed)
 - [ ] Car B — M10b: word-level inline diff highlight, wrap×diff budget
       math, original-side wrap
 - [ ] Car C — M8b: signatureHelp, LSP inlay hints, `foldingRange` over

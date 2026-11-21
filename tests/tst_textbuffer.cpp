@@ -41,6 +41,8 @@ private slots:
     void randomUndoRedoVsReference();
     void textRangeVsReferenceAcrossPieces();
     void textRangeWalkStaysPrunedWithManyPieces();
+    void newlineWindowsSurvivePieceSplits();
+    void rulerLineReadsStayIndexedOnOnePieceDoc();
 
 private:
     static void verifyAllLines(const TextBuffer& buf, const QString& ref);
@@ -544,6 +546,104 @@ void TestTextBuffer::textRangeWalkStaysPrunedWithManyPieces()
     QVERIFY2(bestMs < 10.0,
              qPrintable(QStringLiteral("1000 end-of-document probes took %1 ms best-of-3; "
                                        "the textRange walk is no longer pruned by subtree chars")
+                            .arg(bestMs, 0, 'f', 2)));
+}
+
+void TestTextBuffer::newlineWindowsSurvivePieceSplits()
+{
+    // Car 0 defect 2 CORRECTNESS pin (the timing slot below pins cost,
+    // not truth): a piece split re-cuts the shared newline-list window
+    // instead of rebuilding it — cuts mid-line and exactly at a '\n', a
+    // whole-line removal, and the undo/redo replays that re-create pieces
+    // through the fresh-list scan path. After EVERY step: the full
+    // line-index oracle (verifyAllLines walks offsetOfLine per line) plus
+    // the invariant walker, which now checks the list itself against the
+    // piece text. The random-op property suite rides the same oracle on
+    // every op; this slot names the mechanism explicitly.
+    const QString ref0 = QStringLiteral("one\ntwo\nthree\n");
+    buffer->setText(ref0);
+    QVERIFY(buffer->debugCheckInvariants());
+
+    buffer->insertAtOffset(1, QStringLiteral("X")); // cut a piece mid-line
+    buffer->breakUndoCoalescing(); // one group per step: the undo legs below pin exact
+    QVERIFY(buffer->debugCheckInvariants());
+    verifyAllLines(*buffer, QStringLiteral("oXne\ntwo\nthree\n"));
+
+    buffer->insertAtOffset(4, QStringLiteral("\n")); // cut exactly AT a '\n'
+    buffer->breakUndoCoalescing();
+    QVERIFY(buffer->debugCheckInvariants());
+    verifyAllLines(*buffer, QStringLiteral("oXne\n\ntwo\nthree\n"));
+
+    buffer->removeRange(6, 10); // whole "two\n" gone
+    QVERIFY(buffer->debugCheckInvariants());
+    verifyAllLines(*buffer, QStringLiteral("oXne\n\nthree\n"));
+
+    buffer->undo(); // replay RE-INSERTS "two\n": the restored piece takes a
+    QVERIFY(buffer->debugCheckInvariants()); // fresh list (the scan path)
+    verifyAllLines(*buffer, QStringLiteral("oXne\n\ntwo\nthree\n"));
+    buffer->undo();
+    QVERIFY(buffer->debugCheckInvariants());
+    verifyAllLines(*buffer, QStringLiteral("oXne\ntwo\nthree\n"));
+    buffer->undo();
+    QVERIFY(buffer->debugCheckInvariants());
+    verifyAllLines(*buffer, ref0);
+    for (int i = 0; i < 3; ++i)
+        buffer->redo();
+    QVERIFY(buffer->debugCheckInvariants());
+    verifyAllLines(*buffer, QStringLiteral("oXne\n\nthree\n"));
+}
+
+void TestTextBuffer::rulerLineReadsStayIndexedOnOnePieceDoc()
+{
+    // Tripwire for the recorded v1.6.1 overview-ruler perf cliff (car 0
+    // defect 2): the M7 stripe loop calls offsetOfLine once per sampled
+    // slot, and offsetOfNthNewline used to scan from the HOLDING PIECE's
+    // start — on a LOADED (never fragmented) one-piece document every
+    // sample costs O(doc): measured ~1 ms x ~400 samples = ~230 ms per
+    // ruler paint on a 12k-line/6MiB file. Car 0's fix gives the nodes a
+    // LAZY per-piece newline-offset list (materialized once by the first
+    // line read that lands on the node — offsetOfNthNewline then indexes
+    // the k-th '\n' directly; splits of a built piece re-cut windows
+    // without scanning, and the eager line COUNT ride keeps setText at
+    // its v1 cost — the A/B found materializing at load or at split
+    // regressed setText and the first-keystroke spike instead).
+    // Same vacuous-pass discipline as
+    // textRangeWalkStaysPrunedWithManyPieces: the budget is a wide middle
+    // ground — cliff mode costs HUNDREDS of ms here, indexed mode well
+    // under 1 ms on any runner — so a timing failure can only be the
+    // cliff returning, never a merely slow machine.
+    constexpr int kLines = 12000; // the recorded shape: 6M units, ONE piece
+    QString doc;
+    doc.reserve(kLines * 500);
+    for (int i = 0; i < kLines; ++i) {
+        doc += QString(499, QLatin1Char('x'));
+        doc += QLatin1Char('\n');
+    }
+    buffer->setText(doc);
+    buffer->clearUndoHistory(); // probe cost, not history cost
+    QCOMPARE(buffer->charCount(), kLines * 500);
+    QCOMPARE(buffer->lineCount(), kLines + 1);
+    QCOMPARE(buffer->debugNodeCount(), 1); // the cliff shape is pinned
+
+    QElapsedTimer t;
+    double bestMs = 1e30;
+    for (int round = 0; round < 3; ++round) {
+        t.start();
+        // ~600 probes, the ruler loop's stride shape (step 20 slots at
+        // stripe resolution): pre-fix every probe re-scanned from the
+        // piece start, on average half the document.
+        for (int line = 0; line < kLines; line += 20)
+            QCOMPARE(buffer->offsetOfLine(line), line * 500);
+        bestMs = std::min(bestMs, static_cast<double>(t.nsecsElapsed()) / 1e6);
+    }
+    // 30 ms for 600 reads = ~50 us/probe: ~20x BELOW the cliff's measured
+    // ~600 ms per sweep, ~50x ABOVE the indexed mode's ~1 us/probe real
+    // cost. The cliff cannot squeeze under; the fix cannot plausibly
+    // blow over.
+    QVERIFY2(bestMs < 30.0,
+             qPrintable(QStringLiteral("600 spread offsetOfLine probes took %1 ms best-of-3; "
+                                       "line reads on a one-piece document are O(doc) again "
+                                       "(the v1.6.1 ruler cliff)")
                             .arg(bestMs, 0, 'f', 2)));
 }
 
