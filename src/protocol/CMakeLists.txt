@@ -10,6 +10,9 @@ add_library(qmn_protocol STATIC
     ProcessTransport.cpp
     TcpTransport.hpp
     TcpTransport.cpp
+    EnvelopeCodec.hpp
+    JsonRpcCodec.hpp
+    JsonRpcCodec.cpp
     RpcClient.hpp
     RpcClient.cpp)
 
@@ -29,5 +32,7 @@ install(FILES
     Transport.hpp
     ProcessTransport.hpp
     TcpTransport.hpp
+    EnvelopeCodec.hpp
+    JsonRpcCodec.hpp
     RpcClient.hpp
     DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qmn/protocol)

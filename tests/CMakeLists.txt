@@ -50,6 +50,30 @@ target_link_libraries(tst_glue PRIVATE qmn_glue Qt6::Test)
 add_test(NAME glue COMMAND tst_glue)
 set_tests_properties(glue PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
+# The 7th ctest entry (PLAN car 4, machine D1): the EnvelopeCodec seam —
+# same grow-machine-by-machine pattern as tst_lsp (D2 src/dap + DapClient,
+# D3 the DapHub glue (flips the main to QTEST_MAIN/offscreen), D4 the demo
+# door). D1 needed NO src/dap code: the second envelope was a test-local
+# codec; the byte-identity half of the tripwire is the untouched tst_lsp
+# binary passing green. Since machine D2 this binary also links qmn_dap
+# (the production DapCodec + DapClient) and spawns the dapfake adapter.
+qt_add_executable(tst_dap tst_dap.cpp)
+target_link_libraries(tst_dap PRIVATE qmn_dap qmn_protocol Qt6::Test)
+add_dependencies(tst_dap dapfake) # the spawn target must exist at run time
+add_test(NAME dap COMMAND tst_dap)
+set_tests_properties(dap PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# The DAP fake adapter (machine D2): a tests support binary, NOT a ctest
+# entry — the dapfake sibling of the fakeserver (same stdio JsonFraming
+# both wires: LSP and DAP share the Content-Length framing, only the
+# envelope differs — which is the whole D1 thesis in one build line).
+qt_add_executable(dapfake dapfake/main.cpp)
+target_link_libraries(dapfake PRIVATE qmn_protocol Qt6::Core)
+set_target_properties(dapfake PROPERTIES WIN32_EXECUTABLE FALSE
+                                         MACOSX_BUNDLE FALSE)
+target_compile_definitions(tst_dap PRIVATE
+    QMN_TEST_DAP_SERVER=\"$<TARGET_FILE:dapfake>\")
+
 qt_add_executable(tst_codeeditor tst_codeeditor.cpp)
 target_link_libraries(tst_codeeditor PRIVATE qmn_view Qt6::Test)
 # The test drives the HighlightEngine seam, whose header includes the

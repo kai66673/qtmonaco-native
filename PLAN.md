@@ -1758,6 +1758,265 @@ inventory confirms zero view work; verified-breakpoints surface as a
 decoration restyle through the existing doors (iide ignored
 `body.breakpoints` — we don't). Fake DAP adapter in the same harness style.
 
+**Car 4 (DAP) design pass (DECIDED 2026-11-21, building).** The stub above
+survives whole — this pass expands it into machines and records the
+decisions the machines force. Four machines, the lsp-binary pattern
+throughout: ctest grows the 7th entry `dap` (`tests/tst_dap.cpp`,
+offscreen) and GROWS machine by machine; `tests/dapfake/` is a support
+binary (NOT an entry) with argv modes + the exit-code oracle + stderr
+markers judging its own transcript (the fakeserver style, verbatim). The
+base protocol is IDENTICAL (Content-Length framing) — JsonFraming and both
+transports ride unchanged.
+
+**D1 — the envelope seam (src/protocol, surgery not API).** Everything in
+RpcClient except the WIRE SHAPE is envelope-agnostic: id/seq allocation,
+pending map, exactly-once fulfilment, per-door budgets, the cancel-then-
+ignore-late rule, the two-phase stop, the gone-latch. The wire shape is
+NOT, and RpcClient.cpp hardcodes the LSP one today — the stub's "same
+RpcClient" always meant this seam, and iide's self-flagged "Lsp/Dap RPC
+duplication" is exactly what D1 kills (one mechanism, two codecs). New
+`protocol/EnvelopeCodec.hpp`: a pure-virtual interface on QtCore types
+owning — outbound request/response/error builders, notification-vs-event
+normalization (DAP `type:"event"` = the notification shape: method := the
+`event` name, params := the `body`; the unknown-notification rule carries
+across unchanged), the response match key (`id` vs `request_seq`), the
+success/error read (`error.code` vs `success:false` + the optional
+positive `error.id` table), the cancel shape (`$/cancelRequest`
+notification vs the `cancel` REQUEST whose own reply lands on the
+unmatched-response ignore path), the mechanical UNREGISTERED-answer
+(-32601 vs `success:false` "Unknown request: X" — "always answer, never
+lie" rides the codec), and the stop-barrier vocabulary (`shutdown` +
+`exit` vs `disconnect {restart:false}` and NO exit message; the kill
+escalation stays the Transport's). Id allocation stays RpcClient-owned
+(DAP seqs are per-direction and monotonic — the same counter fits;
+inbound request ids are adapter seqs, `canonicalId` already handles
+ints). `JsonRpcCodec` = the extracted current logic, the ctor-default:
+the old ctor keeps working, so the machine tripwire is that the ENTIRE
+existing tst_lsp binary lands GREEN with ZERO slot edits (byte-identical
+LSP traffic); the new slots (codec round-trips, DAP envelope decode,
+malformed still firing per codec, local-vs-wire code banding) grow
+`tst_dap` — guiless until a machine needs a widget. Reply.code banding
+pinned honest: local `kErr*` are envelope-independent; wire codes are
+codec-owned (JSON-RPC negatives vs DAP's positive `error.id`s, 0 when the
+adapter omits it) — never conflated (the file header's iide anti-pattern
+rule, extended to the second envelope).
+
+**D1 BUILT 2026-11-21**: host ctest 7/7 — the tripwire held exactly as
+designed (the pre-existing tst_lsp binary + the fakeserver oracles passed
+with ZERO slot edits; only RpcClient.hpp's include chain forced a recompile),
+and the new `dap` entry landed as the 7th ctest test with 15 D1 slots green.
+Two seam details the build settled (additive, consumer-invisible): an EMPTY
+object from `buildNotification`/`buildInvalidIdAnswer`/`buildUnregisteredAnswer`
+means "this envelope answers nothing here" and RpcClient writes NOTHING (the
+DAP-shaped leniency; JsonRpcCodec never builds an empty one, so LSP bytes
+unchanged), and `openIncoming_` became a map id→FULL REQUEST object (DAP
+responses echo `command` + the inbound seq, not just the id — JSON-RPC reads
+its id back out of the same object, byte-identical). The test-local
+`TestDapCodec` in tst_dap.cpp is the blueprint machine D2 promotes into
+src/dap as the production `DapCodec`. D2-era correction (decided with the
+real handshake, and the reason D1's record said what it said): DAP's
+outbound one-way EXISTS — it is the `initialized` EVENT — so
+`buildNotification` gained a `qint64 seq` param right at the seam's
+landing; RpcClient allocates it from its own counter ONLY when
+`responsesCarrySeq()` (JsonRpcCodec ignores it, LSP notify bytes stay
+unchanged), and the empty-answer skip rule stands as written — the
+test-local codec deliberately keeps its empty one-way as the skip pin.
+
+**D2 — `src/dap/`: `DapCodec` + `DapClient` (new `qmn_dap` static, the
+`qmn::dap` export rides `qmnTargets`, the lsp CMake pattern verbatim).**
+The layer rule holds literally: `src/dap/` knows ONLY `src/protocol/`.
+Handshake: transport up → `initialize` request (args `{adapterID,
+clientID, clientName, clientOS, locale, linesStartAt1, columnsStartAt1}`
+— the declared 1-based pair IS the spec default, so every
+wire↔model conversion lives at the glue boundary, −1 in / +1 out; the
+design pass also sketched a `clientCapabilities:{}` member, but the
+build settled on NOT sending the member at all (honest-absence style:
+we declare no reverse-request capabilities; their relays answer
+honestly anyway) — every key the CALLER passes outranks the default)
+→ READY means adapter-alive-but-UNconfigured; the `initialized`
+EVENT opens the configuration gate and spec ordering is ENFORCED:
+configuration commands early are refused locally (id 0 + reason, the
+hub featureGate precedent). Then `launch`/`attach` (app-carried args;
+10 s budget like initialize — the adapter may build) — the standard
+order, the deprecated launch-inside-initialize shape is not spoken. The
+initialize response's `body` is stored as the CAPABILITY BAG; a
+`capabilities` event re-stores it; capability-gated doors
+(`supportsTerminateRequest`, `supportsEvaluateForHovers`,
+`supportsConfigurationDoneRequest`) refuse locally with the reason.
+Request doors = the raw `request(command, arguments, handler, timeout)`
+(the LspClient precedent: the client owns the SESSION, the hub composes
+commands); event/answer routes = SIGNALS from day one (the G3 lesson —
+meta-object crossings only): `ready()`, `adapterFailed(reason)`,
+`dapEvent(name, body)` — ONE generic event signal (stopped/continued/
+output/breakpoint/loadedSource/terminated/processExited/capabilities all
+ride it; per-event signals would scale binding cost with the spec) —
+plus the reverse-request RELAYS: the design pass planned a named pair
+(`terminalRequest(id, params)`, `startDebuggingRequest(id, params)`),
+but the build settled on ONE generic `dapRequest(request)` signal —
+same binding-cost logic as the event signal, and the answerer needs the
+request's OWN seq to key its answer, which the full request object
+carries (a bare (id, params) pair would strand the pairing key); the
+client answers an unanswered relay HONESTLY FAILED (`success:false`,
+"not handled: X", error.id 0 — the unregistered-error shape, inventing
+no code) the moment the relay returns — the showMessageRequest-wins
+order, an app that answers DURING the signal wins (first-answer-wins,
+RpcClient refuses the second). A reverse request that arrives UNDECLARED is a wire bug on
+the adapter's side but lands on the same lenient path (the tolerant-
+inbound precedent). LIFECYCLE DIVERGENCE (decided): debug adapters get NO
+auto-restart — an LSP server is a stateless reader whose re-spawn
+replays didOpen for free, but respawning an adapter mid-session RE-RUNS
+the debuggee and its side effects; death lands FAILED and the only way
+back is a fresh startDebugging (a new SESSION, never a resurrection).
+dapfake lands with this machine (the machine-2 precedent): C++
+`tests/dapfake/` spawned via ProcessTransport by a TestHarness factory;
+modes carry the machine tests (lifecycle, breakpoints-verify-move,
+steps, reverse-requests, dying).
+
+**D2 BUILT 2026-11-21**: ctest 7/7 (the `dap` entry GREW to 25 slots = 15
+D1 + 10 D2, all green; `qmn_dap` STATIC + `qmn::dap` export rode
+`qmnTargets` on the lsp CMake pattern, and the packaging smoke re-ran
+with the two new headers under `include/qmn/dap/` + `examples/consumer`
+configuring and building clean). The layer rule holds literally:
+`src/dap/` includes ONLY `src/protocol/`. What the build settled:
+
+- The machine FORCED five new protocol-seam doors (all additive, all
+  JSON-RPC-inert — LSP traffic stays byte-identical, the whole pre-
+  existing tst_lsp binary again passed with ZERO slot edits):
+  `setAnyNotificationHandler` (the event relay) and `setAnyRequestHandler`
+  (the reverse-request relay — the handler MUST answer, RpcClient then
+  refuses second answers); a static ANSWER SHELF
+  `registerMethod`/`registerMethodFailure`/`unregisterMethod` consulted
+  BEFORE anyRequest_/the mechanical unregistered answer (dapfake's
+  progressStart leg PROVES the shelf outranks the relay: `{}` answered
+  without ever reaching `dapRequest`); `setOnCancelRequested` — an
+  inbound-cancel HOOK firing from BOTH the Notification and the Request
+  dispatch paths (DAP cancels as a request AND as the `$/cancelRequest`
+  notification; the Request path registers `openIncoming_` first so the
+  hook can answer with its own seq); `cancelPending(id, code, message)`
+  fulfilling a LOCAL pending request with NO wire write; and the codec
+  gained `cancelCommand()` (JsonRpcCodec keeps `$/cancelRequest`,
+  DapCodec says `cancel`) + `cancelTargetId(message)` (absent target →
+  0 → honest "cannot be cancelled" answer). One new LOCAL failure code
+  `RpcClient::kErrCancelledByPeer = -33104` — deliberately NOT the LSP
+  wire's -32802 and never a fabricated wire error.
+- `DapCodec` = the promoted TestDapCodec blueprint plus the spec-shape
+  upgrades: UNDEFINED args/body members are OMITTED (not sent as null —
+  the shape real adapters emit), an error `data` that IS AN OBJECT
+  MERGES into the error table (DAP has no nested `data` member; a
+  non-object data has no legal spelling and is dropped), cancel is a
+  REQUEST carrying `arguments.requestId`, `shutdownParams()` =
+  `{restart:false}` with NO exit frame (`hasExitNotification()` false —
+  the stop barrier skips that leg), and `classify` normalizes `event`→
+  Notification and demands the seq (a DAP message without seq is not an
+  envelope).
+- `DapClient` = the LspClient lifecycle MIRROR (NotStarted/Starting/
+  Ready/Stopping/Stopped/Failed, manual `restartServer()` no-op from
+  Starting/Ready/Stopping): the pinned handshake initialize (10 s
+  `kInitializeTimeoutMs`, NOT the feature default) → success → `initialized`
+  EVENT → Ready; capabilities = the initialize RESULT whole object, a
+  `capabilities` EVENT RE-STORES (not merges) it while still riding the
+  `dapEvent` relay; NO auto-restart is pinned-by-oracle three ways
+  (initfail, deaf-timeout, dead-mid-session all land Failed with
+  `spawnCount == 1`, and restartServer() then starts a FRESH session —
+  ready() fires again, dapfake exits 0 twice on the clean path);
+  inbound `cancel` fulfils the local pending EXACTLY ONCE with
+  kErrCancelledByPeer, answers `success:true`, and the adapter's LATE
+  answer to the cancelled request is swallowed by the pending map;
+  before Ready every feature door answers EXACTLY ONCE with local
+  kErrNotRunning and the transport factory is NEVER touched.
+- Recorded deviation: the design sentence's "configuration commands
+  early are refused locally (the hub featureGate precedent)" did NOT
+  land in DapClient — the client's only gate is Ready-vs-not; the
+  configurationDone ORDER is D3's hub job (explicit `configurationDone()`
+  decided for the hub, no auto-fire). The named relay pair's death into
+  ONE `dapRequest(request)` signal is marked in the design text above.
+- dapfake for D2: modes `basic` / `initfail` / `dead` / `deaf` /
+  `events` / `reverse` / `cancelreq`, exit code = the far-side oracle
+  (handshake order, the initialized-event presence, client-seq
+  monotonicity, every ANSWER SHAPE it validates itself; exit 2 on any
+  lie, watchdog exit 3), stderr-vs-stdout channel split pinned from
+  both sides. The design's `breakpoints-verify-move` and `steps` modes
+  stay DEFERRED to D3 (dapfake grows with the hub machine — the stub's
+  list survives whole).
+
+**D3 — `DapHub` ON THE GLUE SHELF (src/glue; additive growth,
+`QMN_GLUE_VERSION` STAYS 1.0.0).** Named for the protocol like its
+sibling (the shelf = LspHub + ProjectSession + DapHub); `qmn_glue` links
+`qmn_dap` too. The G2 registry earns its keep: `attachProject
+(ProjectSession*)` resolves every DAP `source` (its `path`, or
+sourceReference → path through the hub's own store) against the session's
+uri map (exact, then bare-path normalization both sides, the
+languageForUri precedent); a frame in a source NO session editor covers →
+`sourceUnresolved(source, frame)` RELAY — the hub NEVER reads disk (the
+G2 no-disk-I/O rule; the app opens an editor and `openDocument(editor,
+uri)` registers it, destroyed() auto-unregisters per the hub precedent).
+Breakpoints: the APP owns the truth (a breakpoint UI is app scope); the
+door `setBreakpoints(editor, lines)` stores, sends DAP `setBreakpoints`
+({source,path}, `[{line: l+1}]`) and re-feeds decorations from
+`body.breakpoints` — **verified lines ride
+`CodeEditor::setBreakpointLines` (a dot says executable) and unverified
+ones become Warning `Diagnostic` decorations** (message from the reply's
+`message`/`instruction`, `source = "dap"`) — the stub's decoration-
+restyle clause given its shape, and the iide "ignored body.breakpoints"
+anti-pattern dies here; the VERIFIED LINE MAY MOVE (desired 5 answers 7)
+so the dot lands on the ACTUAL line and the desired→actual map rides the
+store. Breakpoints are line-anchored (no anchor layer exists in the
+model), so an edit of a bound document RESENDS setBreakpoints with the
+syncer-shaped `kBreakpointResendMs = 400` debounce — line-number honesty,
+recorded. `breakpoint` events update the verified store and refeed
+through the same doors. The stopped feed: `stopped` → v1 SINGLE-THREAD
+(threadId = the last stopped one; a threads UI is a recorded deferred
+sliver) → `stackTrace` → top frame → `setSelection(frame, frame)` (caret
+jump; line−1, column−1 clamped — recorded limitation: DAP columns are
+adapter-unit-dependent, we declare+assume UTF-16 units, ASCII-line
+tripwire pins hold the boundary) + a `setHighlightedLines(line,line)`
+band, cleared on `continued`. Value hints: `variables` of the first top-
+frame scope (top level only, `kMaxValueHints = 20` cap), matched as WORDS
+on the stopped line, `= value` painted AT (line, word-end col) via
+`setInlayHints` — the M5 door finally carries the DAP meaning its name
+was minted with. No text sync at all for DAP: adapters see line numbers,
+never bytes. `configurationDone()` is an EXPLICIT hub door (the app says
+setup ended; gated + skipped per capability). `disconnect()` rides the
+codec-shaped stop barrier; `terminate()` is capability-gated; adapter
+death clears every feed and relays. The hub dtor pumps the bounded
+kStopBarrierMs barrier (the M8 machine-4 lesson, paid twice). Config: NO
+built-in adapter matrix, NO `.qmn/dap.json` (decided: an adapter is not a
+language server — one session at a time, program/args/launchArgs carried
+by `startDebugging(...)`; a dap config shelf is scope creep until a real
+consumer shows up). The `setTransportFactory` seam mirrors LspHub's
+(C++-only, honest absence).
+
+**D4 — the demo door + the close ritual.** qmn-demo grows `--dap
+<adapter-program> [args…]` — GENERIC by design (this host ships
+`lldb-dap` AND gdb 18.1 `-i=dap`, so a real adapter is one flag away);
+MainWindow forward-declares `qmn::glue::DapHub` behind a unique_ptr so
+tst_demo never sees a `qmn::dap` type (the LspHub shape verbatim). Unlike
+the clangd door, dapfake IS CI-built, so the door becomes a REAL
+tripwire: one tst_demo slot drives the --dap path against
+`$<TARGET_FILE:dapfake>` offscreen — the honest difference from the
+`--lsp` door's no-spawn rule, and its reason, recorded. Close-car ritual
+(the clangd-probe precedent: manual, never CI): `tools/probe_dap.sh`
+compiles a small C++ program and drives the REAL adapter through the hub
+(script tries lldb-dap first, gdb -i=dap second): one real breakpoint at
+a known line, continue, stopped, a variable value back — result recorded
+in the CHANGELOG close entry. The wheel: DAP does NOT cross in car 4 —
+deferred G3-style until the shelf's C++ surface settles; but every D3
+door is designed SHIBOKEN-SHAPED from day one (signals for answer
+routes, QJsonObject bodies = plain dicts per the pinned G3 reality, the
+factory seam honestly absent), so the follow-on is a three-copies growth,
+not a surgery.
+
+Frozen-surface check: ZERO new view doors — the stub's inventory survives
+the design read (`setBreakpointLines`/`setDiagnostics`/`setInlayHints`/
+`setHighlightedLines`/`setSelection`/`applyTextEdits` carry every feed);
+the protocol surgery is ADDITIVE for consumers (ctor overload + interface
+header; the default keeps every LSP byte identical); the layer clauses
+hold (dap = protocol-only, never view; the DAP glue sits ON the shelf
+where DAP was always told to land); `examples/consumer` grows the
+DapHub doors TU (doors compile, NOTHING spawns). Gate 2 closes after this
+car — the version close ritual (BOTH package literals at once) is the
+close's decision, not this pass's.
+
 ### Gate 2 at the wheel boundary (rides the owning cars)
 
 Parity tripwire = the qtmonaco `monaco.py` `__main__` block reproduced

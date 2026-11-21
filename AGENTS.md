@@ -80,14 +80,16 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
   not a CI guarantee; the one demo slot that arms the hub only opens
   languages NO built-in spec claims).
 - Gate-2 layers (decided 2026-11-15, built with the owning cars — since M10
-  and M8 `src/diff/`, `src/protocol/` and `src/lsp/` are CODE, `src/dap/` is
-  still a contract until car 4): `src/diff/` — **QtCore ONLY** (line-diff + alignment,
+  and M8 `src/diff/`, `src/protocol/` and `src/lsp/` are CODE, and car 4's
+  machine D2 (2026-11-21) made `src/dap/` CODE too): `src/diff/` — **QtCore
+  ONLY** (line-diff + alignment,
   headless like core). `src/protocol/` — QtCore+QtNetwork, **never view**.
   `src/lsp/` and `src/dap/` — only `src/protocol/`, **never view**. The
   view/core never depend on protocol/lsp/dap; LSP/DAP *glue* (decoration
   feeding, syncer wiring) lives in `src/glue/` (G1 promotion 2026-11-21:
   the old `src/app/glue/` became a REAL layer — `src/glue/` is a CLIENT of
-  core+view+protocol+lsp, QtCore/QtWidgets, exported as `qmn::glue`; it
+  core+view+protocol+lsp (D3 grows it into a `qmn_dap` client too),
+  QtCore/QtWidgets, exported as `qmn::glue`; it
   knows NO app/demo type, and the DAP glue of car 4 lands ON this shelf).
   **M10 amendment (decided
   2026-11-16): `qmn_view` PRIVATE-links `qmn::diff`** — the pure line-diff
@@ -181,18 +183,21 @@ ninja -C build
 ctest --test-dir build --output-on-failure
 ```
 
-Six ctest tests: `textbuffer` (core property tests), `diff` (the pure
+Seven ctest tests: `textbuffer` (core property tests), `diff` (the pure
 line-diff engine, M10), `lsp` (M8: JsonFraming + transports + RpcClient, then
 the fakeserver/LspClient/DocumentSyncer/LspHub machines — this binary GROWS
 machine by machine through M8, no further ctest entries inside the car),
 `glue` (G2: `ProjectSession` over REAL editors — resolution, registry,
 config fold, the attached-but-unclaimed hub path; NO server ever spawns,
-the claimed-server machinery is tst_lsp's fakeserver turf), `codeeditor`
-(widget tests), `demo` (drives the qmn-demo surface
+the claimed-server machinery is tst_lsp's fakeserver turf), `dap` (car 4:
+the EnvelopeCodec seam, then the DapCodec/DapClient machines over the
+`dapfake` adapter — same GROWS-machine-by-machine rule, `tests/dapfake/`
+is a support binary NOT a ctest entry, its exit code is the far-side
+oracle), `codeeditor` (widget tests), `demo` (drives the qmn-demo surface
 programmatically). `textbuffer` and `diff` are guiless; since M8 machine 4
 the `lsp` binary drives real `CodeEditor`s too, so ctest sets
-`QT_QPA_PLATFORM=offscreen` for `lsp`, `glue`, `codeeditor` and `demo` (via
-`set_tests_properties`). Run one test:
+`QT_QPA_PLATFORM=offscreen` for `lsp`, `glue`, `dap`, `codeeditor` and `demo`
+(via `set_tests_properties`). Run one test:
 
 ```bash
 ctest --test-dir build -R codeeditor --output-on-failure
