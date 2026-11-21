@@ -291,6 +291,7 @@ private slots:
     void popupsAutoHideOnKeyMouseAndFocus();
     void completionAcceptRoutesKeysClicksAndEscape();
     void completionAcceptAnchorsStableAndChromeDismiss();
+    void mouseHoverDwellReportsPointerAndStaysGated();
     void popupAnchorsTrackCaretFreezeScrollResizeAndFlip();
 
     // Overview ruler (M7, Phase E1). DoD: ruler geometry state tests
@@ -6779,6 +6780,100 @@ void TestCodeEditor::completionAcceptAnchorsStableAndChromeDismiss()
     QVERIFY(!editor->completionListVisible());
     QVERIFY(!editor->hoverVisible());
     QCOMPARE(accepts, 1); // the chrome press dismissed, it did NOT accept
+}
+
+void TestCodeEditor::mouseHoverDwellReportsPointerAndStaysGated()
+{
+    // Post-1.8.0 mouse-hover dwell: the view is a pure REPORTER (the glue
+    // decides). sendEvent reaches mouseMoveEvent regardless of tracking
+    // (this file's deterministic channel), so the gate's silence is the
+    // view's own doing, not Qt's filter. The caret and selection are never
+    // involved; the point is mapped via positionAt at FIRE time.
+    editor->setPlainText(QStringLiteral("alpha beta\ngamma delta"));
+    editor->show(); // the popup gate reads isVisible() — the widget must be
+                    // shown (offscreen is fine, this file's popup tests do)
+    const int lh = editor->lineHeight();
+    const double cw = editor->cellWidth();
+    auto rowY = [this, lh](int row) {
+        return editor->padding() + row * lh + lh / 2;
+    };
+    auto sendMove = [this](const QPointF& p) {
+        QMouseEvent mv(QEvent::MouseMove, p, p, Qt::NoButton, Qt::NoButton,
+                       Qt::NoModifier);
+        QVERIFY(QApplication::sendEvent(editor, &mv));
+    };
+    QSignalSpy hoverSpy(editor, &CodeEditor::mouseHovered);
+    QSignalSpy cursorSpy(editor, &CodeEditor::cursorMoved);
+
+    // Door OFF (default): a still pointer over "beta" reports NOTHING even
+    // though the move arrived.
+    const QPointF beta(editor->xForCol(0, 6) + cw / 2.0, rowY(0));
+    sendMove(beta);
+    QTest::qWait(700);
+    QVERIFY2(hoverSpy.isEmpty(), "the door is OFF but the view reported");
+
+    // Door ON: the same stillness reports the pointer's position EXACTLY
+    // once — INSIDE "beta" is {0, 6}.
+    editor->setMouseHoverEnabled(true);
+    QVERIFY(editor->isMouseHoverEnabled());
+    sendMove(beta);
+    QTRY_COMPARE_WITH_TIMEOUT(hoverSpy.count(), 1, 2000);
+    const qmn::view::TextPosition reported
+        = qvariant_cast<qmn::view::TextPosition>(hoverSpy.at(0).at(0));
+    QVERIFY2(reported == (qmn::view::TextPosition{0, 6}),
+             qPrintable(QStringLiteral("dwell reported {%1, %2}, wanted "
+                                       "{0, 6}")
+                            .arg(reported.line).arg(reported.col)));
+    QTest::qWait(700); // and it fires ONCE per stillness, not on repeat
+    QCOMPARE(hoverSpy.count(), 1);
+    // The caret and selection stayed exactly where they were: the dwell
+    // never moves anything.
+    QVERIFY(editor->position() == (qmn::view::TextPosition{0, 0}));
+    QVERIFY(!editor->hasSelection());
+    QCOMPARE(cursorSpy.count(), 0);
+
+    // Gutter: arming in text then sliding into the gutter CANCELS.
+    sendMove(beta);
+    sendMove(QPointF(editor->contentLeft() - 10, rowY(0)));
+    QTest::qWait(700);
+    QCOMPARE(hoverSpy.count(), 1);
+
+    // A VISIBLE HOVER POPUP under the pointer: no re-fetch, no report (the
+    // popup never chases the mouse).
+    editor->showHover({0, 0, 0, 5}, QStringLiteral("hover strip text"));
+    QWidget* hp = editor->findChild<QWidget*>(QStringLiteral("qmn-hover-popup"));
+    QVERIFY(hp);
+    sendMove(beta); // arms
+    sendMove(QPointF(hp->geometry().center())); // over the popup: cancels
+    QTest::qWait(700);
+    QCOMPARE(hoverSpy.count(), 1);
+    editor->hideHover();
+
+    // A press kills a pending dwell (the pointer gesture takes over).
+    sendMove(beta);
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier,
+                      beta.toPoint());
+    QTest::mouseRelease(editor, Qt::LeftButton, Qt::NoModifier,
+                        beta.toPoint());
+    QTest::qWait(700);
+    QCOMPARE(hoverSpy.count(), 1);
+    // (The press itself moved the caret to the pointer: the press path, not
+    // the dwell — the hover spy stayed frozen throughout.)
+    QVERIFY(cursorSpy.count() >= 1);
+    QVERIFY(editor->position() == (qmn::view::TextPosition{0, 6}));
+
+    // leaveEvent cancels a pending dwell.
+    sendMove(beta);
+    QEvent leave(QEvent::Leave);
+    QVERIFY(QApplication::sendEvent(editor, &leave));
+    QTest::qWait(700);
+    QCOMPARE(hoverSpy.count(), 1);
+
+    // Door back OFF: back to total silence, tracking gate aside.
+    editor->setMouseHoverEnabled(false);
+    sendMove(beta);
+    QTest::qWait(700);
+    QCOMPARE(hoverSpy.count(), 1);
 }
 
 void TestCodeEditor::popupAnchorsTrackCaretFreezeScrollResizeAndFlip()

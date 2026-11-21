@@ -937,6 +937,52 @@ against the syncer's MIRROR as always. The fakeserver's marker scan
 clean-line plain contents; the codeeditor round-trip grew the `source`
 echo inside `decorationsRoundTripUpdateRemove` (no new slot).
 
+**The fourth deferred sliver is BUILT (2026-11-21, no version bump): the
+MOUSE-pointer hover.** The view grew the additive door `setMouseHoverEnabled`
+(OFF default; enabling ORs a mouse-tracking bit of its own onto the M22
+fold-strip condition) + the signal `mouseHovered(TextPosition)`: a
+motionless button-less pointer inside the TEXT region fires it EXACTLY once
+after `kMouseHoverDwellMs` (500 — the same hover cadence the glue's caret
+trigger uses). This is dwell CHROME on the display side: the view only
+REPORTS the point under the pointer (the existing `positionAt` math at FIRE
+time, so a scroll under a still pointer hovers what sits under it NOW; the
+caret and selection never move) and shows NOTHING. Reporting STOPS over
+either popup (a visible hover stays in place — the m6 popup never chases
+the mouse — and the completion list owns the moment), over the gutter +
+fold strip, the overview ruler and the diff ORIGINAL window, and on the
+widget's leaveEvent or any press. The hub route: a `mouseHovered` tap (the
+completionAccepted pattern: connected for EVERY registration, the `on`
+bit + registration liveness + the completion-owns-the-moment rule make
+everything else silent) lands in `fireHoverAt` — the shared-hover
+composition core, REFACTORED so both routes ride it anchored at the hover
+point, the caret path keeping a thin fire-time wrapper (which also clears
+the mouse cache: a caret popup is a different region). A hub-side cache
+skips the ask when the pointer re-settles on the SAME point while that
+hover is still visible (no second wire ask for one dwell-region). Two new
+slots pin it: codeeditor 256 -> 257 (the door-OFF silence even when a move
+ARRIVES via sendEvent — the gate is the view's own, not Qt's tracking
+filter — the {0,6} report, once-per-stillness, the caret/selection inert,
+the gutter/popup/press/leave cancels) and lsp 72 -> 73 (the fakeserver
+hover echo `HOVER foo off=12` proves the ASK rode the pointer point, not
+the parked caret; a same-cell re-settle keeps the reqlog at ONE hover REQ).
+The door + signal ride the ALREADY-BOUND CodeEditor: three-copies
+untouched, the `static constexpr` dwell constant stays C++-only exactly
+like `kOverviewRulerWidth` (Python sees the pair + the signal, probed in
+the container).
+
+**The test-infra flake fix rides this sliver (2026-11-21): the fakeserver
+watchdog 20 s/25 s -> 120 s/60 s.** A loaded full-suite run stretched the
+lsp binary 35 s -> 150 s and the capability-slot server died at the OLD
+20 s lifetime watchdog while its 30 s QTRY doors were still legitimately
+open — `exitCodeOf(0) == 3` read as a contract failure but was starvation
+(the af0ff35 lesson applied to the leftover half: af0ff35 raised the DOOR
+budgets, the SERVER lifetime was missed). The deaf-mode 60 s keeps its
+roomy margin over the pinned 10 s initialize timeout; a truly hung session
+still dies LOUD (exit 3 + stderr) far inside ctest's 1500 s default. Under
+pathological synthetic load (six pinned busy-loops) even a 30 s door can
+legitimately expire — the pin then reads as a clean QTest timeout, never
+as a confusing exit-code oracle.
+
 **Known pre-existing bug (recorded 2026-11-15, deferred to its own small
 car):** bracketed type-over-selection in `insertTextAtCaret` (the
 `beginEditGroup` bracket around `deleteSelection` + insert, found via a

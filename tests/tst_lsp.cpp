@@ -4584,6 +4584,73 @@ private slots:
         // contents: "foo" starts at model offset 9, the caret sits at 10
     }
 
+    // The MOUSE-dwell hover (post-1.8.0 sliver): the POINTER is the hover
+    // anchor — the hub asks at the reported point (the shared-hover core
+    // rides both routes), the parked caret is never consulted and never
+    // moves, and a re-settle inside the same cell keeps the wire silent
+    // (the hub's same-point cache). The caret is parked BEFORE the arm: a
+    // caret move after arming would light the caret-path debounce too.
+    void hubTriggerMouseHoverAsksAtPointerNotCaret()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features"),
+                                 QStringLiteral("hoveron"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("alpha beta\nfoo bar"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///trig-mh.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.setPosition({0, 0}); // parked BEFORE arming (see above)
+        editor.setMouseHoverEnabled(true);
+        h.hub.setPopupTriggers(&editor, true);
+        editor.show();
+
+        const double cw = editor.cellWidth();
+        const int lh = editor.lineHeight();
+        const QPointF overFoo(editor.xForCol(1, 1) + cw / 2.0,
+                              editor.padding() + lh + lh / 2); // mid-row 1
+        QMouseEvent mv(QEvent::MouseMove, overFoo, overFoo, Qt::NoButton,
+                       Qt::NoButton, Qt::NoModifier);
+        QVERIFY(QCoreApplication::sendEvent(&editor, &mv));
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("REQ textDocument/hover")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return editor.hoverVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QLabel* label =
+            editor.findChild<QLabel*>(QStringLiteral("qmn-hover-label"));
+        QVERIFY(label);
+        // The ASK rode the POINTER point {1,1}: "foo" starts at model
+        // offset 11, the pointer sits at 12 — the echo proves the REQUEST
+        // position, not the parked caret at offset 0.
+        QCOMPARE(label->text(), QStringLiteral("HOVER foo off=12"));
+        QVERIFY(editor.position() == (qmn::view::TextPosition{0, 0}));
+
+        // A second dwell in the SAME cell ({1,1} again: the cell spans one
+        // cw): the view re-reports, the hub cache keeps the wire silent.
+        const QPointF stillFoo(editor.xForCol(1, 1) + cw * 0.75,
+                               editor.padding() + lh + lh / 2);
+        QMouseEvent mv2(QEvent::MouseMove, stillFoo, stillFoo, Qt::NoButton,
+                        Qt::NoButton, Qt::NoModifier);
+        QVERIFY(QCoreApplication::sendEvent(&editor, &mv2));
+        QTest::qWait(900); // past the 500 ms dwell, with slack
+        int hoverReqs = 0;
+        for (const QList<QVariant>& ev : stderrSpy) {
+            if (ev.at(0).toString()
+                    .contains(QStringLiteral("REQ textDocument/hover")))
+                ++hoverReqs;
+        }
+        QCOMPARE(hoverReqs, 1); // still exactly ONE ask
+        QCOMPARE(label->text(), QStringLiteral("HOVER foo off=12"));
+    }
+
 };
 
 QTEST_MAIN(TstLsp) // NOT guiless any more: machine 4's hub slots drive a real

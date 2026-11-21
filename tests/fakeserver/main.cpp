@@ -2108,6 +2108,16 @@ int main(int argc, char** argv)
     }
 
     // A hung test must die LOUD (exit 3 + stderr) instead of hanging ctest.
+    // The budgets must stay ABOVE every legitimate test door, or a starved
+    // host reads as broken (the 2026-11-21 flake: a loaded full-suite run
+    // stretched lsp 35s->150s and the capability-slot server died at the
+    // old 20 s while a 30 s QTRY door was still legitimately open — the
+    // same philosophy as the af0ff35 timeout bumps; the DOOR budgets were
+    // raised THEN — the server-side lifetime was the leftover half). The
+    // ordering that must hold: deaf 60000 > the stretched 10 s initialize
+    // (the deaf mode's own deadline rides that one) and the 120 s default
+    // outlives every QTRY door even on a 3-4x starved host, while a truly
+    // hung session still dies LOUD far inside ctest's 1500 s default.
     QTimer watchdog;
     watchdog.setSingleShot(true);
     QObject::connect(&watchdog, &QTimer::timeout, [] {
@@ -2116,7 +2126,7 @@ int main(int argc, char** argv)
         std::fflush(stderr);
         _exit(3);
     });
-    watchdog.start(g_mode == QLatin1String("deaf") ? 25'000 : 20'000);
+    watchdog.start(g_mode == QLatin1String("deaf") ? 60'000 : 120'000);
 
     runLoop();
     return 0; // never reached: every path ends in exit()/fail()

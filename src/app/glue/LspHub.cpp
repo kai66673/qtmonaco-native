@@ -68,6 +68,11 @@ struct LspHub::TriggerState {
     qint64 pendingCompletion = 0;   // 0 = nothing in flight (local refusals
                                     // return 0 from the door, -1 from the
                                     // client — neither is a cancelable id)
+    qmn::view::TextPosition lastMouseHoverPos{-1, -1}; // post-1.8.0 sliver:
+                                    // the last mouse-dwell point that got a
+                                    // hover ask (a re-settle INSIDE the same
+                                    // visible hover = no second wire ask);
+                                    // the caret path and (re)arming clear it
 };
 
 namespace {
@@ -653,6 +658,12 @@ bool LspHub::openDocument(qmn::view::CodeEditor* editor, const QString& uri,
                 onTriggerAccept(key, item); // the ACCEPT route (post-1.8.0
                                             // sliver): the hub does the insert
             });
+    connect(editor, &qmn::view::CodeEditor::mouseHovered, reg.syncer,
+            [this, key](qmn::view::TextPosition pos) {
+                onTriggerMouseHover(key, pos); // the MOUSE-hover route
+                                               // (post-1.8.0 sliver): the
+                                               // view dwelled, the hub asks
+            });
 
     reg.syncer->open(doc->toPlainText(), languageId); // didOpen now, or on
                                                       // ready() if the server
@@ -1233,6 +1244,7 @@ void LspHub::setPopupTriggers(qmn::view::CodeEditor* editor, bool on)
         t->completionTimer.stop();
         t->hoverTimer.stop();
         t->pendingTypingMove = false;
+        t->lastMouseHoverPos = {-1, -1};
         if (t->pendingCompletion != 0) {
             if (qmn::lsp::LspClient* client = clientForUri(syncer->uri()))
                 client->cancel(t->pendingCompletion);
@@ -1243,6 +1255,7 @@ void LspHub::setPopupTriggers(qmn::view::CodeEditor* editor, bool on)
         return;
     }
     t->on = true;
+    t->lastMouseHoverPos = {-1, -1}; // a fresh arm asks fresh
 }
 
 bool LspHub::popupTriggersEnabled(qmn::view::CodeEditor* editor) const
@@ -1287,6 +1300,33 @@ void LspHub::onTriggerCaretMoved(const QString& uri,
     t->hoverTimer.start(kHoverTriggerMs); // every non-typing move RE-ARMS:
                                           // the hover fires when the caret
                                           // sits still
+}
+
+// The MOUSE-hover route (post-1.8.0 sliver): the view already DWELLED
+// (kMouseHoverDwellMs, view-side gates: text only, never popups/gutter/
+// ruler/original window) and reports the point under the pointer. The hub
+// still decides: the `on` bit + registration liveness + completion owns
+// the moment (the caret-path rule, mirrored) + a no-refire pin — if the
+// pointer re-settles on the SAME point while that hover is still visible,
+// the wire stays silent. Then the shared-hover composition asks AT THE
+// POINTER (the caret is never consulted here).
+void LspHub::onTriggerMouseHover(const QString& uri,
+                                 const qmn::view::TextPosition& pos)
+{
+    TriggerState* t = triggerFor(uri);
+    if (!t || !t->on)
+        return; // triggers OFF: the tap rides every registration, the bit
+                // is what makes an unarmed editor a silent no-op
+    auto reg = registrations_.constFind(uri);
+    if (reg == registrations_.constEnd() || !reg->editor)
+        return;
+    qmn::view::CodeEditor* editor = reg->editor;
+    if (editor->completionListVisible() || t->pendingCompletion != 0)
+        return;
+    if (pos == t->lastMouseHoverPos && editor->hoverVisible())
+        return; // same point, same popup: no second ask
+    t->lastMouseHoverPos = pos;
+    fireHoverAt(uri, pos);
 }
 
 // The ACCEPT route (post-1.8.0 sliver): the user accepted a shown row and
@@ -1468,7 +1508,23 @@ qmn::view::CodeEditor::HoverRange hoverDiagnosticFrame(
     return onLine;
 }
 
+// The CARET wrapper (the hoverTimer's target): the LATEST caret is read at
+// fire time, and the mouse-point cache is invalidated — a caret popup is a
+// different hover region, so the next pointer dwell must ask again.
 void LspHub::fireHoverTrigger(const QString& uri)
+{
+    auto reg = registrations_.constFind(uri);
+    if (reg == registrations_.constEnd() || !reg->editor)
+        return;
+    if (TriggerState* t = triggerFor(uri))
+        t->lastMouseHoverPos = {-1, -1};
+    fireHoverAt(uri, reg->editor->position());
+}
+
+// The shared-hover composition core: BOTH hover routes (the caret trigger
+// and the post-1.8.0 mouse-dwell route) ride it, anchored at `at` — which
+// for the mouse route is the pointer point, NOT the caret.
+void LspHub::fireHoverAt(const QString& uri, const qmn::view::TextPosition& at)
 {
     TriggerState* t = triggerFor(uri);
     if (!t || !t->on)
@@ -1481,15 +1537,14 @@ void LspHub::fireHoverTrigger(const QString& uri)
     // while completion owns the popup — in flight or visible.
     if (editor->completionListVisible() || t->pendingCompletion != 0)
         return;
-    const qmn::view::TextPosition caret = editor->position();
-    // The SHARED hover popup (post-1.8.0 sliver): the caret-line's decoded
-    // diagnostics LEAD the popup and the server's hover contents ride at
-    // the end. The diagnostics half needs no provider at all — the pushed
-    // set already lives in the view's decoration state.
+    // The SHARED hover popup (post-1.8.0 sliver): the hovered line's
+    // decoded diagnostics LEAD the popup and the server's hover contents
+    // ride at the end. The diagnostics half needs no provider at all — the
+    // pushed set already lives in the view's decoration state.
     const QStringList diagLines
-        = hoverDiagnosticLines(editor->diagnostics(), caret.line);
+        = hoverDiagnosticLines(editor->diagnostics(), at.line);
     const qmn::view::CodeEditor::HoverRange diagFrame
-        = hoverDiagnosticFrame(editor->diagnostics(), caret);
+        = hoverDiagnosticFrame(editor->diagnostics(), at);
     qmn::lsp::LspClient* client = clientForUri(uri);
     if (!client || !client->isReady()
         || !capabilityOffered(client, QStringLiteral("hoverProvider"))) {
@@ -1503,13 +1558,13 @@ void LspHub::fireHoverTrigger(const QString& uri)
         const QString text
             = reg->syncer ? reg->syncer->mirrorText() : QString();
         editor->showHover(
-            diagFrame.startLine < 0 ? wordRangeAt(text, caret) : diagFrame,
+            diagFrame.startLine < 0 ? wordRangeAt(text, at) : diagFrame,
             diagLines.join(QLatin1Char('\n')));
         return;
     }
     requestHover(
-        editor, caret,
-        [this, uri, caret, diagLines,
+        editor, at,
+        [this, uri, at, diagLines,
          diagFrame](const qmn::protocol::RpcClient::Reply& reply) {
             auto reg2 = registrations_.constFind(uri);
             if (reg2 == registrations_.constEnd() || !reg2->editor)
@@ -1540,8 +1595,8 @@ void LspHub::fireHoverTrigger(const QString& uri)
             // The FRAME decodes against the MIRROR — the one text the
             // server answered against (featureGate flushed it before the
             // request). The server's `range` wins; else the diagnostics
-            // frame; else the word at the caret; else the zero-width
-            // caret range.
+            // frame; else the word at the hover point; else the
+            // zero-width range there.
             const QString text = reg2->syncer ? reg2->syncer->mirrorText()
                                               : QString();
             const qmn::lsp::PositionConverter::Encoding encoding
@@ -1567,7 +1622,7 @@ void LspHub::fireHoverTrigger(const QString& uri)
             } else if (diagFrame.startLine >= 0) {
                 range = diagFrame;
             } else {
-                range = wordRangeAt(text, caret);
+                range = wordRangeAt(text, at);
             }
             ed->showHover(range, out.join(QLatin1Char('\n')));
         });

@@ -395,8 +395,22 @@ private:
                              const qmn::view::TextPosition& pos);
     void onTriggerAccept(const QString& uri,
                          const qmn::view::CodeEditor::CompletionItem& item);
+    // The MOUSE-hover route (post-1.8.0 sliver): the view already dwelled
+    // (its own kMouseHoverDwellMs chrome debounce, view-side gates: text
+    // only, never over the popups/gutter/ruler/original window) and now
+    // reports the point under the pointer. The hub still owns the DECISION:
+    // the `on` bit + registration liveness + the completion-owns-the-moment
+    // rule + a same-point-while-hover-visible no-refire pin, then the ask
+    // rides the shared-hover composition AT THAT POINT (the caret is never
+    // consulted, and the pointer never moves the caret).
+    void onTriggerMouseHover(const QString& uri,
+                             const qmn::view::TextPosition& pos);
     void fireCompletionTrigger(const QString& uri);
-    void fireHoverTrigger(const QString& uri);
+    void fireHoverTrigger(const QString& uri); // caret wrapper: reads the
+                                               // LATEST caret at fire time
+    void fireHoverAt(const QString& uri,
+                     const qmn::view::TextPosition& at); // the shared-hover
+                                                         // composition core
     // Pump (bounded by kStopBarrierMs) until every client lands a terminal
     // state: the ONLY way the destructor can promise the servers are gone.
     void waitForStops();

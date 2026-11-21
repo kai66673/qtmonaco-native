@@ -475,6 +475,15 @@ CodeEditor::CodeEditor(QWidget* parent)
     // switch disables folding, and hover with it; see setLineNumbersMode).
     setMouseTracking(lineNumbersMode_ != LineNumbersMode::Off);
 
+    // Post-1.8.0 mouse-hover dwell: single-shot debounce (armed/restored by
+    // updateMouseHoverDwell, cancelled by press/leave/out-of-text moves).
+    // The FIRE-time positionAt mapping keeps the report honest when the
+    // view scrolls under a motionless pointer.
+    mouseHoverTimer_.setSingleShot(true);
+    connect(&mouseHoverTimer_, &QTimer::timeout, this, [this] {
+        emit mouseHovered(positionAt(mouseHoverPoint_));
+    });
+
     vBar_ = new QScrollBar(Qt::Vertical, this);
     vBar_->hide();
     connect(vBar_, &QScrollBar::valueChanged, this, [this](int value) {
@@ -4450,6 +4459,8 @@ void CodeEditor::leaveEvent(QEvent* event)
     // hover machinery never RELIES on this arriving: press, edit and fold
     // mutations clear it too (the dragLeave lesson, M16).
     clearFoldHoverState();
+    if (mouseHoverTimer_.isActive())
+        mouseHoverTimer_.stop(); // post-1.8.0: the pointer left; no report
     QWidget::leaveEvent(event);
 }
 
@@ -6205,7 +6216,7 @@ void CodeEditor::setLineNumbersMode(LineNumbersMode mode)
     lineNumbersMode_ = mode;
     // M22: the fold strip (and with it the hover tracking) rides this mode:
     // Off removes the chrome that hosts folding AND hover.
-    setMouseTracking(mode != LineNumbersMode::Off);
+    setMouseTracking(mode != LineNumbersMode::Off || mouseHoverEnabled_);
     updateScrollBarRange(); // contentLeft moved: the h-window width (and the
                             // hBar geometry riding it) changed with the gutter
     update(); // contentLeft() shifts everything drawn at x
@@ -7265,6 +7276,56 @@ bool CodeEditor::hoverVisible() const
     return hoverPopup_ && hoverPopup_->isVisible();
 }
 
+// The mouse-hover dwell door (see the header): enabling ORs a tracking bit
+// of its own onto the M22 fold-strip condition, so button-less moves reach
+// mouseMoveEvent; disabling cancels any pending dwell.
+void CodeEditor::setMouseHoverEnabled(bool enabled)
+{
+    if (mouseHoverEnabled_ == enabled)
+        return;
+    mouseHoverEnabled_ = enabled;
+    setMouseTracking(enabled || lineNumbersMode_ != LineNumbersMode::Off);
+    if (!enabled && mouseHoverTimer_.isActive())
+        mouseHoverTimer_.stop();
+}
+
+// Arm/restore the dwell timer on an in-text button-less move; CANCEL it
+// when the pointer sits over anything that is not live text — the gutter +
+// fold strip (x left of contentLeft), the ruler strip, the diff ORIGINAL
+// window (a read-only hover over the other buffer is out of scope), or
+// either POPUP (a visible hover stays where it is — the m6 popup never
+// chases the mouse; the completion list owns the moment anyway). The
+// position itself is mapped at FIRE time by the timer.
+void CodeEditor::updateMouseHoverDwell(const QPoint& pt)
+{
+    auto cancel = [this] {
+        if (mouseHoverTimer_.isActive())
+            mouseHoverTimer_.stop();
+    };
+    if (!mouseHoverEnabled_) {
+        cancel();
+        return;
+    }
+    if (pt.x() < contentLeft() || overviewRulerGeometry().contains(pt)) {
+        cancel();
+        return;
+    }
+    if (diff_ && diffFrame().valid && diffChromeHit(pt)) {
+        cancel(); // the ORIGINAL window is a different buffer: a read-side
+                  // hover is out of scope (M10 m3 keeps it press-gesture only)
+        return;
+    }
+    if ((hoverPopup_ && hoverPopup_->isVisible()
+         && hoverPopup_->geometry().contains(pt))
+        || (completionPopup_ && completionPopup_->isVisible()
+            && completionPopup_->geometry().contains(pt))) {
+        cancel();
+        return;
+    }
+    mouseHoverPoint_ = pt;
+    mouseHoverTimer_.start(kMouseHoverDwellMs);
+}
+
 void CodeEditor::placeCompletionPopup()
 {
     if (!completionPopup_)
@@ -8010,6 +8071,8 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
     // M22: any press invalidates the hover region (the dragLeave lesson:
     // the clear must not rely on a later leave/move arriving).
     clearFoldHoverState();
+    if (mouseHoverTimer_.isActive())
+        mouseHoverTimer_.stop(); // post-1.8.0: a press kills a pending dwell
     hidePopupsForInteraction(); // M8 m6: a press ANYWHERE (content, gutter,
                                 // ruler, popup) dismisses the feature popups
                                 // (post-1.8.0 accept sliver: a press on a
@@ -8436,6 +8499,9 @@ void CodeEditor::mouseMoveEvent(QMouseEvent* event)
     // ruler drag, never hover.
     if (event->buttons() == Qt::NoButton) {
         updateFoldHoverState(event->position().toPoint());
+        updateMouseHoverDwell(event->position().toPoint()); // post-1.8.0
+                                                            // mouse-hover
+                                                            // dwell chrome
         event->ignore();
         return;
     }

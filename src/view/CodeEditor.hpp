@@ -652,6 +652,28 @@ public:
     void hideHover();
     bool hoverVisible() const;
 
+    // Mouse-hover DWELL (post-1.8.0 sliver, additive): with the door ON, a
+    // motionless button-less pointer inside the TEXT region fires
+    // `mouseHovered` exactly once after kMouseHoverDwellMs of stillness —
+    // pure dwell CHROME on the display side: the view only REPORTS the
+    // point under the pointer (positionAt math, the caret and selection
+    // never move) and shows NOTHING; the whole DECISION — provider gates,
+    // wire requests, popup contents — stays in the glue (LspHub's trigger
+    // machinery, `setPopupTriggers`). The pointer over either POPUP stops
+    // reporting: a visible hover stays in place (the user may reach for
+    // it — the m6 popup never chases the mouse) and the completion list
+    // owns the moment. Stops on: the pointer leaving the widget, any
+    // press, the gutter/fold strip, the overview ruler, the diff
+    // ORIGINAL window. The position is mapped at FIRE time, so scrolling
+    // under a motionless pointer hovers the text under it NOW. Default
+    // OFF: tracking stays off (the M22 fold-strip bit rides line numbers,
+    // this door ORs its own bit in), so button-less moves never arrive
+    // and the signal stays silent.
+    static constexpr int kMouseHoverDwellMs = 500; // same hover cadence the
+                                                   // glue's caret trigger uses
+    void setMouseHoverEnabled(bool enabled);
+    bool isMouseHoverEnabled() const { return mouseHoverEnabled_; }
+
     // Overview ruler (M7, Phase E1) — the minimap substitute: a right-edge
     // strip in which the WHOLE document is scaled to pixels (model px
     // space [0, 2*padding + lineCount*lineHeight) maps linearly onto the
@@ -948,6 +970,14 @@ signals:
     // (applyTextEdits) and re-triggering are the glue's job — the view never
     // mutates the document through accept (the display-only contract).
     void completionAccepted(int index, const CompletionItem& item);
+    // The mouse-hover dwell report (see setMouseHoverEnabled): emitted
+    // EXACTLY once per still pointer, kMouseHoverDwellMs after the last
+    // button-less move inside the text region (none over the popups, the
+    // gutter, the ruler or the diff original window). The position rides
+    // the positionAt math at FIRE time — the caret is NOT involved and
+    // never moves. The glue decides what (if anything) to ask; the view
+    // shows nothing on its own.
+    void mouseHovered(TextPosition position);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -1368,6 +1398,14 @@ private:
                                          // re-show rides a closed popup)
     void placeHoverPopup();      // anchor math + bounds clamp (shared rect
     void placeCompletionPopup(); // helper lives beside the classes in .cpp)
+    // --- post-1.8.0 mouse-hover dwell state (see the setMouseHoverEnabled
+    // door): a single-shot debounce + the last in-text button-less point;
+    // the position is mapped at FIRE time, so a scroll under a motionless
+    // pointer hovers what sits under it NOW.
+    QTimer mouseHoverTimer_;
+    QPoint mouseHoverPoint_;
+    bool mouseHoverEnabled_ = false;
+    void updateMouseHoverDwell(const QPoint& pt); // arm/rest/cancel
     void repositionPopups();       // setVScroll/setHScroll/resizeEvent hooks
     void hidePopupsForInteraction(); // keyPress/mousePress/focusOut auto-hide
 
