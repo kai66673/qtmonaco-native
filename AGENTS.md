@@ -45,6 +45,19 @@ phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
   ritual. **G3 made the shelf's semver real to Python users too** — the
   wheel carries `qmn.LspHub`/`qmn.ProjectSession` (`qmn::glue 1.0.0`):
   shelf breakage is now a wheel-visible story, not only a C++ one.
+- **The close ritual has a WHEEL half that the 1.9.0 close forgot**: after
+  bumping the two literals, REBUILD the wheel
+  (`./bindings/build_in_container.sh --wheel` — the wheel's version IS
+  `pyproject.toml`'s) and bump the FOURTH literal, the wheel-version
+  path-dep in `pydemo/pyproject.toml` (uv takes no glob in path-sources).
+  The 1.9.0 audit found the drift twice over: that dep still spelled a
+  long-gone 1.7.0 wheel (so `uv run` in pydemo couldn't even RESOLVE —
+  the demo was broken since the 1.8.0 close) and `dist/repaired/` still
+  held only the stale 1.8.0 wheel. A green headless pydemo run
+  (`QT_QPA_PLATFORM=offscreen uv run main.py --exit-after-ms …`) belongs
+  to every wheel-shipping close — and the rebuild pays for itself: the
+  1.9.0 rebuild caught a real GCC-<12 compile break (see the
+  portability traps bullet below).
 - **Keep public view API Shiboken-wrappable**: `Q_OBJECT`, plain Qt types in
   params/returns, no C++ templates or STL types crossing the API boundary
   (internals are unconstrained). The binding wraps the **view** widget AND
@@ -160,6 +173,15 @@ Include headers relative to `src/` (CMake adds `src/` as a PUBLIC include dir):
   target; `qmn_view`'s qmn_ts link is PRIVATE and never propagates). Any
   consumer of `view/HighlightEngine.hpp` outside `qmn_view` (tests, bench
   tools) must add `third_party/tree-sitter/runtime/include` itself.
+- **GCC-<12 trap (build portability, same container-catches-host class):**
+  the wheel container's Rocky 9 g++ 11.5 REJECTS `inline constexpr`
+  objects of POLYMORPHIC types — it miscounts any virtual destructor as
+  "used before its definition" (its own bug, fixed in later GCC; clang is
+  fine), and the Arch host's newer GCC waves it through. `inline const`
+  value-init of a trivial type is constant-initialized identically (zero
+  static-init cost) and needs no constexpr destructor — that's the v1.9.1
+  fix at `kJsonRpcCodec` (the ONLY such site; found at the 1.9.0 wheel
+  rebuild, which CI would have failed too).
 - **`.scm` queries are embedded at CMake CONFIGURE time** (`configure_file`
   in `third_party/tree-sitter/CMakeLists.txt`); the query files are
   `CMAKE_CONFIGURE_DEPENDS` of that dir, so a query edit re-runs configure on

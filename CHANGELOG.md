@@ -3,6 +3,44 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.9.1] — 2026-11-21 — hotfix close: the wheel half the 1.9.0 close forgot, and the GCC-<12 compile break its rebuild exposed
+
+### Fixed
+- **The GCC-<12 compile break at `kJsonRpcCodec` (found only by the wheel
+  rebuild).** `inline constexpr` of a POLYMORPHIC type — the D1 default
+  codec — is rejected by the wheel container's Rocky 9 g++ 11.5 ("virtual
+  constexpr destructor used before its definition", a GCC bug fixed in
+  later releases; clang and newer GCC are fine), while the Arch host's
+  compiler waves it through. The CI `wheel` job runs the SAME container
+  script, so the pushed 1.8.x/1.9.0 trees would fail there — a shipping
+  break, not a local quirk. Now `inline const`: a trivial type
+  value-initialized identically (constant-initialized, zero static-init
+  cost), and no consumer ever needed the constexpr. The same
+  container-catches-host class as the system-tree-sitter trap — recorded
+  as a new AGENTS portability bullet.
+- **pydemo was broken since the 1.8.0 close.** The wheel-version
+  path-dep in `pydemo/pyproject.toml` still spelled a long-gone
+  `qmn_native-1.7.0` filename, so `uv run` could not even RESOLVE the
+  dependency (`Failed to generate package metadata … No such file or
+  directory`); and the 1.9.0 close left `dist/repaired/` holding only
+  the stale 1.8.0 wheel — the versions simply did not stack. The dep now
+  points at the freshly rebuilt 1.9.1 wheel and the headless pydemo
+  smoke (five `examples/demo.*` fixtures, `--exit-after-ms`, offscreen)
+  is green.
+
+### Meta
+- **The close ritual gained its recorded WHEEL half** (AGENTS): after
+  bumping the two package literals, REBUILD the wheel via the container
+  pipeline and bump the FOURTH literal — the pydemo path-dep (uv takes no
+  glob) — and land a green headless pydemo run. The rebuild pays for
+  itself twice: it proved the GCC fix on the real shipping compiler and
+  it re-synced dist/ with the tagged tree.
+- Both package literals bumped 1.9.0 → 1.9.1 in this commit;
+  `QMN_GLUE_VERSION` stays 1.0.0 (no shelf change). The wheel 1.9.1
+  passed smoke + qtmonaco parity in the container; ctest 7/7 green on
+  the host. `v1.9.0` stays where it was pushed — the tag with the known
+  defect stays, `v1.9.1` is the fixed tree (the 1.6.0→1.6.1 precedent).
+
 ## [1.9.0] — 2026-11-21 — CAR 4 (DAP) CLOSED — Gate 2's last car: the DAP protocol layer, the debug shelf, the demo door, and the live-adapter probe that rewrote two faked handshake rules
 
 ### Added

@@ -49,7 +49,15 @@ public:
 };
 
 // The RpcClient default ctor hands this out; inline (C++17) so one
-// process-wide object serves every client.
-inline constexpr JsonRpcCodec kJsonRpcCodec{};
+// process-wide object serves every client. NOT `constexpr`: a constexpr
+// variable of a polymorphic type needs a constexpr DESTRUCTOR, and GCC
+// < 12 (the wheel container's Rocky 9 gcc 11.5 — caught at the 1.9.0
+// wheel rebuild; the Arch host's newer GCC waves it through, the same
+// container-catches-host class as the system-tree-sitter trap) miscounts
+// any virtual dtor here as "used before its definition" (its own bug;
+// clang and DR-correct GCC compile it). `inline const` value-init of a
+// trivial type is constant-initialized all the same — zero static-init
+// cost — and nothing here needs the constexpr.
+inline const JsonRpcCodec kJsonRpcCodec{};
 
 } // namespace qmn::protocol
