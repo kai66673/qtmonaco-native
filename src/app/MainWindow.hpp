@@ -24,6 +24,7 @@ namespace qmn::glue {
 class LspHub;         // the G1 shelf's hub (the --lsp door)
 class ProjectSession; // G2: the demo's document registry — the tabs become
                       // its presentation
+class DapHub;         // the D3 shelf hub (the --dap door, car 4)
 } // namespace qmn::glue
 
 namespace qmn::app {
@@ -49,6 +50,24 @@ public:
     void setLspEnabled(bool enabled);
     bool lspEnabled() const { return hub_ != nullptr; }
 
+    // The --dap door (car 4, D4): GENERIC by design — the adapter PROGRAM
+    // and its argv come from the CLI (no built-in matrix: an adapter is
+    // not a language server). Arming creates the DapHub, attaches it to
+    // the ALWAYS-on document session and wires the status-bar truths
+    // (session start/end, debugStopped/continued, launchRejected,
+    // sourceUnresolved); the session auto-starts at the FIRST openPath —
+    // a debug session needs a registered document, and store-BEFORE-ready
+    // breakpoints are the hub's legal order. launchProgram empty = the
+    // first opened tab's file becomes the launch `program`. Arming with an
+    // EMPTY adapterProgram = OFF: ~DapHub pumps the disconnect barrier.
+    // OFF by DEFAULT stays load-bearing for every tst_demo slot except
+    // the ONE tripwire (which spawns dapfake — CI-built: the recorded,
+    // reasoned difference from the --lsp door's no-spawn rule).
+    void setDapAdapter(const QString& adapterProgram,
+                       const QStringList& adapterArgs = {},
+                       const QString& launchProgram = QString());
+    bool dapEnabled() const { return dapHub_ != nullptr; }
+
     // Stores the template AND pushes it to every open editor (the
     // dialog-accept door). Getter = the current template.
     void applyEditorSettings(const EditorSettings& settings);
@@ -70,6 +89,7 @@ private slots:
 private:
     void addEditorTab(const QString& path, const QString& text);
     void setCurrentTabTitle();
+    void maybeStartDapSession(CodeEditor* editor, const QString& absolutePath);
 
     QTabWidget* tabs_ = nullptr;
     QLabel* statusLabel_ = nullptr; // permanent status widget
@@ -81,6 +101,15 @@ private:
     std::unique_ptr<qmn::glue::LspHub> hub_; // the --lsp door's hub; null =
                                     // OFF (the DEFAULT: tst_demo never
                                     // spawns servers)
+    std::unique_ptr<qmn::glue::DapHub> dapHub_; // the --dap door's hub;
+                                    // null = OFF (the DEFAULT; its dtor
+                                    // pumps the disconnect barrier)
+    QString dapAdapter_;   // the --dap door's adapter program (the CLI's)
+    QStringList dapAdapterArgs_; // its argv (repeatable --dap-arg)
+    QString dapProgram_;   // the launch-program override (empty = the
+                           // first opened tab's file)
+    bool dapStarted_ = false; // one auto-start attempt per armed hub (the
+                              // hub itself pins ONE session anyway)
 };
 
 } // namespace qmn::app

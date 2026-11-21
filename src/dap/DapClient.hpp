@@ -23,9 +23,12 @@ namespace qmn::dap {
 // and destroyed together through the factory seam (M1's pair-rewiring
 // hazard, and ProcessTransport is single-session by design). Lazy start is
 // the GLUE's decision (D3's DapHub); start() runs the pinned handshake:
-// `initialize` REQUEST (RpcClient's 10 s budget) -> on success the
-// `initialized` EVENT (DAP's outbound one-way, riding RpcClient::notify —
-// the frame shape is DapCodec's), and only then Ready.
+// `initialize` REQUEST (RpcClient's 10 s budget) -> Ready on its success
+// response. The client NEVER writes an `initialized` EVENT — that event is
+// the ADAPTER'S direction on this wire (the car-4 live-probe correction:
+// gdb's python adapter dies on a client-side event frame, and no real
+// adapter emits `initialized` early enough to wait for — the event just
+// rides the dapEvent relay when it finally arrives).
 //
 // THE LIFECYCLE DIFFERENCE from LspClient, PLAN-decided: NO auto-restart
 // for debug adapters. A crashed compiler-server is background noise; a
@@ -67,7 +70,7 @@ public:
     enum class State {
         NotStarted, // start() never called
         Starting,   // transport up or coming up, initialize pending
-        Ready,      // initialized sent; commands may run
+        Ready,      // initialize ANSWERED; commands may run
         Stopping,   // the disconnect barrier is in flight
         Stopped,    // clean stop completed (terminal; start() usable again)
         Failed,     // handshake failed, or the session died (NO restarts)
@@ -112,9 +115,10 @@ public:
     qint64 request(const QString& command, const QJsonValue& arguments,
                    qmn::protocol::RpcClient::ReplyHandler handler,
                    int timeoutMs = qmn::protocol::RpcClient::kFeatureTimeoutMs);
-    // Outbound EVENT frame (the handshake's initialized is the client
-    // layer's own; glue uses this door for nothing in v1 — pinned open for
-    // progress/notification-shaped adapters).
+    // Outbound EVENT frame (pinned open for notification-shaped adapters —
+    // but v1's client sends NOTHING through it, handshake included: most
+    // real adapters cannot take a client-side event at all — gdb's python
+    // DAP server CRASHES on one, the live-probe record).
     void event(const QString& name,
                const QJsonValue& body = QJsonValue(QJsonValue::Undefined));
     // Outbound `cancel` REQUEST for one of our pendings (the wire frame is

@@ -15,9 +15,11 @@
 
 #include <QByteArray>
 #include <QFile>
+#include <QFileInfo>
 #include <QFontDatabase>
 #include <QTabBar>
 #include <QTemporaryDir>
+#include <QStatusBar>
 #include <QtTest>
 
 #include <memory>
@@ -383,6 +385,113 @@ private slots:
         window_->setLspEnabled(true); // second hub, never an early death
         window_->setLspEnabled(false);
         QVERIFY(!window_->lspEnabled());
+    }
+
+    // ---- the --dap door (car 4, machine D4) --------------------------------
+    // The recorded difference from the --lsp rule above: dapfake IS built by
+    // CI (tests/dapfake), so these two slots drive REAL spawns through the
+    // demo door. tst_demo still names NO glue/dap type — every truth is read
+    // through the demo's own doors + the editor's M5 decorations.
+
+    static int dapDiagCount(const CodeEditor* ed)
+    {
+        int n = 0;
+        for (const CodeEditor::Diagnostic& diag : ed->diagnostics())
+            if (diag.source == QLatin1String("dap"))
+                ++n;
+        return n;
+    }
+
+    static bool dapDiagAt(const CodeEditor* ed, int line, const QString& message)
+    {
+        for (const CodeEditor::Diagnostic& diag : ed->diagnostics())
+            if (diag.source == QLatin1String("dap") && diag.startLine == line
+                && diag.message == message)
+                return true;
+        return false;
+    }
+
+    void dapDoorOffByDefaultAndTripwireFeedsTheGutterThroughTheDemo()
+    {
+        // The full chain through DEMO doors only: CLI door -> hub -> real
+        // dapfake spawn -> setBreakpoints (wire 1-based) -> reply + the
+        // `breakpoint` EVENT -> the editor's M5 gutter feeds. The hub's
+        // EDIT-RESEND demand (dapfake's disconnect arm refuses to exit 0
+        // after fewer than 2 setBreakpoints calls) is paid here too.
+        QVERIFY(!window_->dapEnabled()); // the DEFAULT is OFF
+        const QString file = writeFile(
+            QStringLiteral("daptrip.txt"),
+            "l0\nl1\nl2\nl3\nl4\nl5\nl6\nl7\nl8\nl9\n");
+        QVERIFY(window_->openPath(file));
+        QVERIFY(!window_->dapEnabled()); // openPath never turns the door on
+
+        // Arm the door AFTER the tab exists: the late-arm leg auto-starts
+        // the session on the first tab, and the expected source.path argv
+        // pins the hub's uri->localPath resolution end-to-end.
+        window_->setDapAdapter(QString::fromLatin1(QMN_TEST_DAP_SERVER),
+                               {QStringLiteral("breakpoints"),
+                                QFileInfo(file).absoluteFilePath()});
+        QVERIFY(window_->dapEnabled());
+
+        QTRY_COMPARE_WITH_TIMEOUT(
+            window_->statusBar()->currentMessage(),
+            QStringLiteral("DAP: сессия запущена"), 30000);
+
+        CodeEditor* ed = window_->editorAt(0);
+        QVERIFY(ed);
+        // The MERGED post-event truth (the D3 lesson: the `breakpoint`
+        // event lands in the same batch as the reply — the intermediate
+        // dots {2,6}-without-diag must never satisfy the pin): the demo
+        // stored model lines {2,6}; dapfake answers both verified at the
+        // SAME line, then the first call's FIRST id (model 2) is pulled
+        // unverified ("dapfake pulled the dot"):
+        QTRY_VERIFY_WITH_TIMEOUT(
+            ed->breakpointLines() == (QVector<int>{6})
+                && dapDiagAt(ed, 2, QStringLiteral("dapfake pulled the dot")),
+            15000);
+
+        // The edit-RESEND leg: a line-anchored store re-speaks the same
+        // model lines after a document edit; call 2 answers both verified
+        // with fresh ids — so the pulled dot COMES BACK and the dap row
+        // goes away (the hub's producer-keyed diag merge, not a wipe).
+        QCOMPARE(ed->applyTextEdits({{0, 0, 0, 0, QStringLiteral("z")}}), 1);
+        QTRY_VERIFY_WITH_TIMEOUT(
+            ed->breakpointLines() == (QVector<int>{2, 6})
+                && dapDiagCount(ed) == 0,
+            15000);
+
+        // The clean teardown through the door (empty adapterProgram = OFF):
+        // orderly stopDebugging -> disconnect -> dapfake's arm is satisfied
+        // (2 setBreakpoints calls) and it exits 0; the dtor's bounded pump
+        // does the rest while the status bar still speaks.
+        window_->setDapAdapter(QString());
+        QVERIFY(!window_->dapEnabled());
+        QCOMPARE(window_->statusBar()->currentMessage(),
+                 QStringLiteral("DAP: адаптер остановлен"));
+    }
+
+    void dapDoorShowsTheLaunchRefusalInTheStatusBar()
+    {
+        // launchreject mode: the READY leg's `launch` gets the DAP error
+        // envelope (a real adapter refusing the program is the everyday
+        // shape). The hub RELAYS launchRejected and KEEPS the session (the
+        // recorded split: relaunch-vs-stop is the app's call) — the demo
+        // door tells the refusal in the status bar and never self-kills.
+        QVERIFY(window_->openPath(
+            writeFile(QStringLiteral("daprej.txt"), "r0\nr1\nr2\nr3\n")));
+        window_->setDapAdapter(QString::fromLatin1(QMN_TEST_DAP_SERVER),
+                               {QStringLiteral("launchreject")});
+        QVERIFY(window_->dapEnabled());
+
+        QTRY_COMPARE_WITH_TIMEOUT(
+            window_->statusBar()->currentMessage(),
+            QStringLiteral("DAP: пуск отклонён: dapfake cannot run this program"),
+            30000);
+        QVERIFY(window_->dapEnabled()); // the refusal never kills the door
+        QCOMPARE(window_->editorCount(), 1); // and never kills the tab
+
+        window_->setDapAdapter(QString());
+        QVERIFY(!window_->dapEnabled());
     }
 };
 

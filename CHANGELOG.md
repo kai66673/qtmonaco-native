@@ -3,6 +3,109 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.9.0] — 2026-11-21 — CAR 4 (DAP) CLOSED — Gate 2's last car: the DAP protocol layer, the debug shelf, the demo door, and the live-adapter probe that rewrote two faked handshake rules
+
+### Added
+- **The EnvelopeCodec seam + the `src/dap/` layer (machines D1+D2).**
+  `RpcClient` went POLICY-FREE: every wire shape routes through an
+  injected `EnvelopeCodec*`; the JSON-RPC policy was EXTRACTED VERBATIM
+  into `JsonRpcCodec` and LSP traffic stayed byte-identical (tst_lsp +
+  the fakeserver transcripts passed with ZERO slot edits). The 7th ctest
+  entry `dap` (a support binary `tests/dapfake/` as the far-side oracle:
+  its exit code audits the transcript — exit 2 on any wire lie, exit 3 on
+  a hang): production `DapCodec` byte pins (UNDEFINED args/body members
+  OMITTED not null, positive `error.id`s, cancel-as-request carrying
+  `arguments.requestId`, the `disconnect`-without-`exit` stop barrier);
+  `DapClient` as the LspClient lifecycle mirror — NO auto-restart for
+  adapters (a crashed adapter killed the user's debug session; the
+  restart door is the explicit `restartServer()`), the generic
+  `dapEvent`/`dapRequest` relays with the honest in-envelope default
+  answer, inbound-cancel-fulfils-exactly-once with the invented
+  `kErrCancelledByPeer`, the five additive protocol-shelf doors
+  (any-notification/any-request handlers, the answer shelf,
+  `setOnCancelRequested`, `cancelPending`, codec cancel vocabulary).
+- **Machine D3 — `DapHub` as the glue shelf's THIRD member** (LspHub +
+  ProjectSession + DapHub; `qmn_glue` PUBLIC-links `qmn_dap`): every DAP
+  source resolves through the G2 uri map (the hub NEVER reads disk; an
+  uncovered frame relays `sourceUnresolved`); the APP owns breakpoint
+  truth — `setBreakpoints(editor, lines)` speaks DAP, re-feeds verified
+  dots AT THE ACTUAL line through `setBreakpointLines` (the 9→11 move
+  pin), unverified ones become `source:"dap"` Warnings, the DESIRED store
+  survives sessions (ready()-leg RE-PUSH) and an edit RESENDS through the
+  400 ms debounce; the single-thread stopped feed drives the caret
+  (`setPosition`) + frame band (`setHighlightedLines`) + value hints at
+  word-end (`setInlayHints` — the M5 door finally carries the DAP meaning
+  its name was minted with); `stopDebugging()`/`terminateDebugging()`
+  (renamed: `disconnect` would shadow the QObject statics), capability-
+  gated terminate, `terminated` clears feeds but leaves the client ready
+  (v1 split), adapter death merges into `sessionEnded` and EMPTIES the
+  feed; two generation guards (sessionGen_/stopGen_) drop in-flight
+  chains; `startDebugging(program, args, launchArgs, adapterId)` has NO
+  built-in matrix and NO `.qmn/dap.json` — an adapter is not a language
+  server.
+- **Machine D4 — the demo door + the shelf's `launchRejected(message)`
+  signal** (relays a Ready-leg launch refusal — error answer or the 5 s
+  timeout — and KEEPS the session): `qmn-demo --dap <adapter-program>` +
+  repeatable `--dap-arg` + `--dap-program` (deviation from the designed
+  greedy `--dap <adapter> [args…]`: repeatable flags keep adapter args
+  and the launch target honest); OFF by default, auto-starts once per
+  armed hub at the first tab, demo stores bps before `startDebugging`
+  (the legal store-before-ready order walked), and the status bar shows
+  every shelf signal (Russian strings). tst_demo drives the door against
+  dapfake (`launchreject` mode) — the recorded EXCEPTION to the `--lsp`
+  door's no-spawn rule, dapfake is CI-built. DAP does NOT cross the
+  wheel in this release (deferred G3-style; every hub door is
+  shiboken-shaped from day one).
+- **`tools/probe_dap.cpp` + `tools/probe_dap.sh`** — the live-adapter
+  close-car ritual (ad-hoc g++ like `bench_model`, never a CI gate): a
+  real `-g -O0` C drill driven through the hub against REAL debuggers,
+  7 pinned steps (handshake Ready, verified dot at a real source line,
+  stopped shape, caret-vs-dot agreement, stackTrace→scopes→variables,
+  `answer=41` read back, terminated→`sessionEnded` + feeds cleared).
+  THIS release closed with both host adapters GREEN: `lldb-dap` and gdb
+  18.1 `-i=dap` agreed end-to-end.
+
+### Fixed
+- **The handshake direction (the probe's first kill).** The D2 client
+  wrote the `initialized` EVENT after the initialize response — WRONG
+  direction: on the DAP wire that event is the ADAPTER'S, and gdb's
+  python DAP server CRASHES on a client-side event frame (`KeyError:
+  'command'` → "DAP: terminating"). dapfake had mirrored the wrong order
+  as its "mandatory next client frame", making every handshake test
+  tautological. Now Ready rides the initialize RESPONSE ALONE, the
+  client sends NO event frame (the `event()` door stays pinned open,
+  unused in v1), and the adapter's `initialized` rides the generic
+  relay — written late, mid-`launch`, by both live adapters. dapfake
+  now writes its OWN `initialized` behind every answered initialize and
+  every mode exits 2 on a client-side event frame — the gdb crash
+  pinned as a tripwire. (`src/lsp/` untouched: the client-sent
+  `initialized` is LSP-correct.)
+- **The configurationDone ordering (the probe's second kill, found while
+  re-running after the first fix).** Deferring the word behind EVERY
+  setup answer deadlocked against gdb: its adapter answers `launch` only
+  AFTER `configurationDone` (the daplog shows the inferior start waiting
+  for the word). The setup band now counts the ANSWERED
+  `setBreakpoints` pushes ONLY (the launch deliberately OUT), the
+  deferral is one-shot and settles when the band drains — an early word
+  starts gdb's inferior before the pending breakpoints resolve and the
+  stop never lands. Pinned near-side by the FakePeer slot
+  `dapConfigurationDoneIsDeferredBehindTheSetupAnswers` (dapfake's reads
+  cannot see which of its answers the hub has processed).
+- Live facts learned and pinned on the way: gdb answers pre-launch
+  `setBreakpoints` with `verified:false reason:"pending"` and upgrades
+  the dots through `breakpoint` reason:"changed" verified:true EVENTS
+  (the hub's id-keyed event machinery carried it unchanged); lldb
+  verifies IN the response when bps follow `launch` — bps-before-launch
+  proved unreliable (one lldb run never hit the bp).
+
+### Meta
+- ctest 7/7: `dap` grew machine by machine to 35 slots (16 s) — and the
+  lesson stands: a fake that mirrors the WRONG spec makes the tests
+  tautological; the live-adapter ritual is now part of a DAP-touching
+  close, recorded before the car may close.
+- Both package literals bumped 1.8.0 → 1.9.0 in this commit;
+  `QMN_GLUE_VERSION` stays 1.0.0 (every shelf change was additive).
+
 ## [1.8.0] — 2026-11-19 — M8 LSP CLOSED (Gate 2 car 3): the protocol stack, the LSP session, the app-side hub, the parity hooks
 
 ### Added

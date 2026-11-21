@@ -123,6 +123,8 @@ bool DapHub::startDebugging(const QString& adapterProgram,
     client_.reset();
     ++sessionGen_;
     ++stopGen_;
+    setupPending_ = 0;     // fresh session, fresh setup accounting
+    cfgDoneWaiting_ = false;
 
     adapterProgram_ = adapterProgram;
     adapterArgs_ = adapterArgs;
@@ -145,8 +147,25 @@ bool DapHub::startDebugging(const QString& adapterProgram,
         if (gen != sessionGen_)
             return;
         // The launch REQUEST first (the VS Code order: launch, then
-        // configuration, then configurationDone):
-        client_->request(QStringLiteral("launch"), launchArgs_, nullptr);
+        // configuration, then configurationDone). The answer is not inert:
+        // an error (a real adapter refusing the program is the everyday
+        // shape) rides launchRejected — the session itself stays, the app
+        // decides (the recorded split, same as terminated's). The launch
+        // is DELIBERATELY NOT in the configurationDone setup band (the
+        // live-gdb daplog, 2026-11-21): gdb's python adapter answers
+        // `launch` only AFTER configurationDone — gating the word on the
+        // launch answer deadlocks the handshake against the adapter's own
+        // flow. Only the breakpoint pushes are the race gdb actually has
+        // (an early configurationDone starts the inferior before the
+        // pending breakpoints resolve).
+        client_->request(QStringLiteral("launch"), launchArgs_,
+                         [this, gen](const qmn::protocol::RpcClient::Reply& reply) {
+                             if (gen != sessionGen_ || !reply.isError)
+                                 return;
+                             emit launchRejected(reply.message.isEmpty()
+                                                     ? QStringLiteral("launch rejected")
+                                                     : reply.message);
+                         });
         // Then every stored breakpoint re-pushes (the ready() re-push is
         // the same code path a session restart rides):
         const QStringList uris = bound_.keys(); // SNAPSHOT: handlers may edit
@@ -210,8 +229,10 @@ bool DapHub::startDebugging(const QString& adapterProgram,
         emit adapterStderr(line); // the channel split carries (never a dapEvent)
     });
 
-    client_->start(); // the pinned handshake (initialize -> initialized ->
-                      // Ready); commands before Ready answer kErrNotRunning
+    client_->start(); // the pinned handshake (initialize request -> Ready
+                      // on its response; the adapter's own `initialized`
+                      // event rides the relay only); commands before Ready
+                      // answer kErrNotRunning
     return true;
 }
 
@@ -265,8 +286,22 @@ void DapHub::configurationDone()
     if (caps.contains(QStringLiteral("supportsConfigurationDoneRequest"))
         && !caps.value(QStringLiteral("supportsConfigurationDoneRequest")).toBool())
         return;
+    if (setupPending_ > 0) {
+        cfgDoneWaiting_ = true; // one-shot: the word travels when the last
+        return;                 // setup answer lands (settleConfigurationDone)
+    }
     client_->request(QStringLiteral("configurationDone"),
                      QJsonValue(QJsonValue::Undefined), nullptr);
+}
+
+void DapHub::settleConfigurationDone()
+{
+    if (setupPending_ > 0 || !cfgDoneWaiting_ || closingDown_)
+        return;
+    cfgDoneWaiting_ = false;
+    configurationDone(); // re-enters the door: the caps gate re-runs, and
+                         // the request is ordered strictly AFTER the setup
+                         // answers — the live-gdb serialization rule
 }
 
 qint64 DapHub::request(const QString& command, const QJsonValue& arguments)
@@ -430,10 +465,13 @@ void DapHub::sendSetBreakpoints(const QString& uri)
     args.insert(QStringLiteral("breakpoints"), breakpoints);
 
     const quint64 gen = sessionGen_;
+    ++setupPending_; // every push belongs to the SETUP band until answered
     client_->request(QStringLiteral("setBreakpoints"), args,
                      [this, uri, gen](const Reply& reply) {
                          if (gen != sessionGen_ || closingDown_)
                              return;
+                         --setupPending_;
+                         settleConfigurationDone();
                          if (reply.isError) {
                              // The command FAILED: honest unverified with
                              // the adapter's/local's reason (the iide

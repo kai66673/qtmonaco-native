@@ -126,5 +126,13 @@ set_tests_properties(codeeditor PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscree
 # so it runs fully offscreen.
 qt_add_executable(tst_demo tst_demo.cpp)
 target_link_libraries(tst_demo PRIVATE qmn_demo_app Qt6::Test)
+# The --dap door's REAL tripwire (PLAN D4): unlike the --lsp door (clangd
+# is no CI guarantee - that door is never armed), dapfake IS built here,
+# so the demo slot drives a real spawn through it. The test never names a
+# glue/dap type (MainWindow keeps the hub behind its unique_ptr) - it only
+# needs the adapter PATH.
+add_dependencies(tst_demo dapfake)
+target_compile_definitions(tst_demo PRIVATE
+    QMN_TEST_DAP_SERVER=\"$<TARGET_FILE:dapfake>\")
 add_test(NAME demo COMMAND tst_demo)
 set_tests_properties(demo PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

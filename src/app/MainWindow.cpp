@@ -1,5 +1,6 @@
 #include "MainWindow.hpp"
 
+#include "glue/DapHub.hpp"
 #include "glue/LspHub.hpp"
 #include "glue/ProjectSession.hpp"
 #include "EditorSettingsDialog.hpp"
@@ -118,6 +119,85 @@ void MainWindow::setLspEnabled(bool enabled)
     statusBar()->showMessage(QStringLiteral("LSP: включён (спеки из коробки)"));
 }
 
+void MainWindow::setDapAdapter(const QString& adapterProgram,
+                               const QStringList& adapterArgs,
+                               const QString& launchProgram)
+{
+    if (adapterProgram.isEmpty()) {
+        if (!dapHub_)
+            return;
+        // The orderly stop FIRST (barrier + sessionEnded while the status
+        // bar is still alive to say so); then ~DapHub is the honest
+        // teardown (BOUNDED dtor pump — the M8 machine-4 lesson, paid
+        // twice). No hand-sweep of decorations: unlike the LSP popups,
+        // these are editor-side feeds the hub CLEARS ITSELF on the way out.
+        dapHub_->stopDebugging();
+        dapHub_.reset();
+        dapStarted_ = false;
+        dapProgram_.clear();
+        dapAdapter_.clear();
+        dapAdapterArgs_.clear();
+        statusBar()->showMessage(QStringLiteral("DAP: адаптер остановлен"));
+        return;
+    }
+    if (dapHub_) { // re-arm: the simple honest shape — drop, then build
+        dapHub_->stopDebugging();
+        dapHub_.reset();
+        dapStarted_ = false;
+    }
+    dapAdapter_ = adapterProgram;
+    dapAdapterArgs_ = adapterArgs;
+    dapProgram_ = launchProgram;
+    dapHub_ = std::make_unique<qmn::glue::DapHub>();
+    dapHub_->attachProject(session_.get()); // the G2 uri map resolves every
+                                            // DAP source (the hub NEVER reads disk)
+    // EVERY answer route on the shelf is a SIGNAL — the demo tells the
+    // status bar what the session says:
+    connect(dapHub_.get(), &qmn::glue::DapHub::sessionStarted, this, [this] {
+        statusBar()->showMessage(QStringLiteral("DAP: сессия запущена"));
+        dapHub_->configurationDone(); // the app says: setup ended (the hub
+                                      // skips it when the caps say false,
+                                      // and defers it behind the setup
+                                      // answers — the live-gdb rule)
+    });
+    connect(dapHub_.get(), &qmn::glue::DapHub::launchRejected, this,
+            [this](const QString& message) {
+                statusBar()->showMessage(QStringLiteral("DAP: пуск отклонён: %1")
+                                             .arg(message));
+            });
+    connect(dapHub_.get(), &qmn::glue::DapHub::sessionEnded, this,
+            [this](const QString& reason) {
+                statusBar()->showMessage(QStringLiteral("DAP: сессия завершена (%1)")
+                                             .arg(reason));
+            });
+    connect(dapHub_.get(), &qmn::glue::DapHub::debugStopped, this,
+            [this](int threadId, const QString& reason) {
+                statusBar()->showMessage(QStringLiteral("DAP: пауза в потоке %1 (%2)")
+                                             .arg(threadId).arg(reason));
+            });
+    connect(dapHub_.get(), &qmn::glue::DapHub::debugContinued, this, [this] {
+        statusBar()->showMessage(QStringLiteral("DAP: продолжено"));
+    });
+    connect(dapHub_.get(), &qmn::glue::DapHub::sourceUnresolved, this,
+            [this](const QJsonObject& source, const QJsonObject&) {
+                // v1 limitation, recorded: the demo has no door to OPEN a
+                // file the ADAPTER names (the user does that through the
+                // Файл menu — the NEXT feed resolves it via the session).
+                statusBar()->showMessage(QStringLiteral("DAP: кадр вне открытых файлов: %1")
+                                             .arg(source.value(QStringLiteral("path")).toString()));
+            });
+    statusBar()->showMessage(
+        QStringLiteral("DAP: адаптер %1 — сессия начнётся с первой вкладкой")
+            .arg(adapterProgram));
+    if (CodeEditor* first = editorAt(0)) { // armed LATE (doors after the
+        maybeStartDapSession(              // tabs exist too: the CLI arms
+            first, QFileInfo(tabs_->tabBar()
+                                 ->tabData(0)
+                                 .toString())
+                     .absoluteFilePath()); // before, but the door is a door
+    }
+}
+
 bool MainWindow::openPath(const QString& path)
 {
     QString error;
@@ -213,8 +293,34 @@ void MainWindow::addEditorTab(const QString& path, const QString& text)
         if (!language.isEmpty())
             raw->setLanguage(language);
     }
+    maybeStartDapSession(raw, QFileInfo(path).absoluteFilePath());
 
     tabs_->setCurrentIndex(index); // currentChanged sets title + status
+}
+
+// The --dap door's auto-start leg: a debug session needs a REGISTERED
+// document (breakpoints and frames resolve through the session's uri map),
+// so the session begins at the first tab, not at the door. Storing the
+// DEMO breakpoints BEFORE startDebugging is the hub's documented legal
+// order — the ready() re-push speaks them the moment the wire exists.
+void MainWindow::maybeStartDapSession(CodeEditor* editor, const QString& absolutePath)
+{
+    if (!dapHub_ || dapStarted_)
+        return;
+    dapStarted_ = true; // ONE attempt per armed hub: a dead adapter gets
+                        // one honest status-bar truth, not a respawn on
+                        // every tab open (a re-arm is the door's job)
+    // The demo's breakpoint truth (PLAN: the APP owns it — a breakpoint UI
+    // is app scope, never the shelf's): lines 3 and 7 (1-based). The PAIR
+    // exists so the interesting shapes become VISIBLE in the gutter for
+    // any adapter: a pull-back `breakpoint` event hits the first, an
+    // unverified answer earns the second row the dap Warning (dapfake's
+    // contract pulls the FIRST id; lldb/gdb answer their own honest truth).
+    dapHub_->setBreakpoints(editor, {2, 6});
+    const QString program
+        = dapProgram_.isEmpty() ? absolutePath : dapProgram_;
+    dapHub_->startDebugging(dapAdapter_, dapAdapterArgs_,
+                            QJsonObject{{QStringLiteral("program"), program}});
 }
 
 void MainWindow::closeTabAt(int index)

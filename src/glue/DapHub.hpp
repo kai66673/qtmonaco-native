@@ -38,7 +38,9 @@
 //     re-push on the next session's ready() is the same code path).
 //
 // No text sync at all for DAP: adapters see line numbers, never bytes.
-// configurationDone() is an EXPLICIT door (the app says setup ended).
+// configurationDone() is an EXPLICIT door (the app says setup ended),
+// DEFERRED one-shot while the session's setBreakpoints pushes are still
+// unanswered — the live-gdb ordering rule, see setupPending_ below.
 // stopDebugging() rides the codec-shaped disconnect barrier; the hub dtor
 // pumps that barrier bounded (the M8 machine-4 lesson, paid twice).
 //
@@ -132,7 +134,11 @@ public:
     // The EXPLICIT configurationDone door (the app says setup ended): sent
     // only Ready, SKIPPED when the capabilities say no
     // supportsConfigurationDoneRequest (some adapters default true and
-    // never publish the key — the DAP spec's own note).
+    // never publish the key — the DAP spec's own note). DEFERRED (one shot)
+    // while the session's setBreakpoints pushes are still unanswered —
+    // ordering it into the breakpoint setup is the live-gdb rule (a
+    // configurationDone answered mid-registration starts the inferior
+    // before the pending breakpoints resolve).
     void configurationDone();
 
     // A fire-and-forget command passthrough (the app's continue/next/step
@@ -160,6 +166,12 @@ public:
 signals:
     void sessionStarted();                       // handshake Ready
     void sessionEnded(const QString& reason);    // clean stop or death
+    // The `launch` request's answer said success:false (a real adapter
+    // refusing the program is the everyday shape). The SESSION stays as it
+    // is — deciding relaunch-vs-stop is the app's call, same split as the
+    // terminated-event rule; silently swallowing the refusal is the lie
+    // this signal kills (the D4 demo door shows it in the status bar).
+    void launchRejected(const QString& message);
     // Debug-stop bookkeeping (the single-thread v1 shape):
     void debugStopped(int threadId, const QString& reason);
     void debugContinued();
@@ -203,6 +215,9 @@ private:
                              QString* normalizedOut) const;
 
     void sendSetBreakpoints(const QString& uri);       // the DAP command
+    void settleConfigurationDone();                    // the deferred word
+                                                       // when the last setup
+                                                       // answer lands
     void applyBreakpointBody(const QString& uri, const QJsonObject& body);
     void markAllUnverified(const QString& uri, const QString& message);
     void feedDecorations(const QString& uri);          // the two M5 doors
@@ -234,6 +249,19 @@ private:
     // stopped/continued/death (old stackTrace/scopes/variables chains drop).
     quint64 sessionGen_ = 0;
     quint64 stopGen_ = 0;
+
+    // SETUP serialization (the car-4 close-ritual lesson, pinned against a
+    // LIVE gdb): the app's configurationDone word must reach the adapter
+    // strictly AFTER the breakpoint pushes are ANSWERED — gdb starts the
+    // inferior on an early configurationDone, before the pending
+    // breakpoints resolve, and the user's stop never lands. setupPending_
+    // counts the outstanding setBreakpoints pushes ONLY; the launch is
+    // deliberately OUT of the band (the live-gdb daplog: that adapter
+    // answers `launch` only AFTER configurationDone, so gating the word
+    // on the launch answer deadlocks the two sides against each other).
+    // cfgDoneWaiting_ is the one-shot deferred word.
+    int setupPending_ = 0;
+    bool cfgDoneWaiting_ = false;
 
     QString adapterProgram_;
     QStringList adapterArgs_;

@@ -27,11 +27,30 @@ int main(int argc, char* argv[])
                                      "(clangd for c/cpp) + .qmn/lsp.json, "
                                      "completion/hover popups on typing and "
                                      "idle caret moves")});
+    parser.addOption({QStringLiteral("dap"),
+                      QStringLiteral("Enable the DAP hub (car 4): start ONE debug "
+                                     "session through the named <adapter-program> "
+                                     "(lldb-dap, gdb -i=dap, ...; the adapter argv "
+                                     "follows as repeatable --dap-arg). The session "
+                                     "begins with the first opened tab."),
+                      QStringLiteral("program")});
+    parser.addOption({QStringLiteral("dap-arg"),
+                      QStringLiteral("One argument for the adapter program "
+                                     "(repeatable, order-preserving)"),
+                      QStringLiteral("arg")});
+    parser.addOption({QStringLiteral("dap-program"),
+                      QStringLiteral("What to DEBUG (the launch 'program'; default: "
+                                     "the first opened tab's own file)"),
+                      QStringLiteral("path")});
     parser.process(app);
 
     qmn::app::MainWindow window;
     if (parser.isSet(QStringLiteral("lsp")))
         window.setLspEnabled(true); // BEFORE the tabs: openPath wires them
+    if (parser.isSet(QStringLiteral("dap")))
+        window.setDapAdapter(parser.value(QStringLiteral("dap")),
+                             parser.values(QStringLiteral("dap-arg")),
+                             parser.value(QStringLiteral("dap-program")));
     for (const QString& path : parser.positionalArguments())
         window.openPath(path); // CLI failures land in the status bar, like menu opens
     window.show();

@@ -200,11 +200,19 @@ void DapClient::onHandshakeReply(const RpcClient::Reply& reply)
         return;
     }
     adapterCapabilities_ = reply.result.toObject();
-    // The SECOND handshake half: the `initialized` EVENT frame (DAP's
-    // outbound one-way — buildNotification's event spelling, the seq is
-    // RpcClient's own). The spec pins initialize -> initialized -> commands;
-    // ready() fires only after this write.
-    session_->rpc->notify(QStringLiteral("initialized"), QJsonObject{});
+    // Ready rides the RESPONSE ALONE (the car-4 live-probe correction of
+    // 2026-11-21, and it replaces the old "client writes an `initialized`
+    // EVENT first" design): on the DAP wire `initialized` is the ADAPTER'S
+    // outbound event, the client-side mirror of LSP's is a protocol
+    // direction-DAP never has. Two live adapters pinned the shape: a
+    // client-sent event frame CRASHES gdb's python DAP server (KeyError
+    // 'command' -> "DAP: terminating", the session goes deaf mid-air),
+    // and neither gdb nor lldb-dap emits `initialized` eagerly — lldb
+    // writes it only while processing `launch` — so a client WAITING for
+    // it before any request deadlocks. The adapter's event therefore
+    // simply rides the dapEvent relay when it arrives; commands may run
+    // straight off this response (the app serializes its own setup-over
+    // word — D3's hub owns that shape).
     state_ = State::Ready;
     emit ready();
 }

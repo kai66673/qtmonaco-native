@@ -152,9 +152,11 @@ public:
     {
         return {}; // This test-local envelope has no outbound one-way —
                    // deliberately kept from D1 to pin RpcClient's
-                   // empty-answer skip (the production DapCodec DOES have
-                   // one: the handshake's initialized EVENT, pinned by
-                   // machine D2's handshake slots instead)
+                   // empty-answer skip (the production DapCodec HAS one for
+                   // the event() door, but the client layer sends NO event
+                   // frame itself — `initialized` is the ADAPTER'S event
+                   // on this wire, the live-probe direction correction
+                   // pinned in machine D2's handshake slots)
     }
     QJsonObject buildResponse(const QJsonObject& incoming, const QJsonValue& result,
                               qint64 selfSeq) const override
@@ -941,11 +943,13 @@ private slots:
         QVERIFY(reply.result.isUndefined()); // body-less command: honest Undefined
     }
 
-    void dapHandshakeSpeaksInitializeThenInitializedEvent()
+    void dapHandshakePinsInitializeResponseAndRelaysAdaptersInitialized()
     {
         // The pinned handshake at wire-byte level over the FakePeer (the
         // dapfake slots pin the ORDER far-side: a lying order exits 2):
-        // initialize REQUEST -> success -> initialized EVENT -> Ready.
+        // initialize REQUEST -> success -> Ready; the `initialized` EVENT
+        // is the ADAPTER'S own and rides the relay (the car-4 live-probe
+        // direction correction — the client never sends an event frame).
         FakePeer peer;
         QVERIFY(peer.listen());
         DapClient client([&peer](QObject* parent) -> Transport* {
@@ -988,32 +992,37 @@ private slots:
 
         peer.send(parsed(R"({"type":"response","seq":1,"request_seq":1,"success":true,)"
                          R"("command":"initialize","body":{"supportsConfigurationDoneRequest":true}})"));
-        QTRY_COMPARE_WITH_TIMEOUT(peer.messages.size(), 2, 3000);
-        // The SECOND handshake half: the initialized EVENT frame, on our OWN
-        // seq (2 — every DAP message consumes one, and responsesCarrySeq()
-        // is why notify() takes it):
-        QCOMPARE(wire(peer.messages.at(1)),
-                 QByteArray(R"({"body":{},"event":"initialized","seq":2,"type":"event"})"));
+        // Ready rides the RESPONSE ALONE, and the client writes NOTHING
+        // else — the seq counter is untouched at 1 (the live-gdb lesson:
+        // a client-side event frame CRASHES a real adapter's server):
         QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 3000);
         QCOMPARE(client.state(), DapClient::State::Ready);
+        QCOMPARE(peer.messages.size(), 1);
+        // The adapter's OWN `initialized` EVENT (written late, mid-launch
+        // by both lldb-dap and gdb) simply rides the generic relay:
+        peer.send(parsed(R"({"type":"event","seq":7,"event":"initialized"})"));
+        QTRY_COMPARE_WITH_TIMEOUT(events.size(), 1, 3000);
+        QCOMPARE(events.last().first, QStringLiteral("initialized"));
+        QVERIFY(events.last().second.isUndefined()); // NO body member
         // On this wire the capabilities ARE the initialize result (no
         // nested "capabilities" member):
         QVERIFY(client.adapterCapabilities()
                     .value(QStringLiteral("supportsConfigurationDoneRequest"))
                     .toBool());
 
-        // Commands keep the single outbound counter (3 = next, 4 = the
-        // event() door's frame), and a normal reply decodes:
+        // Commands keep the single outbound counter (2 = next, 3 = the
+        // event() door's frame — the handshake consumed NO client frame),
+        // and a normal reply decodes:
         QVector<RpcClient::Reply> replies;
         client.request(QStringLiteral("next"), QJsonObject{{QStringLiteral("threadId"), 1}},
                        [&](const RpcClient::Reply& r) { replies.append(r); });
         QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("next")), 1, 3000);
-        QCOMPARE(peer.messages.last().value(QStringLiteral("seq")).toInt(), 3);
+        QCOMPARE(peer.messages.last().value(QStringLiteral("seq")).toInt(), 2);
         client.event(QStringLiteral("progressTick"), QJsonObject{{QStringLiteral("v"), 1}});
-        QTRY_COMPARE_WITH_TIMEOUT(peer.messages.size(), 4, 3000);
-        QCOMPARE(wire(peer.messages.at(3)),
-                 QByteArray(R"({"body":{"v":1},"event":"progressTick","seq":4,"type":"event"})"));
-        peer.send(parsed(R"({"type":"response","request_seq":3,"success":true,"command":"next","body":{"allThreadsContinued":false}})"));
+        QTRY_COMPARE_WITH_TIMEOUT(peer.messages.size(), 3, 3000);
+        QCOMPARE(wire(peer.messages.at(2)),
+                 QByteArray(R"({"body":{"v":1},"event":"progressTick","seq":3,"type":"event"})"));
+        peer.send(parsed(R"({"type":"response","request_seq":2,"success":true,"command":"next","body":{"allThreadsContinued":false}})"));
         QTRY_COMPARE_WITH_TIMEOUT(replies.size(), 1, 3000);
         QVERIFY(!replies.first().isError);
         QVERIFY(!replies.first().result.toObject()
@@ -1032,12 +1041,12 @@ private slots:
         QCOMPARE(events.last().first, QStringLiteral("capabilities"));
 
         // The stop barrier through the real client: the disconnect REQUEST
-        // (restart:false, seq 5), NO exit frame, then the teardown:
+        // (restart:false, seq 4), NO exit frame, then the teardown:
         client.stop();
         QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("disconnect")), 1, 3000);
         QCOMPARE(wire(peer.messages.last()),
-                 QByteArray(R"({"arguments":{"restart":false},"command":"disconnect","seq":5,"type":"request"})"));
-        peer.send(parsed(R"({"type":"response","request_seq":5,"success":true,"command":"disconnect"})"));
+                 QByteArray(R"({"arguments":{"restart":false},"command":"disconnect","seq":4,"type":"request"})"));
+        peer.send(parsed(R"({"type":"response","request_seq":4,"success":true,"command":"disconnect"})"));
         QTRY_COMPARE_WITH_TIMEOUT(client.state(), DapClient::State::Stopped, 3000);
         QTRY_VERIFY_WITH_TIMEOUT(peer.clientGone(), 3000);
         QCOMPARE(peer.indexOf([](const QJsonObject& m) {
@@ -1132,8 +1141,8 @@ private slots:
         QCOMPARE(h.client->state(), DapClient::State::Ready);
 
         // The clean stop: the disconnect barrier; dapfake exits 0, which IS
-        // its audit (it exits 2 on a broken handshake order, a missing
-        // initialized event, a non-monotonic client seq or a bogus command).
+        // its audit (it exits 2 on a broken handshake — a client-side
+        // event frame, a non-monotonic client seq or a bogus command).
         h.client->stop();
         QTRY_COMPARE_WITH_TIMEOUT(h.client->state(), DapClient::State::Stopped, 5000);
         QTRY_COMPARE_WITH_TIMEOUT(h.exitCodeOf(0), 0, 5000);
@@ -1165,8 +1174,8 @@ private slots:
         QTest::qWait(300);
         QCOMPARE(h.spawnCount, 1);
         // enterFailed still shut the pipe honestly: disconnect answered,
-        // dapfake exits 0 (and it exits 2 if an initialized event ever
-        // arrived — none did).
+        // dapfake exits 0 (and it exits 2 on ANY client-side event frame —
+        // out of spec on this wire, none ever arrives).
         QTRY_COMPARE_WITH_TIMEOUT(h.exitCodeOf(0), 0, 5000);
         // The Failed-state feature door keeps answering locally:
         QVector<RpcClient::Reply> replies;
@@ -1236,16 +1245,21 @@ private slots:
                          });
         h.client->start();
         QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 30000);
-        // The generic relay: the OUTPUT event with its body verbatim...
-        QTRY_COMPARE_WITH_TIMEOUT(events.size(), 2, 5000);
-        QCOMPARE(events.at(0).first, QStringLiteral("output"));
-        QCOMPARE(events.at(0).second.toObject()
+        // The generic relay: dapfake's OWN `initialized` EVENT rides first
+        // (the direction correction's far-side face: the adapter writes
+        // that event, our client never does — and the relay just carries
+        // it like any other)...
+        QTRY_COMPARE_WITH_TIMEOUT(events.size(), 3, 5000);
+        QCOMPARE(events.at(0).first, QStringLiteral("initialized"));
+        // ...the OUTPUT event with its body verbatim...
+        QCOMPARE(events.at(1).first, QStringLiteral("output"));
+        QCOMPARE(events.at(1).second.toObject()
                      .value(QStringLiteral("output")).toString(),
                  QStringLiteral("dapfake-out"));
         // ...and the TERMINATED event with NO body member — relayed as an
         // Undefined QJsonValue (the DapHub reads terminated from this relay).
-        QCOMPARE(events.at(1).first, QStringLiteral("terminated"));
-        QVERIFY(events.at(1).second.isUndefined());
+        QCOMPARE(events.at(2).first, QStringLiteral("terminated"));
+        QVERIFY(events.at(2).second.isUndefined());
         h.client->stop();
         QTRY_COMPARE_WITH_TIMEOUT(h.client->state(), DapClient::State::Stopped, 5000);
         // Exit 0 doubles as "dapfake spoke nothing else on the wire" (a
@@ -1354,6 +1368,86 @@ private slots:
                              QJsonValue(QJsonValue::Undefined)), qint64(-1));
         QVERIFY(!hub.startDebugging(QString())); // an empty program refuses
         hub.attachProject(nullptr);              // legal: QPointer unattach
+    }
+
+    void dapConfigurationDoneIsDeferredBehindTheSetupAnswers()
+    {
+        // THE SETUP BAND at wire level (the car-4 close-ritual lesson,
+        // paid to a LIVE gdb twice over): an early configurationDone starts
+        // gdb's inferior before the pending breakpoints resolve (the stop
+        // never lands), and gdb answers `launch` only AFTER configuration-
+        // Done — so the band counts the setBreakpoints pushes ONLY and the
+        // launch deliberately stays outside, or the two sides deadlock.
+        // The deferral is only visible near-side (dapfake's reads can't see
+        // WHICH of its own answers the hub has already processed), so this
+        // slot runs the hub over the FakePeer with scripted answers.
+        ProjectSession project;
+        CodeEditor ed;
+        const QString path = QStringLiteral("/dapfake/project/prog.cpp");
+        QVERIFY(project.openDocument(&ed, path));
+        ed.setPlainText(QStringLiteral("line one\nline two\nline three\n"
+                                       "line four\nline five\nline six\n"
+                                       "line seven\nline eight\nline nine\n"
+                                       "line ten\nline eleven\nline twelve\n"));
+
+        FakePeer peer; // (the TcpTransport stand-in, no process spawned)
+        QVERIFY(peer.listen());
+        DapHub hub;
+        hub.setTransportFactory([&peer](const QString&, const QStringList&,
+                                        QObject* parent) -> Transport* {
+            return new TcpTransport(QStringLiteral("127.0.0.1"),
+                                    peer.port(), parent);
+        });
+        hub.attachProject(&project);
+
+        QVERIFY(hub.setBreakpoints(&ed, {4})); // wire line 5 = ONE setup push
+        QVERIFY(hub.startDebugging(QStringLiteral("unused-over-tcp"), {},
+                                   QJsonObject{{QStringLiteral("program"),
+                                               QStringLiteral("/bin/true")}},
+                                   QStringLiteral("tstpeer")));
+        QTRY_VERIFY_WITH_TIMEOUT(peer.haveClient(), 3000);
+
+        // The handshake: initialize (client seq 1 — NO event frame follows
+        // it any more, the direction correction) answered with the caps
+        // SAYING configurationDone is supported, so the door really fires:
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("initialize")), 1, 3000);
+        peer.send(parsed(R"({"type":"response","seq":1,"request_seq":1,"success":true,)"
+                         R"("command":"initialize","body":{"supportsConfigurationDoneRequest":true}})"));
+
+        // The Ready leg in the pinned order: launch (2), then the stored
+        // breakpoint re-push (3) —
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("launch")), 1, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("setBreakpoints")), 1, 3000);
+
+        // — and the app's word arrives MID-SETUP (the demo calls the door
+        // from its sessionStarted handler, exactly here): DEFERRED, no
+        // frame on the wire, twice over —
+        hub.configurationDone();
+        QTest::qWait(200);
+        QCOMPARE(peer.commandCount(QStringLiteral("configurationDone")), 0);
+        // the launch answer does NOT drain the band — it is not even in
+        // it (gdb answers `launch` only after configurationDone arrives):
+        peer.send(parsed(R"({"type":"response","request_seq":2,"success":true,"command":"launch"})"));
+        QTest::qWait(200);
+        QCOMPARE(peer.commandCount(QStringLiteral("configurationDone")), 0);
+
+        // The LAST push answer lands -> the deferred one-shot word
+        // travels (seq 4: nothing else consumed the counter), ordered
+        // strictly after both setup answers:
+        peer.send(parsed(R"({"type":"response","request_seq":3,"success":true,)"
+                         R"("command":"setBreakpoints","body":{"breakpoints":[)"
+                         R"({"verified":true,"line":5,"id":11}]}})"));
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("configurationDone")), 1, 3000);
+        QCOMPARE(peer.messages.last().value(QStringLiteral("seq")).toInt(), 4);
+        // the verified dot settled through the normal feed while we waited:
+        QCOMPARE(ed.breakpointLines(), (QVector<int>{4}));
+
+        // The teardown honesty: the disconnect barrier (seq 5) answered,
+        // the client closes the pipe.
+        hub.stopDebugging();
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("disconnect")), 1, 3000);
+        peer.send(parsed(R"({"type":"response","request_seq":5,"success":true,"command":"disconnect"})"));
+        QTRY_VERIFY_WITH_TIMEOUT(peer.clientGone(), 5000);
     }
 
     void dapHubBreakpointsVerifyMoveResendAndClear()
@@ -1610,6 +1704,43 @@ private slots:
         QVERIFY(!hub.isDebugging());
         QCOMPARE(hub.request(QStringLiteral("ping"),
                              QJsonValue(QJsonValue::Undefined)), qint64(-1));
+        QTRY_COMPARE_WITH_TIMEOUT(spawns.exitCodeOf(0), 0, 5000);
+    }
+
+    void dapHubLaunchRejectionRelaysAndKeepsSession()
+    {
+        // launchreject mode: the Ready leg fires `launch` and dapfake
+        // answers the DAP ERROR envelope (success:false + error{id,format}
+        // — the shape a real adapter makes when the program is not
+        // runnable). The hub must RELAY launchRejected with the format
+        // text AND keep the session alive (the recorded split: relaunch-
+        // vs-stop is the app's call; silently swallowing the refusal is
+        // the bug this mode kills):
+        HubSpawns spawns;
+        DapHub hub;
+        spawns.install(hub);
+        QSignalSpy startedSpy(&hub, &DapHub::sessionStarted);
+        QSignalSpy rejectedSpy(&hub, &DapHub::launchRejected);
+        QSignalSpy endedSpy(&hub, &DapHub::sessionEnded);
+
+        QVERIFY(hub.startDebugging(QString::fromLatin1(QMN_TEST_DAP_SERVER),
+                                   {QStringLiteral("launchreject")},
+                                   QJsonObject{{QStringLiteral("program"),
+                                               QStringLiteral("/definitely/not/a/binary")}},
+                                   QStringLiteral("dapfake")));
+        QTRY_COMPARE_WITH_TIMEOUT(startedSpy.count(), 1, 30000);
+        QTRY_COMPARE_WITH_TIMEOUT(rejectedSpy.count(), 1, 5000);
+        QCOMPARE(rejectedSpy.at(0).at(0).toString(),
+                 QStringLiteral("dapfake cannot run this program"));
+        // The session SURVIVES its own refused launch:
+        QVERIFY(hub.isDebugging());
+        QVERIFY(hub.isReady());
+        QCOMPARE(endedSpy.count(), 0);
+        // The clean exit (no far-side audit rides this mode beyond the
+        // launch refusal — its contract is the disconnect):
+        hub.stopDebugging();
+        QTRY_COMPARE_WITH_TIMEOUT(endedSpy.count(), 1, 5000);
+        QCOMPARE(endedSpy.at(0).at(0).toString(), QStringLiteral("stopped"));
         QTRY_COMPARE_WITH_TIMEOUT(spawns.exitCodeOf(0), 0, 5000);
     }
 

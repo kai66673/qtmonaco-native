@@ -2086,6 +2086,71 @@ DapHub doors TU (doors compile, NOTHING spawns). Gate 2 closes after this
 car — the version close ritual (BOTH package literals at once) is the
 close's decision, not this pass's.
 
+**D4 BUILT (2026-11-21) + the two live-adapter amendments it forced.**
+The door SHIPPED as designed with one CLI DEVIATION: `--dap
+<adapter-program>` + repeatable `--dap-arg <arg>` + `--dap-program
+<program-to-debug>` — the designed `--dap <adapter> [args…]` greedy tail
+cannot tell adapter args from the launch target, the repeatable flags
+keep both honest (recorded deviation; `MainWindow::setDapAdapter(program,
+args, launchProgram)` is the programmatic door, OFF by default, hub
+auto-starts at the first armed tab, ONE attempt per armed hub). The demo
+stores model bps {2,6} BEFORE `startDebugging` (D3's store-before-ready
+legality, walked) and every shelf answer route is wired to the STATUS
+BAR (Russian strings) — sessionStarted / launchRejected / sessionEnded /
+debugStopped / debugContinued / sourceUnresolved. The shelf GREW one
+additive door: `launchRejected(message)` relays a Ready-leg launch
+refusal (error answer OR the 5 s command timeout) and KEEPS the session
+(terminated's recorded split again). tst_demo GREW three slots over the
+REAL door — the tripwire spawns `$<TARGET_FILE:dapfake>` (mode
+`launchreject` for the refusal slot): the recorded honest EXCEPTION to
+the `--lsp` no-spawn rule, dapfake is CI-built (offscreen exit codes
+prove nothing — the pgrep sample was the spawn proof during development).
+
+The close-ritual probe (`tools/probe_dap.cpp` + `tools/probe_dap.sh`,
+ad-hoc g++ like bench_model, `-no-pie` per the non-PIC archives rule,
+never a CI gate) caught REAL spec bugs the fake had blessed — dapfake
+had mirrored the WRONG shapes and the tests went tautological:
+
+- Amendment to D2 (the HANDSHAKE DIRECTION): the client-sent
+  `initialized` EVENT D2 shipped is OUT of DAP spec — `initialized` is
+  the ADAPTER'S event (unlike LSP, where the client-sent one is correct:
+  `src/lsp/` untouched). gdb 18.1's python DAP server CRASHES on a
+  client-side event frame (`KeyError: 'command'` → "DAP: terminating")
+  and no real adapter emits `initialized` early enough to WAIT for
+  either (lldb writes it mid-`launch`) — so Ready rides the initialize
+  RESPONSE ALONE, the client sends NO event frame (the `event()` door
+  stays pinned open but v1 sends nothing through it), and the adapter's
+  `initialized` simply rides the generic dapEvent relay. dapfake now
+  writes its OWN `initialized` behind every answered initialize and
+  EVERY mode exits 2 on a client-side event frame — the crash shape
+  pinned as a tripwire so the wrong direction can never creep back;
+  the FakePeer handshake slot renumbered (the handshake consumes NO
+  client frame any more) and the events-relay slot pins `initialized`
+  as the first relayed event.
+- Amendment to D3 (the configurationDone ORDER, second live-gdb lesson):
+  gating the word on EVERY setup answer DEADLOCKS — the daplog shows
+  gdb answers `launch` only AFTER `configurationDone` (its python
+  `launch` starts the inferior which waits for the word). The band now
+  counts the ANSWERED `setBreakpoints` pushes ONLY (launch deliberately
+  OUT), one-shot deferral `cfgDoneWaiting_` settles when the band
+  drains. Near-side-only visibility (dapfake's reads cannot see WHICH
+  of its answers the hub has processed), so the new FakePeer pin
+  `dapConfigurationDoneIsDeferredBehindTheSetupAnswers` scripts the
+  answers directly.
+- Live wire facts pinned (both adapters green end-to-end, 7 steps each:
+  handshake Ready, verified dot at model line 4, stopped shape,
+  caret-vs-dot agreement (waitUntil: the stackTrace chain is ASYNC),
+  stackTrace→scopes→variables read-back of `answer=41` through REAL
+  lldb and REAL gdb, continue reply, terminated→sessionEnded + feeds
+  cleared): gdb pre-launch bps answer `verified:false reason:"pending"`
+  and UPGRADE the dots via `breakpoint` reason:"changed" verified:true
+  EVENTS — D3's id-keyed event machinery already carried it; lldb
+  verifies IN the response when bps follow `launch` (bps-before-launch
+  proved unreliable: one lldb run never hit the bp); lldb's own
+  `initialized` + `capabilities` events arrive late, mid-launch.
+`QMN_GLUE_VERSION` stays 1.0.0 (every D4 shelf change is additive); the
+PACKAGE close ritual bumps BOTH literals in one commit — car 4 CLOSED.
+
 ### Gate 2 at the wheel boundary (rides the owning cars)
 
 Parity tripwire = the qtmonaco `monaco.py` `__main__` block reproduced

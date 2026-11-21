@@ -197,7 +197,20 @@ the EnvelopeCodec seam, then the DapCodec/DapClient machines, then the
 D3 `DapHub` shelf machines over REAL editors — same
 GROWS-machine-by-machine rule, `tests/dapfake/` is a support binary NOT
 a ctest entry, its exit code is the far-side oracle), `codeeditor`
-(widget tests), `demo` (drives the qmn-demo surface programmatically).
+(widget tests), `demo` (drives the qmn-demo surface programmatically;
+since D4 one slot drives the `--dap` door against `$<TARGET_FILE:dapfake>`
+— spawning IS allowed here, unlike the `--lsp` door, because dapfake is
+CI-built; the LIVE-adapter ritual `tools/probe_dap.sh` is manual, never
+CI, but car 4 may not close without it). Two wire facts pinned by the
+car-4 live probe (2026-11-21, both adapters): on the DAP wire
+`initialized` is the **ADAPTER'S** event — the client NEVER sends event
+frames (a client-side one CRASHES gdb's python DAP server; dapfake exits
+2 on one in every mode), and Ready rides the initialize RESPONSE alone
+(opposite of LSP's client-sent `initialized`, which stays correct in
+`src/lsp/`); the hub defers `configurationDone` behind the ANSWERED
+`setBreakpoints` pushes but never gates it on the `launch` answer
+(gdb answers `launch` only AFTER `configurationDone` — gating there
+deadlocks the two sides).
 `textbuffer` and `diff` are guiless; since M8 machine 4 the `lsp` binary
 drives real `CodeEditor`s too (and D3 flipped `dap` to
 `QTEST_MAIN`), so ctest sets

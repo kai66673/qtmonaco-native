@@ -7,27 +7,28 @@
 //
 // Modes (argv[1], pinned with the machine-D2 tst_dap slots):
 //   basic    the handshake (initialize VALIDATES arguments.adapterID is a
-//            non-empty string — a structural lie exits 2), then the
-//            initialized EVENT is mandatory as the very next client
-//            message (spec order, a missing/early one exits 2); then
-//            commands: `next` -> body{allThreadsContinued:false}, `ping`
-//            -> body{pong:true}; an EVENT "output" carrying
-//            DAPOUT-PROTOCOL-MARKER rides right after the handshake while
-//            a DAPOUT-STDERR-MARKER line went to stderr at startup (the
-//            two-channel relay pin). `disconnect` -> answer + exit 0.
-//            Unknown commands exit 2 (harness drift).
+//            non-empty string — a structural lie exits 2); after ANSWERING
+//            initialize dapfake sends the `initialized` EVENT ITSELF (the
+//            spec's direction — the car-4 live-probe correction: on the
+//            DAP wire that event is the ADAPTER'S, and a client-side one
+//            CRASHES gdb's python server); then commands: `next` ->
+//            body{allThreadsContinued:false}, `ping` -> body{pong:true};
+//            an EVENT "output" carrying DAPOUT-PROTOCOL-MARKER rides
+//            right after the handshake while a DAPOUT-STDERR-MARKER line
+//            went to stderr at startup (the two-channel relay pin).
+//            `disconnect` -> answer + exit 0. Unknown commands exit 2
+//            (harness drift).
 //   initfail initialize answers success:false error{id:1,format:"dapfake
-//            cannot start"} — the client must go FAILED with NO
-//            initialized event (an early one exits 2) and NO restart
-//            (spawn counting is the tst side); the disconnect that
-//            enterFailed triggers is answered, exit 0.
-//   dead     answers the handshake, WAITS for the initialized event, then
-//            _exit(7): the mid-session death; the no-auto-restart decision
-//            is pinned by the tst-side spawnCount staying 1.
+//            cannot start"} — the client must go FAILED, NO initialized
+//            from either side, and NO restart (spawn counting is the
+//            tst side); the disconnect that enterFailed triggers is
+//            answered, exit 0.
+//   dead     answers the handshake, writes its own initialized EVENT,
+//            then _exit(7): the mid-session death; the no-auto-restart
+//            decision is pinned by the tst-side spawnCount staying 1.
 //   deaf     NEVER answers initialize (the RpcClient 10 s handshake budget
 //            is what has to fail it) but answers the disconnect honestly;
-//            exit 0. A pre-answer initialized event from the client is a
-//            lie, exit 2.
+//            exit 0.
 //   events   handshake, then two events: output{category,console,
 //            "dapfake-out"} and terminated (NO body member — the
 //            Undefined-body relay pin). Waits for the disconnect, exit 0.
@@ -93,6 +94,17 @@
 //            `continued` EVENT. `terminate` -> ok + remembered;
 //            `disconnect` exits 2 unless terminate arrived FIRST (the
 //            terminateDebugging demand), else 0.
+//   launchreject (machine D4; no extra argv)
+//            The basic handshake, then the hub's Ready-leg `launch`
+//            request gets a DAP ERROR envelope (respondFail: the real-
+//            adapter refusal shape, success:false + error{id,format}) —
+//            the hub must relay launchRejected (message straight out of
+//            the error format) and KEEP the session (the recorded split:
+//            relaunch-vs-stop is the app's call; silently swallowing the
+//            refusal is the bug this mode kills). The hub's Ready leg may
+//            still push stored breakpoints and the demo still calls
+//            configurationDone: both answer ok pass-through (no audit). No
+//            other command is audited; waits for the disconnect, exit 0.
 //
 // Every inbound REQUEST must carry a strictly increasing numeric `seq`
 // (all modes): the per-direction seq monotonicity is pinned HERE, on the
@@ -213,8 +225,9 @@ void sendRequest(const QString& command, const QJsonObject& arguments)
     send(m);
 }
 
-// The per-mode "handshake completed" hooks (fired on the initialized
-// event, i.e. only modes whose initialize was ANSWERED get here).
+// The per-mode "handshake completed" hooks (fired the moment dapfake's
+// OWN initialized EVENT was written — only modes whose initialize was
+// ANSWERED get here).
 void afterHandshake()
 {
     g_handshakeDone = true;
@@ -361,25 +374,15 @@ void handle(const QJsonObject& message)
         return;
     }
     if (type == QLatin1String("event")) {
-        const QString event = message.value(QStringLiteral("event")).toString();
-        if (g_handshakeDone)
-            fail(QStringLiteral("client sent event \"%1\" mid-session "
-                                "(none of these modes legitimately does)")
-                     .arg(event));
-        if (g_mode != QLatin1String("basic")
-            && g_mode != QLatin1String("dead")
-            && g_mode != QLatin1String("events")
-            && g_mode != QLatin1String("reverse")
-            && g_mode != QLatin1String("cancelreq")
-            && g_mode != QLatin1String("breakpoints")
-            && g_mode != QLatin1String("steps"))
-            fail(QStringLiteral("initialized arrived although this mode's "
-                                "handshake never completed (%1)").arg(g_mode));
-        if (event != QLatin1String("initialized"))
-            fail(QStringLiteral("first post-handshake message was event "
-                                "\"%1\", not initialized").arg(event));
-        afterHandshake();
-        return;
+        // CLIENT-side event frames are out of DAP spec — `initialized` is
+        // the ADAPTER'S event, and the live gdb python adapter CRASHES on
+        // a client-sent one (KeyError 'command' -> "DAP: terminating").
+        // The fixed client layer never sends one; every mode keeps this
+        // exit-2 tripwire so the wrong direction can never creep back.
+        fail(QStringLiteral("client sent event \"%1\": client-side events "
+                            "are out of spec on the DAP wire (the live gdb "
+                            "adapter dies on them)")
+                 .arg(message.value(QStringLiteral("event")).toString()));
     }
     if (type != QLatin1String("request"))
         fail(QStringLiteral("frame is not a DAP message (type \"%1\")").arg(type));
@@ -422,6 +425,13 @@ void handle(const QJsonObject& message)
             caps.insert(QStringLiteral("supportsConfigurationDoneRequest"), true);
         }
         respondOk(message, caps);
+        // The spec's DIRECTION (car-4 live-probe correction, 2026-11-21):
+        // dapfake writes the `initialized` EVENT ITSELF right after the
+        // answer — the client answers with REQUESTS only. (dapfake's old
+        // "mandatory next client frame" expectation had made the WRONG
+        // direction tautological; a live gdb died on the client's frame.)
+        sendEvent(QStringLiteral("initialized"), QJsonObject{});
+        afterHandshake();
         return;
     }
     if (command == QLatin1String("disconnect")) {
@@ -434,6 +444,15 @@ void handle(const QJsonObject& message)
                      .arg(g_setBpCount));
         respondOk(message, QJsonValue(QJsonValue::Undefined));
         _exit(0); // every mode ends its contract here (dead already _exited)
+    }
+    if (command == QLatin1String("launch")
+        && g_mode == QLatin1String("launchreject")) {
+        // The refusal shape a REAL adapter answers when the program is
+        // not runnable — the hub's launchRejected relay pin (the session
+        // must stay; the tst slot asserts exactly that).
+        respondFail(message, 1,
+                    QStringLiteral("dapfake cannot run this program"));
+        return;
     }
     if (command == QLatin1String("launch")
         && g_mode != QLatin1String("breakpoints")
@@ -458,8 +477,9 @@ void handle(const QJsonObject& message)
                             "deaf mode (the TEST never calls cancel())"));
     }
     if (!g_handshakeDone)
-        fail(QStringLiteral("command \"%1\" arrived before the initialized "
-                            "event").arg(command));
+        fail(QStringLiteral("command \"%1\" arrived before the handshake "
+                            "completed (dapfake's own initialized event was "
+                            "never written behind that answer)").arg(command));
 
     if (g_mode == QLatin1String("basic")) {
         if (command == QLatin1String("next")) {
@@ -482,6 +502,30 @@ void handle(const QJsonObject& message)
             sendRequest(QStringLiteral("cancel"),
                         QJsonObject{{QStringLiteral("requestId"), g_slowSeq}});
         return; // the LATE answer travels from checkAnswer
+    } else if (g_mode == QLatin1String("launchreject")) {
+        // The D4 demo-door ride: the launch refusal above does NOT stop
+        // the hub's Ready leg from PUSHING the stored breakpoints, and the
+        // demo still calls configurationDone (these caps say true) — both
+        // answer plain ok pass-through, no audit: this mode's whole far-
+        // side contract is the refusal + the clean disconnect exit 0.
+        if (command == QLatin1String("setBreakpoints")) {
+            QJsonArray returned;
+            for (const QJsonValue& bp : message.value(QStringLiteral("arguments"))
+                                            .toObject()
+                                            .value(QStringLiteral("breakpoints"))
+                                            .toArray())
+                returned.append(QJsonObject{
+                    {QStringLiteral("verified"), true},
+                    {QStringLiteral("line"),
+                     bp.toObject().value(QStringLiteral("line"))}});
+            respondOk(message,
+                      QJsonObject{{QStringLiteral("breakpoints"), returned}});
+            return;
+        }
+        if (command == QLatin1String("configurationDone")) {
+            respondOk(message, QJsonValue(QJsonValue::Undefined));
+            return;
+        }
     } else if (g_mode == QLatin1String("breakpoints")
                || g_mode == QLatin1String("steps")) {
         // The machine-D3 hub battery. Both modes audit the hub's own
@@ -733,6 +777,7 @@ int main(int argc, char** argv)
         && g_mode != QLatin1String("dead") && g_mode != QLatin1String("deaf")
         && g_mode != QLatin1String("events") && g_mode != QLatin1String("reverse")
         && g_mode != QLatin1String("cancelreq")
+        && g_mode != QLatin1String("launchreject")
         && g_mode != QLatin1String("breakpoints")
         && g_mode != QLatin1String("steps"))
         fail(QStringLiteral("unknown mode \"%1\"").arg(g_mode));
