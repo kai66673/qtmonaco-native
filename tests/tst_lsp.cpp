@@ -4441,6 +4441,149 @@ private slots:
         QVERIFY(stderrSpy.empty()); // not one feature request was ever asked
     }
 
+    // --- Shared hover popup (post-1.8.0 sliver): the caret-line's decoded
+    // diagnostics LEAD the hover, the server's contents ride at the end,
+    // and the `[source]` label (additive Diagnostic.source) tells which
+    // producer spoke. The fakeserver's `diagsource` flag labels its marker
+    // scan; the marker doc "bug warn" gives one error + one warning.
+
+    // Provider PRESENT: one popup, diagnostics first, hover contents last,
+    // the server's `range` still the frame.
+    void hubTriggerHoverSharesDiagnosticsAndContents()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features"),
+                                 QStringLiteral("hoveron"),
+                                 QStringLiteral("diags"),
+                                 QStringLiteral("diagsource"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000); // wire stays spare: only feature REQs
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("bug warn\nfoo bar"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///trig-dh.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        editor.setPosition({0, 0});
+        QVERIFY2(waitUntil([&] { return editor.diagnostics().size() == 2; }),
+                 "the marker diagnostics never reached the view");
+        h.hub.setPopupTriggers(&editor, true);
+
+        editor.setPosition({0, 6}); // INSIDE "warn", line 0 carries BOTH
+                                    // marker diagnostics
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("REQ textDocument/hover")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return editor.hoverVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QLabel* label =
+            editor.findChild<QLabel*>(QStringLiteral("qmn-hover-label"));
+        QVERIFY(label);
+        QCOMPARE(label->text(),
+                 QStringLiteral(
+                     "error: [fakesrv] bug at line 0\n"
+                     "warning: [fakesrv] warn at line 0\n"
+                     "HOVER warn off=6"));
+    }
+
+    // NO hoverProvider: the hover question never goes to the wire (the
+    // fakeserver WITHOUT `hoveron` fails on any hover request — zero REQ
+    // lines here pin the local refusal), yet the diagnostics half still
+    // fills the shared popup.
+    void hubTriggerDiagnosticsHoverNeedsNoProvider()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features"),
+                                 QStringLiteral("diags"),
+                                 QStringLiteral("diagsource"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("bug warn\nfoo bar"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///trig-dh2.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        editor.setPosition({0, 0});
+        QVERIFY2(waitUntil([&] { return editor.diagnostics().size() == 2; }),
+                 "the marker diagnostics never reached the view");
+        h.hub.setPopupTriggers(&editor, true);
+
+        editor.setPosition({0, 1}); // idle NON-typing move, INSIDE "bug":
+                                    // the frame follows the containing
+                                    // diagnostic without any wire ask
+        QVERIFY2(waitUntil([&] { return editor.hoverVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QLabel* label =
+            editor.findChild<QLabel*>(QStringLiteral("qmn-hover-label"));
+        QVERIFY(label);
+        QCOMPARE(label->text(),
+                 QStringLiteral(
+                     "error: [fakesrv] bug at line 0\n"
+                     "warning: [fakesrv] warn at line 0"));
+        QTest::qWait(300); // and the wire stays clean: the hover was REFUSED
+                           // LOCALLY (a hover REQ would have the fakeserver
+                           // exit 2 — the client would be FAILED right here)
+        QVERIFY(stderrSpy.empty());
+        QVERIFY(client->isReady());
+    }
+
+    // Provider present, diagnostics PRESENT, but the caret on a clean line:
+    // the popup is the plain contents hover again (the composition adds
+    // nothing when no record overlaps the caret line) — and the null-result
+    // hide survives for the EMPTY composition.
+    void hubTriggerHoverOnCleanLineStaysPlainContents()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features"),
+                                 QStringLiteral("hoveron"),
+                                 QStringLiteral("diags"),
+                                 QStringLiteral("diagsource"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("bug warn\nfoo bar"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///trig-dh3.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        editor.setPosition({0, 0});
+        QVERIFY2(waitUntil([&] { return editor.diagnostics().size() == 2; }),
+                 "the marker diagnostics never reached the view");
+        h.hub.setPopupTriggers(&editor, true);
+
+        editor.setPosition({1, 1}); // line 1: NO diagnostic overlaps it
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("REQ textDocument/hover")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return editor.hoverVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QLabel* label =
+            editor.findChild<QLabel*>(QStringLiteral("qmn-hover-label"));
+        QVERIFY(label);
+        QCOMPARE(label->text(), QStringLiteral("HOVER foo off=10")); // only
+        // contents: "foo" starts at model offset 9, the caret sits at 10
+    }
+
 };
 
 QTEST_MAIN(TstLsp) // NOT guiless any more: machine 4's hub slots drive a real

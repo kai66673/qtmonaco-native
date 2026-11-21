@@ -124,7 +124,13 @@ struct ModelDoc {
 };
 QMap<QString, ModelDoc> g_docs;
 bool g_publishDiags = false; // argv flag: publish diagnostics on every
-                             // didOpen/didChange of an open document
+                             // open/change (didOpen/didChange of an open
+                             // document)
+bool g_diagSource = false; // argv flag (post-1.8.0 shared-hover sliver):
+                           // every published record carries the LSP
+                           // `source` label "fakesrv" — and the hub's
+                           // codeAction context re-encodes it back, so
+                           // machine 5's scan-compare stays symmetric
 bool g_features = false;     // argv flag (rides sync): the machine-5 provider
                              // set + feature-request answers + the
                              // server-primed write path
@@ -810,7 +816,7 @@ QJsonArray diagsFor(const QString& text)
                         = wirePosition(text, line, j - lineStart);
                     const WirePos end = wirePosition(
                         text, line, j - lineStart + length);
-                    diags.append(QJsonObject{
+                    QJsonObject record{
                         {QStringLiteral("range"),
                          QJsonObject{{QStringLiteral("start"),
                                       QJsonObject{{QStringLiteral("line"),
@@ -826,7 +832,13 @@ QJsonArray diagsFor(const QString& text)
                         {QStringLiteral("message"),
                          QStringLiteral("%1 at line %2")
                              .arg(QLatin1String(marker.word))
-                             .arg(line)}});
+                             .arg(line)}};
+                    if (g_diagSource)
+                        record.insert(
+                            QStringLiteral("source"),
+                            QStringLiteral("fakesrv")); // the shared-hover
+                                                       // sliver's label pin
+                    diags.append(record);
                     j += length - 1;
                     break;
                 }
@@ -2050,6 +2062,9 @@ int main(int argc, char** argv)
                 g_crashOnce = true;
             else if (args.at(i) == QLatin1String("diags"))
                 g_publishDiags = true;
+            else if (args.at(i) == QLatin1String("diagsource"))
+                g_diagSource = true; // rides diags: label every published
+                                     // record with `source: "fakesrv"`
             else if (args.at(i) == QLatin1String("features"))
                 g_features = true;
             else if (args.at(i) == QLatin1String("completiononly"))

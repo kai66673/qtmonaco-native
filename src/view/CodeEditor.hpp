@@ -349,6 +349,11 @@ public:
         int endCol = 0;
         Severity severity = Severity::Error;
         QString message;
+        // The producer label (the LSP `source` field, "clangd" & friends),
+        // carried OPAQUELY since the post-1.8.0 shared-HOVER sliver: the
+        // painter ignores it; the LSP glue feeds it from the wire and its
+        // merged hover popup prints it as `[source]`. Empty = unlabeled.
+        QString source;
 
         bool operator==(const Diagnostic&) const = default; // test round-trips
     };

@@ -906,6 +906,37 @@ pair one unit APART to pin the insert-preference, and insertText-only; the
 sync-arrival slot arms `setDebounceMs(50)` so the accept's didChange sits
 in the server long before the 500 ms hover ask reads it).
 
+**The third deferred sliver is BUILT (2026-11-21, no version bump): the
+SHARED hover popup — diagnostics ride the hover.** The user-decided shape:
+ONE popup, the caret-line's decoded DIAGNOSTICS lead it (one line each:
+the severity word, then the `[source]` label when the producer sent one,
+then the message — multi-line messages print their FIRST line only, the
+popup is a strip, not an output panel) and the server's hover contents
+append at the end. Match = the range OVERLAPPING the caret's LINE (a
+column mismatch never hides a current-line entry; the view's set is
+sorted, so rows read top-left). `Diagnostic` grew the additive `source`
+label — carried OPAQUELY (the painter ignores it, the round-trip getter
+echoes it, Python sees it through the already-bound record, three-copies
+untouched); the hub decodes the wire `source` and re-encodes it into the
+codeAction `context.diagnostics` ONLY when non-empty, so machine 5's
+scan-compare stays byte-symmetric (the fakeserver grew the `diagsource`
+flag: both sides label, or neither does). The diagnostics half needs NO
+provider and NO wire byte: the pushed set already lives in the view's
+decoration state — with no hoverProvider the hover question is refused
+LOCALLY and the popup fills from the diagnostics right away (pinned: the
+reqlog spy sees ZERO hover REQs and the server stays READY). The recorded
+DEVIATION from m6's contract: a null/empty hover result no longer HIDES
+while the diagnostics half carries the popup — the hide survives only for
+the EMPTY composition (clean caret line + no contents = m6 as shipped).
+The FRAME: the server's `range` still wins, else the diagnostics frame
+(the record CONTAINING the caret, else the first overlapping its line),
+else the word at the caret, else zero-width — the wire parts decoded
+against the syncer's MIRROR as always. The fakeserver's marker scan
+(`diags`) feeds one error + one warning on line 0; three new lsp slots
+(69 -> 72) pin the merged label text, the provider-free path and the
+clean-line plain contents; the codeeditor round-trip grew the `source`
+echo inside `decorationsRoundTripUpdateRemove` (no new slot).
+
 **Known pre-existing bug (recorded 2026-11-15, deferred to its own small
 car):** bracketed type-over-selection in `insertTextAtCaret` (the
 `beginEditGroup` bracket around `deleteSelection` + insert, found via a

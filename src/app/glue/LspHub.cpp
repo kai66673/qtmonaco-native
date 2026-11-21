@@ -904,6 +904,7 @@ void LspHub::onDiagnostics(const QString& specName, const QJsonObject& params)
             break;
         }
         out.message = diag.value(QStringLiteral("message")).toString();
+        out.source = diag.value(QStringLiteral("source")).toString();
         decoded.append(out);
     }
     reg->editor->setDiagnostics(decoded); // M5's decoration door, no new
@@ -1124,7 +1125,7 @@ qint64 LspHub::requestCodeActions(qmn::view::CodeEditor* editor,
             qmn::lsp::PositionConverter::fromModelPosition(
                 text, qmn::lsp::ModelPosition{diag.endLine, diag.endCol}),
             enc);
-        diagnostics.append(QJsonObject{
+        QJsonObject record{
             {QStringLiteral("range"),
              QJsonObject{{QStringLiteral("start"),
                           QJsonObject{{QStringLiteral("line"), from.line},
@@ -1133,7 +1134,14 @@ qint64 LspHub::requestCodeActions(qmn::view::CodeEditor* editor,
                           QJsonObject{{QStringLiteral("line"), to.line},
                                       {QStringLiteral("character"), to.character}}}}},
             {QStringLiteral("severity"), static_cast<int>(diag.severity) + 1},
-            {QStringLiteral("message"), diag.message}});
+            {QStringLiteral("message"), diag.message}};
+        if (!diag.source.isEmpty()) // the post-1.8.0 label rides ONLY when
+                                    // the producer sent one: the context
+                                    // stays byte-identical for unlabeled
+                                    // servers (the fakeserver's machine-5
+                                    // scan-compare sees the same symmetry)
+            record.insert(QStringLiteral("source"), diag.source);
+        diagnostics.append(record);
     }
     params.insert(QStringLiteral("context"),
                   QJsonObject{{QStringLiteral("diagnostics"), diagnostics}});
@@ -1397,6 +1405,69 @@ void LspHub::fireCompletionTrigger(const QString& uri)
                                             // in flight to supersede
 }
 
+// The diagnostics half of the SHARED hover popup (post-1.8.0 sliver, the
+// user-decided VS Code shape): the records are the VIEW's decoration state
+// (onDiagnostics fed them; the view holds them sorted). Match = the range
+// OVERLAPPING the caret's LINE — a column mismatch never hides a current-
+// line entry. The severity word + the `[source]` label tell the multi-
+// producer story (the LSP `source`, decoded as it came); a multi-line
+// message prints ONLY its first line — the popup is a strip, not an
+// output panel.
+QStringList hoverDiagnosticLines(
+    const QVector<qmn::view::CodeEditor::Diagnostic>& all, int caretLine)
+{
+    QStringList out;
+    for (const qmn::view::CodeEditor::Diagnostic& d : all) {
+        if (d.startLine > caretLine || d.endLine < caretLine)
+            continue;
+        QString line;
+        switch (d.severity) {
+        case qmn::view::CodeEditor::Severity::Warning:
+            line = QStringLiteral("warning:");
+            break;
+        case qmn::view::CodeEditor::Severity::Information:
+            line = QStringLiteral("info:");
+            break;
+        case qmn::view::CodeEditor::Severity::Hint:
+            line = QStringLiteral("hint:");
+            break;
+        default:
+            line = QStringLiteral("error:");
+            break;
+        }
+        line += QLatin1Char(' ');
+        if (!d.source.isEmpty())
+            line += QStringLiteral("[") + d.source + QStringLiteral("] ");
+        const int nl = d.message.indexOf(QLatin1Char('\n'));
+        out << line + (nl < 0 ? d.message : d.message.left(nl));
+    }
+    return out;
+}
+
+// The frame of a diagnostics-only hover: the record CONTAINING the caret
+// first, else the first one overlapping its line (the view's set is
+// sorted, so "first" reads top-left). All -1 = none: the caller falls
+// back to its usual word/caret frame.
+qmn::view::CodeEditor::HoverRange hoverDiagnosticFrame(
+    const QVector<qmn::view::CodeEditor::Diagnostic>& all,
+    const qmn::view::TextPosition& caret)
+{
+    qmn::view::CodeEditor::HoverRange onLine{-1, -1, -1, -1};
+    for (const qmn::view::CodeEditor::Diagnostic& d : all) {
+        if (d.startLine > caret.line || d.endLine < caret.line)
+            continue;
+        const bool afterStart = d.startLine < caret.line
+            || (d.startLine == caret.line && d.startCol <= caret.col);
+        const bool beforeEnd = caret.line < d.endLine
+            || (caret.line == d.endLine && caret.col <= d.endCol);
+        if (afterStart && beforeEnd)
+            return {d.startLine, d.startCol, d.endLine, d.endCol};
+        if (onLine.startLine < 0)
+            onLine = {d.startLine, d.startCol, d.endLine, d.endCol};
+    }
+    return onLine;
+}
+
 void LspHub::fireHoverTrigger(const QString& uri)
 {
     TriggerState* t = triggerFor(uri);
@@ -1411,38 +1482,72 @@ void LspHub::fireHoverTrigger(const QString& uri)
     if (editor->completionListVisible() || t->pendingCompletion != 0)
         return;
     const qmn::view::TextPosition caret = editor->position();
+    // The SHARED hover popup (post-1.8.0 sliver): the caret-line's decoded
+    // diagnostics LEAD the popup and the server's hover contents ride at
+    // the end. The diagnostics half needs no provider at all — the pushed
+    // set already lives in the view's decoration state.
+    const QStringList diagLines
+        = hoverDiagnosticLines(editor->diagnostics(), caret.line);
+    const qmn::view::CodeEditor::HoverRange diagFrame
+        = hoverDiagnosticFrame(editor->diagnostics(), caret);
+    qmn::lsp::LspClient* client = clientForUri(uri);
+    if (!client || !client->isReady()
+        || !capabilityOffered(client, QStringLiteral("hoverProvider"))) {
+        // No provider (or no live server): the hover QUESTION never goes
+        // to the wire — the diagnostics half fills the popup right away,
+        // and an empty composition keeps m6's hide.
+        if (diagLines.isEmpty()) {
+            editor->hideHover();
+            return;
+        }
+        const QString text
+            = reg->syncer ? reg->syncer->mirrorText() : QString();
+        editor->showHover(
+            diagFrame.startLine < 0 ? wordRangeAt(text, caret) : diagFrame,
+            diagLines.join(QLatin1Char('\n')));
+        return;
+    }
     requestHover(
         editor, caret,
-        [this, uri, caret](const qmn::protocol::RpcClient::Reply& reply) {
+        [this, uri, caret, diagLines,
+         diagFrame](const qmn::protocol::RpcClient::Reply& reply) {
             auto reg2 = registrations_.constFind(uri);
             if (reg2 == registrations_.constEnd() || !reg2->editor)
                 return;
             qmn::view::CodeEditor* ed = reg2->editor;
             if (reply.isError)
                 return; // refusal/cancel/timeout: an OLD popup stays as-is
-            if (reply.result.isNull() || !reply.result.isObject()) {
-                ed->hideHover(); // a null result is the official no-hover
-                return;
+            QString plain;
+            QJsonObject rangeWire;
+            if (!reply.result.isNull() && reply.result.isObject()) {
+                const QJsonObject hover = reply.result.toObject();
+                plain = hoverPlainText(
+                    hover.value(QStringLiteral("contents")));
+                rangeWire = hover.value(QStringLiteral("range")).toObject();
             }
-            const QJsonObject hover = reply.result.toObject();
-            const QString plain = hoverPlainText(
-                hover.value(QStringLiteral("contents")));
-            if (plain.isEmpty()) {
-                ed->hideHover();
+            // The SHARED popup: diagnostics rows first, the contents after
+            // them. A null/empty hover result NO LONGER HIDES when the
+            // diagnostics half carries the popup (the recorded deviation
+            // from m6's empty-hides rule); the hide survives for the
+            // EMPTY composition.
+            QStringList out = diagLines;
+            if (!plain.isEmpty())
+                out << plain;
+            if (out.isEmpty()) {
+                ed->hideHover(); // nothing to show: m6's empty hides
                 return;
             }
             // The FRAME decodes against the MIRROR — the one text the
             // server answered against (featureGate flushed it before the
-            // request). The server's `range` wins; else the word at the
-            // caret; else the zero-width caret range.
+            // request). The server's `range` wins; else the diagnostics
+            // frame; else the word at the caret; else the zero-width
+            // caret range.
             const QString text = reg2->syncer ? reg2->syncer->mirrorText()
                                               : QString();
             const qmn::lsp::PositionConverter::Encoding encoding
                 = reg2->syncer ? reg2->syncer->encoding()
                                : qmn::lsp::PositionConverter::Encoding::Utf16;
             qmn::view::CodeEditor::HoverRange range;
-            const QJsonObject rangeWire =
-                hover.value(QStringLiteral("range")).toObject();
             if (!rangeWire.isEmpty()) {
                 const QJsonObject from
                     = rangeWire.value(QStringLiteral("start")).toObject();
@@ -1459,10 +1564,12 @@ void LspHub::fireHoverTrigger(const QString& uri)
                         to.value(QStringLiteral("character")).toInt(),
                         encoding);
                 range = {fromPos.line, fromPos.col, toPos.line, toPos.col};
+            } else if (diagFrame.startLine >= 0) {
+                range = diagFrame;
             } else {
                 range = wordRangeAt(text, caret);
             }
-            ed->showHover(range, plain);
+            ed->showHover(range, out.join(QLatin1Char('\n')));
         });
 }
 

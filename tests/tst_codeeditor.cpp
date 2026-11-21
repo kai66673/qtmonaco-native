@@ -5841,6 +5841,15 @@ void TestCodeEditor::decorationsRoundTripUpdateRemove()
     const Diag far{99, 0, 99, 2, CodeEditor::Severity::Information, {}};
     editor->setDiagnostics({far});
     QVERIFY(editor->diagnostics() == (QVector<Diag>{far}));
+    // The post-1.8.0 additive `source` label: the view carries it OPAQUELY
+    // (the painter ignores it) and round-trips it verbatim; records that
+    // never set it stay equal (the sliver never broke old constructions).
+    Diag d1s = d1;
+    d1s.source = QStringLiteral("some-lsp");
+    editor->setDiagnostics({d0, d1s});
+    QVERIFY2(editor->diagnostics() == (QVector<Diag>{d0, d1s}),
+             "the source label did not round-trip");
+    editor->setDiagnostics({});
 
     // Breakpoints: stored sorted + deduplicated, cleared by empty set.
     editor->setBreakpointLines({5, 1, 3, 1});

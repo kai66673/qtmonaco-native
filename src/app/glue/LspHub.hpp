@@ -215,13 +215,20 @@ public:
     //
     // Decoded feeds (the view doors are plain-Qt payloads, PLAN's popup
     // shape): completion items -> {label, detail}, the list capped at
-    // kMaxCompletionRows (the popup is a list, not an indexer); the hover
-    // contents (string / MarkupContent / MarkedString, arrays joined by
-    // newlines) pass VERBATIM — markup values are NOT rendered, the view
-    // shows plain text; an empty or absent result HIDES. The hover frame is
-    // the server's `range` when it sends one, else the word at the caret,
-    // else a zero-width caret range — all decoded against the syncer's
-    // MIRROR, the one text the server agrees with.
+    // kMaxCompletionRows (the popup is a list, not an indexer); the HOVER
+    // popup is SHARED (post-1.8.0 sliver): the caret-line's decoded
+    // DIAGNOSTICS lead it — one line each, prefixed by the severity word
+    // and the `[source]` label — and the server's hover contents (string /
+    // MarkupContent / MarkedString, arrays joined by newlines, VERBATIM,
+    // markup NOT rendered) ride at the end when present. The diagnostics
+    // half needs no provider: the pushed set lives in the view's
+    // decoration state. The whole popup HIDES only when the composition is
+    // EMPTY — a null/empty hover result no longer hides while diagnostics
+    // carry it (the recorded deviation from m6's empty-hides rule). The
+    // hover frame is the server's `range` when it sends one, else the
+    // diagnostics frame, else the word at the caret, else a zero-width
+    // caret range — the wire parts decoded against the syncer's MIRROR,
+    // the one text the server agrees with.
     //
     // OFF by default, per editor: a hub that never opts in changes not one
     // wire byte (every existing test's traffic stays byte-identical). The

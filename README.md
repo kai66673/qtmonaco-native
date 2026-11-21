@@ -219,9 +219,11 @@ Gate 2 — IDE surface (after the freeze):
       view-side completion/hover popups, the app-side `LspHub` glue (server
       matrix + `.qmn/lsp.json`) and the qtmonaco parity hooks (`add_action`,
       `update_workspace_configuration`); live-clangd probe PROBE-OK 7/7;
-      the popup TRIGGERING + completion ACCEPT follow-ons shipped after the
-      1.8.0 close (debounced hub-side triggers; VS Code-style row nav and
-      accept — the view emits, the glue applies the insertion)
+      the popup TRIGGERING + completion ACCEPT + shared-HOVER follow-ons
+      shipped after the 1.8.0 close (debounced hub-side triggers; VS
+      Code-style row nav and accept — the view emits, the glue applies the
+      insertion; the hover popup also carries the caret-line's diagnostics
+      with their `[source]` labels)
 - [x] M10 diff view → `open_diffs` parity (the line-diff engine + the two-
       column chrome + the wheel/shim crossing; inline word-level highlight,
       wrap×diff budget math and original-side wrap ride a follow-on M10b)
