@@ -248,6 +248,12 @@ Gate 2 — IDE surface (after the freeze):
       (the top-level `languages` map finally has an owner; `servers` still
       reach the hub), one call to open a document (hub open + popup
       triggers included), and the demo tabs rewritten as its presentation
+- [x] G3 — the shelf at the wheel boundary (PLAN's "G3 design pass"):
+      `qmn.LspHub` (+ `ServerSpec`) and `qmn.ProjectSession` ride the wheel
+      — the first typesystem/CMake/codegen-CLI growth beyond the view; the
+      AUTOMATIC LSP half (config fold, lazy start, sync, diagnostics, popup
+      triggers, accept, server-primed applyEdits + relays) is Python-live;
+      the callback-carrying feature doors stay C++-only, honest absence
 - [ ] DAP features via decorations (breakpoints, current frame, value hints)
 
 Out of scope by design: vim mode. The `set_vim_mode_enabled` setter is still

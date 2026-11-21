@@ -1,12 +1,13 @@
 """Python-facing package for the native Qt editor widget (qtmonaco-native).
 
 The Shiboken-generated extension module is called ``_qmn``, and because the C++
-classes live in the namespace ``qmn::view``, its own import path is
-``_qmn.qmn.view.CodeEditor`` (Shiboken 6.12 mirrors C++ namespaces as Python
-namespaces). This package flattens that to ``qmn.CodeEditor`` and carries the
-qtmonaco-compatible surface: the ``Monaco`` class mirrors the public API of
-``qtmonaco.Monaco`` (the QWebEngineView-based editor this widget replaces as a
-drop-in).
+classes live in the namespaces ``qmn::view`` and (since G3) ``qmn::glue``, its
+own import path is ``_qmn.qmn.view.CodeEditor`` /
+``_qmn.qmn.glue.LspHub`` (Shiboken 6.12 mirrors C++ namespaces as Python
+namespaces). This package flattens that to ``qmn.CodeEditor`` /
+``qmn.LspHub`` and carries the qtmonaco-compatible surface: the ``Monaco``
+class mirrors the public API of ``qtmonaco.Monaco`` (the QWebEngineView-based
+editor this widget replaces as a drop-in).
 
 The 1-based/0-based conversion is deliberately done HERE, in Python, not in
 C++ (PLAN.md, AGENTS.md): qtmonaco is 1-based (``set_cursor``, ``delete_line``,
@@ -30,10 +31,12 @@ Deliberate, documented divergences (PLAN.md "Decided divergences"):
   with the uri/options params accepted-and-ignored (see its docstring).
 * The M8 parity wrap (1.8.0) added ``add_action`` and
   ``update_workspace_configuration``. qtmonaco's other LSP hooks existed only
-  to drive ITS built-in Chromium client and have no counterpart here: the
-  native LSP client and hub are C++ app-side glue (``src/app/glue``, NOT part
-  of the wheel by design), while the view's popup doors (``showCompletionList``
-  / ``showHover``) ARE bound, so an app that owns a client can paint them.
+  to drive ITS built-in Chromium client and have no counterpart here. The
+  native LSP client and hub are C++ glue — since G3 the hub and the document
+  session DO ship in the wheel (``qmn.LspHub`` / ``qmn.ProjectSession``), but
+  as plain objects the app builds and owns, never as ``Monaco`` methods
+  (parity stays parity); the view's popup doors (``showCompletionList`` /
+  ``showHover``) remain bound for apps that own a client of their own.
   ``set_lsp_header`` / ``get_lsp_header`` stay absent ON PURPOSE: qtmonaco's
   "header" is text prepended to the document ON THE WIRE ONLY, while every
   native LSP path (diagnostics, hover, completion, rename, formatting,
@@ -54,8 +57,13 @@ import warnings
 
 # Imported first on purpose: the generated wrapper resolves its QWidget base
 # through shiboken's converter registry, so PySide6.QtWidgets must already be
-# loaded when _qmn initializes.
+# loaded when _qmn initializes. QtNetwork likewise: since G3 the extension
+# carries a DT_NEEDED libQt6Network (the glue shelf reaches protocol's
+# TcpTransport), and the one-Qt-at-runtime rule means that soname must
+# resolve against the ALREADY-LOADED PySide6-bundled copy - QtWidgets does
+# not load QtNetwork on its own. NEVER load Qt by absolute path (AGENTS).
 import PySide6.QtWidgets  # noqa: F401
+import PySide6.QtNetwork  # noqa: F401
 import _qmn as _ext
 
 from PySide6.QtCore import Signal
@@ -64,6 +72,11 @@ CodeEditor = _ext.qmn.view.CodeEditor
 CodeEditorTheme = _ext.qmn.view.CodeEditorTheme
 CodeDocument = _ext.qmn.view.CodeDocument  # M25 (editor-owned, like the theme)
 TextPosition = _ext.qmn.view.TextPosition
+# G3: the glue shelf (qmn::glue). The hub/session are PLAIN objects the app
+# builds and owns - deliberately NOT Monaco methods (parity stays parity);
+# LspHub.ServerSpec rides as a nested attribute of LspHub.
+LspHub = _ext.qmn.glue.LspHub
+ProjectSession = _ext.qmn.glue.ProjectSession
 
 
 class Monaco(CodeEditor):
@@ -393,4 +406,5 @@ class Monaco(CodeEditor):
         )
 
 
-__all__ = ["CodeEditor", "CodeEditorTheme", "CodeDocument", "TextPosition", "Monaco"]
+__all__ = ["CodeEditor", "CodeEditorTheme", "CodeDocument", "LspHub",
+           "Monaco", "ProjectSession", "TextPosition"]

@@ -1574,7 +1574,9 @@ Bound: `LspHub` (+`ServerSpec` record), `ProjectSession`, and the minimum
 protocol payload the feature callbacks need (`RpcClient::Reply`) — the
 FIRST typesystem/CMake/codegen-CLI edit beyond the view types, rejected-log
 audit mandatory. The `TransportFactory` std::function seam stays C++-only
-(the `PerfStats` precedent: raw seam, honest absence).
+(the `PerfStats` precedent: raw seam, honest absence). (AMENDED 2026-11-21
+by the G3 design pass below: the callbacks never cross, so neither does
+their payload — `RpcClient::Reply` stays unbound after all.)
 
 **Ordering (user, 2026-11-21): G1+G2 NOW; this PRECEDES car 4 (DAP)** — the
 DAP glue (breakpoint/frame feeds onto the decoration API) lands ON this
@@ -1617,6 +1619,136 @@ local languageForSuffix copy is GONE (the spike keeps its own, bench-only).
 The 6th ctest entry `glue` (offscreen, REAL editors, zero spawn: the
 attached-hub slots open only languages NO built-in claims — the claimed
 path stays tst_lsp's fakeserver turf).
+
+**G3 design pass (DECIDED 2026-11-21, BUILT SAME DAY; the first three-copies edit
+beyond the view).** Read against the REAL shelf surface, not the outline:
+
+*The drop list — decided by the existing clause, not newly.* `LspHub`'s
+public half is studded with the machinery AGENTS already declares unbound
+by design ("the `PerfStats` and the SlotEdit/UndoMark/**std::function**
+machinery"): `setTransportFactory`, and all EIGHT feature doors
+(`requestHover/Definition/References/Completion/CodeActions/Formatting/
+Rename` + `resolveCompletionItem` — their `FeatureHandler` arg), plus the
+three unbound-type returners `syncerFor`/`clientForUri`/`clientForSpec`
+(binding `LspClient`/`DocumentSyncer` would recursively drag the protocol
+closure into the wheel for no Python use), plus all FOUR `apply*` doors —
+they die on the defaulted `LspClient* servingClient = nullptr` tail even
+though every other parameter is plain `QJsonValue`/`CodeEditor*` (the
+`perfStats()` precedent: an unknown type ANYWHERE in the signature drops
+the function silently into `mjb_rejected_functions.log`). The amendment to
+the outline: with the callbacks never crossing, `RpcClient::Reply` has NO
+door left to travel in — it stays unbound; the payload follows if/when the
+callbacks cross. What Python LOSES: app-driven feature calls (hover on
+demand, the rename flow, formatting, codeAction picking, applying a
+reply-held WorkspaceEdit). What Python KEEPS — the entire AUTOMATIC half,
+which is the bulk of the UX: config fold (session + hub), lazy server
+start, didOpen/didChange/didSave incl. the `willSaveWaitUntil` detour,
+pushed diagnostics as decorations, the M8 popup triggers (the session
+ARMS them on hub-accepted opens by default), completion accept -> the
+hub-side insertion, and server-primed `workspace/applyEdit` (answered
+all-or-nothing hub-side; `applyEditRefused` reports). No live demand asks
+for more, qtmonaco parity never did (`set_lsp_header` stays an honest
+`AttributeError`), and the named extension path stays cheap: signal-relay
+feature doors added to the SHELF (additive, shelf semver minor 1.1.0;
+`Reply` is a plain 5-field record and becomes a `value-type` the moment a
+door carries it) — DEFERRED, not refused. The `showMessageRequest` relay
+signal crosses, its ANSWER route (`clientForSpec()->respond...`) does not:
+the LspClient default answers for Python apps; documented, not bridged.
+
+*Bound set:* `qmn::glue::ProjectSession` ENTIRELY (every G2 door already
+speaks QString/QStringList/int/bool + `CodeEditor*` + `LspHub*` + the
+`QJsonObject` body door; PUBLIC ctor — the app builds sessions),
+`qmn::glue::LspHub` minus the drop list (root pair, `loadConfig`/
+`loadConfigFromJson`, `setServerSpec`/`serverSpec`->`QJsonObject`,
+`specNameForLanguage`, the open/close/save triple, `restartServer`, the
+debounce pair, `setPopupTriggers`/`popupTriggersEnabled`, ALL seven
+signals — QString/int/QStringList payloads plus `serverShowMessageRequest`'s
+two `QJsonValue`s), and the nested `LspHub::ServerSpec` `value-type`
+(fields name/program/args/languages + the `initializeTemplate`
+`QJsonObject`). Lifetime: both classes are Python-built and Python-owned;
+the session->hub pointer is raw NON-owning with the destroyed() hook, so a
+GC'd hub leaves `session.hub()` reading nullptr — GC order is safe by the
+G2 design, documented for the shim docstring.
+
+*The JSON pin (first time anything crosses the wheel):* `QJsonObject`/
+`QJsonValue` as DIRECT params have never been exercised here (the view
+surface is QString-pure; QVariant-based APIs convert dicts, direct wrapper
+params may NOT). PINNED AT THE BUILD (2026-11-21) — the reality is stranger
+than EITHER planned branch: PySide6 6.12's own typesystem declares
+`QJsonObject` a **PRIMITIVE type** (typesystem_core_common.xml), so there is
+NO `QJsonObject` Python class to import AT ALL (QJsonArray/QJsonValue/
+QJsonDocument are classes; QJsonObject is not). The Python **dict IS the
+JSON object**: the generated doors convert dict↔dict DEEPLY — both
+directions, params AND struct members (`loadConfigFromJson({...}) is True`,
+`serverSpec()` returns a plain dict, `ServerSpec.initializeTemplate` accepts
+one). Neither the planned shim fallback NOR the assumed `fromVariant` bridge
+is needed (the latter has no class to hang off). NO string-body C++ door was
+added — the ±H-offset lesson of m7 stands (wire-shaped taxes on doors for
+binding convenience never pay), and it turned out nothing was even missing.
+The smoke pins ARE the record; `QJsonValue` stays a bound class (the signal
+params), so BOTH shapes cross now.
+
+*Three-copies + pipeline (both AGENTS drift traps bit HERE, all three
+edits + the codegen audit are MANDATORY):* (1) typesystem: a second
+`<namespace-type name="glue">` sibling under `qmn` (Shiboken 6.12 still
+forbids '::' in name attributes; the nested mirror shape is the view
+precedent); (2) `bindings/CMakeLists.txt`: `HEADERS` += the two glue
+headers, `_generated` += the PREDICTED TU names — `qmn_glue_wrapper.cpp`,
+`qmn_glue_lsphub_wrapper.cpp`, `qmn_glue_lsphub_serverspec_wrapper.cpp`,
+`qmn_glue_projectsession_wrapper.cpp` — VERIFY against the `--codegen`
+file list before compiling (1.6.1 drift = "specified but not defined"
+configure error; 1.7.0 drift = clean configure, silent no-build, import
+explodes on `undefined symbol: init_qmn_...`); `LIBRARY_TARGET` stays
+`qmn_view` + `target_link_libraries(_qmn PRIVATE qmn_glue)` (static
+absorption: glue+lsp+protocol+core ride INTO the .so, no runtime .so
+proliferation); `find_package(Qt6 ... COMPONENTS Network)` + the Network
+include dirs join the -I loop (protocol's `TcpTransport` carries a real
+QTcpSocket). (3) the hand-reproduced `--codegen` CLI in
+`build_in_container.sh`: header list += the same two headers. Rejected-log
+audit after codegen: the NEW expected entries are exactly the 16 dropped
+doors (1+8+3+4) with unknown-`std::function`/unknown-`qmn::lsp` reasons,
+and the VIEW half of the log stays byte-comparable to the baseline (the
+QFlags noise) — anything else in the log is the 1.7.0 class of silent
+drop. The parser also sees `lsp/LspClient.hpp` transitively (the hub
+header includes it for the `Reply` typedef) and a forward-declared
+`TextPosition` — both merge against the already-parsed view headers;
+codegen pins it. PINNED AT THE 2026-11-21 RUN: the codegen file list matched
+the four predicted TU names EXACTLY (module init symbols
+`init_qmn_glue_LspHub`/`_LspHub_ServerSpec`/`_ProjectSession`); the rejected
+log held exactly the 16 doors beyond the usual Qt/`tr`/private-helper noise
+(and the bound half never appeared in it); and the signals ride
+`PySide::Signal::registerSignals` — the meta-object route, so all SEVEN hub
+relays and both session seams cross with NO per-signal generated code.
+
+*Wheel/runtime plumbing:* auditwheel excludes += `libQt6Network.so.6` in
+BOTH places (the sh list + pyproject `repair_command` — AGENTS sync rule);
+the shim imports `PySide6.QtNetwork` BEFORE `_qmn` (QtWidgets does NOT
+load QtNetwork, and the one-Qt-at-runtime rule means the DT_NEEDED
+soname must resolve against the preloaded PySide6-bundled copy);
+`__all__` += `LspHub`, `ProjectSession` (flat attrs over the
+`_ext.qmn.glue.*` namespace shims, the view precedent; `ServerSpec` rides
+nested on `LspHub`); `qmn.Monaco` stays UNtouched — the shelf is beyond
+parity and the parity file gains NO glue checks. The wheel smoke checks
+(move into `_smoke_checks.py`, both smoke scripts ride them): import the
+pair, build session+hub, attach, `specNameForLanguage("cpp") == clangd`
+(the built-in pin), the SESSION-side `openDocument` TRUE for an
+unclaimed language with the hub's honest false BEHIND it — visible as
+triggers staying DISARMED (`popupTriggersEnabled` False; pinning the hub
+door's own false needs no server to exist — the container has no clangd,
+the same zero-spawn discipline as ctest), the uri/registry round-trip doors,
+and the maps-assertion EXTENDS to libQt6Network (single copy). The shelf
+version becomes REAL: the wheel starts carrying `qmn::glue 1.0.0` (its
+own semver now has users), while the hub's `initialize.clientInfo.version`
+keeps riding the PACKAGE version — the third-literal contract survives
+the wheel. Host builds are unaffected (bindings stay `QMN_BUILD_PYTHON=ON`
+container-only; the CI `wheel` job runs the grown `--wheel` pipeline).
+BUILT 2026-11-21, all green in one pass: the `--codegen` audit above, the
+build-tree smoke, and the full `--wheel` pipeline — auditwheel-repaired
+`manylinux_2_34` wheel (the QtNetwork exclusion live in BOTH lists), smoke
++ qtmonaco parity run against the INSTALLED wheel with the repo off
+`sys.path`, single QtCore AND single QtNetwork in the maps pins. The JSON
+crossing pinned as the dict/primitive-type reality (amended paragraph
+above); `Monaco` and the parity file untouched, exactly as decided.
 
 ### DAP features (car 4)
 

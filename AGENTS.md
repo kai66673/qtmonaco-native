@@ -42,11 +42,18 @@ phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
   `src/glue/CMakeLists.txt` (a plain variable, NOT a nested `project()` —
   that would reset `PROJECT_VERSION` and poison the clientInfo contract) —
   it bumps ONLY when the shelf itself breaks, never in the package close
-  ritual.
+  ritual. **G3 made the shelf's semver real to Python users too** — the
+  wheel carries `qmn.LspHub`/`qmn.ProjectSession` (`qmn::glue 1.0.0`):
+  shelf breakage is now a wheel-visible story, not only a C++ one.
 - **Keep public view API Shiboken-wrappable**: `Q_OBJECT`, plain Qt types in
   params/returns, no C++ templates or STL types crossing the API boundary
-  (internals are unconstrained). The binding wraps only the **view** widget;
-  `core` stays QtCore-only and needs no Python type.
+  (internals are unconstrained). The binding wraps the **view** widget AND
+  (since G3) the **glue shelf's** public doors; `core`/`protocol`/`lsp`
+  stay C++-only and need no Python type. The wrappability rule now binds
+  the SHELF too: a new glue door that Python should reach speaks plain Qt
+  types — `std::function` callbacks and `qmn::lsp`/`qmn::protocol` types
+  in a signature drop the door SILENTLY (the G3 audit counted 16 such
+  drops); a Python-facing answer route needs a SIGNAL, not a callback.
 
 ## Hard rule: layering is contractual
 
@@ -254,7 +261,7 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
   `wheel` job): `pip wheel` → `auditwheel repair --plat manylinux_2_34_x86_64`
   → smoke + parity against the *repaired* wheel with the repo off `sys.path`;
   `--codegen` — run the generator alone and print the generated files plus
-  `mjb_rejected_functions.log`. **After adding public view API, run
+  `mjb_rejected_functions.log`. **After adding public view/GLUE API, run
   `--codegen` and check the rejected log** — silently dropped functions never
   reach Python. Set `REBUILD_IMAGE=1` to rebuild the (slow) image.
 - **Bound-type lists live in THREE copies and must stay in sync:** the
@@ -276,7 +283,21 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
   M8 m6's `CompletionItem`/`HoverRange` popup payloads) and every nested
   enum (M8 m7 added NO new type — its doors are plain
   `QString`/`QStringList` on the already-bound `CodeEditor`, so the three
-  copies were untouched); only `PerfStats` and the
+  copies were untouched). **Since G3 the shelf crosses too** (all THREE
+  copies grew glue entries): `qmn::glue::LspHub` +
+  `qmn::glue::ProjectSession` — PUBLIC ctors, unlike the editor-owned view
+  QObjects, the app builds and owns them — and the nested
+  `LspHub::ServerSpec` record. The shelf half Shiboken can't translate
+  drops BY TYPE ABSENCE (no remove rules): the eight `request*`/
+  `resolveCompletionItem` feature doors (`FeatureHandler` = std::function)
+  + `setTransportFactory`, the `syncerFor`/`clientFor*` returners
+  (`qmn::lsp`/`protocol` types stay unbound — wrapping them would drag the
+  whole protocol closure in), and the four `apply*` doors (the defaulted
+  `LspClient*` tail). Those 16 must be EXACTLY what the rejected log shows
+  beyond the usual Qt/tr noise — the post-codegen audit checks it.
+  `RpcClient::Reply` stays unbound (its only carriers were the callbacks);
+  `QJsonObject`/`QJsonValue` cross as DIRECT params/members for the first
+  time — smoke-pinned, never assumed. Otherwise only `PerfStats` and the
   SlotEdit/UndoMark/std::function machinery stay unbound by design.
 - **Pins are load-bearing:** `PySide6-Essentials==6.12.0` /
   `shiboken6_generator==6.12.0` at build time, `~=6.12.0` at runtime — the
@@ -298,16 +319,20 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
 - **One Qt at runtime:** a `DT_NEEDED libQt6Core.so.6` resolves to the
   already-loaded PySide6-bundled Qt, but `dlopen()` *by path* would load a
   second copy. Never load Qt by absolute path, never ship Qt libs beside the
-  extension; the wheel smoke asserts one `libQt6Core` in `/proc/self/maps`.
+  extension; the wheel smoke asserts one `libQt6Core` (and since G3 one
+  `libQt6Network` — the shelf drags protocol's `TcpTransport`) in
+  `/proc/self/maps`.
 - **Auditwheel exclude lists live in two places and must stay in sync:**
   `build_in_container.sh --wheel` and `[tool.cibuildwheel.linux]
   repair_command` in `pyproject.toml`. The cibuildwheel config is the *future*
   PyPI flow (its before-all Qt bootstrap is missing); the container pipeline
   is what ships.
 - Wheel layout: `_qmn.abi3.so` at site-packages root + pure-Python `qmn/`
-  shim (`bindings/python/qmn/__init__.py`) which **imports `PySide6.QtWidgets`
-  before `_qmn`** (the wrapper resolves its `QWidget` base through shiboken's
-  converter registry at import).
+  shim (`bindings/python/qmn/__init__.py`) which **imports
+  `PySide6.QtWidgets` and `PySide6.QtNetwork` before `_qmn`** (the wrapper
+  resolves its `QWidget` base through shiboken's converter registry at
+  import; the QtNetwork DT_NEEDED the G3 shelf adds must resolve against
+  the ALREADY-LOADED bundled Qt — QtWidgets does not load it on its own).
 - The qtmonaco drop-in class `qmn.Monaco` lives **in the Python shim only**:
   qtmonaco is **1-based** (`set_cursor`, `delete_line`, `set_highlighted_lines`,
   `insert_text`) while C++ `TextPosition` is 0-based — the conversion is done

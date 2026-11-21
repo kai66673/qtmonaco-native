@@ -30,6 +30,20 @@
     * the nested enums - written explicitly rather than relying on the
       generator's automatic enum pickup, so the audit trail in
       mjb_rejected_functions.log stays about the deliberately unbound parts.
+    * since G3 the GLUE shelf too (PLAN "G3 design pass"): ProjectSession
+      ENTIRELY and LspHub minus its drop list. The dropped half needs no
+      remove rules at all - it is the machinery the typesystem already
+      drops by type absence (AGENTS: "the std::function machinery stays
+      unbound by design"): setTransportFactory, the eight request*/
+      resolveCompletionItem feature doors (their FeatureHandler arg), the
+      three syncerFor/clientFor* returners (qmn::lsp types stay unbound -
+      wrapping them would drag the protocol closure in for no Python use)
+      and the four apply* doors (the defaulted LspClient* tail). All 16
+      land in mjb_rejected_functions.log; auditing that log against this
+      list is the mandatory post-codegen ritual. RpcClient::Reply stays
+      unbound too: with the callbacks gone it has no door to travel in.
+      The JSON crossing (QJsonObject/QJsonValue as DIRECT params) is new
+      to the wheel - pinned live by the smoke, not assumed.
 
   Deliberately not bound: PerfStats (the per-keystroke latency counters - a
   bench-harness detail, not editor API), so perfStats() drops by itself (its
@@ -134,6 +148,27 @@
             <enum-type name="Role"/>
             <enum-type name="Preset"/>
             <modify-function signature="CodeEditorTheme(qmn::view::CodeEditor*,QObject*)" remove="all"/>
+        </object-type>
+      </namespace-type>
+
+      <!-- G3: the glue shelf (src/glue, exported qmn::glue). Both ctors
+           stay Python-visible (the app builds a hub/session - unlike the
+           editor-owned view QObjects); the session<->hub pointers are raw
+           NON-owning with destroyed() hooks, so GC order is safe. No
+           remove rules: the drop list vanishes by type absence and lands
+           in the rejected log (see the header comment). -->
+      <namespace-type name="glue">
+        <object-type name="LspHub">
+            <include file-name="glue/LspHub.hpp" location="global"/>
+            <!-- The matrix record: name/program/args/languages fields plus
+                 the initializeTemplate QJsonObject member - PINNED: PySide6
+                 6.12 declares QJsonObject a primitive type, the Python dict
+                 IS the JSON object (deep both directions, members included). -->
+            <value-type name="ServerSpec"/>
+        </object-type>
+
+        <object-type name="ProjectSession">
+            <include file-name="glue/ProjectSession.hpp" location="global"/>
         </object-type>
       </namespace-type>
     </namespace-type>

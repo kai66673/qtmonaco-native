@@ -48,6 +48,7 @@ mkdir -p /tmp/gen
   /work/src/view/CodeEditor.hpp /work/src/view/CodeEditorOptions.hpp \
   /work/src/view/CodeDocument.hpp \
   /work/src/view/CodeEditorTheme.hpp \
+  /work/src/glue/LspHub.hpp /work/src/glue/ProjectSession.hpp \
   /work/bindings/typesystem_qmn.xml
 echo "=== generated files ==="
 find /tmp/gen -type f | sort
@@ -96,6 +97,7 @@ mkdir -p /work/dist/repaired && rm -f /work/dist/repaired/*.whl
 auditwheel repair --plat manylinux_2_34_x86_64 -w /work/dist/repaired \
     --exclude libQt6Core.so.6 --exclude libQt6Gui.so.6 \
     --exclude libQt6Widgets.so.6 --exclude libQt6DBus.so.6 \
+    --exclude libQt6Network.so.6 \
     --exclude libpyside6.abi3.so.6.12 --exclude libshiboken6.abi3.so.6.12 \
     --exclude libGLX.so.0 --exclude libOpenGL.so.0 \
     "$RAW"

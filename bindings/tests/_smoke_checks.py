@@ -145,6 +145,87 @@ def run_checks() -> int:
     print(f"QtCore:     {sorted(copies)}")
     assert len(copies) == 1, f"more than one QtCore in the process: {sorted(copies)}"
 
+    # --- G3 glue shelf: the wheel's FIRST types beyond the view -------------
+    # The risky crossings (PLAN "G3 design pass"): QJsonObject/QJsonValue as
+    # DIRECT params and ServerSpec's QJsonObject member - JSON has NEVER
+    # crossed this wheel before, these pins are why. PINNED REALITY
+    # (2026-11-21 run): PySide6 6.12's own typesystem declares QJsonObject a
+    # PRIMITIVE type - the Python DICT is the JSON object. No QJsonObject
+    # class exists to import at all (QJsonArray/QJsonValue/QJsonDocument do);
+    # the generated doors convert dict <-> dict DEEPLY, both directions and
+    # through struct members. The shim fallback the design pass sketched is
+    # NOT needed. Same NO-SERVER discipline as tst_glue: only languages NO
+    # built-in spec claims get opened (the container has no clangd; a
+    # claimed open could only lazy-start into failure).
+    hub = qmn.LspHub()
+    session = qmn.ProjectSession()
+    session.attachHub(hub)
+    assert session.hub() is hub  # the raw NON-owning pointer crosses back
+    assert hub.specNameForLanguage("cpp") == "clangd"  # the built-in pin
+
+    # Honest absence (the G3 drop list): the std::function feature doors and
+    # the unbound-type doors never reached Python - AttributeError on the
+    # class, never a silent no-op.
+    for missing in ("requestHover", "requestCompletion", "requestRename",
+                    "setTransportFactory", "clientForSpec", "syncerFor",
+                    "applyWorkspaceEdit"):
+        assert not hasattr(hub, missing), f"dropped door crossed: {missing}"
+
+    # JSON IN: the config body travels as a plain dict (the primitive-type
+    # pin; the design pass expected to build QJsonObject by ctor calls -
+    # better reality, pinned not assumed).
+    assert session.loadConfigFromJson({"languages": {"g3ext": "json"}}) is True
+    assert session.languageForSuffix("g3ext") == "json"
+    assert session.loadConfigFromJson({}) is False  # the empty body door too
+
+    # ServerSpec: the nested record, and its QJsonObject member both ways -
+    # a dict IN (primitive-type pin) and the whole spec back OUT as a dict
+    # through the serverSpec pin door (name/program/args/languages/
+    # initializeTemplate keys, deep values).
+    spec = qmn.LspHub.ServerSpec()
+    spec.name = "g3server"
+    spec.program = "g3-echo"
+    spec.languages = ["g3lang"]
+    spec.initializeTemplate = {"initializationOptions": {"g3": True}}
+    hub.setServerSpec(spec)
+    assert hub.specNameForLanguage("g3lang") == "g3server"
+    pinned = hub.serverSpec("g3server")
+    assert isinstance(pinned, dict), type(pinned)
+    assert pinned["program"] == "g3-echo", pinned
+    assert pinned["languages"] == ["g3lang"], pinned
+    assert pinned["initializeTemplate"] == {
+        "initializationOptions": {"g3": True}}, pinned
+
+    # The one-call open on an UNCLAIMED language: session-side registration,
+    # the hub's documented false no-op, triggers stay DISARMED (the hub never
+    # accepted the document). Path door normalizes to the file:// uri key.
+    other = qmn.CodeEditor()
+    opened, closed_uris = [], []
+    session.documentOpened.connect(opened.append)
+    session.documentClosed.connect(closed_uris.append)
+    assert session.openDocument(other, "/tmp/g3-smoke/unclaimed.py") is True
+    assert opened == ["file:///tmp/g3-smoke/unclaimed.py"], opened
+    assert other.language() == "python"
+    assert session.openCount() == 1
+    assert session.openUris() == ["file:///tmp/g3-smoke/unclaimed.py"]
+    assert session.languageForUri("/tmp/g3-smoke/unclaimed.py") == "python"
+    assert session.editorForUri("file:///tmp/g3-smoke/unclaimed.py") is other
+    assert session.popupsOnOpen() is True
+    assert hub.popupTriggersEnabled(other) is False  # never accepted, never armed
+    assert session.closeUri("file:///tmp/g3-smoke/unclaimed.py") is True
+    assert session.openCount() == 0
+    assert closed_uris == ["file:///tmp/g3-smoke/unclaimed.py"], closed_uris
+    session.closeDocument(other)  # unregistered now: the silent no-op
+    assert closed_uris == ["file:///tmp/g3-smoke/unclaimed.py"], closed_uris
+
+    # The hub relays cross as ordinary PySide signals (the answer route
+    # clientForSpec()->respond... is C++-only - documented).
+    assert hasattr(hub, "serverShowMessage") and hasattr(hub, "applyEditRefused")
+
+    network = loaded_libs("libQt6Network.so")
+    print(f"QtNetwork:  {sorted(network)}")
+    assert len(network) == 1, f"more than one QtNetwork in the process: {sorted(network)}"
+
     app.processEvents()
     print("OK: qmn binding smoke test passed")
     return 0

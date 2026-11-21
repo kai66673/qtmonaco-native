@@ -41,7 +41,7 @@ elseif(DEFINED ENV{QTDIR})
     list(APPEND CMAKE_PREFIX_PATH "$ENV{QTDIR}")
 endif()
 
-find_package(Qt6 6.12 REQUIRED COMPONENTS Core Gui Widgets)
+find_package(Qt6 6.12 REQUIRED COMPONENTS Core Gui Widgets Network)
 find_package(Shiboken6 REQUIRED)
 find_package(Shiboken6Tools REQUIRED)
 find_package(PySide6 REQUIRED)
@@ -79,14 +79,24 @@ set(_generated
     "${_gen_dir}/qmn_view_codeeditor_foldrange_wrapper.cpp"
     "${_gen_dir}/qmn_view_codeeditor_textedit_wrapper.cpp"
     "${_gen_dir}/qmn_view_codeeditor_completionitem_wrapper.cpp"
-    "${_gen_dir}/qmn_view_codeeditor_hoverrange_wrapper.cpp")
+    "${_gen_dir}/qmn_view_codeeditor_hoverrange_wrapper.cpp"
+    # G3 (the first growth beyond the view): the glue shelf TUs. These names
+    # were PREDICTED from the established pattern and CONFIRMED against the
+    # 2026-11-21 --codegen file list (AGENTS: the 1.6.1 drift configure-
+    # errors, the 1.7.0 drift configures CLEAN and only explodes at import
+    # with "undefined symbol: init_qmn_glue_..." - the confirmation ritual
+    # is what makes either drift impossible).
+    "${_gen_dir}/qmn_glue_wrapper.cpp"
+    "${_gen_dir}/qmn_glue_lsphub_wrapper.cpp"
+    "${_gen_dir}/qmn_glue_lsphub_serverspec_wrapper.cpp"
+    "${_gen_dir}/qmn_glue_projectsession_wrapper.cpp")
 
 # The macro forwards -I only for the listed QT_MODULES, and Qt6::Widgets'
 # interface carries [include, include/QtWidgets]; CodeEditor.hpp itself includes
 # <QElapsedTimer>/<QString>/<QPointF>, so Core and Gui dirs are added too.
 # Each -I must be its own option, so build one "-I<dir>" entry per directory.
 set(_qmn_qt_incs "")
-foreach(_mod Core Gui Widgets)
+foreach(_mod Core Gui Widgets Network)
     get_target_property(_incs Qt6::${_mod} INTERFACE_INCLUDE_DIRECTORIES)
     foreach(_dir ${_incs})
         list(APPEND _qmn_qt_incs "-I${_dir}")
@@ -100,11 +110,17 @@ shiboken_generator_create_binding(
     # Every binding-header is handed to the parser explicitly (not relying on
     # CodeEditor.hpp's includes): CodeEditorOptions.hpp, CodeDocument.hpp and
     # CodeEditorTheme.hpp are each reachable that way, but naming them keeps
-    # the generated set independent of those includes.
+    # the generated set independent of those includes. G3 adds the two glue
+    # headers; the parser also SEES lsp/LspClient.hpp transitively (the hub
+    # header includes it for the Reply typedef) - seeing an unlisted type is
+    # harmless, only LISTED types are generated (the 1.6.1 lesson runs the
+    # other direction: listed without a header errors).
     HEADERS           "${PROJECT_SOURCE_DIR}/src/view/CodeEditor.hpp"
                       "${PROJECT_SOURCE_DIR}/src/view/CodeDocument.hpp"
                       "${PROJECT_SOURCE_DIR}/src/view/CodeEditorOptions.hpp"
                       "${PROJECT_SOURCE_DIR}/src/view/CodeEditorTheme.hpp"
+                      "${PROJECT_SOURCE_DIR}/src/glue/LspHub.hpp"
+                      "${PROJECT_SOURCE_DIR}/src/glue/ProjectSession.hpp"
     GENERATED_SOURCES ${_generated}
     QT_MODULES        Widgets
     SHIBOKEN_EXTRA_OPTIONS
@@ -114,6 +130,14 @@ shiboken_generator_create_binding(
         -I${QMN_SITE_PACKAGE}/PySide6/include/PySide6
         ${_qmn_qt_incs}
 )
+
+# G3 static absorption (PLAN): the glue shelf - and through it lsp/protocol/
+# core/diff - rides INTO the one _qmn.abi3.so (the view/core precedent, no
+# runtime .so proliferation). QtNetwork joins the link through qmn_lsp's
+# PUBLIC Qt6::Network (protocol's TcpTransport); its DT_NEEDED soname is
+# auditwheel-excluded and satisfied by the PySide6-bundled Qt, which the
+# shim preloads (import PySide6.QtNetwork before _qmn - the one-Qt rule).
+target_link_libraries(_qmn PRIVATE qmn_glue)
 
 target_include_directories(_qmn PRIVATE "${_gen_dir}")
 # The macro adds <PySide6 include>/QtWidgets (the one QT_MODULES entry), but the
