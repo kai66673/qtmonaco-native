@@ -14,8 +14,10 @@
 // adapter (tests/dapfake), keeping every D1 slot and the test-local codec
 // untouched — the D1 slots keep proving the MECHANISM is policy-free.
 //
-// Guiless for now (D3 will drag real editors in and flip the main to
-// QTEST_MAIN + offscreen, like tst_lsp's machine 4 did).
+// Guiless no more: machine D3 landed the DapHub slots over REAL editors
+// and flipped the main to QTEST_MAIN + offscreen, exactly as tst_lsp's
+// machine 4 predicted. The D1/D2 slots keep their shape untouched — D3
+// only APPENDS hub machines (and one test-side spawn/exit helper).
 
 #include <QtTest>
 
@@ -34,15 +36,23 @@
 
 #include "dap/DapClient.hpp"
 #include "dap/DapCodec.hpp"
+#include "glue/DapHub.hpp"
+#include "glue/ProjectSession.hpp"
 #include "protocol/EnvelopeCodec.hpp"
 #include "protocol/JsonFraming.hpp"
 #include "protocol/JsonRpcCodec.hpp"
 #include "protocol/ProcessTransport.hpp"
 #include "protocol/RpcClient.hpp"
 #include "protocol/TcpTransport.hpp"
+#include "view/CodeDocument.hpp"
+#include "view/CodeEditor.hpp"
 
 using namespace qmn::protocol;
 using namespace qmn::dap;
+using qmn::glue::DapHub;
+using qmn::glue::ProjectSession;
+using qmn::view::CodeDocument;
+using qmn::view::CodeEditor;
 
 namespace {
 
@@ -328,6 +338,36 @@ struct DapHarness {
     int exitCodeOf(int index) const
     {
         return index < spawned.size() ? spawned.at(index).exitCode : -1;
+    }
+};
+
+// D3's spawn/exit oracle for the HUB slots: the DapHarness idea moved onto
+// the hub's transport-factory seam (the hub builds its own client, so the
+// test injects there — the very seam the D3 header promises stays honest).
+// LIFETIME RULE: declare this BEFORE the hub it installs onto — the hub's
+// dtor pump may still fire a closed() lambda, and it must find the record
+// alive. The dapfake far-side audits (exit codes 2/3) carry the rest.
+struct HubSpawns {
+    QVector<int> exitCodes; // one entry per spawn, -1 until recorded
+
+    void install(DapHub& hub)
+    {
+        hub.setTransportFactory([this](const QString& program, const QStringList& args,
+                                       QObject* parent) -> Transport* {
+            auto* transport = new ProcessTransport(program, args, parent);
+            exitCodes.append(-1);
+            const int index = exitCodes.size() - 1;
+            QObject::connect(transport, &Transport::closed, transport,
+                             [this, index, transport] {
+                                 exitCodes[index] = transport->exitCode();
+                             });
+            return transport;
+        });
+    }
+
+    int exitCodeOf(int index) const
+    {
+        return index < exitCodes.size() ? exitCodes.at(index) : -1;
     }
 };
 
@@ -1285,9 +1325,334 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(h.client->state(), DapClient::State::Stopped, 5000);
         QTRY_COMPARE_WITH_TIMEOUT(h.exitCodeOf(0), 0, 5000);
     }
+
+    // ================================================== machine D3: the hub
+    // The DapHub over REAL editors (offscreen), dapfake as the far side, and
+    // the HubSpawns seam as the near-side spawn/exit oracle. Every slot ends
+    // with the far-side contract dapfake reads (a wire lie exits 2, a hang
+    // exits 3) — the same two-oracle sandwich tst_lsp's hub machines ride.
+
+    void dapHubRefusesEverythingWithoutAnAdapter()
+    {
+        // The no-session honesty sweep (no process is ever spawned here —
+        // and the absence itself is pinned by every door's return):
+        DapHub hub;
+        qmn::view::CodeEditor ed; // NO document uri, NO project attached
+
+        QVERIFY(!hub.setBreakpoints(&ed, {0})); // a breakpoint needs an identity
+        QVERIFY(hub.requestedBreakpoints(&ed).isEmpty());
+        QVERIFY(hub.breakpointMap(&ed).isEmpty());
+        QCOMPARE(hub.client(), nullptr);
+        QVERIFY(!hub.isDebugging());
+        QVERIFY(!hub.isReady());
+        QVERIFY(hub.adapterCapabilities().isEmpty());
+
+        hub.configurationDone(); // honest no-ops on a session-less hub:
+        hub.stopDebugging();
+        QVERIFY(!hub.terminateDebugging());
+        QCOMPARE(hub.request(QStringLiteral("ping"),
+                             QJsonValue(QJsonValue::Undefined)), qint64(-1));
+        QVERIFY(!hub.startDebugging(QString())); // an empty program refuses
+        hub.attachProject(nullptr);              // legal: QPointer unattach
+    }
+
+    void dapHubBreakpointsVerifyMoveResendAndClear()
+    {
+        ProjectSession project;
+        CodeEditor ed;
+        const QString path = QStringLiteral("/dapfake/project/prog.cpp");
+        QVERIFY(project.openDocument(&ed, path));
+        ed.setPlainText(QStringLiteral("line one\nline two\nline three\n"
+                                       "line four\nline five\nline six\n"
+                                       "line seven\nline eight\nline nine\n"
+                                       "line ten\nline eleven\nline twelve\n"));
+
+        HubSpawns spawns; // BEFORE the hub (the dtor-pump lifetime rule)
+        DapHub hub;
+        spawns.install(hub);
+        hub.attachProject(&project);
+
+        QSignalSpy startedSpy(&hub, &DapHub::sessionStarted);
+        QSignalSpy endedSpy(&hub, &DapHub::sessionEnded);
+        QStringList relayedNames;
+        QObject::connect(&hub, &DapHub::dapEvent,
+                         [&relayedNames](const QString& name, const QJsonValue&) {
+                             relayedNames.append(name);
+                         });
+
+        auto dapDiag = [&ed](int line, const QString& needle) {
+            for (const CodeEditor::Diagnostic& d : ed.diagnostics())
+                if (d.startLine == line && d.source == QLatin1String("dap")
+                    && d.severity == CodeEditor::Severity::Warning
+                    && d.message.contains(needle))
+                    return true;
+            return false;
+        };
+
+        // The store-BEFORE-ready half of the door: setBreakpoints lands its
+        // truth now, the wire push rides the ready() re-push:
+        QVERIFY(hub.setBreakpoints(&ed, {2, 4, 8})); // wire lines 3, 5, 9
+        QCOMPARE(hub.requestedBreakpoints(&ed), (QVector<int>{2, 4, 8}));
+        QVERIFY(ed.breakpointLines().isEmpty()); // nothing painted pre-ready
+
+        QVERIFY(hub.startDebugging(QString::fromLatin1(QMN_TEST_DAP_SERVER),
+                                   {QStringLiteral("breakpoints"), path},
+                                   QJsonObject{{QStringLiteral("program"),
+                                               QStringLiteral("/bin/true")}},
+                                   QStringLiteral("dapfake")));
+        QVERIFY(hub.isDebugging());
+        // ONE session at a time (the PLAN shape): a second start refuses —
+        // dapfake never sees a double handshake (its seq audit would exit 2):
+        QVERIFY(!hub.startDebugging(QString::fromLatin1(QMN_TEST_DAP_SERVER),
+                                    {QStringLiteral("breakpoints"), path},
+                                    QJsonObject{}, QStringLiteral("dapfake")));
+        QTRY_COMPARE_WITH_TIMEOUT(startedSpy.count(), 1, 30000);
+        QVERIFY(hub.isReady());
+
+        // The capabilities PROXY (dapfake says configurationDone is NOT
+        // supported, explicitly): the door must stay SILENT — a stray
+        // configurationDone exits 2 far-side, so the exit-0 below pins it.
+        QVERIFY(hub.adapterCapabilities()
+                    .contains(QStringLiteral("supportsConfigurationDoneRequest")));
+        QVERIFY(!hub.adapterCapabilities()
+                    .value(QStringLiteral("supportsConfigurationDoneRequest")).toBool());
+        hub.configurationDone();
+
+        QTRY_VERIFY_WITH_TIMEOUT(relayedNames.contains(QStringLiteral("breakpoint")), 5000);
+
+        // The re-push landed on Ready AND the id-keyed `breakpoint` EVENT
+        // (dapfake pulls the first call's FIRST id = wire 3 = model 2) lands
+        // in the same frame batch — the "all verified" intermediate NEVER
+        // settles, so the slot pins the MERGED post-event truth: wire 9
+        // VERIFIED-MOVED to 11 (dot on model 10, DESIRED 8 in the map),
+        // wire 5 unverified ("cannot stop"), model 2's dot PULLED AWAY by
+        // the event (second Warning), the DESIRED store untouched:
+        QTRY_VERIFY_WITH_TIMEOUT(dapDiag(4, QStringLiteral("cannot stop on line 5"))
+                                     && dapDiag(2, QStringLiteral("pulled the dot")), 5000);
+        QCOMPARE(ed.breakpointLines(), (QVector<int>{10}));
+        QCOMPARE(ed.diagnostics().size(), 2); // only the two unverified rows
+        const QMap<int, int> moved = hub.breakpointMap(&ed);
+        QCOMPARE(moved.value(8), 10); // the desired->ACTUAL map
+        QCOMPARE(moved.size(), 1);    // unverified (5) AND pulled (2) stay OUT
+        QCOMPARE(hub.requestedBreakpoints(&ed), (QVector<int>{2, 4, 8}));
+
+        // The LINE-ANCHORED resend: editing the bound document re-pushes
+        // through the kBreakpointResendMs debounce; dapfake's pass-2 message
+        // is the far-side proof the SECOND setBreakpoints really arrived
+        // (and dapfake exits 2 if the disconnect ever outran it):
+        ed.setPlainText(ed.toPlainText() + QStringLiteral("// touched\n"));
+        QTRY_VERIFY_WITH_TIMEOUT(
+            dapDiag(4, QStringLiteral("pass 2"))
+                && ed.breakpointLines() == (QVector<int>{2, 10}), 5000);
+
+        // The legal CLEAR: an empty array answers an empty array — every
+        // dap decoration goes, the store empties, the DAP ids die:
+        QVERIFY(hub.setBreakpoints(&ed, {}));
+        QTRY_VERIFY_WITH_TIMEOUT(ed.breakpointLines().isEmpty()
+                                     && ed.diagnostics().isEmpty(), 5000);
+        QVERIFY(hub.requestedBreakpoints(&ed).isEmpty());
+        QVERIFY(hub.breakpointMap(&ed).isEmpty());
+
+        // The stop door rides the disconnect barrier; the clean-stop edge
+        // (DapClient::stopped) is what carries sessionEnded("stopped"):
+        hub.stopDebugging();
+        QTRY_COMPARE_WITH_TIMEOUT(endedSpy.count(), 1, 5000);
+        QCOMPARE(endedSpy.at(0).at(0).toString(), QStringLiteral("stopped"));
+        QVERIFY(!hub.isDebugging());
+        QTRY_COMPARE_WITH_TIMEOUT(spawns.exitCodeOf(0), 0, 5000); // dapfake's
+        // contract: handshake order + the launch audit + >=2 setBreakpoints
+        // calls + no stray configurationDone — ALL paid with this exit 0.
+    }
+
+    void dapHubStoppedFeedPaintsStackAndValueHints()
+    {
+        ProjectSession project;
+        CodeEditor ed;
+        const QString path = QStringLiteral("/dapfake/project/main.cpp");
+        QVERIFY(project.openDocument(&ed, path));
+        ed.setPlainText(QStringLiteral("top line\n"
+                                       "    int y = 8\n"
+                                       "    return x + y\n"
+                                       "bottom line\n"));
+
+        HubSpawns spawns;
+        DapHub hub;
+        spawns.install(hub);
+        hub.attachProject(&project);
+        QSignalSpy startedSpy(&hub, &DapHub::sessionStarted);
+        QSignalSpy endedSpy(&hub, &DapHub::sessionEnded);
+        QSignalSpy stoppedSpy(&hub, &DapHub::debugStopped);
+        QSignalSpy continuedSpy(&hub, &DapHub::debugContinued);
+        QSignalSpy unresolvedSpy(&hub, &DapHub::sourceUnresolved);
+
+        // The frame arrives at 1-based line 3 / column 6 (argv-pinned):
+        QVERIFY(hub.startDebugging(QString::fromLatin1(QMN_TEST_DAP_SERVER),
+                                   {QStringLiteral("steps"), path,
+                                    QStringLiteral("3"), QStringLiteral("6")},
+                                   QJsonObject{{QStringLiteral("name"),
+                                               QStringLiteral("tst")}},
+                                   QStringLiteral("dapfake")));
+        QTRY_COMPARE_WITH_TIMEOUT(startedSpy.count(), 1, 30000);
+        QVERIFY(hub.adapterCapabilities()
+                    .value(QStringLiteral("supportsTerminateRequest")).toBool());
+
+        // The EXPLICIT configurationDone (caps say true here): dapfake
+        // answers and fires the `stopped` event (threadId 7).
+        hub.configurationDone();
+        QTRY_COMPARE_WITH_TIMEOUT(stoppedSpy.count(), 1, 5000);
+        QCOMPARE(stoppedSpy.at(0).at(0).toInt(), 7); // the v1 single-thread leg
+        QCOMPARE(stoppedSpy.at(0).at(1).toString(), QStringLiteral("breakpoint"));
+
+        // The stack feed on the RESOLVED editor (the ONLY frame-resolution
+        // route is the G2 uri map — no disk was touched, the path is a
+        // virtual /dapfake/... path nothing can open):
+        QTRY_COMPARE_WITH_TIMEOUT(ed.highlightedLinesStart(), 2, 5000); // the band
+        QCOMPARE(ed.highlightedLinesEnd(), 2);
+        QCOMPARE(ed.position().line, 2); // frame (3, 6) 1-based -> model (2, 5)
+        QCOMPARE(ed.position().col, 5);
+        QCOMPARE(unresolvedSpy.count(), 0);
+
+        // The value hints: the FIRST top scope only (scope 22 is POISONED —
+        // dapfake exits 2 if it is ever asked, so a wrong-scope feed dies
+        // at the exit code, never as a printed "= WRONG"), first-occurrence
+        // per name (the duplicate "x"/WRONG-DUP never paints), no hint for
+        // names off the line (zzUnused), anchored at the word-END column:
+        QTRY_COMPARE_WITH_TIMEOUT(ed.inlayHints().size(), 2, 5000);
+        const QVector<CodeEditor::InlayHint> hints = ed.inlayHints();
+        QCOMPARE(hints.at(0).line, 2);
+        QCOMPARE(hints.at(0).col, 12); // one past "x"
+        QCOMPARE(hints.at(0).text, QStringLiteral(" = 42"));
+        QCOMPARE(hints.at(1).col, 16); // one past "y"
+        QCOMPARE(hints.at(1).text, QStringLiteral(" = 13"));
+
+        // `continued` (fired through the hub's request door as a raw DAP
+        // command) clears the band AND the hints:
+        QVERIFY(hub.request(QStringLiteral("continue"),
+                             QJsonValue(QJsonValue::Undefined)) >= 1);
+        QTRY_COMPARE_WITH_TIMEOUT(continuedSpy.count(), 1, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(ed.highlightedLinesStart(), -1, 5000);
+        QVERIFY(ed.inlayHints().isEmpty()); // cleared in the SAME call chain
+
+        // terminateDebugging: the capability is TRUE here, so the terminate
+        // REQUEST leads and the barrier follows (dapfake exits 2 if the
+        // disconnect ever outran terminate):
+        QVERIFY(hub.terminateDebugging());
+        QTRY_COMPARE_WITH_TIMEOUT(endedSpy.count(), 1, 5000);
+        QCOMPARE(endedSpy.at(0).at(0).toString(), QStringLiteral("stopped"));
+        QVERIFY(!hub.isDebugging());
+        QTRY_COMPARE_WITH_TIMEOUT(spawns.exitCodeOf(0), 0, 5000);
+    }
+
+    void dapHubUnresolvedFrameRelaysSourceAndFrame()
+    {
+        ProjectSession project;
+        CodeEditor ed;
+        QVERIFY(project.openDocument(&ed, QStringLiteral("/dapfake/project/other.cpp")));
+        ed.setPlainText(QStringLiteral("x = 1\n"));
+
+        HubSpawns spawns;
+        DapHub hub;
+        spawns.install(hub);
+        hub.attachProject(&project);
+        QSignalSpy startedSpy(&hub, &DapHub::sessionStarted);
+        QSignalSpy endedSpy(&hub, &DapHub::sessionEnded);
+        QSignalSpy unresolvedSpy(&hub, &DapHub::sourceUnresolved);
+
+        // steps mode with the BOGUS frame path: the session's open
+        // documents do NOT cover it — and the hub NEVER reads disk, NEVER
+        // opens anything of its own:
+        QVERIFY(hub.startDebugging(QString::fromLatin1(QMN_TEST_DAP_SERVER),
+                                   {QStringLiteral("steps"), QStringLiteral("BOGUS"),
+                                    QStringLiteral("1"), QStringLiteral("1")},
+                                   QJsonObject{}, QStringLiteral("dapfake")));
+        QTRY_COMPARE_WITH_TIMEOUT(startedSpy.count(), 1, 30000);
+        hub.configurationDone();
+
+        QTRY_COMPARE_WITH_TIMEOUT(unresolvedSpy.count(), 1, 5000);
+        const QJsonObject source = unresolvedSpy.at(0).at(0).toJsonObject();
+        const QJsonObject frame = unresolvedSpy.at(0).at(1).toJsonObject();
+        QVERIFY(source.value(QStringLiteral("path")).toString()
+                    .contains(QStringLiteral("definitely-not-open")));
+        QCOMPARE(frame.value(QStringLiteral("name")).toString(),
+                 QStringLiteral("dapfake-top"));
+        // Nothing was painted anywhere (the app's call to open an editor;
+        // the NEXT feed would resolve it — no silent I/O):
+        QCOMPARE(ed.highlightedLinesStart(), -1);
+        QVERIFY(ed.inlayHints().isEmpty());
+        QCOMPARE(ed.position().line, 0);
+
+        QVERIFY(hub.terminateDebugging());
+        QTRY_COMPARE_WITH_TIMEOUT(endedSpy.count(), 1, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(spawns.exitCodeOf(0), 0, 5000);
+    }
+
+    void dapHubTerminateWithoutCapabilityFallsBackToStop()
+    {
+        // basic mode's caps carry NO supportsTerminateRequest: the door
+        // answers the honest false AND still takes the plain barrier
+        // (dapfake answers the disconnect and exits 0 either way):
+        HubSpawns spawns;
+        DapHub hub;
+        spawns.install(hub);
+        QSignalSpy startedSpy(&hub, &DapHub::sessionStarted);
+        QSignalSpy endedSpy(&hub, &DapHub::sessionEnded);
+
+        QVERIFY(hub.startDebugging(QString::fromLatin1(QMN_TEST_DAP_SERVER),
+                                   {QStringLiteral("basic")}, QJsonObject{},
+                                   QStringLiteral("dapfake")));
+        QTRY_COMPARE_WITH_TIMEOUT(startedSpy.count(), 1, 30000);
+        QVERIFY(!hub.adapterCapabilities()
+                    .contains(QStringLiteral("supportsTerminateRequest")));
+
+        QVERIFY(!hub.terminateDebugging()); // the honest "no terminate here"...
+        QTRY_COMPARE_WITH_TIMEOUT(endedSpy.count(), 1, 5000); // ...and the
+        QCOMPARE(endedSpy.at(0).at(0).toString(), QStringLiteral("stopped")); // barrier rode anyway
+        QVERIFY(!hub.isDebugging());
+        QCOMPARE(hub.request(QStringLiteral("ping"),
+                             QJsonValue(QJsonValue::Undefined)), qint64(-1));
+        QTRY_COMPARE_WITH_TIMEOUT(spawns.exitCodeOf(0), 0, 5000);
+    }
+
+    void dapHubAdapterCrashClearsFeedsAndRelaysSessionEnded()
+    {
+        ProjectSession project;
+        CodeEditor ed;
+        QVERIFY(project.openDocument(&ed, QStringLiteral("/dapfake/project/dead.cpp")));
+        ed.setPlainText(QStringLiteral("alpha\nbeta\n"));
+
+        HubSpawns spawns;
+        DapHub hub;
+        spawns.install(hub);
+        hub.attachProject(&project);
+        QSignalSpy endedSpy(&hub, &DapHub::sessionEnded);
+
+        // A stored breakpoint (the ready() re-push would race the crash —
+        // whichever order the frames land in, the sessionGen_ guard makes
+        // the feed's final state deterministic once sessionEnded fires):
+        QVERIFY(hub.setBreakpoints(&ed, {1}));
+        QVERIFY(hub.startDebugging(QString::fromLatin1(QMN_TEST_DAP_SERVER),
+                                   {QStringLiteral("dead")}, QJsonObject{},
+                                   QStringLiteral("dapfake")));
+
+        // dead mode: dapfake _exit(7)s right after the handshake. The
+        // client's failed() merges into the hub's sessionEnded, feeds all
+        // cleared, and the DESIRED breakpoint truth survives the death —
+        // the next session's ready() re-pushes it (the recorded shape):
+        QTRY_COMPARE_WITH_TIMEOUT(endedSpy.count(), 1, 30000);
+        QVERIFY(!endedSpy.at(0).at(0).toString().isEmpty());
+        QVERIFY(!hub.isDebugging());
+        QVERIFY(!hub.isReady());
+        QVERIFY(ed.breakpointLines().isEmpty());
+        QVERIFY(ed.diagnostics().isEmpty()); // the feed EMPTIES on death — it
+        // never repaints as warnings: a dead session gets to say nothing
+        QCOMPARE(hub.requestedBreakpoints(&ed), (QVector<int>{1}));
+        QCOMPARE(hub.request(QStringLiteral("next"),
+                             QJsonValue(QJsonValue::Undefined)), qint64(-1));
+        QTRY_COMPARE_WITH_TIMEOUT(spawns.exitCodeOf(0), 7, 5000);
+    }
 };
 
-QTEST_GUILESS_MAIN(TstDap) // machine D1 is pure protocol; machine D3 (the
-                          // DapHub over real editors) will flip this to
-                          // QTEST_MAIN, like tst_lsp's machine 4 did
+QTEST_MAIN(TstDap) // machine D3 dragged real CodeEditors in, exactly as
+                   // tst_lsp's machine 4 predicted (ctest runs this entry
+                   // with QT_QPA_PLATFORM=offscreen)
 #include "tst_dap.moc"

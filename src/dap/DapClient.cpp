@@ -61,7 +61,10 @@ void DapClient::start(const QJsonObject& initializeArguments)
 void DapClient::stop()
 {
     if (!session_) {
+        const bool wasLive = state_ != State::Stopped;
         state_ = State::Stopped;
+        if (wasLive) // the stopped() edge is for a session that WAS live
+            emit stopped();
         return;
     }
     state_ = State::Stopping; // onGone() maps the eviction to Stopped
@@ -73,6 +76,7 @@ void DapClient::stop()
             session_->transport->stop();
         endSession();
         state_ = State::Stopped;
+        emit stopped();
         return;
     }
     session_->rpc->stop(); // the two-phase barrier: `disconnect` REQUEST
@@ -213,6 +217,9 @@ void DapClient::onGone()
     case State::Stopping:
         state_ = State::Stopped;
         endSession();
+        emit stopped(); // the clean-barrier terminal edge (D3 hub's feed
+                        // teardown rides this; unwanted death → Failed,
+                        // never here)
         return;
     case State::NotStarted:
     case State::Stopped:

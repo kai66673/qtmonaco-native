@@ -1,11 +1,16 @@
-# The glue shelf (G1 promotion, PLAN "The glue shelf + ProjectSession"):
-# the old src/app/glue hub, now a REAL layer and a REAL export. Layer rule
-# (the retired M8 amendment inverted): src/glue is a CLIENT of
-# core+view+protocol+lsp and knows NO app/demo type; app targets link this
-# target, and no glue type travels further. Tested by tst_lsp (the hub
-# machines ride that binary, the 5th ctest entry unchanged) and by the
+# The glue shelf (G1 promotion, PLAN "The glue shelf + ProjectSession";
+# D3, 2026-11-21, grew it into a qmn_dap CLIENT too — the shelf is now
+# LspHub + ProjectSession + DapHub): the old src/app/glue hub, now a REAL
+# layer and a REAL export. Layer rule (the retired M8 amendment inverted):
+# src/glue is a CLIENT of core+view+protocol+lsp+dap and knows NO app/demo
+# type; app targets link this target, and no glue type travels further.
+# Tested by tst_lsp (the hub machines ride that binary, the 5th ctest
+# entry unchanged), by tst_glue (ProjectSession over REAL editors), by
+# tst_dap (D3's DapHub slots ride the 7th entry) and by the
 # examples/consumer glue TU against the INSTALLED shelf.
 add_library(qmn_glue STATIC
+    DapHub.hpp
+    DapHub.cpp
     LspHub.hpp
     LspHub.cpp
     ProjectSession.hpp
@@ -13,7 +18,7 @@ add_library(qmn_glue STATIC
 target_include_directories(qmn_glue PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>
     $<INSTALL_INTERFACE:${CMAKE_INSTALL_INCLUDEDIR}/qmn>)
-target_link_libraries(qmn_glue PUBLIC qmn_view qmn_lsp)
+target_link_libraries(qmn_glue PUBLIC qmn_view qmn_lsp qmn_dap)
 # The initialize clientInfo version the hub announces rides the PACKAGE
 # version: the 1.8.0 close found a hand-maintained literal drifting (the
 # project() line still said 1.6.1 while pyproject rode 1.7.0), so this is
@@ -32,7 +37,8 @@ set(QMN_GLUE_VERSION 1.0.0)
 
 set_target_properties(qmn_glue PROPERTIES EXPORT_NAME glue)
 install(TARGETS qmn_glue EXPORT qmnGlueTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})
-install(FILES LspHub.hpp ProjectSession.hpp DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qmn/glue)
+install(FILES DapHub.hpp LspHub.hpp ProjectSession.hpp
+    DESTINATION ${CMAKE_INSTALL_INCLUDEDIR}/qmn/glue)
 
 # Second export set, SAME qmn:: namespace (qmn::glue): its targets carry
 # link refs to qmn::view/qmn::lsp/qmn::protocol from the qmnTargets set, so

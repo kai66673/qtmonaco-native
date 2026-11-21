@@ -1986,6 +1986,75 @@ by `startDebugging(...)`; a dap config shelf is scope creep until a real
 consumer shows up). The `setTransportFactory` seam mirrors LspHub's
 (C++-only, honest absence).
 
+**D3 BUILT 2026-11-21**: ctest 7/7 (the `dap` entry GREW to 31 slots =
+25 D1/D2 + 6 hub slots; the binary FLIPPED `QTEST_GUILESS_MAIN` →
+`QTEST_MAIN`, exactly as the D1 header-comment prediction and tst_lsp's
+machine-4 precedent said, and `tst_dap` now links `qmn_glue`). What the
+build settled:
+
+- The shelf's THIRD member is `src/glue/DapHub.{hpp,cpp}`;
+  `qmn_glue` PUBLIC-links `qmn_dap` (the header's `client()` door names
+  `qmn::dap::DapClient*`; that door stays C++-only, and the whole hub is
+  shiboken-shaped per the D4 record, `QMN_GLUE_VERSION` stayed 1.0.0).
+- Two PLAN names RENAMED at the door: `disconnect()` →
+  **`stopDebugging()`** (`disconnect` would shadow the QObject statics on
+  a QObject subclass — a hazard for every consumer, not a cosmetic
+  choice), and `terminate()` → **`terminateDebugging()`**; the design's
+  "gated + skipped per capability" became: the door answers the honest
+  FALSE when `supportsTerminateRequest` is absent/false AND still rides
+  the plain barrier (a terminate that silently did nothing would be the
+  worse lie); `configurationDone()` skips ONLY when
+  `supportsConfigurationDoneRequest` is EXPLICITLY false (absence =
+  send, the DAP spec's own default).
+- The caret leg uses **`CodeEditor::setPosition(TextPosition)`** — the
+  design said `setSelection(frame, frame)`, but `setSelection` is a
+  PRIVATE editor member (recon error); `setPosition` is the public caret
+  door and it keeps the ZERO-new-view-doors rule literal. The band,
+  dots, diags and hints ride the M5 doors unchanged.
+- One machine-caught bug worth its scar: the DAP `StackFrame` identity
+  field is **`id`**, not `frameId` (the REQUEST argument is the one
+  spelled frameId) — reading "frameId" off the frame would have silently
+  killed the value-hint leg.
+- `startDebugging(program, args, launchArgs, adapterId="dap")`: ONE
+  session at a time (any live state → honest false); launchArgs
+  auto-fills `request:"launch"` + `noDebug:false` only if absent; the
+  ready() leg sends `launch` FIRST, then re-pushes stored breakpoints,
+  then fires `sessionStarted` — so store-BEFORE-start is a legal order.
+  `adapterCapabilities()` is a PROXY to the client (no mirrored bag, no
+  re-store drift); `terminated` clears every feed + relays
+  `sessionEnded("terminated")` but leaves the CLIENT Ready (v1 split:
+  the app decides stop-vs-relaunch); adapter death merges into
+  `sessionEnded` and `clearAllFeeds` EMPTIES the feed — it does NOT
+  repaint dots as warnings (a dead session gets to say nothing; the
+  DESIRED breakpoint truth survives for the next session's re-push).
+  Two generation guards: `sessionGen_` (every in-flight reply drops on
+  start/adapter-gone) and `stopGen_` (stackTrace→scopes→variables chains
+  drop on stopped/continued/death — the chains are three legs deep and
+  the old tests never had chains).
+- `dapfake` GREW the two planned modes: **`breakpoints`** (explicit
+  `supportsConfigurationDoneRequest:false` skip-pin, the launch
+  spec-fill audit, the uri→localPath `source.path` equality pin, the
+  move pin 9→11, the unverified-with-message pin, the id-keyed
+  `breakpoint` EVENT, the pass-2 resend oracle + a disconnect that
+  exits 2 if the edit-resend never arrived) and **`steps`** (terminate
+  caps pair, the `configurationDone`→`stopped`(threadId 7) leg, the
+  stack chain audits, the SECOND-scope POISON reference that exits 2
+  far-side so a wrong-scope feed can never print tst-side, the first-
+  wins duplicate pin, the BOGUS-source `sourceUnresolved` pin, and a
+  disconnect that exits 2 unless `terminate` led). One generic `launch`
+  arm was added for the OLD modes: the hub ALWAYS fires launch at Ready,
+  so basic/dead/events/reverse/cancelreq now answer it ok (the strict
+  audits live only in the two D3 modes).
+- Tests ride REAL offscreen editors with VIRTUAL `/dapfake/...` paths
+  registered through `ProjectSession::openDocument` — ZERO disk touched
+  (the tst_glue precedent), and the near-side spawn/exit oracle moved
+  onto the hub's `setTransportFactory` seam (`HubSpawns`, declared
+  BEFORE the hub: the dtor pump may still fire a closed() lambda). One
+  honest note: dapfake's first-call `breakpoint` event lands in the SAME
+  frame batch as the setBreakpoints reply, so the slot pins the MERGED
+  post-event truth (dots `{10}`, two Warnings, map `{8→10}`) instead of
+  a never-settling intermediate.
+
 **D4 — the demo door + the close ritual.** qmn-demo grows `--dap
 <adapter-program> [args…]` — GENERIC by design (this host ships
 `lldb-dap` AND gdb 18.1 `-i=dap`, so a real adapter is one flag away);

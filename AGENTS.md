@@ -90,7 +90,10 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
   the old `src/app/glue/` became a REAL layer — `src/glue/` is a CLIENT of
   core+view+protocol+lsp (D3 grows it into a `qmn_dap` client too),
   QtCore/QtWidgets, exported as `qmn::glue`; it
-  knows NO app/demo type, and the DAP glue of car 4 lands ON this shelf).
+  knows NO app/demo type, and the DAP glue of car 4 lands ON this shelf
+  (D3 2026-11-21: `DapHub` joined the shelf as its third member —
+  LspHub + ProjectSession + DapHub; `qmn_glue` PUBLIC-links `qmn_dap`
+  because the hub header names a `DapClient*` door)).
   **M10 amendment (decided
   2026-11-16): `qmn_view` PRIVATE-links `qmn::diff`** — the pure line-diff
   layer is QtCore-only like core, not a network layer; no diff type crosses
@@ -190,12 +193,14 @@ machine by machine through M8, no further ctest entries inside the car),
 `glue` (G2: `ProjectSession` over REAL editors — resolution, registry,
 config fold, the attached-but-unclaimed hub path; NO server ever spawns,
 the claimed-server machinery is tst_lsp's fakeserver turf), `dap` (car 4:
-the EnvelopeCodec seam, then the DapCodec/DapClient machines over the
-`dapfake` adapter — same GROWS-machine-by-machine rule, `tests/dapfake/`
-is a support binary NOT a ctest entry, its exit code is the far-side
-oracle), `codeeditor` (widget tests), `demo` (drives the qmn-demo surface
-programmatically). `textbuffer` and `diff` are guiless; since M8 machine 4
-the `lsp` binary drives real `CodeEditor`s too, so ctest sets
+the EnvelopeCodec seam, then the DapCodec/DapClient machines, then the
+D3 `DapHub` shelf machines over REAL editors — same
+GROWS-machine-by-machine rule, `tests/dapfake/` is a support binary NOT
+a ctest entry, its exit code is the far-side oracle), `codeeditor`
+(widget tests), `demo` (drives the qmn-demo surface programmatically).
+`textbuffer` and `diff` are guiless; since M8 machine 4 the `lsp` binary
+drives real `CodeEditor`s too (and D3 flipped `dap` to
+`QTEST_MAIN`), so ctest sets
 `QT_QPA_PLATFORM=offscreen` for `lsp`, `glue`, `dap`, `codeeditor` and `demo`
 (via `set_tests_properties`). Run one test:
 

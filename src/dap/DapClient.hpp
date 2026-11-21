@@ -133,6 +133,11 @@ public:
 signals:
     // Fires on EVERY (re-)READY — D3's hub re-pushes breakpoints on it.
     void ready();
+    // The CLEAN stop reached its terminal state (the disconnect barrier
+    // completed, or stop() from a state with no session). D3's hub needs
+    // this edge (its sessionEnded relay + the verified-state teardown);
+    // unwanted death lands in failed(), never here.
+    void stopped();
     // Handshake failed, or the session died (no restart budget exists).
     void failed(const QString& reason);
     // ALL adapter events, generic relay: name = the `event` member

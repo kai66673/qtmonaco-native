@@ -53,6 +53,46 @@
 //            pinned tst-side). A client-originated "cancel" command exits
 //            2 (the test never sends one). Waits for the disconnect,
 //            exit 0.
+//   breakpoints (machine D3; argv[2] = the expected source.path)
+//            Handshake with supportsConfigurationDoneRequest EXPLICITLY
+//            FALSE — the hub's configurationDone door must NOT send the
+//            request when told false (a stray one lands in the exit-2
+//            "unexpected command" arm). Then `launch` (arguments.request
+//            == "launch" && noDebug == false — the hub's spec-fill audit),
+//            then the setBreakpoints battery: source.path must EQUAL
+//            argv[2] (the uri→localPath conversion pin, the exact string
+//            the app opened the document with); the breakpoints member
+//            must be an array; ids are assigned ACROSS calls, strictly
+//            increasing. Wire rules: line 5 -> unverified, message
+//            "dapfake cannot stop on line 5" (+ " (pass N)" from call 2
+//            on — the resend oracle, read tst-side through the Diagnostic
+//            message); line 9 -> VERIFIED line 11 (the MOVED breakpoint:
+//            the hub's dot must land on the ACTUAL line); everything else
+//            verified in place; an EMPTY array answers with an empty body
+//            array (the clear door). After the FIRST call a `breakpoint`
+//            EVENT (reason:"changed", the first call's first id, verified
+//            false, "dapfake pulled the dot") rides — the event-keyed
+//            store update pin. `disconnect` exits 2 unless AT LEAST TWO
+//            setBreakpoints calls arrived (the edit-resend demand), else 0.
+//   steps    (machine D3; argv[2] = frame source path or the literal
+//            "BOGUS", argv[3]/argv[4] = the frame's 1-based line/column)
+//            Handshake with supportsConfigurationDoneRequest:true AND
+//            supportsTerminateRequest:true, the `launch` audit, then
+//            configurationDone -> ok answer + a `stopped` EVENT
+//            (reason:"breakpoint", threadId:7). The hub's stack chain:
+//            `stackTrace` (threadId/startFrame/levels audited) answers ONE
+//            frame {id:1, line/column from argv, source.path=argv[2] —
+//            "BOGUS" swaps in a path NO open document can resolve, the
+//            sourceUnresolved pin}; `scopes` (frameId==1 audited) answers
+//            TWO scopes — variablesReference 21 (the ONE the hub must use)
+//            and 22 (poison: asking it exits 2 HERE, so a hub that reads
+//            the wrong scope can never print "= WRONG" tst-side);
+//            `variables` (21 legal, anything else exits 2) answers pairs
+//            including a DUPLICATE name (first-wins pin) and names absent
+//            from the stopped line (no-hint pins). `continue` -> ok + a
+//            `continued` EVENT. `terminate` -> ok + remembered;
+//            `disconnect` exits 2 unless terminate arrived FIRST (the
+//            terminateDebugging demand), else 0.
 //
 // Every inbound REQUEST must carry a strictly increasing numeric `seq`
 // (all modes): the per-direction seq monotonicity is pinned HERE, on the
@@ -94,6 +134,12 @@ qint64 g_outstandingReq = -1; // the seq of our one outstanding request
 int g_reverseStep = 0;        // reverse mode: 0 runInTerminal, 1 startDebugging
 qint64 g_slowSeq = -1;        // cancelreq: the client's slow command's seq
 int g_cancelStep = 0;         // cancelreq: 0 bogus-id, 1 real-id
+int g_setBpCount = 0;         // breakpoints: completed setBreakpoints calls
+int g_bpIdCounter = 0;        // breakpoints: adapter-wide ids, strictly increasing
+bool g_terminateSeen = false; // steps: terminate answered before the disconnect
+QString g_argPath;            // breakpoints: the EXPECTED source.path; steps: the frame path
+int g_frameLine = 3;          // steps: the frame's 1-based line (argv[3])
+int g_frameCol = 6;           // steps: the frame's 1-based column (argv[4])
 
 [[noreturn]] void fail(const QString& what)
 {
@@ -324,7 +370,9 @@ void handle(const QJsonObject& message)
             && g_mode != QLatin1String("dead")
             && g_mode != QLatin1String("events")
             && g_mode != QLatin1String("reverse")
-            && g_mode != QLatin1String("cancelreq"))
+            && g_mode != QLatin1String("cancelreq")
+            && g_mode != QLatin1String("breakpoints")
+            && g_mode != QLatin1String("steps"))
             fail(QStringLiteral("initialized arrived although this mode's "
                                 "handshake never completed (%1)").arg(g_mode));
         if (event != QLatin1String("initialized"))
@@ -358,15 +406,45 @@ void handle(const QJsonObject& message)
             respondFail(message, 1, QStringLiteral("dapfake cannot start"));
             return;
         }
-        respondOk(message, QJsonObject{
-            {QStringLiteral("supportsConfigurationDoneRequest"), true},
+        // Mode-shaped capabilities (the machine-D3 pins ride these): the
+        // EXPLICIT false in breakpoints mode tells the hub's
+        // configurationDone door to STAY SILENT (a stray request lands in
+        // the exit-2 arm below); steps mode advertises the terminate pair.
+        QJsonObject caps{
             {QStringLiteral("supportsCancelRequest"), true},
-            {QStringLiteral("dapfakeMode"), g_mode}});
+            {QStringLiteral("dapfakeMode"), g_mode}};
+        if (g_mode == QLatin1String("steps")) {
+            caps.insert(QStringLiteral("supportsConfigurationDoneRequest"), true);
+            caps.insert(QStringLiteral("supportsTerminateRequest"), true);
+        } else if (g_mode == QLatin1String("breakpoints")) {
+            caps.insert(QStringLiteral("supportsConfigurationDoneRequest"), false);
+        } else {
+            caps.insert(QStringLiteral("supportsConfigurationDoneRequest"), true);
+        }
+        respondOk(message, caps);
         return;
     }
     if (command == QLatin1String("disconnect")) {
+        if (g_mode == QLatin1String("steps") && !g_terminateSeen)
+            fail(QStringLiteral("disconnect arrived before terminate (the "
+                                "TEST promised terminateDebugging)"));
+        if (g_mode == QLatin1String("breakpoints") && g_setBpCount < 2)
+            fail(QStringLiteral("disconnect after %1 setBreakpoints call(s): "
+                                "the edit-resend never arrived")
+                     .arg(g_setBpCount));
         respondOk(message, QJsonValue(QJsonValue::Undefined));
         _exit(0); // every mode ends its contract here (dead already _exited)
+    }
+    if (command == QLatin1String("launch")
+        && g_mode != QLatin1String("breakpoints")
+        && g_mode != QLatin1String("steps")) {
+        // Machine D3's hub ALWAYS fires `launch` once the session is Ready
+        // (its spec-fill of request/noDebug is audited strictly in the two
+        // D3 modes); the older D2 modes stay conversational and just answer
+        // ok, so the hub slots riding basic/dead/events modes never trip
+        // the "unexpected command" arm below.
+        respondOk(message, QJsonObject{});
+        return;
     }
     if (command == QLatin1String("cancel")) {
         // A CLIENT-originated cancel is legitimate in exactly one place:
@@ -404,6 +482,215 @@ void handle(const QJsonObject& message)
             sendRequest(QStringLiteral("cancel"),
                         QJsonObject{{QStringLiteral("requestId"), g_slowSeq}});
         return; // the LATE answer travels from checkAnswer
+    } else if (g_mode == QLatin1String("breakpoints")
+               || g_mode == QLatin1String("steps")) {
+        // The machine-D3 hub battery. Both modes audit the hub's own
+        // spec-fill of the launch arguments first:
+        if (command == QLatin1String("launch")) {
+            const QJsonObject args
+                = message.value(QStringLiteral("arguments")).toObject();
+            if (args.value(QStringLiteral("request")).toString()
+                != QLatin1String("launch"))
+                fail(QStringLiteral("launch arguments.request was not "
+                                    "\"launch\" (%1)")
+                         .arg(args.value(QStringLiteral("request"))
+                                  .toVariant().toString()));
+            if (args.value(QStringLiteral("noDebug")).toBool(true))
+                fail(QStringLiteral("launch arguments.noDebug was not false"));
+            respondOk(message, QJsonObject{});
+            return;
+        }
+
+        if (g_mode == QLatin1String("breakpoints")) {
+            if (command == QLatin1String("setBreakpoints")) {
+                const QJsonObject args
+                    = message.value(QStringLiteral("arguments")).toObject();
+                const QString path = args.value(QStringLiteral("source"))
+                                         .toObject()
+                                         .value(QStringLiteral("path"))
+                                         .toString();
+                if (path.isEmpty())
+                    fail(QStringLiteral("setBreakpoints arrived without a "
+                                        "source.path"));
+                if (!g_argPath.isEmpty() && path != g_argPath)
+                    fail(QStringLiteral("setBreakpoints source.path is \"%1\", "
+                                        "expected the opened path \"%2\"")
+                             .arg(path, g_argPath)); // the uri->localPath pin
+                if (!args.value(QStringLiteral("breakpoints")).isArray())
+                    fail(QStringLiteral("setBreakpoints arrived without a "
+                                        "breakpoints array"));
+                ++g_setBpCount;
+                const QJsonArray requested
+                    = args.value(QStringLiteral("breakpoints")).toArray();
+                const int firstIdOfCall = g_bpIdCounter + 1;
+                QJsonArray returned;
+                for (const QJsonValue& value : requested) {
+                    const QJsonObject item = value.toObject();
+                    if (!item.value(QStringLiteral("line")).isDouble())
+                        fail(QStringLiteral("setBreakpoints entry without a "
+                                            "numeric line"));
+                    const int line = item.value(QStringLiteral("line")).toInt();
+                    QJsonObject bp;
+                    bp.insert(QStringLiteral("id"), ++g_bpIdCounter);
+                    if (line == 5) {
+                        bp.insert(QStringLiteral("verified"), false);
+                        bp.insert(QStringLiteral("line"), line);
+                        bp.insert(QStringLiteral("message"),
+                                  g_setBpCount == 1
+                                      ? QStringLiteral("dapfake cannot stop "
+                                                      "on line 5")
+                                      : QStringLiteral("dapfake cannot stop "
+                                                      "on line 5 (pass %1)")
+                                            .arg(g_setBpCount));
+                    } else if (line == 9) {
+                        bp.insert(QStringLiteral("verified"), true);
+                        bp.insert(QStringLiteral("line"), 11); // THE MOVE
+                    } else {
+                        bp.insert(QStringLiteral("verified"), true);
+                        bp.insert(QStringLiteral("line"), line);
+                    }
+                    returned.append(bp);
+                }
+                respondOk(message,
+                          QJsonObject{{QStringLiteral("breakpoints"), returned}});
+                if (g_setBpCount == 1 && !returned.isEmpty()) {
+                    // The event-keyed store update: the first call's FIRST
+                    // id flips unverified (id-keyed, spec reason "changed").
+                    sendEvent(QStringLiteral("breakpoint"),
+                              QJsonObject{{QStringLiteral("reason"),
+                                           QStringLiteral("changed")},
+                                          {QStringLiteral("breakpoint"),
+                                           QJsonObject{
+                                               {QStringLiteral("id"),
+                                                firstIdOfCall},
+                                               {QStringLiteral("verified"),
+                                                false},
+                                               {QStringLiteral("message"),
+                                                QStringLiteral("dapfake pulled "
+                                                              "the dot")}}}});
+                }
+                return;
+            }
+        } else { // steps
+            if (command == QLatin1String("configurationDone")) {
+                respondOk(message, QJsonValue(QJsonValue::Undefined));
+                sendEvent(QStringLiteral("stopped"),
+                          QJsonObject{{QStringLiteral("reason"),
+                                       QStringLiteral("breakpoint")},
+                                      {QStringLiteral("threadId"), 7},
+                                      {QStringLiteral("allThreadsStopped"),
+                                       true}});
+                return;
+            }
+            if (command == QLatin1String("stackTrace")) {
+                const QJsonObject args
+                    = message.value(QStringLiteral("arguments")).toObject();
+                if (args.value(QStringLiteral("threadId")).toInt() != 7)
+                    fail(QStringLiteral("stackTrace asked threadId %1, the "
+                                        "stopped event said 7")
+                             .arg(args.value(QStringLiteral("threadId")).toInt()));
+                if (args.value(QStringLiteral("startFrame")).toInt() != 0)
+                    fail(QStringLiteral("stackTrace startFrame was not 0"));
+                if (args.value(QStringLiteral("levels")).toInt() < 1)
+                    fail(QStringLiteral("stackTrace levels was not >= 1"));
+                QString path = g_argPath;
+                if (path == QLatin1String("BOGUS"))
+                    path = QStringLiteral("/dapfake/definitely-not-open.cpp");
+                const QJsonObject frame{
+                    {QStringLiteral("id"), 1},
+                    {QStringLiteral("name"), QStringLiteral("dapfake-top")},
+                    {QStringLiteral("source"),
+                     QJsonObject{{QStringLiteral("name"),
+                                  QStringLiteral("main.cpp")},
+                                 {QStringLiteral("path"), path}}},
+                    {QStringLiteral("line"), g_frameLine},
+                    {QStringLiteral("column"), g_frameCol}};
+                respondOk(message,
+                          QJsonObject{{QStringLiteral("stackFrames"),
+                                       QJsonArray{frame}},
+                                      {QStringLiteral("totalFrames"), 1}});
+                return;
+            }
+            if (command == QLatin1String("scopes")) {
+                const QJsonObject args
+                    = message.value(QStringLiteral("arguments")).toObject();
+                if (args.value(QStringLiteral("frameId")).toInt() != 1)
+                    fail(QStringLiteral("scopes asked frameId %1, the frame "
+                                        "carried id 1")
+                             .arg(args.value(QStringLiteral("frameId")).toInt()));
+                respondOk(message, QJsonObject{{QStringLiteral("scopes"),
+                                                QJsonArray{
+                                                    QJsonObject{
+                                                        {QStringLiteral("name"),
+                                                         QStringLiteral("Locals")},
+                                                        {QStringLiteral("variablesReference"),
+                                                         21},
+                                                        {QStringLiteral("expensive"),
+                                                         false}},
+                                                    QJsonObject{
+                                                        {QStringLiteral("name"),
+                                                         QStringLiteral("Globals poison")},
+                                                        {QStringLiteral("variablesReference"),
+                                                         22},
+                                                        {QStringLiteral("expensive"),
+                                                         false}}}}});
+                return;
+            }
+            if (command == QLatin1String("variables")) {
+                const QJsonObject args
+                    = message.value(QStringLiteral("arguments")).toObject();
+                const int ref = args.value(QStringLiteral("variablesReference"))
+                                    .toInt();
+                if (ref == 22)
+                    fail(QStringLiteral("the hub read the SECOND (poisoned) "
+                                        "scope — the PLAN feed is the first "
+                                        "top-frame scope only"));
+                if (ref != 21)
+                    fail(QStringLiteral("variables asked reference %1, only "
+                                        "21 was published").arg(ref));
+                respondOk(message,
+                          QJsonObject{{QStringLiteral("variables"),
+                                       QJsonArray{
+                                           QJsonObject{{QStringLiteral("name"),
+                                                       QStringLiteral("x")},
+                                                      {QStringLiteral("value"),
+                                                       QStringLiteral("42")},
+                                                      {QStringLiteral("variablesReference"),
+                                                       0}},
+                                           QJsonObject{{QStringLiteral("name"),
+                                                       QStringLiteral("x")},
+                                                      {QStringLiteral("value"),
+                                                       QStringLiteral("WRONG-DUP")},
+                                                      {QStringLiteral("variablesReference"),
+                                                       0}},
+                                           QJsonObject{{QStringLiteral("name"),
+                                                       QStringLiteral("y")},
+                                                      {QStringLiteral("value"),
+                                                       QStringLiteral("13")},
+                                                      {QStringLiteral("variablesReference"),
+                                                       0}},
+                                           QJsonObject{{QStringLiteral("name"),
+                                                       QStringLiteral("zzUnused")},
+                                                      {QStringLiteral("value"),
+                                                       QStringLiteral("never-on-line")},
+                                                      {QStringLiteral("variablesReference"),
+                                                       0}}}}});
+                return;
+            }
+            if (command == QLatin1String("continue")) {
+                respondOk(message, QJsonObject{{QStringLiteral("allThreadsContinued"),
+                                                true}});
+                sendEvent(QStringLiteral("continued"),
+                          QJsonObject{{QStringLiteral("allThreadsContinued"),
+                                       true}});
+                return;
+            }
+            if (command == QLatin1String("terminate")) {
+                g_terminateSeen = true;
+                respondOk(message, QJsonObject{});
+                return;
+            }
+        }
     }
     fail(QStringLiteral("unexpected command \"%1\" in mode %2")
              .arg(command, g_mode));
@@ -445,8 +732,16 @@ int main(int argc, char** argv)
     if (g_mode != QLatin1String("basic") && g_mode != QLatin1String("initfail")
         && g_mode != QLatin1String("dead") && g_mode != QLatin1String("deaf")
         && g_mode != QLatin1String("events") && g_mode != QLatin1String("reverse")
-        && g_mode != QLatin1String("cancelreq"))
+        && g_mode != QLatin1String("cancelreq")
+        && g_mode != QLatin1String("breakpoints")
+        && g_mode != QLatin1String("steps"))
         fail(QStringLiteral("unknown mode \"%1\"").arg(g_mode));
+    if (args.size() > 2)
+        g_argPath = args.at(2);
+    if (args.size() > 3)
+        g_frameLine = args.at(3).toInt();
+    if (args.size() > 4)
+        g_frameCol = args.at(4).toInt();
 
     if (g_mode == QLatin1String("basic")) {
         // The STDERR channel marker fires BEFORE the handshake completes:

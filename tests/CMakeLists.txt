@@ -58,7 +58,7 @@ set_tests_properties(glue PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # binary passing green. Since machine D2 this binary also links qmn_dap
 # (the production DapCodec + DapClient) and spawns the dapfake adapter.
 qt_add_executable(tst_dap tst_dap.cpp)
-target_link_libraries(tst_dap PRIVATE qmn_dap qmn_protocol Qt6::Test)
+target_link_libraries(tst_dap PRIVATE qmn_glue qmn_dap qmn_protocol Qt6::Test)
 add_dependencies(tst_dap dapfake) # the spawn target must exist at run time
 add_test(NAME dap COMMAND tst_dap)
 set_tests_properties(dap PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
