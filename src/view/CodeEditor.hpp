@@ -253,6 +253,46 @@ public:
     QString language() const;
     static QStringList availableLanguages();
 
+    // ---- GRAMMAR REGISTRY (post-1.8.0 grammar-extensibility follow-on;
+    // PLAN): process-wide, GUI-thread, and TYPE-ERASED here on purpose -
+    // a language arrives as an opaque qintptr address, so no tree-sitter
+    // type ever enters this header (Shiboken rule + the PRIVATE qmn_ts
+    // link). A real address comes from grammarAddress() (any registered
+    // id, the five vendored ones included), from loadGrammar() (a
+    // compiled grammar library exporting tree-sitter's
+    // tree_sitter_<name>() convention), or from your own compilation's
+    // tree_sitter_xxx() symbol. registerGrammar CHECKS the language's
+    // version/ABI through a scratch parser at the door, then UPSERTS:
+    // an existing id keeps its availableLanguages() slot (a custom
+    // python MAY shadow the vendored one - user decision), a new id
+    // appends. Attached editors see a write on their next paint: same
+    // language pointer -> only the query/roles/folds rebuild (NO
+    // reparse); a different pointer -> full reparse; entry removed ->
+    // the editor falls back to plain text. The registered language
+    // POINTER must outlive all use: loaded grammar libraries are never
+    // unloaded, and a hand-supplied parser must stay loaded too. The
+    // highlightsQuery is a .scm source; EMPTY means parse-only mode
+    // (folding/line tracking ride the tree, no colors). foldNodeNames
+    // picks foldable node types; names the grammar lacks are dropped.
+    // A setLanguage(unknown) stays plain text: a later registration
+    // does NOT light up old calls - call setLanguage again.
+    static bool registerGrammar(const QString& language, qintptr languageAddress,
+                                const QString& highlightsQuery,
+                                const QStringList& foldNodeNames = {});
+    static bool unregisterGrammar(const QString& language); // false: no such id
+    static qintptr grammarAddress(const QString& language); // 0: no such id
+    // Loads a grammar library and calls its exported entry point
+    // (symbolName overrides the tree_sitter_<base-of-file> derivation).
+    // The handle stays open forever; 0 on load/resolve failure.
+    static qintptr loadGrammar(const QString& fileName, const QString& symbolName = {});
+    // Capture-role overrides for a REGISTERED id (registerGrammar
+    // first): names outside the engine's fixed role table gain a role,
+    // known names change it; TokenKind::Text means "paint nothing".
+    // Visible on the next paint.
+    static bool setCaptureRole(const QString& language, const QString& captureName,
+                               CodeEditor::TokenKind role);
+    static bool clearCaptureRole(const QString& language, const QString& captureName);
+
     // M23 language-scoped property overrides (Monaco's [languageId] model):
     // LANGUAGE override (when set) > editor options template > factory
     // default. languageProperties(id) hands out the per-language child

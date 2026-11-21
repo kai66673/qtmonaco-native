@@ -229,6 +229,13 @@ Gate 2 — IDE surface (after the freeze):
       column chrome + the wheel/shim crossing; inline word-level highlight,
       wrap×diff budget math and original-side wrap ride a follow-on M10b)
 - [x] Soft wrap (the deferred half of M9) — the M25 car
+- [x] Grammar extensibility (a post-1.8.0 follow-on): a process-wide runtime
+      grammar registry behind additive `CodeEditor` doors — register a parser BY
+      ADDRESS (`qintptr`, type-erased), load a compiled grammar library
+      (`loadGrammar`, tree-sitter's `tree_sitter_<name>` convention), UPSERT with
+      a live rebind into attached editors (a custom `python` may shadow the
+      vendored one), capture-role overrides above the fixed role table, and
+      unregister -> plain text; the five vendored grammars seed the table
 - [ ] DAP features via decorations (breakpoints, current frame, value hints)
 
 Out of scope by design: vim mode. The `set_vim_mode_enabled` setter is still

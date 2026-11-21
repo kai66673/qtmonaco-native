@@ -983,6 +983,56 @@ pathological synthetic load (six pinned busy-loops) even a 30 s door can
 legitimately expire — the pin then reads as a clean QTest timeout, never
 as a confusing exit-code oracle.
 
+**The fifth deferred sliver is BUILT (2026-11-21, no version bump):
+GRAMMAR EXTENSIBILITY — a runtime, process-wide grammar registry.** The
+user-decided shape: (1) registration BY ADDRESS + a .so loader; (2) id
+conflict = UPSERT with a LIVE rebind (a custom `python` MAY shadow the
+vendored one); (3) the capture-role override doors ride the SAME sliver.
+Six additive static doors on the ALREADY-BOUND `CodeEditor` (three-copies
+untouched, rejected-log: unchanged QFlags-only noise):
+`registerGrammar(id, qintptr languageAddress, highlightsQuery, foldNodeNames)`,
+`unregisterGrammar(id)`, `grammarAddress(id)`, `loadGrammar(fileName,
+symbolName)`, `setCaptureRole(id, captureName, TokenKind)` +
+`clearCaptureRole`. The address is TYPE-ERASED to `qintptr` (a Python int)
+so `tree_sitter/api.h` never enters the public header (Shiboken rule +
+the PRIVATE qmn_ts link); Python calls it with `grammarAddress("python")`
+out of the box. The mechanics: `HighlightEngine`'s frozen static `kRegistry`
+array became a function-local-static `QVector<LangEntry>` (id, language
+POINTER, owned query bytes, fold-node list, role-override map) seeded from
+the vendored five, plus a generation counter; every engine carries
+`regGen_` and `refreshIfNeeded` runs `reconcileRegistry` when it lags —
+ONE integer compare on the paint fast path, no new mapping/geometry door.
+A write reaches attached editors on their NEXT pass: same language
+pointer -> the tree and the line index SURVIVE (query/capture-roles/folds
+rebuild only), a DIFFERENT pointer -> `ts_parser_set_language` + tree drop
++ full reparse, entry GONE -> the editor falls to plain text and
+`language()` empties (the unplug is next-pass, not door-synchronous —
+pinned). `registerGrammar` VALIDATES the language through a scratch
+`ts_parser_new`+`set_language` AT THE DOOR (version/ABI checked before
+any paint can touch it; a zeroed TSLanguage reads version 0 and is
+refused CLEANLY); what no door can validate is the pointer VALUE — the
+contract says the address comes from `grammarAddress`/`loadGrammar`/one's
+own compilation. Empty query = parse-only mode (folds/line tracking ride
+the tree, no colors); foldNodeNames filter through `composeFoldQuery` as
+always; role overrides ride ABOVE the fixed `kindForCapture` table AT
+QUERY-BUILD time (unknown names GAIN a role, known names change it,
+`Text` = paint nothing). `loadGrammar` honors the ecosystem convention
+(`tree_sitter_<base>`, explicit symbolName overrides), KEEPS EVERY loaded
+handle open forever (grammar unloading dangles — the ecosystem bans it)
+and returns 0 on load/symbol failure. The new slot
+`grammarRegistryRegistersUpsertsRolesAndUnplugs` (codeeditor 257 -> 258)
+drives the whole surface — including a REAL second python parser: the
+vendored `parser.c`+`scanner.c` compiled a SECOND time as a SHARED test
+fixture (`qmn_pygrammar`, distinct pointer -> pins the live-swap reparse),
+plus `qmn_fakegrammar` (libbogus.so: loads, calls, REGISTERS-AS-REFUSED) —
+both wired via `target_compile_definitions` paths like the fakeserver
+precedent, neither installed (not in any export set; consumer smoke
+clean). The tests dir needed its own `enable_language(C)`: third_party's
+enablement lives in ITS directory scope and sibling subdirs never see the
+language-rule variables. The process-wide table is GUI-thread discipline
+like everything here (no atomics); every id the slot mints is unregistered
+again, and the vendored five ids stay byte-untouched for the other slots.
+
 **Known pre-existing bug (recorded 2026-11-15, deferred to its own small
 car):** bracketed type-over-selection in `insertTextAtCaret` (the
 `beginEditGroup` bracket around `deleteSelection` + insert, found via a

@@ -6112,6 +6112,44 @@ QStringList CodeEditor::availableLanguages()
     return HighlightEngine::languageIds();
 }
 
+// ---- grammar registry doors (post-1.8.0 sliver): the engine owns the
+// table; these only type-erase the TSLanguage address (qintptr) so the
+// public header stays tree-sitter-free (see the block there).
+bool CodeEditor::registerGrammar(const QString& language, qintptr languageAddress,
+                                 const QString& highlightsQuery,
+                                 const QStringList& foldNodeNames)
+{
+    return HighlightEngine::registerGrammar(
+        language, reinterpret_cast<const TSLanguage*>(languageAddress),
+        highlightsQuery, foldNodeNames);
+}
+
+bool CodeEditor::unregisterGrammar(const QString& language)
+{
+    return HighlightEngine::unregisterGrammar(language);
+}
+
+qintptr CodeEditor::grammarAddress(const QString& language)
+{
+    return qintptr(HighlightEngine::grammarLanguage(language));
+}
+
+qintptr CodeEditor::loadGrammar(const QString& fileName, const QString& symbolName)
+{
+    return qintptr(HighlightEngine::loadGrammarLibrary(fileName, symbolName));
+}
+
+bool CodeEditor::setCaptureRole(const QString& language, const QString& captureName,
+                                CodeEditor::TokenKind role)
+{
+    return HighlightEngine::setCaptureRole(language, captureName, int(role));
+}
+
+bool CodeEditor::clearCaptureRole(const QString& language, const QString& captureName)
+{
+    return HighlightEngine::clearCaptureRole(language, captureName);
+}
+
 QVector<CodeEditor::HighlightSpan> CodeEditor::highlightSpans(int startOffset, int endOffset)
 {
     QVector<HighlightSpan> out;

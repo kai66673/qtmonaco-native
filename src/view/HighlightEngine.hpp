@@ -52,6 +52,7 @@
 #include <QRegularExpression>
 #include <QString>
 #include <QStringList>
+#include <QVector>
 
 #include <vector>
 
@@ -82,8 +83,51 @@ public:
     QString language() const { return languageId_; }
     bool active() const { return lang_ != nullptr; }
 
-    // Language ids with a parser + query (registry order).
+    // Language ids with a parser + query (registry order; registered
+    // ids follow the vendored ones in registration order).
     static QStringList languageIds();
+
+    // ---- grammar registry (post-1.8.0 grammar-extensibility sliver;
+    // PLAN): the ONE process-wide grammar table (GUI-thread discipline
+    // like everything here). registerGrammar UPSERTS by id (normalized
+    // like setLanguage's): an existing id keeps its availableLanguages()
+    // position, a new id appends. Attached editors RECONCILE on their
+    // next refresh pass (the paint path calls refreshIfNeeded every
+    // frame): same language pointer -> the tree and the line index
+    // SURVIVE, only query/predicates/capture-roles/folds get rebuilt;
+    // a DIFFERENT pointer -> tree dropped, full reparse; entry GONE
+    // (unregisterGrammar) -> the editor falls to plain text and
+    // language() empties. A previously-unknown id lights up only when
+    // setLanguage is called again (setLanguage(unknown) = plain text,
+    // as always; the engine keeps no pending-request memory).
+    // `lang` must OUTLIVE every use: the registry keeps the raw
+    // pointer, and a loaded grammar library is NEVER unloaded (the
+    // tree-sitter ecosystem's own rule). The door VALIDATES the
+    // language's version/ABI through a scratch parser at registration
+    // time - it cannot validate the pointer itself: a bogus address is
+    // UB (obtain it from grammarLanguage(), loadGrammarLibrary(), or a
+    // parser you compiled yourself). The highlights query may be EMPTY
+    // (parse-only: folding/line tracking ride the tree, no colors);
+    // foldNodeNames unknown to the grammar are filtered at composition.
+    static bool registerGrammar(const QString& id, const TSLanguage* lang,
+                                const QString& highlightsQuery,
+                                const QStringList& foldNodeNames);
+    static bool unregisterGrammar(const QString& id); // false: no such id
+    static const TSLanguage* grammarLanguage(const QString& id); // nullptr: no such id
+    // Capture-name overrides ride ABOVE the fixed role table (unknown
+    // names gain a role, known ones change it; TokenKind::Text maps to
+    // "no span", keeping Text never-emitted-as-a-span). Needs a
+    // REGISTERED id (registerGrammar first, roles after).
+    static bool setCaptureRole(const QString& id, const QString& captureName,
+                               int kind); // kind = CodeEditor::TokenKind int
+    static bool clearCaptureRole(const QString& id, const QString& captureName);
+    // tree-sitter's loader convention: the library exports a no-arg
+    // extern "C" function returning its language; symbolName empty ->
+    // derived as tree_sitter_<file base name>. The handle is KEPT OPEN
+    // forever (even when the symbol lookup fails), so resolved pointers
+    // never dangle. nullptr on any failure.
+    static const TSLanguage* loadGrammarLibrary(const QString& fileName,
+                                                const QString& symbolName);
 
     // Core edit-observer entry: applies ts_tree_edit and keeps the line
     // index current; defers the reparse until refreshIfNeeded().
@@ -165,6 +209,26 @@ public:
     static QColor colorFor(CodeEditor::TokenKind kind);
 
 private:
+    // Grammar registry entry (post-1.8.0 sliver): DEFINED in the .cpp,
+    // where the process-wide table lives. The engine never caches a
+    // LangEntry pointer across calls - it copies what it applies.
+    struct LangEntry;
+    // Process-wide grammar table access (the table itself is a .cpp
+    // static): TRANSIENT entry pointers - a registerGrammar write may
+    // reallocate the vector - so callers copy what they keep.
+    static QVector<LangEntry>& registry();
+    static const LangEntry* entryFor(const QString& norm); // id normalized
+    static LangEntry* entryForMut(const QString& norm);
+    // (Re)build query_, captureKind_ (+ the entry's role overrides),
+    // pattern predicates and foldQuery_ from an entry. Never touches
+    // the tree: the caller decides (a language SWAP must drop the tree
+    // and set dirty_; a query/role/fold upsert reuses it).
+    void applyQueries(const LangEntry& entry);
+    // Re-resolve languageId_ against the registry after a registry
+    // write (runs inside refreshIfNeeded; see the class-level comment
+    // on the static registry doors).
+    void reconcileRegistry();
+
     // Raw capture before merging (query emission order kept in seq).
     struct Capture {
         int start;
@@ -263,6 +327,10 @@ private:
     const qmn::core::TextBuffer* buffer_ = nullptr;
     QString languageId_;
     const TSLanguage* lang_ = nullptr;
+    // Registry generation observed at the last setLanguage/reconcile;
+    // refreshIfNeeded compares it against the counter in the .cpp
+    // (one integer compare on the paint fast path).
+    quint64 regGen_ = 0;
     TSParser* parser_ = nullptr;
     TSQueryCursor* cursor_ = nullptr;
     TSTree* tree_ = nullptr;

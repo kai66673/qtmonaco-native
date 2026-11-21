@@ -242,6 +242,7 @@ private slots:
     // Syntax highlighting (M4, Phase D2).
     void setLanguageUnknownFallsBackToPlain();
     void availableLanguagesShipsPinnedGrammars();
+    void grammarRegistryRegistersUpsertsRolesAndUnplugs();
     void pythonSpansMapToModelOffsets();
     void jsonSpansMapToModelOffsets();
     void javascriptSpansMapToModelOffsets();
@@ -5194,6 +5195,121 @@ void TestCodeEditor::availableLanguagesShipsPinnedGrammars()
              QStringList({QStringLiteral("python"), QStringLiteral("json"),
                           QStringLiteral("javascript"), QStringLiteral("c"),
                           QStringLiteral("cpp")}));
+}
+
+void TestCodeEditor::grammarRegistryRegistersUpsertsRolesAndUnplugs()
+{
+    // Post-1.8.0 grammar-extensibility sliver (PLAN): the registry doors
+    // on CodeEditor - registration BY ADDRESS (qintptr keeps the public
+    // header tree-sitter-free), the loader, capture-role overrides, LIVE
+    // upsert into attached editors, unplug -> plain text. The table is
+    // process-wide: every id this slot mints is unregistered again (the
+    // tripwire at the end), and the five vendored ids are never touched -
+    // every other slot here leans on them.
+    const QStringList baseline = CodeEditor::availableLanguages();
+
+    // --- address door sanity: normalized lookups, 0 for unknowns ---------
+    const qintptr vendoredPy = CodeEditor::grammarAddress(QStringLiteral("python"));
+    QVERIFY(vendoredPy != 0);
+    QCOMPARE(CodeEditor::grammarAddress(QStringLiteral(" PYTHON ")), vendoredPy);
+    QCOMPARE(CodeEditor::grammarAddress(QStringLiteral("nope")), qintptr(0));
+    // A 0 address and a blank id are refused AT the door:
+    QVERIFY(!CodeEditor::registerGrammar(QStringLiteral("bad"), 0, QString(), {}));
+    QVERIFY(!CodeEditor::registerGrammar(QStringLiteral("  "), vendoredPy, QString(), {}));
+
+    // --- loadGrammar, against the fixture libraries -----------------------
+    QCOMPARE(CodeEditor::loadGrammar(QStringLiteral("/no/such/qmn-grammar.so")), qintptr(0));
+    // Naming convention on the happy path: libbogus.so -> tree_sitter_bogus:
+    const qintptr bogus = CodeEditor::loadGrammar(QStringLiteral(QMN_TEST_FAKE_GRAMMAR));
+    QVERIFY(bogus != 0); // the library loaded, its entry point ran...
+    // ...yet the DOOR refuses it: the zeroed language's version 0 misses the
+    // runtime's ABI window (13-15), validation runs at registration time.
+    QVERIFY(!CodeEditor::registerGrammar(QStringLiteral("bogus"), bogus, QString(), {}));
+    // Explicit-symbol path, miss side (library stays loaded, owns no grammar):
+    QCOMPARE(CodeEditor::loadGrammar(QStringLiteral(QMN_TEST_FAKE_GRAMMAR),
+                                     QStringLiteral("tree_sitter_nope")),
+             qintptr(0));
+    QCOMPARE(CodeEditor::availableLanguages(), baseline); // nothing leaked
+
+    // --- a REAL second python parser, through the loader ------------------
+    const qintptr py2 = CodeEditor::loadGrammar(QStringLiteral(QMN_TEST_PY_GRAMMAR),
+                                                QStringLiteral("tree_sitter_python"));
+    QVERIFY(py2 != 0);
+    QVERIFY(py2 != vendoredPy); // same pinned grammar, a distinct copy
+    QVERIFY(CodeEditor::registerGrammar(QStringLiteral("pyext"), py2,
+        QStringLiteral("(string) @string (identifier) @var"),
+        QStringList({QStringLiteral("function_definition")})));
+    QCOMPARE(CodeEditor::availableLanguages(),
+             baseline + QStringList({QStringLiteral("pyext")})); // appended
+
+    editor->setPlainText(QStringLiteral("def f(x):\n    return \"hi\"  # cmt\n"));
+    editor->setLanguage(QStringLiteral("pyext"));
+    QCOMPARE(editor->language(), QStringLiteral("pyext"));
+    // The tiny custom query inks strings ONLY: @var lives OUTSIDE the
+    // fixed role table (kindForCapture drops it) and there is no
+    // @comment capture, so the tail comment stays uninked.
+    auto spans = allSpans(editor);
+    QCOMPARE(countKind(spans, TK::String), 1);
+    QCOMPARE(countKind(spans, TK::Comment), 0);
+    editor->grab(); // the foldables cache is paint-fed
+    QVERIFY(editor->isFoldable(0)); // function_definition folds lines 0-1
+
+    // --- capture-role override: unknown names GAIN a role -----------------
+    QVERIFY(CodeEditor::setCaptureRole(QStringLiteral("pyext"), QStringLiteral("var"),
+                                       TK::Comment));
+    QVERIFY(!CodeEditor::setCaptureRole(QStringLiteral("no-such-id"),
+                                        QStringLiteral("var"), TK::Comment));
+    spans = allSpans(editor); // next engine pass reconciles (no setLanguage)
+    QCOMPARE(countKind(spans, TK::Comment), 2); // f and x now inked via @var
+    QCOMPARE(countKind(spans, TK::String), 1);  // untouched
+    QVERIFY(CodeEditor::clearCaptureRole(QStringLiteral("pyext"), QStringLiteral("var")));
+    QVERIFY(!CodeEditor::clearCaptureRole(QStringLiteral("pyext"), QStringLiteral("var")));
+    spans = allSpans(editor);
+    QCOMPARE(countKind(spans, TK::Comment), 0); // @var role-less again: dropped
+
+    // --- live UPSERT, SAME language pointer: query+fold entry swap, the
+    // tree and the incremental state SURVIVE (no reparse cost paid) -------
+    QVERIFY(CodeEditor::registerGrammar(QStringLiteral("pyext"), py2,
+                                        QStringLiteral("(comment) @comment"),
+                                        QStringList({QStringLiteral("class_definition")})));
+    spans = allSpans(editor);
+    QCOMPARE(countKind(spans, TK::Comment), 1); // the tail comment, exactly one
+    QCOMPARE(countKind(spans, TK::String), 0);  // old query fully replaced
+    QCOMPARE(editor->language(), QStringLiteral("pyext")); // id kept, live rebind
+    editor->grab();
+    QVERIFY(!editor->isFoldable(0)); // the fold query now hunts class_definition
+                                     // ONLY - grammar fold mode, so the indent
+                                     // scan stays silent (M13 rule) even
+                                     // though line 1 is deeper
+
+    // --- parse-only mode: EMPTY query keeps tree/folds, drops colors ------
+    QVERIFY(CodeEditor::registerGrammar(QStringLiteral("pyext"), py2, QString(),
+                                        QStringList({QStringLiteral("function_definition")})));
+    editor->grab();
+    QVERIFY(allSpans(editor).isEmpty()); // no colors, by contract...
+    QVERIFY(editor->isFoldable(0)); // ...but the tree+folds ride the entry
+
+    // --- live language SWAP, different pointer: reparse under the hood ----
+    QVERIFY(CodeEditor::registerGrammar(QStringLiteral("pyext"), vendoredPy,
+        QStringLiteral("(string) @string"),
+        QStringList({QStringLiteral("function_definition")})));
+    editor->grab();
+    spans = allSpans(editor);
+    QCOMPARE(countKind(spans, TK::String), 1); // the VENDORED copy drives now
+    QVERIFY(editor->isFoldable(0)); // and its folds came back with the entry
+    QCOMPARE(editor->language(), QStringLiteral("pyext")); // the id never changed
+
+    // --- unplug: attached editors fall back to plain text on their
+    // NEXT engine pass (reconcile rides refreshIfNeeded, like every
+    // other registry write - the door itself never reaches editors) ---
+    QVERIFY(CodeEditor::unregisterGrammar(QStringLiteral("pyext")));
+    QVERIFY(!CodeEditor::unregisterGrammar(QStringLiteral("pyext")));
+    QVERIFY(allSpans(editor).isEmpty()); // this pass reconciles...
+    QVERIFY(editor->language().isEmpty()); // ...and unplugs the editor
+    QCOMPARE(CodeEditor::grammarAddress(QStringLiteral("pyext")), qintptr(0));
+
+    // --- leave the process-wide table EXACTLY as we found it --------------
+    QCOMPARE(CodeEditor::availableLanguages(), baseline);
 }
 
 void TestCodeEditor::pythonSpansMapToModelOffsets()

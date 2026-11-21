@@ -2,6 +2,14 @@ qt_add_executable(tst_textbuffer tst_textbuffer.cpp)
 target_link_libraries(tst_textbuffer PRIVATE qmn_core Qt6::Test)
 add_test(NAME textbuffer COMMAND tst_textbuffer)
 
+# The grammar fixtures further down compile C (bogus.c + the vendored
+# parser.c recompiled SHARED): third_party/tree-sitter enable_language(C)s
+# INSIDE its own directory scope, and a subdirectory's language-rule
+# variables (CMAKE_C_COMPILE_OBJECT) do not reach sibling subdirs - the
+# re-enable here (idempotent) is what lets those SHARED C fixtures
+# configure. The C compiler was already a hard requirement via qmn_ts.
+enable_language(C)
+
 # The 4th ctest entry (M10): headless property + golden tests over the
 # pure line-diff engine (src/diff is QtCore-only, like core).
 qt_add_executable(tst_diff tst_diff.cpp)
@@ -43,6 +51,39 @@ target_link_libraries(tst_codeeditor PRIVATE qmn_view Qt6::Test)
 # the same seam note as in tools/bench_highlight.cpp.
 target_include_directories(tst_codeeditor PRIVATE
     ${CMAKE_CURRENT_LIST_DIR}/../third_party/tree-sitter/runtime/include)
+
+# Grammar-registry fixtures (post-1.8.0 grammar-extensibility sliver),
+# loaded at RUN time by path - neither is a ctest entry, and neither
+# links the tree-sitter runtime: generated parsers are self-contained C.
+# 1) qmn_fakegrammar: exports tree_sitter_bogus returning a ZEROED
+#    TSLanguage-sized buffer (version 0, outside the runtime's 13-15
+#    range) - the door's scratch-parser validation must refuse it with
+#    false. The OUTPUT name keeps the loader's symbol-derivation
+#    (libbogus.so -> tree_sitter_bogus) on the happy naming path.
+# 2) qmn_pygrammar: the vendored python parser.c + scanner.c compiled a
+#    SECOND time as a shared library - a language pointer DISTINCT from
+#    qmn_view's statically linked copy, for the real loadGrammar +
+#    live language-swap path. Named away from "python" on purpose: the
+#    test passes the exported symbol explicitly (also pinning that
+#    door). Warning-free like the third_party parsers.
+add_library(qmn_fakegrammar SHARED fakegrammar/bogus.c)
+set_target_properties(qmn_fakegrammar PROPERTIES OUTPUT_NAME "bogus") # libbogus.so
+add_library(qmn_pygrammar SHARED
+    ../third_party/tree-sitter/grammars/python/src/parser.c
+    ../third_party/tree-sitter/grammars/python/src/scanner.c)
+target_include_directories(qmn_pygrammar PRIVATE
+    ${CMAKE_CURRENT_LIST_DIR}/../third_party/tree-sitter/runtime/include
+    ${CMAKE_CURRENT_LIST_DIR}/../third_party/tree-sitter/grammars/python/src)
+set_target_properties(qmn_pygrammar PROPERTIES C_STANDARD 11 C_EXTENSIONS ON)
+target_compile_options(qmn_fakegrammar PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-w>)
+target_compile_options(qmn_pygrammar PRIVATE
+    $<$<C_COMPILER_ID:GNU,Clang,AppleClang>:-w>)
+target_compile_definitions(tst_codeeditor PRIVATE
+    QMN_TEST_FAKE_GRAMMAR=\"$<TARGET_FILE:qmn_fakegrammar>\"
+    QMN_TEST_PY_GRAMMAR=\"$<TARGET_FILE:qmn_pygrammar>\")
+add_dependencies(tst_codeeditor qmn_fakegrammar qmn_pygrammar)
+
 add_test(NAME codeeditor COMMAND tst_codeeditor)
 set_tests_properties(codeeditor PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 

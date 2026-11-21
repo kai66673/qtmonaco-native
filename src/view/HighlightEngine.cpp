@@ -3,6 +3,9 @@
 #include "view/QueryData.hpp"
 
 #include <QElapsedTimer>
+#include <QFileInfo>
+#include <QHash>
+#include <QLibrary>
 
 #include <algorithm>
 #include <cstdint> // UINT32_MAX for the fold-cursor range reset
@@ -96,7 +99,8 @@ const char* const kFoldCpp[] = {
     "preproc_function_def",
 };
 
-struct LangEntry {
+// Vendored seed (VENDORED.md pins; the .scm embeddings ride QueryData).
+struct VendorSeed {
     const char* id;
     const TSLanguage* (*langFn)();
     const char* (*queryFn)();
@@ -104,8 +108,9 @@ struct LangEntry {
     uint32_t foldNodeCount;
 };
 
-// Registry order is surfaced by CodeEditor::availableLanguages().
-const LangEntry kRegistry[] = {
+// The registry order is surfaced by CodeEditor::availableLanguages():
+// vendored first, registered ids following in registration order.
+const VendorSeed kVendor[] = {
     {"python", &tree_sitter_python, &queries::pythonHighlights, kFoldPython,
      uint32_t(sizeof kFoldPython / sizeof kFoldPython[0])},
     {"json", &tree_sitter_json, &queries::jsonHighlights, kFoldJson,
@@ -117,6 +122,17 @@ const LangEntry kRegistry[] = {
     {"cpp", &tree_sitter_cpp, &queries::cppHighlights, kFoldCpp,
      uint32_t(sizeof kFoldCpp / sizeof kFoldCpp[0])},
 };
+
+// Every registry WRITE bumps this; an engine whose regGen_ lags behind
+// reconciles inside its next refreshIfNeeded (one integer compare on
+// the paint fast path). Starts at 1 so an engine's default 0 forces a
+// first-pass sync even before any write happened.
+quint64 g_registryGeneration = 1;
+
+QString normalizeLangId(const QString& id)
+{
+    return id.trimmed().toLower();
+}
 
 // Capture name -> TokenKind: the union of the capture names used by the
 // five vendored highlights.scm files (VENDORED.md: upstream copies, the
@@ -170,12 +186,17 @@ int kindForCapture(const char* name, uint32_t len)
 // Composes the fold query source for the names a language actually has; an
 // empty result means "no fold query". Names are single tokens by
 // construction (query syntax needs no escaping here).
-QByteArray composeFoldQuery(const TSLanguage* lang, const char* const* names, uint32_t count)
+QByteArray composeFoldQuery(const TSLanguage* lang, const QStringList& names)
 {
+    // Node names are ASCII identifiers by tree-sitter's grammar naming
+    // rules; toLatin1 mangles anything else into '?', which the language
+    // lookup then rejects (no real symbol can contain '?').
     QByteArray src;
-    for (uint32_t i = 0; i < count; ++i) {
-        const char* n = names[i];
-        if (!ts_language_symbol_for_name(lang, n, uint32_t(std::strlen(n)), true))
+    for (const QString& name : names) {
+        const QByteArray n = name.toLatin1();
+        if (n.isEmpty())
+            continue;
+        if (!ts_language_symbol_for_name(lang, n.constData(), uint32_t(n.size()), true))
             continue;
         src += '(';
         src += n;
@@ -185,6 +206,56 @@ QByteArray composeFoldQuery(const TSLanguage* lang, const char* const* names, ui
 }
 
 } // namespace
+
+// Grammar registry (post-1.8.0 grammar-extensibility sliver, PLAN): the
+// ONE process-wide table - seeded from kVendor above, grown by the
+// registerGrammar door (upsert by normalized id). These member
+// definitions live OUTSIDE the anonymous namespace: a nested type may
+// only be DEFINED in the namespace that encloses HighlightEngine.
+// GUI-thread discipline like every other part of the engine: the doors
+// and every refresh pass run on it, so the generation counter needs no
+// atomics.
+struct HighlightEngine::LangEntry {
+    QString id; // stored NORMALIZED (trimmed + lowercased)
+    const TSLanguage* lang = nullptr; // resolved once at registry WRITE
+    QByteArray query; // the highlights.scm source, owned (UTF-8)
+    QStringList foldNodes; // M13 fold-node list; grammar-unknown names
+                           // are filtered by composeFoldQuery
+    QHash<QString, int> roles; // capture name -> TokenKind int; rides
+                               // ABOVE the fixed kindForCapture table
+};
+
+QVector<HighlightEngine::LangEntry>& HighlightEngine::registry()
+{
+    static QVector<LangEntry> reg = [] {
+        QVector<LangEntry> seeded;
+        for (const VendorSeed& s : kVendor) {
+            LangEntry e;
+            e.id = QString::fromLatin1(s.id);
+            e.lang = s.langFn();
+            e.query = QByteArray(s.queryFn());
+            for (uint32_t i = 0; i < s.foldNodeCount; ++i)
+                e.foldNodes << QString::fromLatin1(s.foldNodes[i]);
+            seeded << e;
+        }
+        return seeded;
+    }();
+    return reg;
+}
+
+const HighlightEngine::LangEntry* HighlightEngine::entryFor(const QString& norm)
+{
+    const QVector<LangEntry>& reg = registry();
+    for (const LangEntry& e : reg)
+        if (e.id == norm)
+            return &e;
+    return nullptr;
+}
+
+HighlightEngine::LangEntry* HighlightEngine::entryForMut(const QString& norm)
+{
+    return const_cast<LangEntry*>(entryFor(norm));
+}
 
 // Zero-copy pull reader (PLAN.md D2 core decision). The lexer calls with
 // byte-aligned offsets only under TSInputEncodingUTF16LE (it advances in
@@ -239,8 +310,8 @@ void HighlightEngine::attach(const qmn::core::TextBuffer* buffer)
 QStringList HighlightEngine::languageIds()
 {
     QStringList ids;
-    for (const LangEntry& e : kRegistry)
-        ids << QString::fromLatin1(e.id);
+    for (const LangEntry& e : registry())
+        ids << e.id;
     return ids;
 }
 
@@ -272,56 +343,219 @@ void HighlightEngine::clearState()
 
 void HighlightEngine::setLanguage(const QString& id)
 {
-    const QString norm = id.trimmed().toLower();
+    const QString norm = normalizeLangId(id);
     if (norm == languageId_)
         return;
     clearState();
     languageId_.clear();
-    const LangEntry* hit = nullptr;
-    for (const LangEntry& e : kRegistry) {
-        if (QString::fromLatin1(e.id) == norm) {
-            hit = &e;
-            break;
-        }
-    }
+    regGen_ = g_registryGeneration; // we just read the table: fresh baseline
+    const LangEntry* hit = entryFor(norm);
     if (!hit)
         return; // "" or unknown: plain text, and language() stays empty
-    if (!ts_parser_set_language(parser_, hit->langFn()))
+    if (!ts_parser_set_language(parser_, hit->lang))
         return;
-    lang_ = hit->langFn();
+    lang_ = hit->lang;
     languageId_ = norm;
+    applyQueries(*hit);
+    rebuildLineIndex();
+    dirty_ = true; // first parse is a full parse (old tree is null)
+    spansDirty_ = true;
+}
 
-    const char* src = hit->queryFn();
+// (Re)builds query_, captureKind_ (+ role overrides), predicates and
+// foldQuery_ from a registry entry; the tree is NOT touched (see the
+// header). Extracted from setLanguage so reconcileRegistry can re-apply
+// an UPSERTED entry while the tree is kept.
+void HighlightEngine::applyQueries(const LangEntry& entry)
+{
+    ts_query_delete(query_);
+    query_ = nullptr;
+    ts_query_delete(foldQuery_);
+    foldQuery_ = nullptr;
+    captureKind_.clear();
+    queryPredicates_.clear();
     uint32_t errOffset = 0;
     TSQueryError err = TSQueryErrorNone;
-    query_ = ts_query_new(lang_, src, uint32_t(std::strlen(src)), &errOffset, &err);
-    // A broken query (it must not happen with the committed .scm pins, but
-    // never trust embedded data) only costs colors: parsing and line
-    // tracking keep working, so folding/etc. can reuse the tree later.
+    query_ = ts_query_new(lang_, entry.query.constData(),
+                          uint32_t(entry.query.size()), &errOffset, &err);
+    // A broken query (must not happen with the committed .scm pins, may
+    // happen with a registerGrammar-supplied one) only costs colors:
+    // parsing and line tracking keep working, so folding/etc. can reuse
+    // the tree later. An EMPTY query means parse-only on purpose: the
+    // door's contract for grammars without colors.
     if (query_) {
         const uint32_t n = ts_query_capture_count(query_);
         captureKind_.resize(n);
         for (uint32_t i = 0; i < n; ++i) {
             uint32_t len = 0;
             const char* name = ts_query_capture_name_for_id(query_, i, &len);
-            captureKind_[i] = kindForCapture(name, len);
+            int kind = kindForCapture(name, len);
+            const auto ov = entry.roles.constFind(QString::fromLatin1(name, int(len)));
+            if (ov != entry.roles.constEnd())
+                kind = *ov; // override rides ABOVE the table (unknown
+                            // names gain a role, known ones change it);
+                            // TokenKind::Text maps to "no span", which
+                            // keeps Text never-emitted as a span
+            captureKind_[i] = kind == 0 ? -1 : kind;
         }
         buildQueryPredicates();
     }
-    // M13: the fold query is composed from the language's node list, so a
-    // name the pinned grammar does not have never reaches ts_query_new
-    // (that call fails atomically on an unknown node type). Composed text
-    // empty or a rejected query both mean foldQuery_ = nullptr: folding
-    // then runs on the view's indent scan alone, colors untouched.
-    const QByteArray foldSrc = composeFoldQuery(lang_, hit->foldNodes, hit->foldNodeCount);
+    // M13: the fold query is composed from the entry's node list, so a
+    // name the grammar does not have (a typo, a user grammar's fiction)
+    // never reaches ts_query_new - that call fails atomically on an
+    // unknown node type, and composeFoldQuery filters against the
+    // language first. Composed text empty or a rejected query both mean
+    // foldQuery_ = nullptr: folding then runs on the view's indent scan
+    // alone, colors untouched either way.
+    const QByteArray foldSrc = composeFoldQuery(lang_, entry.foldNodes);
     if (!foldSrc.isEmpty())
         foldQuery_ = ts_query_new(lang_, foldSrc.constData(), uint32_t(foldSrc.size()), &errOffset, &err);
-    // A null foldQuery_ (no usable node names, or a rejected query) leaves
-    // folds() empty: the view's indent scan is then the only fold source,
-    // and the highlight colors are untouched either way.
-    rebuildLineIndex();
-    dirty_ = true; // first parse is a full parse (old tree is null)
-    spansDirty_ = true;
+}
+
+// Re-resolve languageId_ against the current table after a registry
+// write made regGen_ stale (refreshIfNeeded runs this before any of its
+// own work). The tree SURVIVES whenever the language pointer did not
+// change: a color/query/fold upsert never costs a reparse. An unplug
+// (entry gone) or a swapped parser does: the tree goes with it.
+void HighlightEngine::reconcileRegistry()
+{
+    regGen_ = g_registryGeneration;
+    if (languageId_.isEmpty())
+        return; // plain-text state: nothing attached can care
+    const LangEntry* e = entryFor(languageId_);
+    if (!e) {
+        clearState(); // grammar unplugged mid-flight: fall to plain text
+        languageId_.clear();
+        return;
+    }
+    if (e->lang != lang_) {
+        if (!ts_parser_set_language(parser_, e->lang)) {
+            clearState(); // re-set refused (must not happen: the door
+                          // validated at registration time) - honest
+                          // fallback instead of a half-applied language
+            languageId_.clear();
+            return;
+        }
+        ts_tree_delete(tree_);
+        tree_ = nullptr;
+        lang_ = e->lang;
+        dirty_ = true; // next refresh full-parses under the new language
+    }
+    applyQueries(*e);
+    spansDirty_ = true; // folds ride the same rebuild pass
+}
+
+// ---- registry doors (header carries the contract comments) ----
+
+bool HighlightEngine::registerGrammar(const QString& id, const TSLanguage* lang,
+                                      const QString& highlightsQuery,
+                                      const QStringList& foldNodeNames)
+{
+    const QString norm = normalizeLangId(id);
+    if (norm.isEmpty() || !lang)
+        return false;
+    // Validation AT THE DOOR, not in paint: the scratch parser runs
+    // exactly the version/ABI checks setLanguage would run later, so a
+    // wrong-ABI parser is refused with false and never reaches a paint
+    // path. What NO door can validate is the pointer VALUE - C/C++ has
+    // no valid-address test; the contract is that callers supply real
+    // parsers (grammarLanguage/loadGrammarLibrary/own compilation).
+    TSParser* probe = ts_parser_new();
+    const bool fits = ts_parser_set_language(probe, lang);
+    ts_parser_delete(probe);
+    if (!fits)
+        return false;
+    LangEntry e;
+    e.id = norm;
+    e.lang = lang;
+    e.query = highlightsQuery.toUtf8(); // ts_query_new wants UTF-8 bytes
+    e.foldNodes = foldNodeNames; // grammar-unknown names filter out at compose
+    QVector<LangEntry>& reg = registry();
+    if (LangEntry* hit = entryForMut(norm))
+        *hit = std::move(e); // upsert: the id keeps its availableLanguages() slot
+    else
+        reg << std::move(e); // new ids append after the vendored ones
+    ++g_registryGeneration; // attached editors reconcile on their next pass
+    return true;
+}
+
+bool HighlightEngine::unregisterGrammar(const QString& id)
+{
+    const QString norm = normalizeLangId(id);
+    QVector<LangEntry>& reg = registry();
+    for (int i = 0; i < reg.size(); ++i) {
+        if (reg[i].id != norm)
+            continue;
+        reg.removeAt(i);
+        ++g_registryGeneration; // attached editors fall to plain text;
+                                // vendored ids go too (the upsert
+                                // decision) - restoring one means
+                                // registerGrammar with the address kept
+                                // from grammarLanguage BEFORE removal
+        return true;
+    }
+    return false;
+}
+
+const TSLanguage* HighlightEngine::grammarLanguage(const QString& id)
+{
+    const LangEntry* e = entryFor(normalizeLangId(id));
+    return e ? e->lang : nullptr;
+}
+
+bool HighlightEngine::setCaptureRole(const QString& id, const QString& captureName, int kind)
+{
+    if (captureName.isEmpty())
+        return false;
+    LangEntry* e = entryForMut(normalizeLangId(id));
+    if (!e)
+        return false; // door order: registerGrammar first, roles after
+    e->roles.insert(captureName, kind);
+    ++g_registryGeneration;
+    return true;
+}
+
+bool HighlightEngine::clearCaptureRole(const QString& id, const QString& captureName)
+{
+    LangEntry* e = entryForMut(normalizeLangId(id));
+    if (!e || !e->roles.remove(captureName))
+        return false;
+    ++g_registryGeneration;
+    return true;
+}
+
+const TSLanguage* HighlightEngine::loadGrammarLibrary(const QString& fileName, const QString& symbolName)
+{
+    auto* lib = new QLibrary(fileName);
+    if (!lib->load()) {
+        delete lib;
+        return nullptr;
+    }
+    // The handle is kept OPEN forever, even if the symbol hunt then
+    // fails: registered parsers borrow language pointers from it, and
+    // unloading mid-process would dangle (the tree-sitter ecosystem
+    // bans grammar unloading on its own; dropping a QLibrary may
+    // unload, so handles are never dropped).
+    static QVector<QLibrary*> g_grammarLibraries; // process-lifetime
+    g_grammarLibraries << lib;
+    QString sym = symbolName;
+    if (sym.isEmpty()) {
+        // ecosystem convention: libfoo.so exports tree_sitter_foo (file
+        // base name, leading "lib" dropped, non-alphanumerics -> '_')
+        QString base = QFileInfo(fileName).completeBaseName();
+        if (base.startsWith(QLatin1String("lib")))
+            base.remove(0, 3);
+        base.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9]")), QLatin1String("_"));
+        sym = QLatin1String("tree_sitter_") + base;
+    }
+    const QFunctionPointer entry = lib->resolve(sym.toLatin1().constData());
+    if (!entry)
+        return nullptr; // library stays loaded; it just owns no grammar for us
+    // tree-sitter's loader contract: the symbol is a no-arg extern "C"
+    // function returning the language. A symbol with another signature
+    // is UB to call - the exact contract every ecosystem editor uses.
+    auto exportFn = reinterpret_cast<const TSLanguage* (*)()>(entry);
+    return exportFn();
 }
 
 // Flatten each pattern's predicate steps once per language. Step layout
@@ -615,6 +849,8 @@ void HighlightEngine::setViewport(int startUnit, int endUnit)
 
 void HighlightEngine::refreshIfNeeded()
 {
+    if (regGen_ != g_registryGeneration)
+        reconcileRegistry(); // a registry write landed since the last pass
     if (!lang_)
         return;
 

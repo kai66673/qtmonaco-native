@@ -139,6 +139,15 @@ Include headers relative to `src/` (CMake adds `src/` as a PUBLIC include dir):
   in `third_party/tree-sitter/CMakeLists.txt`); the query files are
   `CMAKE_CONFIGURE_DEPENDS` of that dir, so a query edit re-runs configure on
   the next `ninja` automatically.
+- **The grammar registry is RUNTIME-extensible** (post-1.8.0 sliver): the old
+  static array became a process-wide `QVector<LangEntry>` in
+  `HighlightEngine.cpp` seeded from the vendored five; engines reconcile
+  against a generation counter inside `refreshIfNeeded` (SAME language
+  pointer = tree kept, only query/roles/folds rebuilt). The `CodeEditor`
+  doors (`registerGrammar`/`loadGrammar`/`grammarAddress`/`unregisterGrammar`/
+  `setCaptureRole`) type-erase the parser as a `qintptr` ADDRESS —
+  tree-sitter types stay out of the public header; loaded grammar
+  libraries are NEVER unloaded.
 
 ## Build & test (C++ host path)
 
