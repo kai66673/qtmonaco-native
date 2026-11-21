@@ -1146,19 +1146,52 @@ void featureCompletion(const QJsonValue& id, const QJsonObject& params)
                  .arg(triggerCharacter));
     // The proof rides LEGAL fields: labels this test pins verbatim, so the
     // frame the hub built is visible in the reply itself.
+    // The ACCEPT sliver (post-1.8.0) rides the SAME items with payloads:
+    // "alpha" gets a plain {range,newText} textEdit — zero-width at the
+    // REQUEST position; the tk= item carries the insert/replace alternative
+    // shape (clangd's favorite) with the replace range deliberately
+    // ONE UNIT LEFT of the insert one, so a test can tell which range the
+    // hub picked (insert wins); the off= item has NO textEdit but an
+    // insertText — the hub must synthesize the insertion at the fire-time
+    // caret itself.
+    const QJsonObject position = params.value(QStringLiteral("position")).toObject();
+    auto posObj = [&position](int colShift) {
+        int col = position.value(QStringLiteral("character")).toInt() + colShift;
+        if (col < 0)
+            col = 0;
+        return QJsonObject{{QStringLiteral("line"),
+                            position.value(QStringLiteral("line")).toDouble()},
+                           {QStringLiteral("character"), col}};
+    };
+    const QJsonObject pointEdit{
+        {QStringLiteral("start"), posObj(0)}, {QStringLiteral("end"), posObj(0)}};
     QJsonArray items;
     items.append(QJsonObject{
         {QStringLiteral("label"), QStringLiteral("alpha")},
         {QStringLiteral("kind"), 14}, // Variable: the kind table rides along
         {QStringLiteral("data"),
-         QJsonObject{{QStringLiteral("origin"), QStringLiteral("list")}}}});
+         QJsonObject{{QStringLiteral("origin"), QStringLiteral("list")}}},
+        {QStringLiteral("textEdit"),
+         QJsonObject{{QStringLiteral("range"), pointEdit},
+                     {QStringLiteral("newText"), QStringLiteral("ALPHA")}}}});
     items.append(QJsonObject{{QStringLiteral("label"), QStringLiteral("tk=")
-                                                               + QString::number(triggerKind)}});
+                                                               + QString::number(triggerKind)},
+                             {QStringLiteral("textEdit"),
+                              QJsonObject{{QStringLiteral("newText"),
+                                           QStringLiteral("TKTXT")},
+                                          {QStringLiteral("insert"), pointEdit},
+                                          {QStringLiteral("replace"),
+                                           QJsonObject{{QStringLiteral("start"),
+                                                       posObj(-1)},
+                                                      {QStringLiteral("end"),
+                                                       posObj(0)}}}}}});
     if (triggerKind == 2)
         items.append(QJsonObject{{QStringLiteral("label"),
                                   QStringLiteral("tc=") + triggerCharacter}});
     items.append(QJsonObject{{QStringLiteral("label"),
-                              QStringLiteral("off=") + QString::number(offset)}});
+                              QStringLiteral("off=") + QString::number(offset)},
+                             {QStringLiteral("insertText"),
+                              QStringLiteral("OFFTXT")}});
     const QJsonObject result{
         {QStringLiteral("isIncomplete"), false},
         {QStringLiteral("items"), items}};

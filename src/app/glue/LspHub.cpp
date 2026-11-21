@@ -103,6 +103,53 @@ QString hoverPlainText(const QJsonValue& contents)
     return QString();
 }
 
+// The ACCEPT payload of one completion row (post-1.8.0 sliver): the wire's
+// `textEdit` in either legal shape — the plain {range, newText} or the
+// insert/replace alternative range {insert, replace, newText} that clangd
+// prefers. The INSERT range wins: accept is a type-and-accept flow, and the
+// insert range is the one anchored at the request position. With no usable
+// textEdit the server's `insertText` (else the `label`) becomes a ZERO-WIDTH
+// insertion at the caret captured at trigger FIRE time — the client
+// advertises insertTextFormat PLAIN TEXT in initialize, so no snippet
+// markers are expected from a conforming server. All-zero output = "no
+// payload" (onTriggerAccept refuses such accepts silently).
+qmn::view::CodeEditor::TextEdit completionTextEdit(const QJsonObject& item,
+                                                   qmn::view::TextPosition caretAtFire)
+{
+    qmn::view::CodeEditor::TextEdit ed;
+    const QJsonValue teVal = item.value(QStringLiteral("textEdit"));
+    if (teVal.isObject()) {
+        const QJsonObject te = teVal.toObject();
+        QJsonObject range = te.value(QStringLiteral("range")).toObject();
+        if (!te.contains(QStringLiteral("range"))) {
+            if (te.contains(QStringLiteral("insert")))
+                range = te.value(QStringLiteral("insert")).toObject();
+            else if (te.contains(QStringLiteral("replace")))
+                range = te.value(QStringLiteral("replace")).toObject();
+        }
+        const QJsonObject s = range.value(QStringLiteral("start")).toObject();
+        const QJsonObject e = range.value(QStringLiteral("end")).toObject();
+        if (s.value(QStringLiteral("line")).isDouble()
+            && e.value(QStringLiteral("line")).isDouble()) {
+            ed.startLine = s.value(QStringLiteral("line")).toInt();
+            ed.startCol = s.value(QStringLiteral("character")).toInt();
+            ed.endLine = e.value(QStringLiteral("line")).toInt();
+            ed.endCol = e.value(QStringLiteral("character")).toInt();
+            ed.newText = te.value(QStringLiteral("newText")).toString();
+            return ed;
+        }
+    }
+    QString text = item.value(QStringLiteral("insertText")).toString();
+    if (text.isEmpty())
+        text = item.value(QStringLiteral("label")).toString();
+    if (!text.isEmpty()) {
+        ed.startLine = ed.endLine = caretAtFire.line;
+        ed.startCol = ed.endCol = caretAtFire.col;
+        ed.newText = text;
+    }
+    return ed;
+}
+
 // The fallback hover frame: the WORD at the caret (no word = a zero-width
 // caret range). Clamped into the mirror text — the frame the server answered
 // against.
@@ -371,7 +418,24 @@ QJsonObject LspHub::buildInitializeParams(const ServerSpec& spec) const
                                       {QStringLiteral("willSave"), false},
                                       {QStringLiteral("willSaveWaitUntil"),
                                        false},
-                                      {QStringLiteral("didSave"), true}}}}},
+                                      {QStringLiteral("didSave"), true}}},
+                         // PLAIN-TEXT completions only (post-1.8.0 accept
+                         // sliver): the popups have no snippet engine, so
+                         // the client advertises insertTextFormat 1 and NO
+                         // snippet support — a conforming server (clangd
+                         // included) then sends textEdit/insertText as plain
+                         // text, and the accept path applies them verbatim.
+                         {QStringLiteral("completion"),
+                          QJsonObject{{QStringLiteral("completionItem"),
+                                       QJsonObject{
+                                           {QStringLiteral("snippetSupport"),
+                                            false},
+                                           {QStringLiteral("insertTextFormat"),
+                                            QJsonObject{
+                                                {QStringLiteral("valueSupport"),
+                                                 true},
+                                                {QStringLiteral("value"),
+                                                 1}}}}}}}}},
             {QStringLiteral("window"),
              QJsonObject{{QStringLiteral("workDoneProgress"), false}}}});
     // The template deep-merges ON TOP (its ${WORKSPACE_ROOT} expands first,
@@ -582,6 +646,12 @@ bool LspHub::openDocument(qmn::view::CodeEditor* editor, const QString& uri,
     connect(editor, &qmn::view::CodeEditor::cursorMoved, reg.syncer,
             [this, key](qmn::view::TextPosition pos) {
                 onTriggerCaretMoved(key, pos);
+            });
+    connect(editor, &qmn::view::CodeEditor::completionAccepted, reg.syncer,
+            [this, key](int /*index*/,
+                        const qmn::view::CodeEditor::CompletionItem& item) {
+                onTriggerAccept(key, item); // the ACCEPT route (post-1.8.0
+                                            // sliver): the hub does the insert
             });
 
     reg.syncer->open(doc->toPlainText(), languageId); // didOpen now, or on
@@ -1211,6 +1281,34 @@ void LspHub::onTriggerCaretMoved(const QString& uri,
                                           // sits still
 }
 
+// The ACCEPT route (post-1.8.0 sliver): the user accepted a shown row and
+// the VIEW emitted it — the view never inserts (display-only contract), so
+// the insertion lives HERE. The guards ride the frozen semantics: the
+// trigger `on` bit is the opt-in gate (the tap is connected for EVERY
+// registration, so the gate is what makes an OFF editor a silent refusal),
+// the registration must still be alive, and a row with NO payload (the
+// all-zero default from a server that sent neither textEdit nor insertText)
+// is refused silently. ONE applyTextEdits call = ONE undo group (one Ctrl+Z
+// reverses the accept), and the syncer rides the view's textChanged like
+// for any local edit, so the server sees the didChange right away. No auto
+// re-completion after accept (VS Code's rule): the next qualifying typing
+// burst re-triggers on its own.
+void LspHub::onTriggerAccept(const QString& uri,
+                             const qmn::view::CodeEditor::CompletionItem& item)
+{
+    const TriggerState* t = triggerFor(uri);
+    if (!t || !t->on)
+        return;
+    const auto reg = registrations_.constFind(uri);
+    if (reg == registrations_.constEnd() || !reg->editor)
+        return; // released between the emit and the delivery
+    const qmn::view::CodeEditor::TextEdit& ed = item.textEdit;
+    if (ed.newText.isEmpty() && ed.startLine == 0 && ed.startCol == 0
+        && ed.endLine == 0 && ed.endCol == 0)
+        return; // no payload at all: nothing to insert
+    reg->editor->applyTextEdits({ed});
+}
+
 void LspHub::fireCompletionTrigger(const QString& uri)
 {
     TriggerState* t = triggerFor(uri);
@@ -1250,9 +1348,13 @@ void LspHub::fireCompletionTrigger(const QString& uri)
             return;
         triggerCharacter = QString(unit);
     }
+    const qmn::view::TextPosition caretAtFire
+        = reg->editor->position(); // captured for the reply: the accept
+                                   // payload's fallback anchor (the caret may
+                                   // have moved on when the reply lands)
     const qint64 id = requestCompletion(
-        reg->editor, reg->editor->position(),
-        [this, uri](const qmn::protocol::RpcClient::Reply& reply) {
+        reg->editor, caretAtFire,
+        [this, uri, caretAtFire](const qmn::protocol::RpcClient::Reply& reply) {
             if (TriggerState* s = triggerFor(uri))
                 s->pendingCompletion = 0; // THIS request is over, by whatever
                                           // route (reply, -32802, timeout, refusal)
@@ -1263,8 +1365,9 @@ void LspHub::fireCompletionTrigger(const QString& uri)
                 return; // refusals/cancels/timeouts show NOTHING (the
                         // superseded request never touches the popup)
             // The result is CompletionItem[] OR a CompletionList object —
-            // both legal per spec; only label+detail cross into the view
-            // (PLAN: no resolve path), capped at kMaxCompletionRows.
+            // both legal per spec; label+detail plus the decoded/synthesized
+            // ACCEPT payload (completionTextEdit above) cross into the view,
+            // capped at kMaxCompletionRows (no resolve path, PLAN).
             QJsonArray items;
             if (reply.result.isArray())
                 items = reply.result.toArray();
@@ -1282,7 +1385,8 @@ void LspHub::fireCompletionTrigger(const QString& uri)
                 if (label.isEmpty())
                     continue; // a row without a label is no row
                 rows.append({label,
-                             item.value(QStringLiteral("detail")).toString()});
+                             item.value(QStringLiteral("detail")).toString(),
+                             completionTextEdit(item, caretAtFire)});
                 if (rows.size() >= kMaxCompletionRows)
                     break;
             }

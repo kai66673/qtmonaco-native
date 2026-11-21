@@ -4257,6 +4257,190 @@ private slots:
         QCOMPARE(stderrSpy.count(), armedReqs);
     }
 
+    // --- ACCEPT sliver (post-1.8.0): the accepted row's payload reaches the
+    // wire. The fakeserver decorates its OWN completion items: plain
+    // {range,newText} (alpha), insert/replace ranges one unit APART (tk= —
+    // the hub must prefer INSERT), and insertText-only (off= — the hub must
+    // synthesize the insertion at the FIRE-time caret). The sync side is
+    // proved by CONTENT: the hover reply's echoed word can only read
+    // "betaaTKTXT" if the accept's didChange reached the server mirror (a
+    // positional probe would not prove arrival — featureOffset passes
+    // generous wire positions through, stale or not).
+    void hubTriggerAcceptInsertsDecodedTextEditAndSyncs()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features"),
+                                 QStringLiteral("hoveron"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(50); // the accept's didChange must sit in the
+                                 // SERVER long before the 500 ms hover ask reads it
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("beta"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///trig-acc.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        editor.setPosition({0, 4});
+        h.hub.setPopupTriggers(&editor, true);
+
+        QTest::keyClick(&editor, Qt::Key_A);
+        QVERIFY2(waitUntil([&] { return editor.completionListVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QListWidget* list = editor.findChild<QListWidget*>(
+            QStringLiteral("qmn-completion-list"));
+        QVERIFY(list);
+        QCOMPARE(list->count(), 3);
+
+        QTest::keyClick(&editor, Qt::Key_Down); // onto the tk= row (the
+                                                // insert/replace-shaped edit)
+        QTest::keyClick(&editor, Qt::Key_Return); // ACCEPT: the hub applies
+        QVERIFY(!editor.completionListVisible());
+        QCOMPARE(editor.toPlainText(), QStringLiteral("betaaTKTXT"));
+        // Had the hub taken the REPLACE range (one unit LEFT of insert), the
+        // typed 'a' would be GONE — "betaTKTXT" would sit here instead.
+        // INSERT winning is pinned by the very shape of the result.
+
+        // SYNC proof by content: move the caret INSIDE the inserted word
+        // (a non-typing move) — the server echoes the word at the position
+        // decoded from its OWN synced mirror. The didOpen text was just
+        // "beta": only didChanges (the typed 'a', the accepted insertion)
+        // could have taught the server about the rest of the run.
+        editor.setPosition({0, 7});
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("REQ textDocument/hover")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return editor.hoverVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QLabel* label =
+            editor.findChild<QLabel*>(QStringLiteral("qmn-hover-label"));
+        QVERIFY(label);
+        // the whole run around offset 7 is ONE word for the server's
+        // wordAt(): "betaaTKTXT" did not exist until BOTH didChanges (the
+        // typed 'a' and the accepted insertion) reached the mirror
+        QCOMPARE(label->text(), QStringLiteral("HOVER betaaTKTXT off=7"));
+    }
+
+    // NO textEdit but an insertText: the hub synthesizes a ZERO-WIDTH
+    // insertion at the caret captured at trigger FIRE time — and the accept
+    // edit (5 units) is NOT typing, so no completion RE-FIRES behind it.
+    void hubTriggerAcceptFallbackSynthesizesInsertAtFireCaret()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000); // wire stays spare: only feature REQs
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("beta"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///trig-acc2.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        editor.setPosition({0, 4});
+        h.hub.setPopupTriggers(&editor, true);
+
+        QTest::keyClick(&editor, Qt::Key_A);
+        QVERIFY2(waitUntil([&] { return editor.completionListVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QListWidget* list = editor.findChild<QListWidget*>(
+            QStringLiteral("qmn-completion-list"));
+        QVERIFY(list);
+
+        QTest::keyClick(&editor, Qt::Key_Down);
+        QTest::keyClick(&editor, Qt::Key_Down); // the off= row: insertText
+                                                // ONLY, no textEdit at all
+        QTest::keyClick(&editor, Qt::Key_Return);
+        QCOMPARE(editor.toPlainText(), QStringLiteral("betaaOFFTXT"));
+        // the FIRE caret was (0,5) (the typed 'a'): the synthesized zero-
+        // width insertion landed EXACTLY there
+        const int reqs = [] (const QSignalSpy& spy) {
+            int n = 0;
+            for (const QList<QVariant>& args : spy)
+                if (args.at(0).toString()
+                        .contains(QStringLiteral("REQ textDocument/completion")))
+                    ++n;
+            return n;
+        }(stderrSpy);
+        QTest::qWait(600); // past the 150 ms completion debounce
+        QCOMPARE(stderrSpy.count(), reqs); // the 5-unit accept insertion is
+                                           // NOT typing: no re-fire
+    }
+
+    // The hub's refusal gates: an ARMED editor whose row carries NO payload
+    // (all-zero textEdit) and a NEVER-ARMED editor with a payload — in BOTH
+    // cases the view emitted (the view is payload-blind) and the hub applied
+    // NOTHING. Zero feature traffic throughout: refusals are silent.
+    void hubTriggerAcceptRefusedWithoutTriggersOrPayload()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor armed;
+        armed.setLanguage(QStringLiteral("python"));
+        armed.setPlainText(QStringLiteral("beta"));
+        QVERIFY(h.hub.openDocument(&armed,
+                                   QStringLiteral("file:///trig-acc3a.py"),
+                                   QStringLiteral("python")));
+        qmn::view::CodeEditor unarmed;
+        unarmed.setLanguage(QStringLiteral("python"));
+        unarmed.setPlainText(QStringLiteral("beta"));
+        QVERIFY(h.hub.openDocument(&unarmed,
+                                   QStringLiteral("file:///trig-acc3b.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        using CI = qmn::view::CodeEditor::CompletionItem;
+        using TE = qmn::view::CodeEditor::TextEdit;
+
+        armed.show();
+        unarmed.show();
+        h.hub.setPopupTriggers(&armed, true); // only the FIRST is armed
+
+        int fired = 0;
+        QObject::connect(&armed, &qmn::view::CodeEditor::completionAccepted,
+                         [&](int, const CI&) { ++fired; });
+        QObject::connect(&unarmed, &qmn::view::CodeEditor::completionAccepted,
+                         [&](int, const CI&) { ++fired; });
+
+        // ARMED + payload-LESS row: the view accepts and emits (it carries
+        // the payload OPAQUELY, the refusal is the hub's), the hub refuses.
+        armed.showCompletionList(
+            {CI{QStringLiteral("nopayload"), QString()}}); // all-zero default
+        QTest::keyClick(&armed, Qt::Key_Return);
+        QCOMPARE(fired, 1); // the VIEW emitted —
+        QCOMPARE(armed.toPlainText(), QStringLiteral("beta")); // the hub did not
+
+        // NEVER-ARMED editor, row WITH a payload: the completionAccepted tap
+        // is connected for every registration, but the trigger `on` gate is
+        // what makes the unarmed editor a silent refusal.
+        unarmed.showCompletionList(
+            {CI{QStringLiteral("would-apply"), QString(),
+                TE{0, 0, 0, 4, QStringLiteral("NOPE")}}});
+        QTest::keyClick(&unarmed, Qt::Key_Return);
+        QCOMPARE(fired, 2);
+        QCOMPARE(unarmed.toPlainText(), QStringLiteral("beta"));
+
+        QTest::qWait(700); // past BOTH debounces: the refusals stayed silent
+        QVERIFY(stderrSpy.empty()); // not one feature request was ever asked
+    }
+
 };
 
 QTEST_MAIN(TstLsp) // NOT guiless any more: machine 4's hub slots drive a real

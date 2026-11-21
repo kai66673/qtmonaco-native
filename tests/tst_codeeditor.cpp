@@ -289,6 +289,8 @@ private slots:
     // visibleIndexOfModelLine, padding, lineHeight): no new primitives.
     void popupDoorsShowHideReplaceEmptyAndFocusSafe();
     void popupsAutoHideOnKeyMouseAndFocus();
+    void completionAcceptRoutesKeysClicksAndEscape();
+    void completionAcceptAnchorsStableAndChromeDismiss();
     void popupAnchorsTrackCaretFreezeScrollResizeAndFlip();
 
     // Overview ruler (M7, Phase E1). DoD: ruler geometry state tests
@@ -6565,8 +6567,12 @@ void TestCodeEditor::popupsAutoHideOnKeyMouseAndFocus()
     QVERIFY(!editor->completionListVisible());
     QVERIFY(!editor->hoverVisible());
 
-    // A press ON a popup (the editor never sees it — the popups are child
-    // widgets, so each popup's own mousePressEvent runs the same rule):
+    // A press ON a popup's CHROME (the editor never sees it — the popups
+    // are child widgets, so each popup's own mousePressEvent runs the same
+    // rule). QTest::mousePress posts to the WIDGET directly (no child hit-
+    // testing), so this pins the chrome handler; a real press landing on a
+    // completion ROW instead selects/accepts there (the accept-sliver
+    // carve-out — pinned in completionAcceptRoutesKeysClicksAndEscape).
     arm();
     QWidget* cp = editor->findChild<QWidget*>(QStringLiteral("qmn-completion-popup"));
     QVERIFY(cp);
@@ -6589,6 +6595,181 @@ void TestCodeEditor::popupsAutoHideOnKeyMouseAndFocus()
     QVERIFY(QApplication::sendEvent(editor, &out));
     QVERIFY(!editor->completionListVisible());
     QVERIFY(!editor->hoverVisible());
+}
+
+// The ACCEPT sliver's KEY routes (the showCompletionList contract): the
+// list's own keys steer ROWS and never touch the caret or the document;
+// Enter/Tab accept with the row record riding out VERBATIM (the payload is
+// the glue's business — the view inserts nothing); Esc retires ONLY the
+// list; modified combos fall through to the m6 dismiss-and-type rules.
+void TestCodeEditor::completionAcceptRoutesKeysClicksAndEscape()
+{
+    editor->show();
+    editor->setFocus();
+    editor->setPlainText(QStringLiteral("hello world\nsecond line"));
+    using CI = CodeEditor::CompletionItem;
+    using TE = CodeEditor::TextEdit;
+    const CI a{QStringLiteral("alpha"), QStringLiteral("d1"),
+               TE{0, 0, 0, 5, QStringLiteral("ALPHA")}};
+    const CI b{QStringLiteral("beta"), QString(),
+               TE{1, 0, 1, 6, QStringLiteral("BETA")}};
+
+    bool fired = false;
+    int seenIndex = -1;
+    CI seen;
+    QObject::connect(editor, &CodeEditor::completionAccepted,
+                     [&](int index, const CI& item) {
+                         fired = true;
+                         seenIndex = index;
+                         seen = item;
+                     });
+    const qmn::view::TextPosition caretBefore = editor->position();
+
+    editor->showCompletionList({a, b});
+    QVERIFY(editor->completionListVisible());
+    QListWidget* list =
+        editor->findChild<QListWidget*>(QStringLiteral("qmn-completion-list"));
+    QVERIFY(list);
+    QCOMPARE(list->currentRow(), 0); // re-show pre-highlights the FIRST row
+
+    // Nav keys steer rows, never the caret, and never dismiss.
+    QTest::keyClick(editor, Qt::Key_Down);
+    QTest::keyClick(editor, Qt::Key_Down); // clamped at the LAST row
+    QVERIFY(editor->completionListVisible());
+    QCOMPARE(list->currentRow(), 1);
+    QCOMPARE(editor->position(), caretBefore);
+    QTest::keyClick(editor, Qt::Key_Home);
+    QCOMPARE(list->currentRow(), 0);
+    QTest::keyClick(editor, Qt::Key_End);
+    QCOMPARE(list->currentRow(), 1);
+
+    // Enter ACCEPTS the current row: hide happens BEFORE the emit, the
+    // payload rides opaquely, and the document stays untouched.
+    QTest::keyClick(editor, Qt::Key_Home);
+    QTest::keyClick(editor, Qt::Key_Return);
+    QVERIFY(fired);
+    QVERIFY(!editor->completionListVisible());
+    QCOMPARE(seenIndex, 0);
+    QVERIFY(seen == a); // the textEdit crossed the view untouched
+    QCOMPARE(editor->toPlainText(),
+             QStringLiteral("hello world\nsecond line"));
+    QCOMPARE(editor->position(), caretBefore); // accept moves NO caret
+
+    // Tab accepts too; with the list gone Enter is the PLAIN newline again
+    // (the routing lives only while the list is visible).
+    fired = false;
+    editor->showCompletionList({a, b});
+    QTest::keyClick(editor, Qt::Key_Tab);
+    QVERIFY(fired);
+    QCOMPARE(seenIndex, 0);
+    QVERIFY(!editor->completionListVisible());
+    fired = false; // arm the NO-emit probe for the plain Enter below
+    const int linesBefore = editor->lineCount();
+    QTest::keyClick(editor, Qt::Key_Return); // no list: plain editing, NO emit
+    QVERIFY(!fired);
+    QCOMPARE(editor->lineCount(), linesBefore + 1);
+
+    // Esc hides ONLY the list; the hover popup deliberately survives.
+    editor->showHover(qmn::view::CodeEditor::HoverRange{0, 0, 1, 0},
+                      QStringLiteral("hover text"));
+    editor->showCompletionList({a, b});
+    QTest::keyClick(editor, Qt::Key_Escape);
+    QVERIFY(!editor->completionListVisible());
+    QVERIFY(editor->hoverVisible());
+    QTest::keyClick(editor, Qt::Key_Escape); // no list now: the m6 rule
+                                             // dismisses the hover too
+    QVERIFY(!editor->hoverVisible());
+
+    // MOUSE accept: a PRESS on a row only SELECTS (no dismissal, no emit),
+    // and a release on a DIFFERENT row is no accept either (itemClicked
+    // needs press+release on the SAME row). The click that does land is the
+    // accept. The popup stays shown throughout — the list is no longer
+    // click-through.
+    editor->setPlainText(QStringLiteral("hello world\nsecond line"));
+    editor->showCompletionList({a, b});
+    const QPoint row0 = list->visualItemRect(list->item(0)).center();
+    const QPoint row1 = list->visualItemRect(list->item(1)).center();
+    QVERIFY(!row0.isNull() && !row1.isNull());
+    QTest::mousePress(list->viewport(), Qt::LeftButton, Qt::NoModifier, row1);
+    QVERIFY(editor->completionListVisible()); // a press alone never dismisses
+    QCOMPARE(list->currentRow(), 1);
+    QVERIFY(!fired);
+    QTest::mouseRelease(list->viewport(), Qt::LeftButton, Qt::NoModifier, row0);
+    QVERIFY(editor->completionListVisible()); // pressed AND released rows
+                                              // differ: no itemClicked
+    QVERIFY(!fired);
+    QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, row0);
+    QVERIFY(fired); // press+release on ONE row: the accept route
+    QCOMPARE(seenIndex, 0);
+    QVERIFY(seen == a);
+    QVERIFY(!editor->completionListVisible());
+    QCOMPARE(editor->toPlainText(),
+             QStringLiteral("hello world\nsecond line")); // still untouched
+
+    // Modified combos are the EDITOR's shortcuts, never list keys: Ctrl+End
+    // dismisses (m6) and jumps the caret as always.
+    fired = false;
+    editor->showCompletionList({a, b});
+    QTest::keyClick(editor, Qt::Key_End, Qt::ControlModifier);
+    QVERIFY(!editor->completionListVisible());
+    QVERIFY(!fired);
+    QCOMPARE(editor->position().line, 1); // the jump happened
+}
+
+// The accept sliver's STABILITY pins: the popup's first row is
+// pre-highlighted on every show, re-show resets the selection, a row press
+// never leaks a focus change, and the popup chrome keeps the both-popups
+// dismissal while rows keep the accept.
+void TestCodeEditor::completionAcceptAnchorsStableAndChromeDismiss()
+{
+    editor->show();
+    editor->setFocus();
+    editor->setPlainText(QStringLiteral("one\ntwo"));
+    using CI = CodeEditor::CompletionItem;
+    const CI row1{QStringLiteral("first"), QString()};
+    const CI row2{QStringLiteral("second"), QString()};
+
+    editor->showCompletionList({row1, row2, row1}); // row1 TWICE: a row
+                                                    // repeat must not merge
+    QListWidget* list =
+        editor->findChild<QListWidget*>(QStringLiteral("qmn-completion-list"));
+    QVERIFY(list);
+    QCOMPARE(list->count(), 3);
+    QCOMPARE(list->currentRow(), 0);
+    QTest::keyClick(editor, Qt::Key_Down);
+    QCOMPARE(list->currentRow(), 1);
+    editor->showCompletionList({row1, row2}); // re-show RESETS to the first
+    QCOMPARE(list->currentRow(), 0);
+    QCOMPARE(list->count(), 2);
+
+    int accepts = 0;
+    QObject::connect(editor, &CodeEditor::completionAccepted,
+                     [&](int index, const CI&) {
+                         ++accepts;
+                         QCOMPARE(index, 2); // the row clicked: 0-based,
+                                             // pre-accept index space
+                     });
+    editor->showCompletionList({row1, row2, row1});
+    const QPoint last = list->visualItemRect(list->item(2)).center();
+    QVERIFY(!last.isNull());
+    QTest::mouseClick(list->viewport(), Qt::LeftButton, Qt::NoModifier, last);
+    QCOMPARE(accepts, 1); // ONE emit for one accept, hide-first confirmed by
+                          // the visibility door below
+    QVERIFY(!editor->completionListVisible());
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0})); // caret inert
+
+    // The popup's CHROME keeps the old both-popups dismissal (the list now
+    // eats row presses itself, so only chrome reaches the popup handler).
+    editor->showCompletionList({row1, row2});
+    editor->showHover(qmn::view::CodeEditor::HoverRange{0, 0, 0, 1},
+                      QStringLiteral("h"));
+    QWidget* cp = editor->findChild<QWidget*>(
+        QStringLiteral("qmn-completion-popup"));
+    QVERIFY(cp);
+    QTest::mousePress(cp, Qt::LeftButton, Qt::NoModifier, QPoint(0, 0));
+    QVERIFY(!editor->completionListVisible());
+    QVERIFY(!editor->hoverVisible());
+    QCOMPARE(accepts, 1); // the chrome press dismissed, it did NOT accept
 }
 
 void TestCodeEditor::popupAnchorsTrackCaretFreezeScrollResizeAndFlip()

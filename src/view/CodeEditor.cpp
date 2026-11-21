@@ -6768,19 +6768,21 @@ public:
         list_ = new QListWidget(this);
         list_->setObjectName(QStringLiteral("qmn-completion-list"));
         list_->setFocusPolicy(Qt::NoFocus);
-        // Display-only (PLAN v1: no accept/navigation): the list is CLICK
-        // THROUGH — presses fall to the popup widget, whose mousePressEvent
-        // runs the auto-hide. Without this the list swallows the press and
-        // the "a press ANYWHERE dismisses" contract breaks on real clicks
-        // (QTest::mousePress on the popup alone would never catch it).
-        list_->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-        list_->viewport()->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+        // PRE-1.9 this list was CLICK-THROUGH (WA_TransparentForMouseEvents,
+        // the display-only v1). Since the post-1.8.0 ACCEPT sliver the list
+        // owns its rows: a press SELECTS and a release over the same row is
+        // the MOUSE accept route — CodeEditor connects itemClicked to
+        // acceptCompletionRow at popup creation. Only the popup's CHROME
+        // (the margins around the list) still runs the auto-hide press rule
+        // below. Focus never enters the list (NoFocus above): every editor
+        // key still arrives through keyPressEvent, where the view routes the
+        // list's own keys (navigate/accept/Escape).
         list_->setUniformItemSizes(true);
         lay->addWidget(list_);
     }
 
-    // Rows are PLAIN "label  detail" strings (detail is decoration-only in
-    // v1 — there is no accept/navigation path, PLAN's display contract).
+    // Rows are PLAIN "label  detail" strings (detail is decoration-only —
+    // the ACCEPT payload rides the editor-side record, never the row text).
     // Size to content: the widest row's advance sets the width, uniform
     // rows the height; the editor's place* clamps the result into bounds.
     void setItems(const QVector<CodeEditor::CompletionItem>& items)
@@ -6798,17 +6800,70 @@ public:
             w = std::max(w, fm.horizontalAdvance(list_->item(i)->text()));
         const int rowH = std::max(1, list_->sizeHintForRow(0));
         list_->setFixedSize(w + 8, list_->count() * rowH + 8);
+        list_->setCurrentRow(list_->count() > 0 ? 0 : -1); // first row
+                                                           // pre-highlighted
+                                                           // (VS Code shape)
         adjustSize();
     }
+
+    // The accept wiring (itemClicked) connects through this accessor at
+    // popup creation (the lambda lives in CodeEditor::showCompletionList,
+    // where calling the editor's private accept route is legal).
+    QListWidget* list() const { return list_; }
+
+    // Keyboard steering of the current row — the editor ROUTES these keys
+    // here while the list is visible (see keyPressEvent); the list never
+    // takes focus, so this runs from the editor's handler. All keys CLAMP,
+    // none wrap: a page step is the rows that fit the visible list height.
+    void navigate(int key)
+    {
+        const int n = list_->count();
+        if (n == 0)
+            return;
+        int row = list_->currentRow();
+        switch (key) {
+        case Qt::Key_Up:
+            row = qMax(0, row - 1);
+            break;
+        case Qt::Key_Down:
+            row = row < 0 ? 0 : qMin(n - 1, row + 1);
+            break;
+        case Qt::Key_PageUp:
+            row = qMax(0, row - pageSize());
+            break;
+        case Qt::Key_PageDown:
+            row = qMin(n - 1, row + pageSize());
+            break;
+        case Qt::Key_Home:
+            row = 0;
+            break;
+        case Qt::Key_End:
+            row = n - 1;
+            break;
+        default:
+            return;
+        }
+        list_->setCurrentRow(row); // scrolls the row into view (Qt default)
+    }
+
+    int currentRow() const { return list_->currentRow(); }
 
 protected:
     void mousePressEvent(QMouseEvent*) override
     {
-        editor_->hideHover(); // BOTH popups dismiss (see HoverPopup note)
+        // Only the popup's CHROME lands here now (a row press is the
+        // list's): BOTH popups dismiss (see HoverPopup note).
+        editor_->hideHover();
         editor_->hideCompletionList();
     }
 
 private:
+    int pageSize() const
+    {
+        const int rowH = std::max(1, list_->sizeHintForRow(0));
+        return qMax(1, list_->viewport()->height() / rowH);
+    }
+
     CodeEditor* editor_;
     QListWidget* list_;
 };
@@ -7131,8 +7186,23 @@ void CodeEditor::showCompletionList(const QVector<CompletionItem>& items)
         hideCompletionList();
         return;
     }
-    if (!completionPopup_)
+    if (!completionPopup_) {
         completionPopup_ = new CompletionPopup(this);
+        // The MOUSE accept route (post-1.8.0 sliver): itemClicked fires on
+        // a release over the pressed row. The context object is the popup
+        // (the connection dies with the editor), and this lambda lives in a
+        // CodeEditor member, so the private accept route is callable here.
+        QListWidget* list =
+            static_cast<CompletionPopup*>(completionPopup_)->list();
+        connect(list, &QListWidget::itemClicked, completionPopup_,
+                [this](QListWidgetItem* row) {
+                    acceptCompletionRow(
+                        static_cast<CompletionPopup*>(completionPopup_)
+                            ->list()
+                            ->row(row));
+                });
+    }
+    completionRows_ = items; // the accept signal's payload source
     completionAnchor_ = caret_; // frozen at show time; scroll/resize follow
     static_cast<CompletionPopup*>(completionPopup_)
         ->setItems(items); // IN-PLACE replacement while visible
@@ -7150,6 +7220,22 @@ void CodeEditor::hideCompletionList()
 bool CodeEditor::completionListVisible() const
 {
     return completionPopup_ && completionPopup_->isVisible();
+}
+
+// The two accept routes (the Enter/Tab key path above, the itemClicked
+// mouse path connected at popup creation) both land here. The gates: the
+// list must be VISIBLE and the row must exist. HIDE BEFORE EMITTING: a
+// handler that re-shows a fresh list (the glue re-triggering on the edit
+// its accept applied) then rides a closed popup, never a re-entrant show
+// into a live one. The view itself touches NOTHING else — no document
+// mutation, no caret move: inserting item.textEdit is the glue's job.
+void CodeEditor::acceptCompletionRow(int row)
+{
+    if (!completionListVisible() || row < 0 || row >= completionRows_.size())
+        return;
+    const CompletionItem item = completionRows_.at(row);
+    hideCompletionList();
+    emit completionAccepted(row, item);
 }
 
 void CodeEditor::showHover(const HoverRange& range, const QString& plainText)
@@ -7227,8 +7313,6 @@ void CodeEditor::hidePopupsForInteraction()
 void CodeEditor::keyPressEvent(QKeyEvent* event)
 {
     perfTimer_.start();
-    hidePopupsForInteraction(); // M8 m6: typing/navigation dismisses (PLAN
-                                // auto-hide; the glue re-triggers afresh)
     auto finish = [this] {
         if (perfTimer_.isValid()) {
             const qint64 ns = perfTimer_.nsecsElapsed();
@@ -7242,6 +7326,43 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             }
         }
     };
+
+    // Post-1.8.0 ACCEPT sliver: while the completion list is VISIBLE its
+    // own keys route FIRST (the showCompletionList contract, VS Code
+    // shape). Modified combos FALL THROUGH: Ctrl/Alt/Meta chains are the
+    // editor's shortcuts, never list keys — and every other key falls
+    // through to the m6 dismiss + normal typing below.
+    if (completionListVisible()) {
+        auto* cp = static_cast<CompletionPopup*>(completionPopup_);
+        if (!(event->modifiers()
+              & (Qt::ControlModifier | Qt::AltModifier | Qt::MetaModifier))) {
+            const int listKey = event->key();
+            if (listKey == Qt::Key_Up || listKey == Qt::Key_Down
+                || listKey == Qt::Key_PageUp || listKey == Qt::Key_PageDown
+                || listKey == Qt::Key_Home || listKey == Qt::Key_End) {
+                cp->navigate(listKey);
+                event->accept();
+                finish();
+                return;
+            }
+            if (listKey == Qt::Key_Return || listKey == Qt::Key_Enter
+                || listKey == Qt::Key_Tab) {
+                acceptCompletionRow(cp->currentRow());
+                event->accept();
+                finish();
+                return;
+            }
+            if (listKey == Qt::Key_Escape) {
+                hideCompletionList(); // ONLY the list: a visible hover
+                                      // popup deliberately survives Esc
+                event->accept();
+                finish();
+                return;
+            }
+        }
+    }
+    hidePopupsForInteraction(); // M8 m6: typing/navigation dismisses (PLAN
+                                // auto-hide; the glue re-triggers afresh)
 
     const Qt::KeyboardModifiers allMods = event->modifiers();
     const bool shift = allMods & Qt::ShiftModifier;
@@ -7891,6 +8012,10 @@ void CodeEditor::mousePressEvent(QMouseEvent* event)
     clearFoldHoverState();
     hidePopupsForInteraction(); // M8 m6: a press ANYWHERE (content, gutter,
                                 // ruler, popup) dismisses the feature popups
+                                // (post-1.8.0 accept sliver: a press on a
+                                // COMPLETION ROW never lands here — the list
+                                // eats it as row selection, and its release
+                                // may accept)
     // M7 ruler gesture FIRST (left = click/drag scroll, middle too: paste
     // in the chrome strip would surprise): the strip scrolls, the caret
     // never moves. The scrollbar child already swallows its own area.

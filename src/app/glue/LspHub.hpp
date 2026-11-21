@@ -39,6 +39,8 @@
 #include "lsp/LspClient.hpp"
 #include "lsp/WorkspaceEdit.hpp" // the decoder's records cross the applier doors
 #include "protocol/Transport.hpp"
+#include "view/CodeEditor.hpp" // the ACCEPT tap's CompletionItem is a NESTED
+                               // type: a forward declaration is not enough
 
 namespace qmn::view {
 class CodeEditor;
@@ -225,7 +227,13 @@ public:
     // wire byte (every existing test's traffic stays byte-identical). The
     // door needs an OPEN document (triggers ride the registration); turning
     // OFF stops the timers, cancels the in-flight completion and hides both
-    // popups. ACCEPT stays out of scope (the further M8 sliver list).
+    // popups. The ACCEPT route rides this door too (post-1.8.0 sliver): a
+    // row the user accepts in the popup reaches the hub through the view's
+    // completionAccepted signal, and the hub applies the row's textEdit via
+    // applyTextEdits — ONE undo group, the syncer riding textChanged like
+    // any local edit; no auto re-trigger (the next qualifying burst is a
+    // re-type anyway). Accepting with the triggers OFF, or for a released
+    // document, is a silent refusal.
     static constexpr int kCompletionTriggerMs = 150;
     static constexpr int kHoverTriggerMs = 500;
     static constexpr int kMaxCompletionRows = 100;
@@ -367,9 +375,9 @@ private:
     QString resolveUri(qmn::view::CodeEditor* editor, const QString& uri);
     // The popup trigger machinery (the doors above): state lives per
     // registration key, born with the first setPopupTriggers(true) and gone
-    // with the registration. The editApplied/cursorMoved taps connect in
-    // openDocument (context = the registration's syncer, the same
-    // die-with-the-registration trick the edit feed uses), so the slots
+    // with the registration. The editApplied/cursorMoved/completionAccepted
+    // taps connect in openDocument (context = the registration's syncer, the
+    // same die-with-the-registration trick the edit feed uses), so the slots
     // below only ever see a lookup.
     struct TriggerState; // timers + bookkeeping; defined in the .cpp
     TriggerState* triggerEntry(const QString& uri); // creates + wires timers
@@ -378,6 +386,8 @@ private:
                        const QString& inserted);
     void onTriggerCaretMoved(const QString& uri,
                              const qmn::view::TextPosition& pos);
+    void onTriggerAccept(const QString& uri,
+                         const qmn::view::CodeEditor::CompletionItem& item);
     void fireCompletionTrigger(const QString& uri);
     void fireHoverTrigger(const QString& uri);
     // Pump (bounded by kStopBarrierMs) until every client lands a terminal

@@ -591,15 +591,26 @@ public:
     // (that identity is what makes anchor assertions exact). Scroll and
     // resize RE-PLACE (popups track their frozen anchors).
     //
-    // Auto-hide (PLAN): ANY key press in the editor, ANY mouse press (on
-    // the editor OR on a popup — they are display-only), and focus leaving
-    // the editor. An EMPTY payload on either show door HIDES (a glue
+    // Auto-hide (PLAN): ANY key press in the editor, ANY mouse press, and
+    // focus leaving the editor — WITH ONE EXCEPTION since the post-1.8.0
+    // ACCEPT sliver: the completion list OWNS certain keys and its own rows
+    // (see showCompletionList below). A press on the editor, anywhere on the
+    // hover popup, or on the completion popup's chrome around its rows still
+    // dismisses BOTH. An EMPTY payload on either show door HIDES (a glue
     // re-trigger with nothing to show is the same dismissal). Neither door
     // ever takes focus from the editor (WA_ShowWithoutActivating + NoFocus
     // on the popup and its content).
     struct CompletionItem {
         QString label;  // the row's primary text
         QString detail; // appended after two spaces when set (plain text)
+        // The ACCEPT payload (post-1.8.0 sliver): what the FEATURE GLUE
+        // applies when the user accepts this row (see completionAccepted
+        // below). The view carries it OPAQUELY and never applies it itself
+        // (the display-only contract): the glue decodes it from whatever the
+        // server sent (an LSP `textEdit`, insert range first), or synthesizes
+        // a zero-width insertion at the request caret, and silently refuses
+        // an all-zero (payload-less) accept. Defaults all-zero = no payload.
+        TextEdit textEdit;
 
         bool operator==(const CompletionItem&) const = default; // test round-trips
     };
@@ -613,7 +624,19 @@ public:
     };
     // The list anchors at the CARET's position AT SHOW TIME — later caret
     // moves never drag it (the dismissal is a hide, not a follow). An empty
-    // list hides. Re-showing while visible replaces the rows IN PLACE.
+    // list hides. Re-showing while visible replaces the rows IN PLACE and
+    // re-highlights the FIRST row.
+    //
+    // ACCEPT (post-1.8.0 sliver, the VS Code shape): while the list is
+    // visible the view routes Up/Down/PageUp/PageDown/Home/End to the ROWS
+    // (the caret does NOT move), Enter/Tab accept the current row, and a
+    // click-release ON A ROW accepts it (a press alone only SELECTS that row,
+    // no dismissal). Every accept route hides the list and emits
+    // completionAccepted exactly once — the view NEVER inserts anything
+    // itself; applying item.textEdit is the glue's job (and re-triggering
+    // after the edit rides the glue's debounce). Escape hides ONLY the
+    // completion list (a visible hover popup survives); any other key keeps
+    // the m6 rule: dismiss both popups and type as normal.
     void showCompletionList(const QVector<CompletionItem>& items);
     void hideCompletionList();
     bool completionListVisible() const;
@@ -913,6 +936,13 @@ signals:
     // change (the M23 changed-not-touched discipline). This is the signal
     // the LSP glue turns into a live didChangeConfiguration re-push.
     void workspaceConfigurationChanged();
+    // The row the user ACCEPTED in a visible completion list (Enter/Tab on
+    // the current row, or a click-release on that row — see
+    // showCompletionList). `index` is the row index; `item` is the row's
+    // record and carries the textEdit payload OPAQUELY: applying it
+    // (applyTextEdits) and re-triggering are the glue's job — the view never
+    // mutates the document through accept (the display-only contract).
+    void completionAccepted(int index, const CompletionItem& item);
 
 protected:
     void paintEvent(QPaintEvent* event) override;
@@ -1327,6 +1357,10 @@ private:
     QWidget* completionPopup_ = nullptr; // lazy child via the completion doors
     HoverRange hoverAnchor_;             // the range the visible hover tracks
     TextPosition completionAnchor_;      // the caret frozen at show time
+    QVector<CompletionItem> completionRows_; // the SHOWN rows: the accept
+                                             // signal's payload source
+    void acceptCompletionRow(int row);   // hide BEFORE emitting (a handler's
+                                         // re-show rides a closed popup)
     void placeHoverPopup();      // anchor math + bounds clamp (shared rect
     void placeCompletionPopup(); // helper lives beside the classes in .cpp)
     void repositionPopups();       // setVScroll/setHScroll/resizeEvent hooks
@@ -1725,3 +1759,6 @@ Q_DECLARE_METATYPE(qmn::view::TextPosition)
 // Same reason for the M13 fold record (foldableRanges() returns a
 // QVector<FoldRange> the binding's container converter must resolve).
 Q_DECLARE_METATYPE(qmn::view::CodeEditor::FoldRange)
+// Same reason for the post-1.8.0 ACCEPT signal's payload (the record rides
+// completionAccepted as a SIGNAL parameter).
+Q_DECLARE_METATYPE(qmn::view::CodeEditor::CompletionItem)

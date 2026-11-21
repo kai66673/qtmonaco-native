@@ -868,7 +868,43 @@ the server's `range`, else the word at the caret, against the syncer MIRROR.
 The LIVE demo path shipped with it: `qmn-demo --lsp` (hub OFF by default —
 `tst_demo` never spawns a server; clangd is not a CI guarantee), which wires
 openDocument + `setPopupTriggers(true)` for every c/cpp tab on the hub's
-built-in clangd spec. ACCEPT still stays a further sliver.
+built-in clangd spec.
+
+**The second deferred sliver is BUILT (2026-11-21, no version bump): the
+completion ACCEPT.** The VS Code shape (the user's choice): while the list
+is visible the view routes Up/Down/PageUp/PageDown/Home/End to the ROWS
+(the caret never moves), Enter/Tab accept, and a mouse release ON A ROW
+accepts — a press alone only SELECTS. The one recorded DEVIATION from the
+m6 display-only contract: the completion list loses
+`WA_TransparentForMouseEvents` (rows became click-targets); a press on the
+popup CHROME, a press on the editor, and any other key still dismiss both
+popups, and Esc hides ONLY the list (a visible hover deliberately survives).
+The view NEVER inserts: `CompletionItem` gained the additive `TextEdit
+textEdit` field (all-zero default, carried OPAQUELY) and the view emits
+`completionAccepted(index, item)` exactly once per accept (hide BEFORE
+emit, so a glue re-show rides a closed popup). The insertion lives in the
+hub: the `completionAccepted` tap connects for EVERY registration but the
+trigger `on` bit + registration liveness + an all-zero-payload refusal make
+anything unintended a silent no-op; the edit goes through the frozen
+`applyTextEdits` door — one accept = one undo group, the syncer rides
+`textChanged` like any local edit (server arrival proved by CONTENT: the
+fakeserver hover echoes the word only a delivered didChange can spell),
+and NO auto re-fire (the multi-unit accept edit is not typing). The hub
+decodes the wire `textEdit` in both legal shapes — plain `{range,newText}`
+and the insert/replace alternative ranges, PREFERING `insert` (anchored at
+the request position) — and otherwise synthesizes `insertText`-or-`label`
+as a zero-width insertion at the caret captured at trigger FIRE time;
+`initialize` now advertises completion `insertTextFormat` 1 (PLAIN TEXT,
+`snippetSupport` false — the popups have no snippet engine). The new field
++ signal ride ALREADY-BOUND classes: the three-copies stayed untouched, and
+`CompletionItem` got a `Q_DECLARE_METATYPE` (signal parameter, the
+`cursorMoved` precedent; container codegen rejected-log: unchanged
+QFlags-only noise). Tst grew: codeeditor 254 -> 256 slots, lsp 66 -> 69
+(the fakeserver decorates its EXISTING items — every row-count/label pin
+holds — with the three payload shapes: plain textEdit, the insert/replace
+pair one unit APART to pin the insert-preference, and insertText-only; the
+sync-arrival slot arms `setDebounceMs(50)` so the accept's didChange sits
+in the server long before the 500 ms hover ask reads it).
 
 **Known pre-existing bug (recorded 2026-11-15, deferred to its own small
 car):** bracketed type-over-selection in `insertTextAtCaret` (the
