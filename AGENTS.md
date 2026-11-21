@@ -12,6 +12,8 @@ phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
   train** since 2026-11-15, ordering decided: M25 soft wrap (SHIPPED) → M10
   diff (cars 1–3 built: engine + view + chrome) → M8 LSP/protocol (**CLOSED
   2026-11-19**, seven machines — see the PLAN "M8 … CLOSED" paragraph) →
+  **the glue shelf G1+G2 (DECIDED 2026-11-21, ordered BEFORE car 4 by the
+  user — see the PLAN "glue shelf + ProjectSession" record)** →
   **DAP, the one Gate-2 car still open**. The full design record is the
   PLAN.md "GATE 2" section — read it before starting
   a car. Never start work for a later gate while an earlier one is open.
@@ -25,15 +27,22 @@ phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
   and machine 7's four doors are ALL additive, and the popup anchors reuse
   the existing `xForCol` + characterRect math.
 - Both deliverables ship: a C++ static package (export set `qmn::core` /
-  `qmn::view`, plus internal `qmn::internal_tree_sitter`, and since M8 the
-  REAL exports `qmn::protocol` / `qmn::lsp` — `qmn_glue` is app code and
-  ships nothing) and a PySide6 wheel
+  `qmn::view`, plus internal `qmn::internal_tree_sitter`, since M8 the
+  REAL exports `qmn::protocol` / `qmn::lsp`, and since the G1 promotion
+  (2026-11-21) the SECOND-shelf export `qmn::glue` — its own export set +
+  `qmnGlueConfig.cmake`, see "Current state" and the layering rule below)
+  and a PySide6 wheel
   `qmn-native` (cp310-abi3, manylinux_2_34). See "Python bindings" below.
 - **The package version has exactly two literals** — `project(qtmonaco-native
   VERSION …)` in `CMakeLists.txt` and `version` in `pyproject.toml` — and the
   close ritual bumps BOTH in one commit (the 1.8.0 close found them drifted:
   1.6.1 vs 1.7.0). The hub's LSP `initialize` `clientInfo.version` is
-  CONFIGURED from `PROJECT_VERSION`, never hand-kept.
+  CONFIGURED from `PROJECT_VERSION`, never hand-kept. **G1 exception:** the
+  glue SHELF versions itself with a third literal, `QMN_GLUE_VERSION` in
+  `src/glue/CMakeLists.txt` (a plain variable, NOT a nested `project()` —
+  that would reset `PROJECT_VERSION` and poison the clientInfo contract) —
+  it bumps ONLY when the shelf itself breaks, never in the package close
+  ritual.
 - **Keep public view API Shiboken-wrappable**: `Q_OBJECT`, plain Qt types in
   params/returns, no C++ templates or STL types crossing the API boundary
   (internals are unconstrained). The binding wraps only the **view** widget;
@@ -51,15 +60,15 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
 - `src/app/` — view only (`qmn-spike` bench/spike harness and `qmn-demo`
   tabbed demo app). `qmn-demo`'s window/dialog logic lives in the
   `qmn_demo_app` STATIC lib (`demo_main.cpp` is a thin main) because
-  `tst_demo` links the lib and drives it offscreen. **M8 amendment
-  (2026-11-19): `src/app/glue/` is the ONE app target allowed to know
-  lsp/protocol** — `qmn_glue` (STATIC, `LspHub`) links `qmn_view` +
-  `qmn_lsp`, is NOT in any export set (app code, package surface unchanged)
-  and `tst_lsp` links it. Still no view→lsp arrow anywhere: the hub is a
-  *client* of both sides. **Post-1.8.0 sliver (2026-11-19): `qmn_demo_app`
-  links `qmn_glue` PRIVATE too — qmn-demo's `--lsp` door** (built-in clangd
-  spec + `.qmn/lsp.json` + popup triggers on c/cpp tabs). The door is OFF by
-  default and MainWindow.hpp forward-declares `LspHub` behind a `unique_ptr`,
+  `tst_demo` links the lib and drives it offscreen. **G1 promotion
+  (2026-11-21) retired the old M8 amendment:** the hub is no longer app
+  code — `src/glue/` is a real layer (see the Gate-2 layers bullet), and
+  the clause is now "app targets LINK the `qmn_glue` target; no glue type
+  ever appears in an app-defined header beyond the forward-decls already
+  there". `qmn_demo_app` links `qmn_glue` PRIVATE — qmn-demo's `--lsp`
+  door** (built-in clangd spec + `.qmn/lsp.json` + popup triggers on c/cpp
+  tabs). The door is OFF by default and MainWindow.hpp forward-declares
+  `qmn::glue::LspHub` behind a `unique_ptr`,
   so `tst_demo` never sees an lsp type and never spawns a server (clangd is
   not a CI guarantee; the one demo slot that arms the hub only opens
   languages NO built-in spec claims).
@@ -69,7 +78,11 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
   headless like core). `src/protocol/` — QtCore+QtNetwork, **never view**.
   `src/lsp/` and `src/dap/` — only `src/protocol/`, **never view**. The
   view/core never depend on protocol/lsp/dap; LSP/DAP *glue* (decoration
-  feeding, syncer wiring) lives in `src/app/`. **M10 amendment (decided
+  feeding, syncer wiring) lives in `src/glue/` (G1 promotion 2026-11-21:
+  the old `src/app/glue/` became a REAL layer — `src/glue/` is a CLIENT of
+  core+view+protocol+lsp, QtCore/QtWidgets, exported as `qmn::glue`; it
+  knows NO app/demo type, and the DAP glue of car 4 lands ON this shelf).
+  **M10 amendment (decided
   2026-11-16): `qmn_view` PRIVATE-links `qmn::diff`** — the pure line-diff
   layer is QtCore-only like core, not a network layer; no diff type crosses
   any public view header (the diff doors take `CodeDocument*`/`QString` and
@@ -161,14 +174,17 @@ ninja -C build
 ctest --test-dir build --output-on-failure
 ```
 
-Five ctest tests: `textbuffer` (core property tests), `diff` (the pure
+Six ctest tests: `textbuffer` (core property tests), `diff` (the pure
 line-diff engine, M10), `lsp` (M8: JsonFraming + transports + RpcClient, then
 the fakeserver/LspClient/DocumentSyncer/LspHub machines — this binary GROWS
 machine by machine through M8, no further ctest entries inside the car),
-`codeeditor` (widget tests), `demo` (drives the qmn-demo surface
+`glue` (G2: `ProjectSession` over REAL editors — resolution, registry,
+config fold, the attached-but-unclaimed hub path; NO server ever spawns,
+the claimed-server machinery is tst_lsp's fakeserver turf), `codeeditor`
+(widget tests), `demo` (drives the qmn-demo surface
 programmatically). `textbuffer` and `diff` are guiless; since M8 machine 4
 the `lsp` binary drives real `CodeEditor`s too, so ctest sets
-`QT_QPA_PLATFORM=offscreen` for `lsp`, `codeeditor` and `demo` (via
+`QT_QPA_PLATFORM=offscreen` for `lsp`, `glue`, `codeeditor` and `demo` (via
 `set_tests_properties`). Run one test:
 
 ```bash

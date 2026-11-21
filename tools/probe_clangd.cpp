@@ -26,7 +26,7 @@
 
 #include <functional>
 
-#include "app/glue/LspHub.hpp"
+#include "glue/LspHub.hpp"
 #include "lsp/DocumentSyncer.hpp"
 #include "lsp/LspClient.hpp"
 #include "protocol/RpcClient.hpp"
@@ -64,7 +64,7 @@ struct FeatureProbe {
     bool arrived = false;
     qmn::protocol::RpcClient::Reply reply;
 
-    qmn::app::LspHub::FeatureHandler handler()
+    qmn::glue::LspHub::FeatureHandler handler()
     {
         return [this](const qmn::protocol::RpcClient::Reply& r) {
             arrived = true;
@@ -109,7 +109,7 @@ bool step(const QString& what)
     return true;
 }
 
-bool runProbe(qmn::view::CodeEditor& editor, qmn::app::LspHub& hub,
+bool runProbe(qmn::view::CodeEditor& editor, qmn::glue::LspHub& hub,
               const QString& workspaceRoot, const QString& uri)
 {
     // The drill document: every line a deliberate reason to answer. Line 4
@@ -258,7 +258,7 @@ bool runProbe(qmn::view::CodeEditor& editor, qmn::app::LspHub& hub,
                          << "document with " << jsonDump(fmt.reply.result)
                          << Qt::endl,
                    false;
-        const qmn::app::LspHub::ApplyReport applied =
+        const qmn::glue::LspHub::ApplyReport applied =
             hub.applyTextEditList(&editor, fmt.reply.result, client);
         if (!applied.applied || applied.documentsChanged != 1)
             return err() << "PROBE-FAIL formatting apply: "
@@ -300,7 +300,7 @@ bool runProbe(qmn::view::CodeEditor& editor, qmn::app::LspHub& hub,
                                             : QStringLiteral("never answered"))
                          << Qt::endl,
                    false;
-        const qmn::app::LspHub::ApplyReport applied =
+        const qmn::glue::LspHub::ApplyReport applied =
             hub.applyReplyEdit(rename.reply.result, client);
         if (!applied.applied || applied.documentsChanged != 1)
             return err() << "PROBE-FAIL rename apply (version pin drift?): "
@@ -404,7 +404,7 @@ int main(int argc, char** argv)
     file.close();
 
     qmn::view::CodeEditor editor; // declared BEFORE the hub: the hub's
-    qmn::app::LspHub hub;         // destructor says didClose while alive
+    qmn::glue::LspHub hub;         // destructor says didClose while alive
     hub.setWorkspaceRoot(workspace.path());
 
     const bool ok = runProbe(editor, hub, workspace.path(),

@@ -16,11 +16,17 @@
 class QLabel;
 class QTabWidget;
 
-namespace qmn::app {
+namespace qmn::glue {
+// Both glue types are kept OUT of this header's include set so tst_demo
+// never learns protocol/lsp/glue types — it only links the static lib
+// that does (AGENTS: app links the glue TARGET, no glue type crosses
+// this header beyond these forward-decls).
+class LspHub;         // the G1 shelf's hub (the --lsp door)
+class ProjectSession; // G2: the demo's document registry — the tabs become
+                      // its presentation
+} // namespace qmn::glue
 
-class LspHub; // app/glue/LspHub.hpp; kept OUT of this header's include set so
-              // tst_demo never learns protocol/lsp types — it only links the
-              // static lib that does (AGENTS: the hub is an app-side client)
+namespace qmn::app {
 
 class MainWindow : public QMainWindow {
     Q_OBJECT
@@ -34,10 +40,12 @@ public:
     bool openPath(const QString& path);
 
     // The --lsp door (the M8 close-train popup-trigger demo path): creates
-    // (or destroys) the LspHub. OFF by DEFAULT is load-bearing: tst_demo
-    // drives this window offscreen and must never spawn a real server. With
-    // a hub, every c/cpp tab gets openDocument + setPopupTriggers(true);
-    // languages no spec claims simply stay plain-editor tabs.
+    // (or destroys) the LspHub and attaches (detaches) it to the ALWAYS-on
+    // document session. OFF by DEFAULT is load-bearing: tst_demo drives
+    // this window offscreen and must never spawn a real server. With a
+    // hub attached, every tab whose language a spec claims goes through
+    // the session's open (hub openDocument + popup triggers); languages
+    // no spec claims simply stay plain-editor tabs.
     void setLspEnabled(bool enabled);
     bool lspEnabled() const { return hub_ != nullptr; }
 
@@ -67,8 +75,12 @@ private:
     QLabel* statusLabel_ = nullptr; // permanent status widget
     EditorSettings settings_;       // template for new tabs
     QString lastDir_;               // dialog start dir once a file was picked
-    std::unique_ptr<LspHub> hub_;   // the --lsp door's hub; null = OFF (the
-                                    // DEFAULT: tst_demo never spawns servers)
+    std::unique_ptr<qmn::glue::ProjectSession> session_; // ALWAYS on: the
+        // document registry + language table + config fold (G2); the tabs
+        // mirror it, the --lsp door only ATTACHES a hub to it
+    std::unique_ptr<qmn::glue::LspHub> hub_; // the --lsp door's hub; null =
+                                    // OFF (the DEFAULT: tst_demo never
+                                    // spawns servers)
 };
 
 } // namespace qmn::app

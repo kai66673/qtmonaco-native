@@ -32,7 +32,7 @@
 #include <functional>
 #include <memory>
 
-#include "app/glue/LspHub.hpp"
+#include "glue/LspHub.hpp"
 #include "lsp/DocumentSyncer.hpp"
 #include "lsp/LspClient.hpp"
 #include "lsp/PositionConverter.hpp"
@@ -411,7 +411,7 @@ struct HubHarness {
     int crashSpawnCount = 0;
     int spawnCount = 0;
     QVector<Spawn> spawned;
-    qmn::app::LspHub hub;
+    qmn::glue::LspHub hub;
 
     explicit HubHarness(const QStringList& modes)
         : modeArgs(modes)
@@ -420,7 +420,7 @@ struct HubHarness {
         // already expands ${WORKSPACE_ROOT} into spec.program, which is what
         // the spawn really needs).
         hub.setTransportFactory(
-            [this](const qmn::app::LspHub::ServerSpec& spec, QObject* parent) {
+            [this](const qmn::glue::LspHub::ServerSpec& spec, QObject* parent) {
                 ++spawnCount;
                 QStringList args = modeArgs;
                 const bool dies = crashSpawnCount < 0
@@ -450,7 +450,7 @@ struct HubHarness {
     void installSpec(const QString& name, const QStringList& languages,
                      const QJsonObject& initializeTemplate = QJsonObject())
     {
-        qmn::app::LspHub::ServerSpec spec;
+        qmn::glue::LspHub::ServerSpec spec;
         spec.name = name;
         spec.program = program;
         spec.args = modeArgs;
@@ -473,7 +473,7 @@ struct FeatureProbe {
     bool arrived = false;
     qmn::protocol::RpcClient::Reply reply;
 
-    qmn::app::LspHub::FeatureHandler handler()
+    qmn::glue::LspHub::FeatureHandler handler()
     {
         return [this](const qmn::protocol::RpcClient::Reply& r) {
             arrived = true;
@@ -2246,7 +2246,7 @@ private slots:
         // refused WHOLE (never a partial merge).
         QTemporaryDir root;
         QVERIFY(root.isValid());
-        qmn::app::LspHub hub;
+        qmn::glue::LspHub hub;
         hub.setWorkspaceRoot(root.path());
         QCOMPARE(hub.workspaceRoot(), root.path());
 
@@ -2332,7 +2332,7 @@ private slots:
         const QString serverPath = QString::fromLatin1(QMN_TEST_LSP_SERVER);
         const QString wsroot = QFileInfo(serverPath).absolutePath(); // holds
                                                                     // fakeserver
-        qmn::app::LspHub hub;
+        qmn::glue::LspHub hub;
         hub.setWorkspaceRoot(wsroot);
         QVERIFY(hub.loadConfigFromJson(QJsonObject{
             {QStringLiteral("servers"),
@@ -2419,7 +2419,7 @@ private slots:
                                  QStringLiteral("utf-16")});
         h.crashSpawnCount = 2; // sessions #0 and #1 die after the handshake
         h.installSpec(QStringLiteral("crashy"), {QStringLiteral("python")});
-        QSignalSpy failedSpy(&h.hub, &qmn::app::LspHub::serverFailed);
+        QSignalSpy failedSpy(&h.hub, &qmn::glue::LspHub::serverFailed);
 
         qmn::view::CodeEditor first;
         first.setPlainText(QStringLiteral("first text"));
@@ -3174,7 +3174,7 @@ private slots:
         // editor: refused with a reason, never applied to "the last document".
         qmn::view::CodeEditor stranger;
         stranger.setPlainText(QStringLiteral("never registered"));
-        const qmn::app::LspHub::ApplyReport homeless
+        const qmn::glue::LspHub::ApplyReport homeless
             = h.hub.applyTextEditList(&stranger, QJsonArray{});
         QVERIFY(!homeless.applied);
         QCOMPARE(int(homeless.refused.size()), 1);
@@ -3204,7 +3204,7 @@ private slots:
 
         // The spec's own "nothing changed": a null reply is the legal EMPTY
         // list — applied, with nothing to do.
-        const qmn::app::LspHub::ApplyReport nothing
+        const qmn::glue::LspHub::ApplyReport nothing
             = h.hub.applyTextEditList(&editor, QJsonValue(QJsonValue::Null),
                                       client);
         QVERIFY(nothing.applied);
@@ -3213,7 +3213,7 @@ private slots:
         QVERIFY(nothing.refused.isEmpty());
         QCOMPARE(editor.toPlainText(), text);
 
-        const qmn::app::LspHub::ApplyReport report
+        const qmn::glue::LspHub::ApplyReport report
             = h.hub.applyTextEditList(&editor, fmt.reply.result, client);
         QVERIFY2(report.applied,
                  qPrintable(QStringLiteral("formatting refused: %1")
@@ -3294,7 +3294,7 @@ private slots:
         QCOMPARE(int(actions.size()), 4);
 
         // 1. The plain shape: `edit` on the action itself.
-        const qmn::app::LspHub::ApplyReport withEdit
+        const qmn::glue::LspHub::ApplyReport withEdit
             = h.hub.applyCodeAction(actions.at(0).toObject(), client);
         QVERIFY2(withEdit.applied,
                  qPrintable(withEdit.refused.join(QLatin1String("; "))));
@@ -3315,7 +3315,7 @@ private slots:
 
         // 2. clangd's shape: the work hides in command.arguments[0], and the
         //    command NAME is never matched.
-        const qmn::app::LspHub::ApplyReport viaCommand
+        const qmn::glue::LspHub::ApplyReport viaCommand
             = h.hub.applyCodeAction(actions.at(1).toObject(), client);
         QVERIFY2(viaCommand.applied,
                  qPrintable(viaCommand.refused.join(QLatin1String("; "))));
@@ -3333,7 +3333,7 @@ private slots:
 
         // 3. A create-file documentChange: v1 has no workspace/file model, so
         //    ALL of it is refused — the text edits it carried included.
-        const qmn::app::LspHub::ApplyReport structure
+        const qmn::glue::LspHub::ApplyReport structure
             = h.hub.applyCodeAction(actions.at(2).toObject(), client);
         QVERIFY(!structure.applied);
         QCOMPARE(structure.documentsChanged, 0);
@@ -3348,7 +3348,7 @@ private slots:
                                               // impossible
 
         // 4. Neither shape: the decoder's reason, not a silent success.
-        const qmn::app::LspHub::ApplyReport emptyHanded
+        const qmn::glue::LspHub::ApplyReport emptyHanded
             = h.hub.applyCodeAction(actions.at(3).toObject(), client);
         QVERIFY(!emptyHanded.applied);
         QCOMPARE(int(emptyHanded.refused.size()), 1);
@@ -3389,7 +3389,7 @@ private slots:
         // The door's honest null: a rename that renames nothing answers the
         // spec's null, and the applier door reports it — never a crash, never
         // an applied:true over an empty edit.
-        const qmn::app::LspHub::ApplyReport nullReply
+        const qmn::glue::LspHub::ApplyReport nullReply
             = h.hub.applyReplyEdit(QJsonValue(QJsonValue::Null), client);
         QVERIFY(!nullReply.applied);
         QVERIFY(!nullReply.refused.isEmpty());
@@ -3403,7 +3403,7 @@ private slots:
         QVERIFY2(waitUntil([&] { return probe.arrived; }),
                  "rename never answered");
         QVERIFY2(!probe.reply.isError, qPrintable(probe.reply.message));
-        const qmn::app::LspHub::ApplyReport renamed
+        const qmn::glue::LspHub::ApplyReport renamed
             = h.hub.applyReplyEdit(probe.reply.result, client);
         QVERIFY2(renamed.applied,
                  qPrintable(renamed.refused.join(QLatin1String("; "))));
@@ -3431,7 +3431,7 @@ private slots:
         QVERIFY2(waitUntil([&] { return multiProbe.arrived; }),
                  "the multi-file rename never answered");
         QVERIFY(!multiProbe.reply.isError);
-        const qmn::app::LspHub::ApplyReport multiReport
+        const qmn::glue::LspHub::ApplyReport multiReport
             = h.hub.applyReplyEdit(multiProbe.reply.result, client);
         QVERIFY(!multiReport.applied);
         QCOMPARE(multiReport.documentsChanged, 0);
@@ -3462,7 +3462,7 @@ private slots:
         QVERIFY2(waitUntil([&] { return pinProbe.arrived; }),
                  "the version-pinned rename never answered");
         QVERIFY(!pinProbe.reply.isError);
-        const qmn::app::LspHub::ApplyReport pinReport
+        const qmn::glue::LspHub::ApplyReport pinReport
             = h.hub.applyReplyEdit(pinProbe.reply.result, client);
         QVERIFY(!pinReport.applied);
         QCOMPARE(pinReport.documentsChanged, 0);
@@ -3505,7 +3505,7 @@ private slots:
         syncer->setTypingCapMs(20000);
 
         QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
-        QSignalSpy refusedSpy(&h.hub, &qmn::app::LspHub::applyEditRefused);
+        QSignalSpy refusedSpy(&h.hub, &qmn::glue::LspHub::applyEditRefused);
 
         h.hub.saveDocument(&editor); // the marker rides the saved text
 
@@ -3570,7 +3570,7 @@ private slots:
         syncer->setTypingCapMs(20000);
 
         QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
-        QSignalSpy refusedSpy(&h.hub, &qmn::app::LspHub::applyEditRefused);
+        QSignalSpy refusedSpy(&h.hub, &qmn::glue::LspHub::applyEditRefused);
 
         h.hub.saveDocument(&editor);
 
@@ -3623,7 +3623,7 @@ private slots:
 
             int relayed = 0;
             QObject::connect(
-                &h.hub, &qmn::app::LspHub::serverShowMessageRequest,
+                &h.hub, &qmn::glue::LspHub::serverShowMessageRequest,
                 [&](const QString& spec, const QJsonValue& id,
                     const QJsonValue& params) {
                     ++relayed;
@@ -3680,7 +3680,7 @@ private slots:
 
             int relayed = 0;
             QObject::connect(
-                &h.hub, &qmn::app::LspHub::serverShowMessageRequest,
+                &h.hub, &qmn::glue::LspHub::serverShowMessageRequest,
                 [&](const QString&, const QJsonValue&, const QJsonValue&) {
                     ++relayed; // a modal-less app: it sees the request and
                                // answers no one
@@ -3875,7 +3875,7 @@ private slots:
 
         QStringList shown; // the server's echoes, in the order they arrived
         QObject::connect(
-            &h.hub, &qmn::app::LspHub::serverShowMessage,
+            &h.hub, &qmn::glue::LspHub::serverShowMessage,
             [&](const QString& spec, int type, const QString& message) {
                 QCOMPARE(spec, QStringLiteral("cfgrv"));
                 QCOMPARE(type, 3);
@@ -3980,7 +3980,7 @@ private slots:
         const QString uri = QStringLiteral("file:///m7-config-restart.cfg");
 
         QStringList shown;
-        QObject::connect(&h.hub, &qmn::app::LspHub::serverShowMessage,
+        QObject::connect(&h.hub, &qmn::glue::LspHub::serverShowMessage,
                          [&](const QString&, int, const QString& message) {
                              shown << message;
                          });

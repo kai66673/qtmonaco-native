@@ -17,7 +17,17 @@ set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
 
 find_package(qmn REQUIRED) # pulls Qt6 (Core/Gui/Widgets) via find_dependency
+# The G1 glue shelf: a SEPARATE find, separate decision (PLAN). Its config
+# find_dependency(qmn)s on its own — pointing at the SAME prefix makes that
+# second find resolve to the same installed package (the load-order proof).
+find_package(qmnGlue REQUIRED)
 
 qt_standard_project_setup()
 qt_add_executable(qmn-consumer-smoke main.cpp)
 target_link_libraries(qmn-consumer-smoke PRIVATE qmn::view)
+
+# The shelf's own smoke TU: the qmn::glue doors compile+link across the
+# export boundary and NOTHING spawns (clangd is not a CI guarantee — every
+# door here answers without a server).
+qt_add_executable(qmn-consumer-glue-smoke glue_smoke.cpp)
+target_link_libraries(qmn-consumer-glue-smoke PRIVATE qmn::glue)

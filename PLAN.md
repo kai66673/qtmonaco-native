@@ -840,7 +840,9 @@ deferred half — by the gate rule above that is a Gate-1 debt, and it is paid
 BEFORE anything builds on row math: the diff alignment rows live in slot
 space, so a late wrap would force a full revalidation round on diff tests.
 The wheel-parity leftovers ride their owning cars, they are not a car of
-their own.
+their own. (AMENDED 2026-11-21: the glue-shelf train G1+G2 — see "The glue
+shelf + ProjectSession" below — was ordered BEFORE car 4 by the user, since
+the DAP glue lands ON that shelf.)
 
 **Status at the 1.8.0 close (2026-11-19): wrap (M25), diff (M10 cars 1–3) and
 LSP (M8 machines 1–7) are SHIPPED.** DAP is the one car left open, and the
@@ -1510,6 +1512,111 @@ Machine 7 (the PARITY WRAP — qtmonaco's `add_action` +
   binary. AMENDED AGAIN 2026-11-19 by machine 4: the hub slots drive a real
   `CodeEditor`, so that ONE binary is now widget-carrying — `QTEST_MAIN` +
   `QT_QPA_PLATFORM=offscreen`.)
+
+### The glue shelf + ProjectSession (post-M8 train, DECIDED 2026-11-21; design record)
+
+The user-decided shape: (1) glue becomes a REAL second shelf — an exported
+`qmn::glue` with its own semver; (2) ProjectSession's scope is DOCUMENT
+SESSION + hub (uri ↔ editor ↔ syncer ↔ language, language resolution, spec
+resolution) — NO disk I/O, NO file watching, NO workspace folders; (3) the
+shelf is BINDED into the wheel too (accepted cost: `RpcClient::Reply` and
+`QJsonObject` cross into Python, and the three-copies widen for the first
+time beyond the view).
+
+**G1 — the promotion surgery (no new API).** `src/app/glue/` moves to
+`src/glue/` (the layer dir the M8 plan reserved); the target name stays
+`qmn_glue`. It becomes a real export on its OWN export set: a second
+`install(EXPORT qmnGlueTargets NAMESPACE qmn::)` +
+`cmake/qmnGlueConfig.cmake.in` (`find_dependency(qmn)` BEFORE
+`include(qmnGlueTargets)` — the config guarantees load order, which is what
+satisfies CMake's cross-export-set link warning). Own semver MECHANICS: a
+third version literal `set(QMN_GLUE_VERSION …)` in `src/glue/CMakeLists.txt`
+(NO nested `project()` — it would reset `PROJECT_VERSION` and poison the
+`QMN_PACKAGE_VERSION` define, whose contract is the PACKAGE version: the
+hub's `initialize.clientInfo.version` must not start reporting the shelf
+version). `write_basic_package_version_file(COMPATIBILITY
+SameMajorVersion)` for the shelf; the shelf version starts at 1.0.0 (the
+hub is NEW as public surface, though internal since M8). qmn's own
+`qmnConfig.cmake` does NOT load glue — separate find, separate decision.
+The layering clause INVERTS: `src/glue/` is a real layer (client of
+core+view+protocol+lsp, QtCore/Widgets; never any app/demo type), and the
+old M8 amendment ("`src/app/glue/` is the ONE app target allowed to know
+lsp/protocol") becomes "app targets link the `qmn_glue` target; no glue
+type ever appears in an app-defined header other than the forward-decls
+already there". AGENTS.md gets the rewritten clause + the third-literal
+rule. Includes `app/glue/LspHub.hpp` → `glue/LspHub.hpp` (hub .cpp,
+MainWindow, tst_lsp); `examples/consumer` grows a glue consumer TU
+(doors compile, NOTHING spawns — clangd is not a CI guarantee).
+
+**G2 — `ProjectSession` (a glue QObject).** The registry of open documents
+(uri → editor + languageId) that today lives three times over (MainWindow
+tabs, spike's map, every consumer's own). The built-in suffix table mirrors
+the spike/demo `languageForSuffix` copies (`.h` resolves to cpp — this
+widget's home is C++/Qt; spike KEEPS its copy, it is a bench harness and
+stays qmn_view-only); `setLanguageOverride(suffix, id)` + a NEW optional
+top-level `"languages": {suffix: id}` key in `.qmn/lsp.json` (the hub
+ignores it; the session reads it and hands `servers` to
+`LspHub::loadConfigFromJson`). `openDocument(editor, uri, languageOverride)`
+RESOLVES the language, calls `editor->setLanguage`, registers, and (hub
+attached) calls `LspHub::openDocument` for the specs that claim the id —
+one call owns the whole open. The session NEVER OWNS editors (observes
+`destroyed()`, the hub's auto-unregister precedent) and never shows UI.
+`closeDocument`/`openUris`/`languageForUri` complete the surface. New ctest
+entry `glue` (offscreen, drives REAL `CodeEditor`s; no server spawn — a
+spec-less hub's `openDocument` false is the honest no-op pin).
+MainWindow's tab-open path rewires to the session (tabs stay a demo
+presentation detail).
+
+**G3 — the shelf at the wheel boundary (bindings).** `_qmn.abi3.so` absorbs
+glue/lsp/protocol statically (the view/core precedent — no runtime .so
+proliferation; QtNetwork comes from the PySide6-bundled Qt, in Essentials).
+Bound: `LspHub` (+`ServerSpec` record), `ProjectSession`, and the minimum
+protocol payload the feature callbacks need (`RpcClient::Reply`) — the
+FIRST typesystem/CMake/codegen-CLI edit beyond the view types, rejected-log
+audit mandatory. The `TransportFactory` std::function seam stays C++-only
+(the `PerfStats` precedent: raw seam, honest absence).
+
+**Ordering (user, 2026-11-21): G1+G2 NOW; this PRECEDES car 4 (DAP)** — the
+DAP glue (breakpoint/frame feeds onto the decoration API) lands ON this
+shelf, so the shelf must exist first. G3 follows once the C++ surface is
+settled.
+
+**BUILT 2026-11-21 (G1+G2 shipped together, host ctest 6/6, container +
+both consumer smokes green; the shelf opens at 1.0.0, the package version
+UNtouched — post-1.8.0 sliver pattern).** G1 shipped as recorded, plus one
+decision the record didn't state: the hub's namespace moved `qmn::app` ->
+`qmn::glue` (it was never public before, so this is not a break; app code
+and tst_lsp follow). The consumer smoke grew a SECOND TU
+(`examples/consumer/glue_smoke.cpp`, its own `find_package(qmnGlue)`) and
+CI runs both smokes — it pins the cross-export-set load order FOR REAL
+(`qmnGlueConfig` find_dependency(qmn) before qmnGlueTargets: the generated
+`INTERFACE_LINK_LIBRARIES "qmn::view;qmn::lsp"` resolves cleanly, zero
+CMake warnings). G2 shipped with the recorded scope plus the surfaces the
+record only implied: the full session doors are attachHub/hub,
+setWorkspaceRoot/workspaceRoot (FORWARD to the attached hub: one root, both
+sides), loadConfig/loadConfigFromJson, languageForSuffix/setLanguageOverride
+(case- and dot-insensitive, an EMPTY id REMOVES a mapping — configs may
+unmap a built-in), openDocument/closeDocument/closeUri, openCount/openUris
+(insertion order)/languageForUri/editorForUri/uriForEditor (linear: a
+session holds tens of documents), documentOpened/documentClosed (the seam a
+tab strip rides), and `setPopupsOnOpen` (default ON: the M8 popup-trigger
+pair now arms INSIDE the session on a hub-accepted open — the demo's
+explicit setPopupTriggers call is gone). Decisions born in the build: (a)
+ONE document per uri — a different editor claiming a registered uri is the
+honest FALSE (the LSP didOpen-twice rule), the same editor+uri is an
+idempotent true; the demo's duplicate-path tab keeps its grammar via an
+explicit suffix-table fallback; (b) the session NEVER fights the app: an
+unresolved suffix never touches the editor's language (the user's own
+setLanguage stays honored); (c) attach-after-open does NOT retro-open
+documents (no lazy spawn behind anyone's back) but DOES forward the root
+and REPLAY the last config body read, so the demo's --lsp-after-first-open
+path still gets its servers — one config file, one reader (the session),
+the hub's own loadConfig stays for hub-only users; (d) the demo's session
+is ALWAYS on, --lsp only attaches/detaches a hub, and MainWindow.cpp's
+local languageForSuffix copy is GONE (the spike keeps its own, bench-only).
+The 6th ctest entry `glue` (offscreen, REAL editors, zero spawn: the
+attached-hub slots open only languages NO built-in claims — the claimed
+path stays tst_lsp's fakeserver turf).
 
 ### DAP features (car 4)
 

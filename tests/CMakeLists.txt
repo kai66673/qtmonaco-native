@@ -40,6 +40,16 @@ set_target_properties(fakeserver PROPERTIES WIN32_EXECUTABLE FALSE
 target_compile_definitions(tst_lsp PRIVATE
     QMN_TEST_LSP_SERVER=\"$<TARGET_FILE:fakeserver>\")
 
+# The 6th ctest entry (G2 of the glue shelf, PLAN "the glue shelf +
+# ProjectSession"): the document session over REAL CodeEditors. Offscreen
+# (the editors are real widgets); NO server ever spawns — the claimed-
+# server machinery is tst_lsp's fakeserver turf, clangd is not a CI
+# guarantee. Links qmn_glue (its PUBLIC interface carries qmn_view).
+qt_add_executable(tst_glue tst_glue.cpp)
+target_link_libraries(tst_glue PRIVATE qmn_glue Qt6::Test)
+add_test(NAME glue COMMAND tst_glue)
+set_tests_properties(glue PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
 qt_add_executable(tst_codeeditor tst_codeeditor.cpp)
 target_link_libraries(tst_codeeditor PRIVATE qmn_view Qt6::Test)
 # The test drives the HighlightEngine seam, whose header includes the

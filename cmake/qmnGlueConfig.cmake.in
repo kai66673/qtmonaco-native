@@ -1,0 +1,14 @@
+@PACKAGE_INIT@
+
+# The glue shelf (PLAN: the glue shelf + ProjectSession, G1). Its exported
+# targets (qmn::glue) carry link refs to qmn::view / qmn::lsp /
+# qmn::protocol — imported targets defined by qmnTargets.cmake — so the
+# qmn package MUST be found BEFORE the shelf's target file is read. Load
+# order here is the whole cross-export-set contract; a shelf break bumps
+# the SHELF version (qmnGlueConfigVersion), never the core package.
+include(CMakeFindDependencyMacro)
+find_dependency(qmn REQUIRED)
+
+include("${CMAKE_CURRENT_LIST_DIR}/qmnGlueTargets.cmake")
+
+check_required_components(qmnGlue)

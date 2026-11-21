@@ -32,6 +32,9 @@ jobs:
                 -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/qmn-prefix"
           cmake --build build-consumer
           ./build-consumer/qmn-consumer-smoke
+          # The G1 glue shelf (PLAN: the glue shelf + ProjectSession): the
+          # SECOND find_package + the qmn::glue doors, no server spawned.
+          ./build-consumer/qmn-consumer-glue-smoke
 
   ubuntu:
     runs-on: ubuntu-24.04
@@ -59,6 +62,9 @@ jobs:
                 -DCMAKE_PREFIX_PATH="$RUNNER_TEMP/qmn-prefix"
           cmake --build build-consumer
           ./build-consumer/qmn-consumer-smoke
+          # The G1 glue shelf (PLAN: the glue shelf + ProjectSession): the
+          # SECOND find_package + the qmn::glue doors, no server spawned.
+          ./build-consumer/qmn-consumer-glue-smoke
 
   # Phase F: the shipping wheel pipeline is the pinned container (Qt 6.12 +
   # PySide6 6.12 + auditwheel/patchelf baked in) - it configures, builds,

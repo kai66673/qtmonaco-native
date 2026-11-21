@@ -1,4 +1,4 @@
-#include "app/glue/LspHub.hpp"
+#include "glue/LspHub.hpp"
 
 // M8 machine 4: the app-layer glue in one object. Everything that connects
 // the view's reality (CodeDocument::editApplied, CodeEditor::setDiagnostics)
@@ -26,7 +26,7 @@
 #include "view/CodeEditor.hpp"
 #include "view/CodeEditorOptions.hpp" // the readOnly door (M19): options-only
 
-namespace qmn::app {
+namespace qmn::glue {
 
 namespace {
 constexpr int kLspSeverityError = 1; // LSP DiagnosticSeverity (wire)
@@ -1813,4 +1813,4 @@ void LspHub::onApplyEdit(const QString& specName, const QJsonValue& id,
         emit applyEditRefused(specName, report.refused);
 }
 
-} // namespace qmn::app
+} // namespace qmn::glue

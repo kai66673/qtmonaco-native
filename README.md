@@ -59,15 +59,19 @@ app-side hub → popups) all shipped in 1.7.0 / 1.8.0.
 src/core/   TextBuffer — pure Qt-based C++ (QtCore ONLY), headless, testable
 src/diff/   LineDiff — pure line diff + alignment table (QtCore ONLY too)
 src/protocol/ JsonFraming + transports + RpcClient (QtCore + QtNetwork, NEVER
-            view/core — the M8 layer rule; LSP/DAP glue lives in src/app)
+            view/core — the M8 layer rule; LSP/DAP glue lives in src/glue)
 src/lsp/    LspClient + DocumentSyncer + PositionConverter + WorkspaceEdit
             (knows src/protocol ONLY, never view/core)
 src/view/   CodeEditor — the raw QWidget canvas (QPainter), depends on core
+src/glue/   LspHub (+ ProjectSession, G2) — the LSP glue: a CLIENT of view,
+            lsp AND protocol, never the reverse; promoted out of src/app by
+            the G1 surgery (2026-11-21) into its OWN export set qmn::glue
+            with its own semver; car 4's DAP glue lands on this shelf
 src/app/    qmn-spike  — demo/bench harness, depends on view
             qmn-demo   — full demo app: tabbed editors + settings dialog
-            glue/LspHub — the LSP glue (a CLIENT of view AND lsp; app code,
-            NOT in any export set, so the package surface never grows a hub)
-tests/      five ctest entries: textbuffer + diff are guiless, lsp +
+            (links qmn_glue PRIVATE for the --lsp door; no glue type ever
+            crosses its headers beyond a forward-decl)
+tests/      six ctest entries: textbuffer + diff are guiless, lsp + glue +
             codeeditor + demo run on QT_QPA_PLATFORM=offscreen
 tools/      standalone micro-benches (model, highlight latency tree split) +
             probe_clangd.sh (the manual live-server ritual, never a CI gate)
@@ -236,6 +240,14 @@ Gate 2 — IDE surface (after the freeze):
       a live rebind into attached editors (a custom `python` may shadow the
       vendored one), capture-role overrides above the fixed role table, and
       unregister -> plain text; the five vendored grammars seed the table
+- [x] The glue shelf + `ProjectSession` (the post-M8 G-train, before DAP):
+      `src/app/glue` promoted into a REAL second shelf — its own export set
+      `qmn::glue` with its own semver (`find_package(qmnGlue)`) — and a new
+      document session on it: the uri ↔ editor ↔ language registry, the
+      suffix table with overrides, the `.qmn/lsp.json` fold for BOTH sides
+      (the top-level `languages` map finally has an owner; `servers` still
+      reach the hub), one call to open a document (hub open + popup
+      triggers included), and the demo tabs rewritten as its presentation
 - [ ] DAP features via decorations (breakpoints, current frame, value hints)
 
 Out of scope by design: vim mode. The `set_vim_mode_enabled` setter is still

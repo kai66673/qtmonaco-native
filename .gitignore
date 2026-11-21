@@ -1,4 +1,5 @@
 build/
+build-dbg/
 build-debug/
 build-py/
 cmake-build-*/

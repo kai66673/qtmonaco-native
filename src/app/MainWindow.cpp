@@ -1,6 +1,7 @@
 #include "MainWindow.hpp"
 
-#include "app/glue/LspHub.hpp"
+#include "glue/LspHub.hpp"
+#include "glue/ProjectSession.hpp"
 #include "EditorSettingsDialog.hpp"
 #include "view/CodeEditor.hpp"
 
@@ -13,34 +14,15 @@
 #include <QStatusBar>
 #include <QTabBar>
 #include <QTabWidget>
-#include <QUrl>
 
 #include <memory>
 
 namespace qmn::app {
 
-namespace {
+using qmn::glue::LspHub; // the G1 shelf moved the hub namespace (qmn::app
+                         // -> qmn::glue); the unqualified uses below stay
 
-// Same suffix->grammar map as the spike's main.cpp (keep both in sync
-// with CodeEditor::availableLanguages(); an unmapped suffix simply stays
-// plain text — setLanguage's documented fallback).
-QString languageForSuffix(const QString& suffix)
-{
-    if (suffix == u"py")
-        return QStringLiteral("python");
-    if (suffix == u"json")
-        return QStringLiteral("json");
-    if (suffix == u"js" || suffix == u"mjs" || suffix == u"cjs")
-        return QStringLiteral("javascript");
-    // Same c/cpp split as the spike: .c -> c, .h/.hpp/... -> cpp (C++/Qt
-    // headers first; the cpp grammar parses plain C near identically too).
-    if (suffix == u"c")
-        return QStringLiteral("c");
-    if (suffix == u"h" || suffix == u"cpp" || suffix == u"cc" || suffix == u"cxx"
-        || suffix == u"hpp" || suffix == u"hh" || suffix == u"hxx")
-        return QStringLiteral("cpp");
-    return {};
-}
+namespace {
 
 QString readTextFile(const QString& path, QString* error)
 {
@@ -96,6 +78,11 @@ MainWindow::MainWindow(QWidget* parent)
     statusLabel_ = new QLabel(this);
     statusBar()->addPermanentWidget(statusLabel_);
     updateStatusLabel();
+
+    // G2: the document session exists whether or not --lsp ever turns on
+    // (suffix table + registry + config fold are the demo's own needs;
+    // PLAN: the tabs become the session's presentation).
+    session_ = std::make_unique<qmn::glue::ProjectSession>();
 }
 
 // Defined out of line: the header forward-declares LspHub behind a
@@ -118,14 +105,16 @@ void MainWindow::setLspEnabled(bool enabled)
                 editor->hideHover();
             }
         }
+        session_->attachHub(nullptr); // detach BEFORE the hub dies (the
+                                      // session's raw pointer goes null)
         hub_.reset();
         statusBar()->showMessage(QStringLiteral("LSP: серверы остановлены"));
         return;
     }
-    hub_ = std::make_unique<LspHub>(); // built-in specs only (clangd for
-                                       // c/cpp — the .qmn/lsp.json file, if
-                                       // any, is read once a workspace root
-                                       // exists, see openPath's first tab)
+    hub_ = std::make_unique<LspHub>(); // built-in specs only; the session
+                                       // forwards its workspace root and
+                                       // REPLAYS a config it already read
+    session_->attachHub(hub_.get());
     statusBar()->showMessage(QStringLiteral("LSP: включён (спеки из коробки)"));
 }
 
@@ -196,9 +185,6 @@ void MainWindow::addEditorTab(const QString& path, const QString& text)
 {
     auto editor = std::make_unique<CodeEditor>();
     editor->setPlainText(text);
-    const QString language = languageForSuffix(QFileInfo(path).suffix().toLower());
-    if (!language.isEmpty())
-        editor->setLanguage(language);
     applySettings(editor.get(), settings_); // the tab inherits the current template
 
     CodeEditor* raw = editor.release(); // the tab widget owns it from here
@@ -208,23 +194,24 @@ void MainWindow::addEditorTab(const QString& path, const QString& text)
     connect(raw, &CodeEditor::cursorMoved, this, &MainWindow::updateStatusLabel);
     connect(raw, &CodeEditor::selectionChanged, this, &MainWindow::updateStatusLabel);
 
-    // The --lsp path (the M8 popup-trigger demo): the hub's built-in clangd
-    // spec claims c/cpp; every other language honestly goes unregistered
-    // (openDocument's documented no-op — a python tab stays a plain editor).
-    if (hub_) {
-        if (hub_->workspaceRoot().isEmpty()) {
-            // PLAN's config rule needs the root BEFORE anything starts, and
-            // the first opened file's directory is the honest demo root.
-            hub_->setWorkspaceRoot(QFileInfo(path).absolutePath());
-            hub_->loadConfig(); // <root>/.qmn/lsp.json deep-merges over the
-                                // built-ins; no file is a silent no-op
-        }
-        const QString uri
-            = QUrl::fromLocalFile(QFileInfo(path).absoluteFilePath()).toString();
-        if (hub_->openDocument(raw, uri, language))
-            hub_->setPopupTriggers(raw, true); // completion on typing, hover
-                                               // on idle caret moves (the M8
-                                               // close-train sliver, live)
+    // G2: ONE session call owns the whole open — the workspace root (the
+    // first opened file's directory: PLAN's config rule needs the root
+    // BEFORE anything starts), the .qmn/lsp.json fold (the "languages"
+    // table session-side, "servers" into an attached hub), the
+    // suffix->language resolution + setLanguage, and with a hub attached
+    // its openDocument + the M8 popup triggers. Languages no spec claims
+    // honestly stay plain-editor tabs (the hub's documented false no-op).
+    if (session_->workspaceRoot().isEmpty()) {
+        session_->setWorkspaceRoot(QFileInfo(path).absolutePath());
+        session_->loadConfig(); // no file: silent, the tables stand
+    }
+    if (!session_->openDocument(raw, QFileInfo(path).absoluteFilePath())) {
+        // The uri is ALREADY a registered document (the session's
+        // one-document-per-uri honesty): the duplicate tab still gets its
+        // grammar — the coloring is the demo's call, not the registry's.
+        const QString language = session_->languageForSuffix(QFileInfo(path).suffix());
+        if (!language.isEmpty())
+            raw->setLanguage(language);
     }
 
     tabs_->setCurrentIndex(index); // currentChanged sets title + status
@@ -236,10 +223,10 @@ void MainWindow::closeTabAt(int index)
     if (!page)
         return;
     tabs_->removeTab(index); // does NOT delete: the editor does, now
-    if (hub_) // didClose while the server is still alive (the editor's
-              // destroyed() would auto-release too — this is just the
-              // orderly version of it)
-        hub_->closeDocument(qobject_cast<CodeEditor*>(page));
+    // The session drop + (hub attached) the orderly didClose while the
+    // server is still alive (the editor's destroyed() would auto-release
+    // on BOTH sides too — this is just the orderly version of it).
+    session_->closeDocument(qobject_cast<CodeEditor*>(page));
     page->deleteLater();
     setCurrentTabTitle();
     updateStatusLabel();

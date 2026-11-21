@@ -1,9 +1,12 @@
 #pragma once
 
-// M8 machine 4 (PLAN GATE 2): the app-layer LSP glue. This is THE place the
-// view and the lsp layers meet — neither knows the other (the layering is
-// contractual: `src/lsp/` never touches view/core, the view never touches
-// protocol/lsp). The hub owns, per server SPEC (PLAN: one client per server
+// M8 machine 4 (PLAN GATE 2), promoted by the G1 glue-shelf surgery
+// (2026-11-21): the LSP glue hub, now a REAL layer (src/glue, exported as
+// qmn::glue) and no longer app code. This is THE place the view and the
+// lsp layers meet — neither knows the other (the layering is contractual:
+// `src/lsp/` never touches view/core, the view never touches
+// protocol/lsp; src/glue is the client where they meet). The hub owns,
+// per server SPEC (PLAN: one client per server
 // spec, multi-document, VS Code shape):
 //
 //   - ONE LspClient  + ONE transport factory per spec, LAZY-STARTED on the
@@ -51,7 +54,7 @@ namespace qmn::lsp {
 class DocumentSyncer; // src/lsp (the hub owns these; the header stays light)
 }
 
-namespace qmn::app {
+namespace qmn::glue {
 
 class LspHub : public QObject {
     Q_OBJECT
@@ -429,4 +432,4 @@ private:
     bool closingDown_ = false;
 };
 
-} // namespace qmn::app
+} // namespace qmn::glue

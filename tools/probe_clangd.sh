@@ -14,8 +14,8 @@ if ! command -v clangd >/dev/null; then
     echo "PROBE-FAIL clangd: not on PATH — there is nothing to probe" >&2
     exit 1
 fi
-if [ ! -f build/src/app/libqmn_glue.a ]; then
-    echo "build/src/app/libqmn_glue.a missing: build first" >&2
+if [ ! -f build/src/glue/libqmn_glue.a ]; then
+    echo "build/src/glue/libqmn_glue.a missing: build first" >&2
     echo "  cmake -S . -B build -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C build" >&2
     exit 1
 fi
@@ -26,7 +26,7 @@ g++ -O2 -std=c++20 -no-pie \
     -isystem /usr/include/qt6 -isystem /usr/include/qt6/QtCore \
     -isystem /usr/include/qt6/QtGui -isystem /usr/include/qt6/QtWidgets \
     -isystem /usr/include/qt6/QtNetwork \
-    build/src/app/libqmn_glue.a \
+    build/src/glue/libqmn_glue.a \
     build/src/lsp/libqmn_lsp.a \
     build/src/protocol/libqmn_protocol.a \
     build/src/view/libqmn_view.a \
