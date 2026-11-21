@@ -2154,8 +2154,9 @@ PACKAGE close ritual bumps BOTH literals in one commit — car 4 CLOSED.
 **Gate 2 CLOSED 2026-11-21** — all four ordered cars (M25 wrap, M10 diff,
 M8 LSP, car 4 DAP) plus the glue G-train (G1+G2+G3) shipped; the train
 ships as tags `v1.9.0` (the car-4 close) and `v1.9.1` (the hotfix close —
-the 1.6.0→1.6.1 precedent, see CHANGELOG). No later gate is designed yet;
-the deferred shelf is Gate 3's input: M8b (signatureHelp, LSP inlay hints,
+the 1.6.0→1.6.1 precedent, see CHANGELOG). The deferred shelf became
+Gate 3's input — the next train was designed the very same day (see
+"# GATE 3" below): M8b (signatureHelp, LSP inlay hints,
 foldingRange over M13, pull diagnostics), M10b (word-level inline diff,
 wrap×diff budgets, original-side wrap), the two verbatim-recorded defects
 (the undo-mark drift on type-over-selection, the overview-ruler perf
@@ -2232,6 +2233,178 @@ mid-queue. NEGATIVE CONTROL: iide has NO diff view, NO change gutter, and
 never enables wrap (every renderer assumes 1 visual = 1 logical) — the wrap
 and diff halves of Gate 2 have NO prior art there and are designed from our
 own E1/E2 map.
+
+# GATE 3 — debt paydown and the live showcase (opened 2026-11-21)
+
+Everything in this gate was PRE-BOOKED: each debt item carries its own
+verbatim record in the sections above (the two recorded defects, the M8b
+and M10b follow-on lists, the CodeDocument multi-observer clause, the G3
+rejected-log audit, the staged cibuildwheel config), plus TWO showcase
+cars the owner asked for (2026-11-21): a live-verification demo in C++
+and its Python analog — the demo layer is where the whole Gate-2 surface
+was never checked end-to-end (qmn-demo carries no diff UI, tst_demo has
+no diff slots, pydemo lost the mirror the moment `--lsp` landed).
+
+**Train ordering (DECIDED 2026-11-21):** defect pair → M10b → M8b →
+multi-observer → wheel-2 → S1 → S2 → PyPI. The argument: the recorded
+defects have been rotting in shipped releases since 1.6.1 (they go
+first, patch-fast); the showcases SILENTLY pin everything before them,
+and S2 (Python) cannot mirror the DAP doors before the wheel car ships.
+The frozen-surface rule holds through the whole gate: everything lands
+ADDITIVELY (Gate 1.5 precedent); a car that would break a frozen door
+stops at the door, like the `visible*` UNITS precedent had a sanctioned
+record — nothing here asks for that again.
+
+**Version rhythm (DECIDED):** every car CLOSE bumps the package version
+(the Gate-2 precedent: M25→1.7.0, M10→1.8.0-as-part, DAP→1.9.0). The
+defect pair is a PATCH (1.9.2 — user-visible bugs in shipped releases),
+every feature car ships a MINOR, and the gate closes on the last car's
+tag with the usual full ritual (both literals + the wheel half + a green
+pydemo — the 1.9.1 addition).
+
+**The two showcase knots (DECIDED 2026-11-21):**
+- S1 GROWS `qmn-demo` in place — NO second showcase binary. The
+  `qmn_demo_app` static lib + `tst_demo` keep driving it offscreen, and
+  the pydemo mirror rule (door-for-door CLI + menus) survives for S2.
+- TOUR MODE: both demos grow a `--tour` flag — a scripted door-for-door
+  self-check that prints a probe-style pin table and EXITS NONZERO on
+  the first failed pin (skips print as skips and keep exit 0). Server-
+  backed legs (clangd for the LSP legs, lldb-dap/gdb for the DAP legs,
+  dapfake as the CI-shape stand-in) SKIP honestly when the server is
+  absent — a tour is a LIVE ritual like `probe_dap.sh` and
+  `probe_clangd.sh`, NEVER a CI gate (clangd and debuggers are not CI
+  guarantees, the recorded rule).
+
+### Car 0 — the recorded defect pair (target 1.9.2, patch)
+
+Two verbatim records above, one car, both fixes independently testable:
+- **The undo-mark drift (recorded 2026-11-15).** Bracketed
+  type-over-selection in `insertTextAtCaret` pushes TWO undo groups
+  (serial +2, depth +2) for ONE `reconcileUndoMarks` call, so
+  `undoMarks_` lags the core's history; the release-build symptom is an
+  undo that restores a stale caret. Tripwire: reproduce THROUGH the
+  accessible `replaceText` door (the discovery route), pin serial +1 and
+  depth +1 and the caret-after-undo.
+- **The overview-ruler perf cliff (recorded 2026-11-16).** The stripe
+  loop's per-sample `offsetOfLine` scans within the holding piece —
+  O(doc) on a ONE-PIECE loaded document (~230 ms per paint measured at
+  12k lines/6 MiB). The fix belongs to the CORE's line index (per-piece
+  newline position lists or a line cache), NOT to the ruler or the wrap
+  layer, and the record says its own car with a bench tripwire — this
+  is that car. DoD: ruler paint on a big single-piece doc measured by a
+  timing slot in the VACUOUS-PASS style of the two existing
+  timing-sensitive tests (failure mode never a false fail), plus the
+  textbuffer property suite unchanged.
+
+### Car B — M10b (diff follow-on)
+
+Word-level inline highlight inside hunks, the wrap×diff budget math, and
+original-side wrap (the three leftovers named in the README M10 entry
+and the M10 close record). The pure engine grows in `src/diff/`
+(QtCore-only), the view doors stay additive, `renderSideBySide:false`
+stays out of v1 by the recorded divergence. The `open_diffs` shim and
+the parity script already pin the semantics this car must not break.
+
+### Car C — M8b (LSP follow-on)
+
+signatureHelp, LSP inlay hints (the M5 `setInlayHints` door finally
+carries its LSP meaning next to DAP's), `textDocument/foldingRange` over
+the M13 fold API, and pull diagnostics (the registry already routes the
+registration). PRE-DECIDED KNOT: ONE fold provider per editor at a time
+— a server that wins the language claim REPLACES the grammar folds
+(mixing two fold feeds in one toggle index is the mismatch bug the iide
+anti-pattern list warns about); the fold store stays M13's, no new view
+doors — the six popup doors carry signatureHelp as they carried hover.
+
+### Car D — multi-observer core (two editors on one CodeDocument)
+
+The CodeDocument record's v1 clause ("one editor per document — a
+multi-view machine needs a core multi-observer first") pays here: the
+core's single edit-observer becomes a LIST (additive). PRE-DECIDED
+knots at this level; machine-level shape decided at the car's design
+pass: the HighlightEngine follows the DOCUMENT (one parse tree per
+buffer, both editors paint from the same spans); undo history is SHARED
+(it lives in the core — one history per buffer, honest); carets and
+selections stay per-editor; LSP sync becomes DOCUMENT-scoped — the
+ProjectSession registration answers "who owns the uri's didOpen", and
+the syncer rides the document's `editApplied` signal (it already fires
+for EVERY primitive mutation, whoever typed). tst_codeeditor grows the
+two-editor slots; `setDiffDocuments` (two docs, one widget) stays
+untouched by this surgery.
+
+### Car E — wheel-2 (DAP across + the answer routes)
+
+The G3 audit's 16 silent drops shrink, and DAP joins the shelf crossing:
+`DapHub` (its doors were shiboken-shaped from day one for exactly this)
++ the nested plain-Qt payload records + the `showMessageRequest`-style
+ANSWER ROUTES the audit left on the C++ side — the route MUST speak a
+SIGNAL plus a plain-typed answer door (the recorded Shiboken fact:
+Python cannot emit a C++ signal, and `std::function` params drop
+silently). The three-copies rule (typesystem / bindings CMake / the
+codegen-CLI list) grows AGAIN, the `--codegen` rejected-log audit is
+mandatory (the 1.6.1 and 1.7.0 drift traps), and the 16-drop baseline
+in AGENTS is REWRITTEN to whatever the new honest drop set is — EXACTLY
+what the log shows, no silent change. `setTransportFactory` and friends
+stay C++-only honest absences. Wheel smoke grows the one-Qt proof.
+
+### Car S1 — qmn-demo grows into the live showcase
+
+The demo finally speaks every surface it can reach: a diff door (open
+two tabs / two files through `setDiffDocuments` + the F7/F8 nav the
+chords already carry), a grammar door (`loadGrammar` through a dialog +
+language rebinding), a DAP CONTROLS leg (continue/step/stop when the hub
+is alive — the status bar already speaks every shelf signal), and
+`--tour` (the pin table above). tst_demo grows a slot per new door
+(dapfake spawn allowed — the recorded exception; clangd legs stay
+spawn-free). The 15-knobs settings surface and the `--lsp`/`--dap` door
+shapes ride unchanged.
+
+### Car S2 — pydemo mirrors the showcase door-for-door
+
+argparse grows the SAME flags (`--diff`, `--lsp`, `--dap`, `--dap-arg`,
+`--dap-program`, `--tour`), the same Russian UX, the same status-bar
+visibility route. This car CANNOT precede car E (the DAP doors are the
+wheel crossing) and its tour legs mirror S1's pin list. The headless
+green run stays a close ritual (the 1.9.1 lesson); the LIVE tour
+against real clangd + lldb-dap is the gate-close ritual alongside
+`probe_dap.sh` and `probe_clangd.sh`.
+
+### Car Py — the PyPI half (last, infra)
+
+The staged `[tool.cibuildwheel]` config grows the missing before-all Qt
+bootstrap (the container trick — the PySide6 wheel ships no Qt headers;
+the mirror.yandex.ru fetch is already proven), a real publish job for
+tagged releases, and the auditwheel-exclude sync rule holds (two homes).
+DoD honest: a 1.x.y wheel on test.pypi.org installs clean in a bare
+container and the smoke runs from there. This car never blocks the
+gate-close tour.
+
+### Explicitly NOT in this gate (owner decision 2026-11-21)
+
+Full GRAPHEME segmentation stays a separate future train: `col` →
+graphemes would move the caret/click/selection/LSP-position semantics
+across the whole surface and LSP positions are UTF-16-defined, so the
+train needs its own mapping-layer design (the record stays in the
+README's not-implemented list). `set/get_lsp_header` stay absent ON
+PURPOSE (the ±H tax record). Markdown-in-hover and semanticTokens
+painting stay "by design" where they are written.
+
+### Gate 3 risks
+
+1. **Core surgery temptation** — cars D and 0's perf fix both reach into
+   core; the frozen-surface rule keeps them additive; the perf fix
+   rides a timing slot whose FAILURE MODE IS A VACUOUS PASS (the
+   recorded style), never a false red on CI.
+2. **The rejected-log drift** — car E changes what Python sees; the G3
+   audit baseline (16 drops) must be RE-PINNED, not eyeballed (both
+   1.6.1 and 1.7.0 codegen traps were silent drift).
+3. **Showcase drift vs the mirror rule** — S1 and S2 must stay
+   door-for-door; the tour pin list is SHARED between them (one table,
+   two drivers), and that table is the drift tripwire.
+4. **Tour honesty** — a tour that skips everything still exits 0 by
+   design; the gate-close ritual is the LIVE run (clangd + lldb-dap +
+   gdb + dapfake all present), recorded in the CHANGELOG entry like the
+   probe ritual's outcome was, or the gate may not close.
 
 ## Top risks
 

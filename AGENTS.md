@@ -12,12 +12,17 @@ phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
   2026-11-21** at tags `v1.9.0` + `v1.9.1` — the whole ordered train
   shipped: M25 soft wrap → M10 diff → M8 LSP/protocol (seven machines) →
   the glue shelf G1–G3 → **car 4 DAP (machines D1–D4, probe ritual green
-  on lldb-dap AND gdb)**. No later gate is designed yet; the deferred
-  slivers (M8b, M10b, the two recorded defects, DAP-at-the-wheel) are the
-  next design pass's input — the PLAN "Gate 2 CLOSED" closer lists them.
-  The full design record is the PLAN.md "GATE 2" section — read it before
-  starting a car. Never start work for a later gate while an earlier one
-  is open.
+  on lldb-dap AND gdb)**. **GATE 3 IS THE OPEN TRAIN since 2026-11-21**
+  (decided the day Gate 2 closed): debt paydown + the live showcase —
+  eight ordered cars: defect pair (→1.9.2 patch) → M10b → M8b →
+  multi-observer core → wheel-2 (DAP across + answer routes) → S1
+  (qmn-demo grows into the showcase, NO second binary) → S2 (pydemo
+  mirrors it door-for-door) → PyPI/cibuildwheel. Grapheme segmentation
+  is OWNER-EXCLUDED from this gate (its own future train — the README
+  not-implemented record stays). The full design record is the PLAN.md
+  "GATE 3" section — read it (and the "GATE 2" records it consumes)
+  before starting a car. Never start work for a later gate while an
+  earlier one is open.
 - The frozen surface widens **only additively** (Gate 1.5 precedent): no new
   view mapping/geometry primitives. The M5 decoration API already covers
   diagnostics, breakpoints and inlay hints. Two sanctioned Gate-2 deviations

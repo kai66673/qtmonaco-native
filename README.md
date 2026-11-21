@@ -151,7 +151,8 @@ house style for it (the setup used against the Arch `code` OSS build):
 Milestones, in build order. **Gate 1** (editor v1: M1b…M13 + M12 completion)
 ships a self-contained editor usable from C++ and PySide6; **Gate 2** (IDE
 surface) starts only after the v1 API freeze — it CLOSED 2026-11-21 with
-tags `v1.9.0`/`v1.9.1`; details in *PLAN.md*.
+tags `v1.9.0`/`v1.9.1`; **Gate 3** (debt paydown + the live C++/Python
+showcase) opened that same day — details in *PLAN.md*.
 
 Gate 1 — Code Editor v1:
 
@@ -267,6 +268,31 @@ v1.9.1):
       scope values as `setInlayHints` at word-end; the demo `--dap` door
       and the live-adapter probe ritual (lldb-dap AND gdb green); DAP does
       NOT cross the wheel yet — the hub doors are shiboken-shaped by design
+
+Gate 3 — debt paydown and the live showcase (opened 2026-11-21, the day
+Gate 2 closed; see PLAN.md for the car-by-car design record):
+
+- [ ] Car 0 — the recorded defect pair (→ 1.9.2 patch): the undo-mark
+      drift on bracketed type-over-selection + the overview-ruler perf
+      cliff on one-piece docs (the fix rides a CORE line index, with a
+      bench tripwire)
+- [ ] Car B — M10b: word-level inline diff highlight, wrap×diff budget
+      math, original-side wrap
+- [ ] Car C — M8b: signatureHelp, LSP inlay hints, `foldingRange` over
+      the M13 fold API (ONE fold provider per editor), pull diagnostics
+- [ ] Car D — multi-observer core: two editors on one `CodeDocument`
+      (the core's single edit-observer becomes a list; document-scoped
+      highlight + LSP sync, shared undo, per-editor carets)
+- [ ] Car E — wheel-2: DAP across the wheel (`qmn.DapHub` + payload
+      records) + the signal-shaped answer routes; the rejected-log
+      baseline re-pinned
+- [ ] Car S1 — `qmn-demo` grows into the live showcase: diff door,
+      grammar door, DAP controls, `--tour` (a scripted pin table that
+      exits nonzero on the first failed pin; live ritual, never CI)
+- [ ] Car S2 — pydemo mirrors the showcase door-for-door (same flags,
+      same tour legs — needs car E first)
+- [ ] Car Py — the PyPI half: the cibuildwheel Qt bootstrap + publish
+      job, DoD a test.pypi.org wheel smoke
 
 Out of scope by design: vim mode. The `set_vim_mode_enabled` setter is still
 exposed by the Python binding for API compatibility, but only warns (see
