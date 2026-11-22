@@ -114,6 +114,30 @@ struct LspHub::FoldFeed {
                               // door — installed)
 };
 
+// The pull-diagnostic-feed state (GATE 3 car C, C5): one debounced
+// textDocument/diagnostic ask per OPEN document whose server took the pull.
+// Same per-document life as the other feeds. The MODE itself is not stored:
+// pullDiagnosticsLive() re-reads offered-or-registered at every edge, and
+// the `refused` bit is this document's FALLBACK to push — a server that
+// advertised diagnosticProvider and then refused the pull stops being
+// asked (no hammering, folds' bit shape) while the push decoder resumes.
+struct LspHub::PullDiagFeed {
+    QTimer refreshTimer;       // single-shot -> requestPullDiagsNow
+    qint64 pendingRequest = 0; // 0 = nothing in flight (the re-arm rule)
+    bool refused = false;      // the pull was REFUSED mid-session: this
+                               // document runs push now; cleared ONLY on an
+                               // open/re-READY authority edge (folds' shape)
+    bool fed = false;          // did the LAST full-set write of the
+                               // diagnostic door come from this hub's PULL
+                               // generation? (Push publishes are the
+                               // server's own trail and never turn this
+                               // bit — the pre-C5 stance that a close does
+                               // not wipe published marks stands.) The
+                               // fallback/teardown clear's precondition
+    QString lastResultId;      // stored, never sent (the no-previousResultId
+                               // rule: every ask is a FULL pull — recorded)
+};
+
 namespace {
 
 // The ONE identifier predicate the trigger shares: the completion
@@ -554,7 +578,21 @@ QJsonObject LspHub::buildInitializeParams(const ServerSpec& spec) const
                           // M5 setInlayHints door — no new view API, and NO
                           // semanticTokens request is ever made or declared:
                           // the hub asks for hints, never for colored runs.
-                          {QStringLiteral("inlayHint"), QJsonObject{}}}},
+                          {QStringLiteral("inlayHint"), QJsonObject{}},
+                          // GATE 3 car C (C5): the PULL DIAGNOSTICS claim.
+                          // relatedDocumentSupport:false is the honest shape
+                          // (v1 pulls per document, never interleaves
+                          // related-diagnostic documents; a diagnostic
+                          // version is NOT claimed either — the pull answers
+                          // ride the document's own sync frame, the
+                          // PositionConverter already keeps them honest).
+                          // Declaring this is what lets a clangd-class server
+                          // FLIP to pull; the push route stays armed for
+                          // every server that never took the pull.
+                          {QStringLiteral("diagnostic"),
+                           QJsonObject{
+                               {QStringLiteral("relatedDocumentSupport"),
+                                false}}}}},
             {QStringLiteral("window"),
              QJsonObject{{QStringLiteral("workDoneProgress"), false}}}});
     // The template deep-merges ON TOP (its ${WORKSPACE_ROOT} expands first,
@@ -615,7 +653,26 @@ void LspHub::registerClient(const QString& specName, SpecClient& entry)
                 // does. ONLY sets this hub fed (single-writer convention,
                 // D3's shape): an app's hints and DAP's stop table stand.
                 handBackHints(specName);
+                // Car C (C5): a dead session's PULL generation goes with it
+                // (the marks speak the dead server's text). Push-published
+                // marks are the server's own trail and stood across death
+                // and auto-restart since M8 — that route's stance does not
+                // change here; only the hub's pull generations clear.
+                stopPullFeeds(specName);
                 emit serverFailed(specName, reason);
+            });
+    // Car C (C5): the DYNAMIC registration path made real — a mid-session
+    // registerCapability(textDocument/diagnostic) re-modes this spec's
+    // documents through the SAME authority edge an open/re-READY is (a
+    // registration IS a fresh claim: it clears the refused bit and arms a
+    // full pull; an unregister opens the push suppression the next publish
+    // rides, no clear owed — the gate re-reads the registry at every edge).
+    connect(client, &qmn::lsp::LspClient::registrationsChanged, this,
+            [this, specName] {
+                for (auto it = registrations_.constBegin();
+                     it != registrations_.constEnd(); ++it)
+                    if (it->specName == specName)
+                        armPullDiagFeed(it.key(), true);
             });
     connect(client,
             &qmn::lsp::LspClient::diagnosticsReceived,
@@ -658,6 +715,11 @@ void LspHub::registerClient(const QString& specName, SpecClient& entry)
                 // server re-answers the whole set, and a document that
                 // opened mid-startup gets its first ask here.
                 armHintFeed(it.key());
+                // Car C (C5): the pull-diagnostic feed re-arms on the same
+                // authority edge — a re-READY CLEARS the refused bit (the
+                // restarted session may take the pull this time) and a
+                // document that opened mid-startup gets its first pull here.
+                armPullDiagFeed(it.key(), true);
             }
         }
     });
@@ -819,6 +881,12 @@ bool LspHub::openDocument(qmn::view::CodeEditor* editor, const QString& uri,
                 // speaks the edited document's offsets as loudly as folds'
                 // line numbers do).
                 armHintFeed(key);
+                // Car C (C5): so does the pull-diagnostic debounce — the
+                // debounced full pull is the pull route's answer to a push
+                // server's post-edit publish. (The plan's `kPullDiagnosticMs`
+                // 600 is wider than the fold/hint 300 on purpose: a pull
+                // report is the heavier ask of the three.)
+                armPullDiagFeed(key);
             });
 
     reg.syncer->open(doc->toPlainText(), languageId); // didOpen now, or on
@@ -840,6 +908,11 @@ bool LspHub::openDocument(qmn::view::CodeEditor* editor, const QString& uri,
     // converter decodes against the MIRROR, which the flush just made
     // current).
     armHintFeed(key);
+    // Car C (C5): the pull feed opens on the same pair of edges (open now,
+    // or the ready() relay when the session is still coming up), and its
+    // ask FLUSHES first — the report's positions decode against the mirror
+    // the flush just made current.
+    armPullDiagFeed(key, true);
     // A buffer set BEFORE this document was registered: the session may
     // already be READY (another document of this language opened first), so
     // the open is a push edge too. An empty buffer makes it a no-op.
@@ -919,6 +992,23 @@ void LspHub::releaseRegistration(const QString& uri, bool editorAlive)
         hint->fed = false;
         reg.editor->setInlayHints({}); // whole-set door: empty clears
     }
+    // Car C (C5): the pull-feed teardown, same walk. The CLEAR is narrower
+    // than folds'/hints' on purpose: a close does NOT wipe push-published
+    // marks — that route's stance stood since M8 and C5 does not change it;
+    // only a door whose LAST full-set write was this hub's PULL generation
+    // clears (stale-pull risk), and only while the editor is alive.
+    std::unique_ptr<PullDiagFeed> pull;
+    auto pit = pulls_.find(uri);
+    if (pit != pulls_.end()) {
+        pull = std::move(pit->second);
+        pulls_.erase(pit);
+    }
+    if (pull && pull->pendingRequest != 0 && client)
+        client->cancel(pull->pendingRequest);
+    if (pull && pull->fed && editorAlive && reg.editor) {
+        pull->fed = false;
+        reg.editor->setDiagnostics({}); // whole-set door: empty clears
+    }
     if (reg.syncer) {
         reg.syncer->close(); // didClose (a stopped server drops it silently,
                              // the M2 notify rule)
@@ -983,6 +1073,11 @@ void LspHub::saveDocument(qmn::view::CodeEditor* editor)
         || !willSaveWaitUntilOffered(client)) {
         if (syncer)
             syncer->save(); // flush-then-didSave (machine 3's door)
+        // Car C (C5): the didSave edge of the pull feed — the plan's
+        // "after didSave" trigger, armed right where the didSave bytes go
+        // out (the ask's own flush keeps it honest either way).
+        if (syncer)
+            armPullDiagFeed(syncer->uri());
         if (editor && editor->document())
             editor->document()->markSaved(); // the modified flag is the
                                              // document's
@@ -1026,6 +1121,9 @@ void LspHub::saveDocument(qmn::view::CodeEditor* editor)
             nowSyncer->save(); // any applied edit's endServerEdit full sync
                                // is already queued, so the didSave rides the
                                // EDITED model — the ordering PLAN pins
+            // Car C (C5): the didSave pull edge, same as the plain branch —
+            // armed off the WILLING path too.
+            armPullDiagFeed(nowSyncer->uri());
             if (ed->document())
                 ed->document()->markSaved();
         });
@@ -1060,29 +1158,20 @@ void LspHub::setDebounceMs(int ms)
 }
 
 // ------------------------------------------------------------- diagnostics
-void LspHub::onDiagnostics(const QString& specName, const QJsonObject& params)
+namespace {
+// THE ONE diagnostic decoder (C5's refactor): the push route's
+// `params.diagnostics[]` and the pull route's `report.items[]` are the SAME
+// Diagnostic shape on the wire, so the severity/range-clamp/swap discipline
+// exists exactly ONCE. `text` is the clamping frame (the syncer MIRROR —
+// the only frame whose offsets the door's paint can trust) and `encoding`
+// the negotiated one. Tolerant-read rules: an out-of-range severity reads
+// Error, an inverted range SWAPS (the liar's range read the way it was
+// meant), positions clamp through the PositionConverter.
+QVector<qmn::view::CodeEditor::Diagnostic> decodeDiagnosticItems(
+    const QJsonArray& incoming, const QString& text,
+    qmn::lsp::PositionConverter::Encoding encoding)
 {
-    if (closingDown_)
-        return; // the teardown pump still drains the socket: a late publish
-                // has nothing to paint into (registrations_ are already gone)
-    const QString uri = params.value(QStringLiteral("uri")).toString();
-    auto reg = registrations_.find(uri);
-    if (reg == registrations_.end())
-        return; // not our document (a window/showMessageRequest-style
-                // broadcast): nothing to paint
-    // The cross-wire guard: a publish from a server that is NOT the one this
-    // document's spec resolved to is a wire lie — drop it, do not paint it.
-    auto entry = clients_.constFind(specName.toLower());
-    if (entry == clients_.constEnd() || clientForUri(uri) != entry->client)
-        return;
-    const qmn::lsp::LspClient* client = clientForUri(uri);
-    const qmn::lsp::PositionConverter::Encoding encoding
-        = qmn::lsp::PositionConverter::fromWire(
-            client ? client->positionEncoding() : QString());
-    const QString text = reg->syncer->mirrorText(); // the clamping frame
     QVector<qmn::view::CodeEditor::Diagnostic> decoded;
-    const QJsonArray incoming
-        = params.value(QStringLiteral("diagnostics")).toArray();
     decoded.reserve(incoming.size());
     for (const QJsonValue& value : incoming) {
         const QJsonObject diag = value.toObject();
@@ -1130,8 +1219,51 @@ void LspHub::onDiagnostics(const QString& specName, const QJsonObject& params)
         out.source = diag.value(QStringLiteral("source")).toString();
         decoded.append(out);
     }
+    return decoded;
+}
+} // namespace
+
+void LspHub::onDiagnostics(const QString& specName, const QJsonObject& params)
+{
+    if (closingDown_)
+        return; // the teardown pump still drains the socket: a late publish
+                // has nothing to paint into (registrations_ are already gone)
+    const QString uri = params.value(QStringLiteral("uri")).toString();
+    auto reg = registrations_.find(uri);
+    if (reg == registrations_.end())
+        return; // not our document (a window/showMessageRequest-style
+                // broadcast): nothing to paint
+    // The cross-wire guard: a publish from a server that is NOT the one this
+    // document's spec resolved to is a wire lie — drop it, do not paint it.
+    auto entry = clients_.constFind(specName.toLower());
+    if (entry == clients_.constEnd() || clientForUri(uri) != entry->client)
+        return;
+    // THE PULL-MODE SUPPRESSION (C5): a server that TOOK the pull (static
+    // provider or dynamic registration — the same gate the feed asks with)
+    // and pushes anyway would race two authorities into one door. Its push
+    // is DROPPED for as long as the pull is live for THIS document — and
+    // when the pull falls through (the refused bit), this guard opens again
+    // and the push route RESUMES: the decoder below is untouched on both
+    // sides of the fallback, exactly the plan's "the armed decoder resumes".
+    if (pullDiagnosticsLive(uri))
+        return;
+    const qmn::lsp::LspClient* client = clientForUri(uri);
+    const qmn::lsp::PositionConverter::Encoding encoding
+        = qmn::lsp::PositionConverter::fromWire(
+            client ? client->positionEncoding() : QString());
+    const QString text = reg->syncer->mirrorText(); // the clamping frame
+    const QVector<qmn::view::CodeEditor::Diagnostic> decoded
+        = decodeDiagnosticItems(
+            params.value(QStringLiteral("diagnostics")).toArray(), text,
+            encoding);
     reg->editor->setDiagnostics(decoded); // M5's decoration door, no new
-                                          // geometry
+                                          // geometry. The fed bit is NOT
+                                          // turned here: push-published
+                                          // marks are the SERVER's own
+                                          // trail — the pre-C5 stance that
+                                          // a close never wipes them stands
+                                          // — and only the hub's PULL
+                                          // generations are its to clear.
 }
 
 // ------------------------------------------------- feature doors (machine 5)
@@ -2228,6 +2360,219 @@ void LspHub::requestFoldsNow(const QString& uri)
     feed->pendingRequest = id > 0 ? id : 0; // locally refused (the gate above
                                             // makes this nearly unreachable)
 }
+bool LspHub::diagnosticsFedFromServer(qmn::view::CodeEditor* editor) const
+{
+    if (!editor)
+        return false;
+    const qmn::lsp::DocumentSyncer* syncer = syncerFor(editor);
+    if (!syncer)
+        return false; // the feed key is the syncer's uri, folds'/hints' rule
+    auto found = pulls_.find(syncer->uri());
+    return found != pulls_.end() && found->second->fed;
+}
+
+LspHub::PullDiagFeed* LspHub::pullDiagFeedEntry(const QString& uri)
+{
+    auto found = pulls_.find(uri);
+    if (found != pulls_.end())
+        return found->second.get();
+    auto feed = std::make_unique<PullDiagFeed>();
+    PullDiagFeed* raw = feed.get();
+    feed->refreshTimer.setSingleShot(true);
+    QObject::connect(&feed->refreshTimer, &QTimer::timeout, this,
+                     [this, uri] { requestPullDiagsNow(uri); });
+    pulls_.emplace(uri, std::move(feed));
+    return raw;
+}
+
+// The CLIENT half of the pull gate: the initialize-advertised
+// `diagnosticProvider` (object or bool — capabilityOffered accepts both) OR
+// the dynamic registration. This is also the PUSH-DROP guard: an incoming
+// publish is suppressed while this says yes, even before the first pull
+// answered — the plan's stance is a mode, not a paint history.
+bool LspHub::pullModeClient(const qmn::lsp::LspClient* client) const
+{
+    if (!client || !client->isReady())
+        return false; // a session still coming up is no authority either way
+    return capabilityOffered(client, QStringLiteral("diagnosticProvider"))
+        || client->isRegistered(QStringLiteral("textDocument/diagnostic"));
+}
+
+// The DOCUMENT half: the client gate minus this document's `refused` bit —
+// a server that advertised the provider and then refused THIS document's
+// pull runs push for it now (the fallback), and no ask fires until an
+// open/re-READY authority edge clears the bit.
+bool LspHub::pullDiagnosticsLive(const QString& uri) const
+{
+    auto found = registrations_.constFind(uri);
+    if (found == registrations_.constEnd() || !found->editor)
+        return false;
+    auto feed = pulls_.find(uri);
+    if (feed != pulls_.end() && feed->second->refused)
+        return false; // this document fell back to push
+    return pullModeClient(clientForUri(uri));
+}
+
+void LspHub::armPullDiagFeed(const QString& uri, bool authorityEdge)
+{
+    if (closingDown_)
+        return;
+    auto found = registrations_.constFind(uri);
+    if (found == registrations_.constEnd())
+        return; // document gone mid-edge
+    if (!pullModeClient(clientForUri(uri)))
+        return; // no provider at the client level: not one diagnostic-pull
+                // byte on this wire (the refused check lives in the LIVE
+                // gate and in the fire-time body, so the bit never arms a
+                // hammering timer either — the gate says no before entry())
+    PullDiagFeed* feed = pullDiagFeedEntry(uri);
+    if (authorityEdge)
+        feed->refused = false; // THE re-arm: a new session/new document is a
+                               // new claim (folds' no-hammering rule, the
+                               // refused bit clears ONLY here)
+    feed->refreshTimer.start(kPullDiagnosticMs); // every edge RE-ARMS: a
+                                                 // burst coalesces into one
+                                                 // full pull
+}
+
+void LspHub::requestPullDiagsNow(const QString& uri)
+{
+    auto feedIt = pulls_.find(uri);
+    if (feedIt == pulls_.end())
+        return; // a teardown erased the feed mid-fire (the cancelled timer
+                // can still land — this is that guard)
+    PullDiagFeed* feed = feedIt->second.get();
+    if (feed->refused)
+        return; // fell back to push mid-debounce; the authority edge re-arms
+    auto reg = registrations_.constFind(uri);
+    if (reg == registrations_.constEnd() || !reg->editor)
+        return; // the document is gone
+    qmn::lsp::DocumentSyncer* syncer = syncerFor(reg->editor);
+    if (!syncer || !syncer->isOpen())
+        return;
+    if (!pullDiagnosticsLive(uri))
+        return; // the authority died mid-debounce (a session that failed in
+                // the kPullDiagnosticMs window): nothing to ask
+    syncer->flush(); // THE FLUSH BEFORE THE ASK (the fold/hint rule
+                     // verbatim): the report's positions decode against the
+                     // mirror, so the didChange bytes must lead the request
+    // SUPERSEDE (the completion/folds/hints discipline): one pull in flight;
+    // two racing reports would race two generations into the whole-set door.
+    qmn::lsp::LspClient* client = clientForUri(uri);
+    if (feed->pendingRequest != 0 && client)
+        client->cancel(feed->pendingRequest);
+    feed->pendingRequest = 0;
+
+    // THE FULL PULL, always: identifier "qmn" names this client's report
+    // series, and NO previousResultId ever rides out — so every answer is a
+    // fresh full report (the answer's resultId is stored below and read
+    // NOWHERE: recorded, and the fakeserver's own guard answers a
+    // previousResultId-carrying ask with exit 2, far-side proof).
+    const qint64 id = client->request(
+        QStringLiteral("textDocument/diagnostic"),
+        QJsonObject{{QStringLiteral("textDocument"),
+                     QJsonObject{{QStringLiteral("uri"), uri}}},
+                    {QStringLiteral("identifier"), QStringLiteral("qmn")}},
+        [this, uri](const qmn::protocol::RpcClient::Reply& reply) {
+            auto hit = pulls_.find(uri);
+            auto reg2 = registrations_.constFind(uri);
+            if (hit == pulls_.end() || reg2 == registrations_.constEnd()
+                || !reg2->editor || !reg2->editor->document())
+                return; // canceled with the registration: nothing to paint
+            PullDiagFeed* feedNow = hit->second.get();
+            qmn::view::CodeEditor* ed = reg2->editor;
+            qmn::lsp::DocumentSyncer* nowSyncer = syncerFor(ed);
+            if (!nowSyncer)
+                return;
+            if (reply.isError) {
+                if (reply.code <= qmn::protocol::RpcClient::kErrTimeout) {
+                    // the whole RpcClient-local -331xx band: kErrTimeout is
+                    // its most positive member (-33100..-33104)
+                    // A LOCAL rejection (kErrNotRunning/kErrTimeout — the
+                    // session died or the ask aged out): transient, NOT a
+                    // refusal. The last set STANDS, no fallback, no
+                    // refused-bit turn (a flaky session must not wipe the
+                    // paint — hints' asymmetry shape); the next edge re-arms.
+                    return;
+                }
+                // THE FALLBACK (the plan's shape): the WIRE refused an
+                // advertised provider (-32601 style) — this document runs
+                // PUSH now. The bit stops the hammering; the push decoder
+                // resumes on the next publish (the suppression guard opens
+                // with the bit). And the stale risk is PULL-specific: a
+                // push-fed set gets repainted by the server's own next
+                // publish, a pull generation would sit frozen forever — so
+                // the clear fires ONLY when the LAST door write was this
+                // hub's PULL generation (the fed bit, single-writer).
+                feedNow->refused = true;
+                if (feedNow->fed) {
+                    feedNow->fed = false;
+                    ed->setDiagnostics({}); // whole-set door: empty clears
+                }
+                return;
+            }
+            if (reply.result.isNull()) {
+                // null = no provider data: NOTHING to paint and no
+                // generation to replace. The pull door's fed bit stays as
+                // it was (no paint happened, no clear is owed), and the
+                // authority stands — the next edge asks again.
+                return;
+            }
+            if (!reply.result.isObject())
+                return; // not a DocumentDiagnosticReport: nothing honest to
+                        // do with it
+            const QJsonObject report = reply.result.toObject();
+            if (auto idIt = report.find(QStringLiteral("resultId"));
+                idIt != report.end())
+                feedNow->lastResultId = idIt->toString(); // STORED, never
+                                                          // sent (the full-
+                                                          // pull rule)
+            if (report.value(QStringLiteral("kind")).toString()
+                == QStringLiteral("unchanged"))
+                return; // the server says the LAST report still stands: the
+                        // PAINT STAYS untouched — no decode, no door write,
+                        // no fed-bit turn. (The stale-paint risk is the
+                        // spec's own bargain: the server promised it.)
+            // "full" — and the spec-impossible-without-our-id "partial"
+            // reads AS FULL (the tolerant read: a partial report without a
+            // previous id IS a full one; pinned far-side by the fakeserver
+            // answering kind "partial" and the exact-set compare).
+            const QVector<qmn::view::CodeEditor::Diagnostic> decoded
+                = decodeDiagnosticItems(
+                    report.value(QStringLiteral("items")).toArray(),
+                    nowSyncer->mirrorText(), nowSyncer->encoding());
+            ed->setDiagnostics(decoded); // the SAME door the push route
+                                         // paints — one decoder, one door
+            feedNow->fed = true; // THE PULL GENERATION IS THE DOOR'S LAST
+                                 // WRITE (the fallback/teardown clear's
+                                 // precondition)
+        });
+    feed->pendingRequest = id > 0 ? id : 0; // locally refused (the gate above
+                                            // makes this nearly unreachable)
+}
+
+// The client-DEATH shape: a dead session's PULL generation must not linger
+// in the paint (the marks speak the dead server's text). The fed-bit gate
+// is again exact: only a door whose LAST full-set write was this hub's pull
+// gets cleared — push-published marks are the server's own trail and stood
+// across restarts long before C5; an app's own set was never the hub's to
+// wipe. (unregisterCapability mid-session needs no separate walk: the LIVE
+// gate re-reads the registry at every edge, so the next publish paints
+// again the moment the pull authority dies.)
+void LspHub::stopPullFeeds(const QString& specName)
+{
+    for (auto it = registrations_.constBegin();
+         it != registrations_.constEnd(); ++it) {
+        if (it->specName != specName || !it->editor)
+            continue;
+        auto pit = pulls_.find(it.key());
+        if (pit == pulls_.end() || !pit->second->fed)
+            continue;
+        pit->second->fed = false;
+        it->editor->setDiagnostics({}); // whole-set door: empty clears
+    }
+}
+
 
 // The diagnostics half of the SHARED hover popup (post-1.8.0 sliver, the
 // user-decided VS Code shape): the records are the VIEW's decoration state

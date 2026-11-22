@@ -3,6 +3,91 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.11.0] — 2026-11-22 — GATE 3 car C (M8b) CLOSED — LSP folds, signatureHelp, inlay hints and pull diagnostics on the shelf
+
+### Added
+- **The fold-provider seam in the view** (car C machine C1, the only
+  public-surface widening of the car): `CodeEditor::setFoldRanges(
+  QVector<FoldRange>)` / `clearFoldRanges()` — installing a server list
+  (even an empty one) puts the fold system in SERVER mode: the grammar's
+  `@fold` captures and the indent fallback go silent, the LSP owns folds
+  ATOMICALLY, never mixed. The door normalizes: clamp to the document,
+  drop `end <= start`, sort start-asc/end-desc, one entry per start wins
+  by WIDEST end. `FoldRange` joins the wheel as a bound nested record;
+  `clearFoldRanges()` hands folds back to the grammar. The nested
+  `CodeEditor::FoldRange` record and both doors cross the PySide6 wheel;
+  `tst_codeeditor` grew 5 fold tripwires.
+- **signatureHelp on the hub** (C2): the 7th `FeatureHandler` door
+  `requestSignatureHelp(...)`, fired by the typed `(` and `,` INSIDE an
+  open paren (the auto-close-pair press AS the gesture), 150 ms debounce,
+  the answer painted in the HOVER popup at fire-time caret — the frozen
+  view surface untouched, six-machine popup math reused.
+- **foldingRange, wire to seam** (C3): the hub asks
+  `textDocument/foldingRange` on open/re-READY, debounced edits and
+  explicit refresh; a `FoldingRangeProvider` capability (static or
+  dynamically registered) makes the server the fold authority from the
+  FIRST answer, an error answer hands folds back to the grammar. The
+  dedupe tie IS the view door's WIDEST-per-start rule — one rule, both
+  sides of the boundary.
+- **LSP inlay hints** (C4): the hub asks `textDocument/inlayHint` for a
+  window capped at 2000 lines, concatenates `label` parts, bakes
+  paddings as real spaces and feeds the ALREADY-BOUND M5
+  `setInlayHints` door — zero new view API. 300 ms refresh, 500-hint
+  cap cuts the wire window. The recorded asymmetry with folds: an error
+  answer leaves the LAST set standing (no grammar under the hint door to
+  hand control back to).
+- **Pull diagnostics** (C5): the hub declares
+  `diagnostic {relatedDocumentSupport:false}` in `initialize`; with the
+  provider advertised or dynamically registered, the hub asks
+  `textDocument/diagnostic` (never a `previousResultId` — always a full
+  pull) on open/re-READY, didSave and debounced edits at 600 ms, while
+  that server's `publishDiagnostics` is DROPPED (one authority per
+  document). `kind:"unchanged"` keeps the paint with ZERO door writes;
+  `"partial"` is read as a full report (the tolerant read). The push
+  route's items and the pull report's `items[]` share ONE decoder — the
+  severity/range-clamp/swap discipline exists once. An advertised-then-
+  refused pull flips the document back to push for good until an
+  open/re-READY edge (no ask hammering). `LspHub::
+  diagnosticsFedFromServer` (a new plain-Qt glue door, Python-reachable)
+  answers whether the marks on the editor came from the hub's own PULL
+  generation — the only marks a teardown or fallback may wipe;
+  push-published marks keep the pre-C5 M8 stance (a close never wipes
+  them). `textDocument/diagnostic` joined `LspClient`'s registrable set.
+
+### Fixed
+- **`client/unregisterCapability` now reads the spec's `unregisterations`
+  key** (`LspClient`): it had been reading `registrations`, which made
+  every dynamic unregistration a silent NO-OP that still answered null.
+  Caught red-first by car C's dynamic pull leg; the fakeserver's own
+  battery frame had grown to match the bug and now speaks the spec too,
+  so the 9007 battery leg pins the reader from the other side.
+
+### Close ritual — live clangd probe (clangd version 23.1.5)
+- `tools/probe_clangd.cpp` grew four car C legs (steps 8..11) and ran
+  PROBE-OK twice over against the live 23.1.5: **signatureHelp** names
+  `betaFn` and both params at the typed-comma position inside a fresh
+  `betaCaller` body, `triggerCharacter ","` riding the context;
+  **foldingRange** proved SERVER mode end-to-end — the fed bit true, two
+  clangd folds ([3..5] main's body, [8..9] betaCaller's) installed with
+  the grammar `@fold` silenced by the C1 seam; **inlayHint** landed the
+  `firstArg` param-name hint through the M5 door (zero new view API);
+  **pull diagnostics observed honestly** — clangd 23.1.5 claims NO
+  `diagnosticProvider` (static or registered), so the pre-C5 push stance
+  stands on the live server, the fed bit stays false, zero asks (the
+  pull machinery itself is the fakeserver's ctest turf).
+- The probe's first signatureHelp answer came back EMPTY and the fault
+  was the drill document, not the client: at cpp the unterminated
+  half-typed `int rebind = alphaLoc` line swallows the NEXT line's
+  `void betaFn(...);` declaration into parser error recovery — hover
+  still answers via clangd's name recovery, signatureHelp cannot (no
+  real declaration to call). The block now lands before the broken
+  line; the leg's step text records the trap.
+- `tools/probe_clangd.sh` lost its `-no-pie` (binutils 2.47 REJECTS the
+  link outright: copy relocations against Qt's PROTECTED `QString::_empty`
+  are non-copyable — and Arch's GCC builds PIE by default anyway, the
+  old flag bought nothing) and gained `build/src/dap/libqmn_dap.a`
+  (since D3 the shelf PUBLIC-links `qmn_dap`).
+
 ## [1.10.0] — 2026-11-22 — GATE 3 car B (M10b) CLOSED — word-level inline diff, the wrap×diff budget math, and the read column that wraps
 
 ### Added

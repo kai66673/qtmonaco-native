@@ -4,9 +4,14 @@
 # but M8 may not CLOSE without a green run, recorded in the CHANGELOG.
 #
 # Ad-hoc g++ like tools/bench_model.cpp: needs the built archives, and the
-# Qt6 include/lib paths below are ARCH Linux paths (adjust elsewhere). -no-pie
-# because the host archives are built without PIC on purpose (AGENTS.md: the
-# per-keystroke perf budgets were measured on non-PIC archives).
+# Qt6 include/lib paths below are ARCH Linux paths (adjust elsewhere). No
+# -no-pie: on this host the archives are PIE anyway (Arch's GCC is PIE by
+# DEFAULT — CMake's PIC option only ADDS -fPIC, it never removes the spec's
+# default — so the old -no-pie bought nothing, and binutils 2.47 now REJECTS
+# the -no-pie link outright: copy relocations against Qt's PROTECTED data
+# symbols like QString::_empty are non-copyable; 2026-11-22 car C ritual
+# found it). The link line also grew build/src/dap/libqmn_dap.a: since car
+# 4's D3 the shelf PUBLIC-links qmn_dap (DapHub's door names a DapClient*).
 set -euo pipefail
 cd "$(dirname "${BASH_SOURCE[0]}")/.."
 
@@ -20,7 +25,7 @@ if [ ! -f build/src/glue/libqmn_glue.a ]; then
     exit 1
 fi
 
-g++ -O2 -std=c++20 -no-pie \
+g++ -O2 -std=c++20 \
     tools/probe_clangd.cpp \
     -Isrc \
     -isystem /usr/include/qt6 -isystem /usr/include/qt6/QtCore \
@@ -28,6 +33,7 @@ g++ -O2 -std=c++20 -no-pie \
     -isystem /usr/include/qt6/QtNetwork \
     build/src/glue/libqmn_glue.a \
     build/src/lsp/libqmn_lsp.a \
+    build/src/dap/libqmn_dap.a \
     build/src/protocol/libqmn_protocol.a \
     build/src/view/libqmn_view.a \
     build/src/diff/libqmn_diff.a \

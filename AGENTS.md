@@ -17,7 +17,9 @@ phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
   eight ordered cars: defect pair (CLOSED at 1.9.2 — the core now carries
 the lazy per-piece newline index) → M10b (CLOSED at 1.10.0 — WordDiff
 inline wash + two Theme roles, the WEIGHTED diff row axis, original-side
-wrap) → M8b →
+wrap) → M8b (CLOSED at 1.11.0 — fold-provider seam, signatureHelp, LSP
+inlay hints, pull diagnostics; the live clangd probe grew four legs, 11
+steps PROBE-OK on clangd 23.1.5) →
   multi-observer core → wheel-2 (DAP across + answer routes) → S1
   (qmn-demo grows into the showcase, NO second binary) → S2 (pydemo
   mirrors it door-for-door) → PyPI/cibuildwheel. Grapheme segmentation

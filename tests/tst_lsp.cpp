@@ -583,6 +583,52 @@ QString hintDumpText(qmn::view::CodeEditor* editor)
                : hintDump(editor).join(QLatin1Char(','));
 }
 
+// The car C (C5) PULL-DIAGNOSTICS fixture: four lines (0..3), NO trailing
+// newline (the {999,x} clamp rides the DOCUMENT'S END, and the document end
+// MOVES with edits — the second flush proof spelled in the decode). The two
+// token families are DISJOINT on purpose: the pull scan's token is "err"
+// (line 1, cols 5..8), the push scanner's marker is "bug" (line 2, cols
+// 4..7) — while the pull is live a "bug" publish paints NOTHING, and once
+// the pull falls through the same publish paints: the two authorities told
+// apart by their paint alone, with zero hub-state reading.
+const QString kPullFixture = QStringLiteral(
+    "def f():\n"
+    "    xerr = 1\n"
+    "    bug here\n"
+    "pass");
+
+// The fakeserver's pull report over kPullFixture, decoded through the ONE
+// shared decoder (the wire noise: an INVERTED same-line pair, a severity-9,
+// an out-of-document {999,x} pair, a bare number) and spelled in the VIEW
+// DOOR's own sort order (startLine,startCol,endLine,endCol — severity reads
+// the enum int: Error 0, Warning 1).
+QStringList pullExpected()
+{
+    return {QStringLiteral("0:0|0:0|0||"),
+            QStringLiteral("0:0|0:1|0|sev9|fakesrv-pull"),
+            QStringLiteral("1:2|1:10|1|swapped|fakesrv-pull"),
+            QStringLiteral("1:5|1:8|0|pull line 1|fakesrv-pull"),
+            QStringLiteral("3:4|3:4|0|outdoc|fakesrv-pull")};
+}
+
+// A diagnostic set as ONE comparable list ("startL:C|endL:C|sev|msg|src") —
+// car C (C5)'s oracle: the one shared decoder, the clamp frame, the kind
+// branches and the suppression/fallback all show up HERE and nowhere else.
+QString pullDump(qmn::view::CodeEditor* editor)
+{
+    QStringList out;
+    for (const qmn::view::CodeEditor::Diagnostic& d : editor->diagnostics())
+        out << QStringLiteral("%1:%2|%3:%4|%5|%6|%7")
+                   .arg(d.startLine)
+                   .arg(d.startCol)
+                   .arg(d.endLine)
+                   .arg(d.endCol)
+                   .arg(int(d.severity))
+                   .arg(d.message)
+                   .arg(d.source);
+    return out.join(QLatin1Char(','));
+}
+
 } // namespace
 
 class TstLsp : public QObject {
@@ -5877,6 +5923,331 @@ private slots:
                                                             // cleared
                                                             // NOTHING it
                                                             // never wrote
+    }
+
+    // --------------------------------------------- car C (C5): pull diagnostics
+
+    // THE PULL AUTHORITY, end to end: the declare rides initialize, the
+    // provider answers full reports scanned from the server's OWN mirror,
+    // and the ONE shared decoder (push items vs pull items) chews the wire
+    // noise into the exact set below — plus the flush-before-ask proof,
+    // twice: the EDITED mirror shows up in the decode, and test/pullState
+    // echoes that the server's own scan saw the edited marker count.
+    void hubPullDiagnosticsPaintTheDecodedReport()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("pull"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pullsrv"), {QStringLiteral("python")});
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(kPullFixture);
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///pull-1.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pullsrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/diagnostic")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&editor] {
+                     return pullDump(&editor)
+                            == pullExpected().join(QLatin1Char(','));
+                 }),
+                 qPrintable(QStringLiteral("diags [%1] | %2")
+                                .arg(pullDump(&editor),
+                                     stderrDump(stderrSpy))));
+        QVERIFY(h.hub.diagnosticsFedFromServer(&editor)); // the hub's PULL
+                                                         // generation owns
+                                                         // the door now
+
+        // The flush-before-ask leg: an edit that GROWS the last line moves
+        // the {999,x} clamp AND plants a second marker — the next report
+        // must name BOTH, so a hub that asked before flushing its
+        // didChange could not produce this set.
+        editor.insertTextAt({3, 4}, QStringLiteral(" err"));
+        QStringList edited;
+        edited << QStringLiteral("0:0|0:0|0||")
+               << QStringLiteral("0:0|0:1|0|sev9|fakesrv-pull")
+               << QStringLiteral("1:2|1:10|1|swapped|fakesrv-pull")
+               << QStringLiteral("1:5|1:8|0|pull line 1|fakesrv-pull")
+               << QStringLiteral("3:5|3:8|0|pull line 3|fakesrv-pull")
+               << QStringLiteral("3:8|3:8|0|outdoc|fakesrv-pull");
+        QVERIFY2(waitUntil([&editor, &edited] {
+                     return pullDump(&editor)
+                            == edited.join(QLatin1Char(','));
+                 }),
+                 qPrintable(QStringLiteral("diags [%1] | %2")
+                                .arg(pullDump(&editor),
+                                     stderrDump(stderrSpy))));
+        const QJsonObject state = askServer(client,
+                                            QStringLiteral("test/pullState"),
+                                            QJsonObject{});
+        QVERIFY2(state.value(QStringLiteral("asks")).toInt() >= 2,
+                 qPrintable(QStringLiteral("pull asks %1 | %2")
+                                .arg(state.value(QStringLiteral("asks")).toInt())
+                                .arg(stderrDump(stderrSpy))));
+        QCOMPARE(state.value(QStringLiteral("markerLines")).toInt(),
+                 2); // the server's OWN scan saw the edited token count:
+                     // the didChange bytes led the ask
+
+        // The teardown half: the fed PULL generation clears with the
+        // document (stale-pull risk — the marks speak the closed doc's
+        // text), and the fed door reads false afterwards.
+        h.hub.closeDocument(&editor);
+        QVERIFY(editor.diagnostics().isEmpty());
+        QVERIFY(!h.hub.diagnosticsFedFromServer(&editor));
+    }
+
+    // kind "unchanged" = the server PROMISES the last report still stands:
+    // the hub writes the door ZERO times — no decode, no wipe, no fed-bit
+    // turn. The stale-paint bargain is the spec's own, and the edit between
+    // the asks proves the hub adds nothing on its side either.
+    void hubPullDiagnosticsUnchangedKeepsThePaint()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("pull"),
+                                 QStringLiteral("pullunchanged"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pullunch"), {QStringLiteral("python")});
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(kPullFixture);
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///pull-2.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pullunch"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        QVERIFY2(waitUntil([&editor] {
+                     return pullDump(&editor)
+                            == pullExpected().join(QLatin1Char(','));
+                 }),
+                 qPrintable(QStringLiteral("diags [%1] | %2")
+                                .arg(pullDump(&editor),
+                                     stderrDump(stderrSpy))));
+        QVERIFY(h.hub.diagnosticsFedFromServer(&editor));
+        const QString painted = pullDump(&editor);
+
+        // An edit re-arms (a pull is an EDGE-triggered route), ask 2
+        // answers "unchanged" — and the paint must sit EXACTLY where ask 1
+        // left it, clamp frame and all.
+        editor.insertTextAt({2, 8}, QStringLiteral(" zz"));
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/diagnostic")),
+                 qPrintable(stderrDump(stderrSpy))); // ask 1 rode the log;
+        QTest::qWait(900);                            // the debounce asks
+        QCOMPARE(pullDump(&editor), painted); // unchanged: NOTHING was
+                                              // written — a hub that
+                                              // decoded the empty-items
+                                              // promise (or WIPED on it)
+                                              // loses this compare
+        QVERIFY(h.hub.diagnosticsFedFromServer(&editor)); // no fed-bit turn
+        const QJsonObject state = askServer(client,
+                                            QStringLiteral("test/pullState"),
+                                            QJsonObject{});
+        QVERIFY(state.value(QStringLiteral("asks")).toInt() >= 2);
+    }
+
+    // THE DYNAMIC REGISTRATION: no static provider — the server registers
+    // textDocument/diagnostic MID-SESSION (client/registerCapability, the
+    // spec's shape) and the hub's registry-driven re-arm answers the pull
+    // from there; unregistering re-modes the document back to push with no
+    // further ask (the LIVE gate re-reads the registry at every edge — no
+    // stored mode state to unwind).
+    void hubPullDiagnosticsDynamicRegistrationRemodes()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("pulldynamic"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pulldyn"), {QStringLiteral("python")});
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("one err two\n"
+                                          "three bug four"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///pull-3.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pulldyn"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        // NO PULLREG marker wait: the registerCapability exchange rides the
+        // HANDSHAKE window (the request leaves on `initialized`), largely
+        // before this spy exists — the fakeserver's own fail()s are the
+        // far-side tripwire (a rejecting client dies and no paint follows).
+        // The near-side proof is the registry itself.
+        QVERIFY2(waitUntil([&client] {
+                     return client->isRegistered(
+                         QStringLiteral("textDocument/diagnostic"));
+                 }),
+                 qPrintable(QStringLiteral("the registration never landed")));
+        QVERIFY2(waitUntil([&editor] {
+                     return pullDump(&editor)
+                            .contains(QStringLiteral("fakesrv-pull"));
+                 }),
+                 qPrintable(QStringLiteral("diags [%1] | %2")
+                                .arg(pullDump(&editor),
+                                     stderrDump(stderrSpy)))); // the ONLY
+                                                                // paintable
+                                                                // source in
+                                                                // this mode:
+                                                                // no push
+                                                                // ever rode
+                                                                // it — the
+                                                                // DYNAMIC
+                                                                // authority
+                                                                // armed the
+                                                                // feed
+        QVERIFY(h.hub.diagnosticsFedFromServer(&editor));
+        QCOMPARE(
+            reqCount(stderrSpy, QStringLiteral("textDocument/diagnostic")),
+            1);
+        QVERIFY(!pullDump(&editor).contains(
+            QStringLiteral("bug at line 1"))); // the push scanner's token
+                                               // never paints under the
+                                               // live pull
+
+        // The unregister leg: the tst fires the server-side DROP; the null
+        // acknowledgment is where the fakeserver rides its push trail —
+        // and THAT publish must paint the very "bug" entry the pull mode
+        // suppressed (the re-mode, end to end).
+        client->notify(QStringLiteral("test/pullUnregister"),
+                       QJsonObject{{QStringLiteral("uri"),
+                                    QStringLiteral("file:///pull-3.py")}});
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("PULLUNREG-OK")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&editor] {
+                     return pullDump(&editor)
+                            .contains(QStringLiteral("bug at line 1"));
+                 }),
+                 qPrintable(QStringLiteral("diags [%1] | %2")
+                                .arg(pullDump(&editor),
+                                     stderrDump(stderrSpy))));
+        QTest::qWait(900); // past the pull debounce TWICE over: an ask from
+                           // a dead authority would show on the REQ log
+        QCOMPARE(
+            reqCount(stderrSpy, QStringLiteral("textDocument/diagnostic")),
+            1); // the un-registered document asks NOTHING — the LIVE gate
+                // re-read the registry, there was no stored mode to clear
+    }
+
+    // THE FALLBACK: a server that ADVERTISED the provider and then REFUSED
+    // the pull (-32601) flips this document back to push. The suppression
+    // guard OPENS with the refused bit — the push route's own publishes
+    // (the "diags" trail) resume and paint — and the hub STOPS ASKING (no
+    // hammering, folds' bit shape; only an open/re-READY edge re-arms).
+    void hubPullDiagnosticsRefusalFallsBackToPush()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("diags"),
+                                 QStringLiteral("pull"),
+                                 QStringLiteral("pullpublish"),
+                                 QStringLiteral("pullfail=0"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pullfall"), {QStringLiteral("python")});
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(kPullFixture);
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///pull-4.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pullfall"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        // The suppression FIRST: the server pushed at didOpen ("diags") —
+        // while the pull is live that publish is DROPPED (the fixture's
+        // "bug" marker paints NOTHING, and no pull item ever exists yet).
+        QTest::qWait(400);
+        QVERIFY2(editor.diagnostics().isEmpty(),
+                 qPrintable(QStringLiteral("diags [%1]").arg(
+                     pullDump(&editor))));
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/diagnostic")),
+                 qPrintable(stderrDump(stderrSpy)));
+        // The refusal (-32601 from ask 1) + the fakeserver's push trail
+        // right behind it: the guard must OPEN and this publish must paint.
+        QVERIFY2(waitUntil([&editor] {
+                     return pullDump(&editor)
+                            .contains(QStringLiteral("bug at line 2"));
+                 }),
+                 qPrintable(QStringLiteral("diags [%1] | %2")
+                                .arg(pullDump(&editor),
+                                     stderrDump(stderrSpy))));
+        QVERIFY(!pullDump(&editor).contains(QStringLiteral("outdoc")));
+            // the refused pull never PAINTED at all: the decode here can
+            // only be the push route's
+        QVERIFY(!h.hub.diagnosticsFedFromServer(&editor)); // no PULL
+                                                          // generation ever
+                                                          // wrote the door:
+                                                          // nothing of the
+                                                          // hub's to clear
+        // And the asks STOP: edits ride the debounce timer into the
+        // refused-bit gate, not into the wire (the no-hammering rule).
+        editor.insertTextAt({0, 8}, QStringLiteral(" zz"));
+        QTest::qWait(1500); // well past kPullDiagnosticMs twice over
+        QCOMPARE(
+            reqCount(stderrSpy, QStringLiteral("textDocument/diagnostic")),
+            1); // exactly the refused ask — the fallback STICKS until an
+                // open/re-READY authority edge
+    }
+
+    // THE CONTROL: a server with NO pull authority (push "diags" only)
+    // paints through the untouched M8 route and gets ZERO diagnostic asks
+    // — the pull gate is capability-driven, not timer-driven, and the
+    // push-published marks survive a close EXACTLY as they did before C5.
+    void hubPullDiagnosticsSilentWithoutTheProvider()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("diags"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pushonly"), {QStringLiteral("python")});
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(kPullFixture);
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///pull-5.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pushonly"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        QVERIFY2(waitUntil([&editor] {
+                     return pullDump(&editor)
+                            .contains(QStringLiteral("bug at line 2"));
+                 }),
+                 qPrintable(QStringLiteral("diags [%1] | %2")
+                                .arg(pullDump(&editor),
+                                     stderrDump(stderrSpy))));
+        QVERIFY(!h.hub.diagnosticsFedFromServer(&editor)); // PUSH marks are
+                                                          // the server's
+                                                          // own trail —
+                                                          // never the
+                                                          // hub's to clear
+        QTest::qWait(900); // past kPullDiagnosticMs: an ask WOULD have shown
+        QCOMPARE(
+            reqCount(stderrSpy, QStringLiteral("textDocument/diagnostic")),
+            0);
+        editor.insertTextAt({0, 8}, QStringLiteral(" zz"));
+        QTest::qWait(900);
+        QCOMPARE(
+            reqCount(stderrSpy, QStringLiteral("textDocument/diagnostic")),
+            0); // edits arm NOTHING without the authority
+        h.hub.closeDocument(&editor);
+        QVERIFY2(pullDump(&editor).contains(QStringLiteral("bug at line 2")),
+                 qPrintable(QStringLiteral("diags [%1]").arg(
+                     pullDump(&editor)))); // the M8 stance: a close never
+                                           // wipes PUBLISHED marks — C5
+                                           // keeps it untouched
     }
 
 };

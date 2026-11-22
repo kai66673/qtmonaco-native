@@ -363,6 +363,214 @@ bool runProbe(qmn::view::CodeEditor& editor, qmn::glue::LspHub& hub,
                  .arg(detourOffered ? QStringLiteral("willSaveWaitUntil detour")
                                     : QStringLiteral("plain synchronous")));
     }
+
+    // ---- GATE 3 car C (M8b) legs: signatureHelp, foldingRange, inlay
+    // hints and the diagnostic authority, against the SAME live clangd.
+    // The betaFn/betaCaller block lands at line 7 — BEFORE the drill's
+    // half-typed rebind line — for a reason live clangd 23.1.5 taught the
+    // hard way (2026-11-22): at cpp, the unterminated `int rebind =
+    // alphaLoc` swallows the next line's `void betaFn(...);` declaration
+    // into its error recovery, so the call has no REAL declaration —
+    // hover still answers via clangd's name recovery, but signatureHelp
+    // answers EMPTY signatures at every position. With the block before
+    // the broken line, both trigger kinds answer fully. The block also
+    // re-arms the edit-edge feeds (foldingRange, inlayHint, pull) exactly
+    // like a user's typing. As in the save leg, what clangd REALLY
+    // advertises decides each branch; both readings print honestly.
+    {
+        editor.insertTextAt(qmn::view::TextPosition(7, 0),
+                            QStringLiteral("void betaFn(int firstArg, "
+                                           "int secondArg);\n"
+                                           "void betaCaller(void) {\n"
+                                           "    int betaUse = betaFn(1, 2);\n"
+                                           "}\n"));
+        hub.syncerFor(&editor)->flush(); // THE app-side frame rule (M8
+                                         // convention): the explicit feature
+                                         // doors do NOT flush the syncer —
+                                         // the app controls its own typing
+                                         // rhythm. Live clangd proved it the
+                                         // hard way: un-flushed, it parsed
+                                         // the OLD document and answered
+                                         // empty signatures at the fresh
+                                         // call position. The hub's OWN
+                                         // auto feeds
+                                         // (fold/hint/pull/sighelp triggers)
+                                         // all flush at ask time — that
+                                         // half is hub-side, pinned in tst.
+        const QJsonObject caps = client->serverCapabilities();
+
+        // C2: the signatureHelp door. (9,27) sits right after the ',' of
+        // the betaCaller call — TriggerForCharacter riding clangd's own
+        // comma.
+        {
+            FeatureProbe sig;
+            if (hub.requestSignatureHelp(
+                    &editor, qmn::view::TextPosition(9, 27), sig.handler(),
+                    QStringLiteral(","))
+                <= 0)
+                return err()
+                       << "PROBE-FAIL signatureHelp: door refused locally\n",
+                       false;
+            if (!waitUntil([&] { return sig.arrived; }, 20000)
+                || sig.reply.isError)
+                return err()
+                       << "PROBE-FAIL signatureHelp: "
+                       << (sig.arrived ? sig.reply.message
+                                       : QStringLiteral("never answered"))
+                       << Qt::endl,
+                       false;
+            if (!jsonDump(sig.reply.result).contains(QStringLiteral("betaFn")))
+                return err()
+                       << "PROBE-FAIL signatureHelp: the answer does not name "
+                          "betaFn (and the block IS parsed now — hover the "
+                          "call to check): "
+                       << jsonDump(sig.reply.result).left(400) << Qt::endl,
+                       false;
+            step(QStringLiteral("signatureHelp: clangd names betaFn and its "
+                                "two params at the typed-comma position "
+                                "(9,27) inside betaCaller, triggerCharacter "
+                                "comma rode the context; the FIRST attempt "
+                                "answered empty because the broken rebind "
+                                "line swallowed the betaFn declaration via "
+                                "name recovery — the block now lands before "
+                                "it"));
+        }
+
+        // C3: the fold feed. An advertised provider makes clangd the fold
+        // AUTHORITY from its first answer — the fed bit is the agreement
+        // proof, and the ranges must actually cover main()'s body (the
+        // drill's brace block lives on lines 2..6).
+        if (caps.contains(QStringLiteral("foldingRangeProvider"))) {
+            if (!waitUntil([&] { return hub.foldsFedFromServer(&editor); },
+                           20000))
+                return err()
+                       << "PROBE-FAIL foldingRange: clangd advertised "
+                          "foldingRangeProvider but the fold feed never "
+                          "fed the door\n",
+                       false;
+            const QVector<qmn::view::CodeEditor::FoldRange> folds
+                = editor.foldableRanges();
+            QStringList shown;
+            bool coversMain = false;
+            for (const qmn::view::CodeEditor::FoldRange& f : folds) {
+                shown << QStringLiteral("%1..%2").arg(f.startLine)
+                                                      .arg(f.endLine);
+                if (f.startLine <= 3 && f.endLine >= 5) // main()'s brace
+                    coversMain = true;                  // fold, NOT the
+                                                        // betaCaller one
+            }
+            if (!coversMain)
+                return err() << "PROBE-FAIL foldingRange: no SERVER fold "
+                                "covers main()'s body (a range must sit on "
+                                "2..6); server ranges: ["
+                             << shown.join(QLatin1String(", "))
+                             << "]\n",
+                       false;
+            step(QStringLiteral("foldingRange: %1 server folds installed "
+                                "(grammar @fold silenced by the C1 seam), "
+                                "main()'s body among them: [%2]")
+                     .arg(folds.size())
+                     .arg(shown.join(QLatin1String(", "))));
+        } else {
+            step(QStringLiteral("foldingRange: clangd advertises NO "
+                                "foldingRangeProvider (observed) — the "
+                                "grammar keeps fold authority, the hub "
+                                "asks NOTHING"));
+        }
+
+        // C4: the inlay-hint feed through the already-bound M5 door. The
+        // betaFn(1, call is the drill: a DEFAULT-ON clangd paints the
+        // parameter NAME before the argument.
+        if (caps.contains(QStringLiteral("inlayHintProvider"))
+            || client->isRegistered(QStringLiteral("textDocument/inlayHint"))) {
+            const bool gotParamHint = waitUntil(
+                [&] {
+                    for (const qmn::view::CodeEditor::InlayHint& h
+                         : editor.inlayHints())
+                        if (h.text.contains(QStringLiteral("firstArg")))
+                            return true;
+                    return false;
+                },
+                30000);
+            if (!gotParamHint) {
+                QStringList shown;
+                for (const qmn::view::CodeEditor::InlayHint& h
+                     : editor.inlayHints())
+                    shown << QStringLiteral("%1:%2[%3]")
+                                 .arg(h.line)
+                                 .arg(h.col)
+                                 .arg(h.text);
+                return err() << "PROBE-FAIL inlayHint: provider live and a "
+                                "betaFn(1, call typed, yet no firstArg "
+                                "param-name hint ever landed; painted: ["
+                             << shown.join(QLatin1String(", ")) << "]\n",
+                       false;
+            }
+            step(QStringLiteral("inlayHint: %1 hints on the door, the "
+                                "firstArg param-name hint proves clangd's "
+                                "answer decoded through the M5 feed (zero "
+                                "new view API)")
+                     .arg(editor.inlayHints().size()));
+        } else {
+            step(QStringLiteral("inlayHint: neither advertised nor registered "
+                                "(observed) — no hint feed expected, the "
+                                "app's own table (if any) stands"));
+        }
+
+        // C5: the diagnostic authority. One more public-door edit (closing
+        // the call) rides the 600 ms debounce — the open/READY edges long
+        // passed. Advertised/registered pull: the PULL generation must
+        // paint the decoded report (and the push route DROPS behind it);
+        // no authority: the pre-C5 push stance stands untouched and the
+        // fed bit stays false forever.
+        const bool pullLive = caps.contains(QStringLiteral("diagnosticProvider"))
+            || client->isRegistered(QStringLiteral("textDocument/diagnostic"));
+        editor.insertTextAt(qmn::view::TextPosition(12, 0),
+                            QStringLiteral("// pull-edge drill\n")); // one
+                                                  // more edit edge for the
+                                                  // 600 ms debounce
+        if (pullLive) {
+            const bool pullPainted = waitUntil(
+                [&] { return hub.diagnosticsFedFromServer(&editor)
+                             && hasErrorOnLine4(); },
+                20000);
+            if (!pullPainted)
+                return err()
+                       << "PROBE-FAIL pull diagnostics: clangd claims the "
+                          "provider, yet the PULL generation never painted "
+                          "the decoded report. "
+                       << dumpsDiags(editor) << Qt::endl,
+                       false;
+            step(QStringLiteral("pull diagnostics: clangd holds the "
+                                "authority — textDocument/diagnostic "
+                                "answered, %1 marks decoded by the ONE "
+                                "shared decoder, fed bit true, push "
+                                "suppressed")
+                     .arg(editor.diagnostics().size()));
+        } else {
+            waitUntil([] { return false; }, 1500); // a 1500 ms settle past
+                                                   // the pull debounce: an
+                                                   // ask WOULD have painted
+                                                   // the fed bit by now
+            if (hub.diagnosticsFedFromServer(&editor))
+                return err()
+                       << "PROBE-FAIL pull diagnostics: NO provider was "
+                          "ever claimed, yet a PULL generation painted — "
+                          "the gate invented an authority\n",
+                       false;
+            if (!hasErrorOnLine4())
+                return err()
+                       << "PROBE-FAIL pull diagnostics: the push route's "
+                          "marks vanished without any pull authority to "
+                          "replace them. "
+                       << dumpsDiags(editor) << Qt::endl,
+                       false;
+            step(QStringLiteral("pull diagnostics: clangd claims NO "
+                                "diagnosticProvider (observed) — the push "
+                                "route holds the marks, fed bit false, zero "
+                                "asks (the pre-C5 stance, untouched)"));
+        }
+    }
     return true;
 }
 

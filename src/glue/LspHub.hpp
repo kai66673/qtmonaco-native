@@ -338,6 +338,14 @@ public:
     // set this hub fed).
     bool hintsFedFromServer(qmn::view::CodeEditor* editor) const;
 
+    // car C (C5): the same question about the M5 DIAGNOSTIC door, the PULL
+    // route's side — "was the editor's diagnostic set LAST written by this
+    // hub's pull feed?" (One fed bit covers the door; the push route's
+    // published marks are the SERVER's own trail and were never the hub's
+    // to clear — that stance predates C5 and stands. The fallback and the
+    // teardown clears ride this bit, single-writer convention again.)
+    bool diagnosticsFedFromServer(qmn::view::CodeEditor* editor) const;
+
     // --- the write path: WorkspaceEdit application ------------------------
     // Both directions of the same machinery: a SERVER-primed edit
     // (workspace/applyEdit, relayed below and answered for real) and the
@@ -552,6 +560,38 @@ private:
     // hub never fed (an app's hints, DAP's stop table: the fed bit is the
     // gate, single-writer convention).
     void handBackHints(const QString& specName);
+    // car C (C5): the PULL diagnostics feed. The mode is a per-ask GATE, not
+    // stored mode state: `pullDiagnosticsLive` says pull is authority NOW
+    // (offered at initialize OR dynamic-registered, minus this document's
+    // `refused` bit — a server that advertised the provider and then refused
+    // the pull FALLS BACK to push, the recorded plan shape, and the bit
+    // stops the hammering). The feed asks {textDocument, identifier:"qmn"},
+    // NEVER a previousResultId (always a full pull; the answer's resultId is
+    // STORED and unused — recorded). kind:"unchanged" ignores the answer,
+    // "full" (and the spec-impossible "partial", read tolerantly as full)
+    // decodes through the SAME decoder the push route uses.
+    static constexpr int kPullDiagnosticMs = 600; // PLAN-pinned debounce
+    struct PullDiagFeed; // timer + in-flight id + refused/fed bits +
+                         // lastResultId; .cpp-defined
+    PullDiagFeed* pullDiagFeedEntry(const QString& uri); // creates it
+    bool pullDiagnosticsLive(const QString& uri) const;  // the mode gate
+    bool pullModeClient(const qmn::lsp::LspClient* client) const; // the
+                                        // client half of the gate: offered
+                                        // OR registered (no refused bit —
+                                        // the push-drop guard asks this)
+    void armPullDiagFeed(const QString& uri,
+                         bool authorityEdge = false); // open / re-READY /
+                                              // didSave / edit edges; the
+                                              // authority edge clears the
+                                              // refused bit (fresh claim)
+    void requestPullDiagsNow(const QString& uri); // the fire-time body
+    void stopPullFeeds(const QString& specName); // client-death: every fed
+                                                 // diagnostic set of this
+                                                 // spec's documents clears
+    // (the push route never cleared at close and C5 does not change that;
+                                                 // the fallback refusal
+                                                 // clears through the same
+                                                 // fed-bit gate)
     void fireHoverTrigger(const QString& uri); // caret wrapper: reads the
                                                // LATEST caret at fire time
     void fireHoverAt(const QString& uri,
@@ -577,6 +617,9 @@ private:
     // like every feed's; the fed bit protects a producer the hub never
     // installed (an app's hints, DAP's stop table).
     std::map<QString, std::unique_ptr<HintFeed>> hints_;
+    // uri -> pull-diagnostic-feed state (C5). Same std::map reason, same
+    // life: born with the registration, gone with it.
+    std::map<QString, std::unique_ptr<PullDiagFeed>> pulls_;
     int debounceMs_ = 400; // PLAN default; the hub's test seam
     int nextUntitled_ = 0; // uris the app never set get an "untitled:" key
     bool closingDown_ = false;

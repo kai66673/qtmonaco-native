@@ -384,7 +384,11 @@ void LspClient::registerPolicyHandlers(RpcClient* rpc)
 
 // The v1 registrable set = PLAN's registration sources + semanticTokens
 // (its wire+decoder half ships in M8, so its dynamic registration is
-// ACCEPTED-and-kept-as-data — painting stays tree-sitter's).
+// ACCEPTED-and-kept-as-data — painting stays tree-sitter's) + GATE 3 car C
+// (C5)'s textDocument/diagnostic (the spec's DiagnosticRegistrationOptions:
+// the diagnostic PULL is dynamically registrable, and the hub's pull feed
+// re-arms off registrationsChanged, so ACCEPTING it here is what makes the
+// dynamic half of the pull mode real).
 static bool isRegistrableMethod(const QString& method)
 {
     static const QSet<QString> kRegistrable{
@@ -392,6 +396,7 @@ static bool isRegistrableMethod(const QString& method)
         QStringLiteral("textDocument/hover"),
         QStringLiteral("textDocument/definition"),
         QStringLiteral("textDocument/references"),
+        QStringLiteral("textDocument/diagnostic"),
         QStringLiteral("textDocument/codeAction"),
         QStringLiteral("textDocument/formatting"),
         QStringLiteral("textDocument/rename"),
@@ -437,11 +442,16 @@ void LspClient::handleUnregisterCapability(RpcClient* rpc,
                                            const QJsonObject& request)
 {
     const QJsonValue id = request.value(QStringLiteral("id"));
-    const QJsonArray registrations =
-        request.value(QStringLiteral("params"))
-            .toObject()
-            .value(QStringLiteral("registrations"))
-            .toArray();
+    const QJsonArray registrations
+        = request.value(QStringLiteral("params"))
+              .toObject()
+              // THE SPEC'S KEY is "unregisterations" (client/unregister-
+              // Capability's own shape). Reading the WRONG key would
+              // silently unregister NOTHING (GATE 3 car C (C5)'s dynamic
+              // pull leg caught this: the hub re-armed the pull it was
+              // supposed to have lost).
+              .value(QStringLiteral("unregisterations"))
+              .toArray();
     // Count-per-method bookkeeping; an unknown method idempotently answers
     // null (removing what is not there is not a lie, it is a no-op).
     for (const QJsonValue& entry : registrations) {

@@ -284,8 +284,13 @@ Gate 2 closed; see PLAN.md for the car-by-car design record):
       covers both sides), original-side wrap (the read column wraps with
       the knob — clicks ride their fragment; the "triple-click is the
       way to take a long line" divergence NARROWS)
-- [ ] Car C — M8b: signatureHelp, LSP inlay hints, `foldingRange` over
-      the M13 fold API (ONE fold provider per editor), pull diagnostics
+- [x] Car C — M8b (CLOSED, 1.11.0): signatureHelp (the 7th feature door,
+      typed `(`/`,` triggers), LSP inlay hints (hub feed into the
+      already-bound M5 door, zero new view API), `foldingRange` over the
+      M13 fold API (ONE fold provider per editor — the C1
+      `setFoldRanges`/`clearFoldRanges` seam is the car's only surface
+      widening), pull diagnostics (declare-then-pull, one shared decoder
+      with the push route, refusal falls back to push)
 - [ ] Car D — multi-observer core: two editors on one `CodeDocument`
       (the core's single edit-observer becomes a list; document-scoped
       highlight + LSP sync, shared undo, per-editor carets)

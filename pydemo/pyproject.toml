@@ -16,4 +16,4 @@ dependencies = [
 # (./bindings/build_in_container.sh --wheel, AGENTS.md). dist/ is gitignored -
 # build the wheel first, then `uv run main.py`. The path bumps at each
 # release (no glob in uv sources; that also keeps uv.lock out of git).
-qmn-native = { path = "../dist/repaired/qmn_native-1.10.0-cp310-abi3-manylinux_2_34_x86_64.whl" }
+qmn-native = { path = "../dist/repaired/qmn_native-1.11.0-cp310-abi3-manylinux_2_34_x86_64.whl" }

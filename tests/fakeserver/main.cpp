@@ -99,6 +99,30 @@
 //            "hintmany=<N>" answers N synthetic hints (the client cap pin),
 //            "hintdelay=<N>" holds the answer for the close-over-in-flight
 //            cancel pin. An inlayHint ask without the flag is exit 2 too.
+//            Car C (C5) adds the PULL DIAGNOSTICS authority: `pull`
+//            advertises diagnosticProvider — after reading the CLIENT's
+//            textDocument.diagnostic claim back, INCLUDING its content (a
+//            relatedDocumentSupport:true claim is exit 2, the far-side pin
+//            that the hub's v1 declare says false) — and answers full
+//            reports (`kind:"full"` + resultId + items scanned from its own
+//            mirror around "err" tokens, plus decoder noise: an inverted
+//            range, a {999,x} out-of-doc range, a severity 9, a bare
+//            number). An ask with a previousResultId is exit 2 (the hub
+//            only pulls FULL) and an ask whose identifier is not "qmn" is
+//            exit 2; an ask reaching a provider-less server is exit 2 like
+//            the other OFF providers. "pulldynamic" skips the static
+//            provider and registers textDocument/diagnostic via
+//            client/registerCapability right after the handshake;
+//            "pullunchanged" answers kind "unchanged" from ask 2 on (the
+//            paint-stays pin); "pullpublish" rides a CONTRADICTING
+//            publishDiagnostics AROUND every answer (on the wire it lands
+//            BEFORE the report — the suppression must hold in either
+//            order);
+//            "pullfail=<N>" refuses past ask N (the fallback: the hub flips
+//            to push and stops asking); "pullid=<S>" sets the resultId.
+//            "test/pullState" echoes the answered-ask count and how many
+//            mirror lines the last full report marked — the flush-before-
+//            ask proof, far side.
 //
 // The exit code IS the oracle for the answers the client side cannot see
 // (the battery's wire shapes); tst_lsp asserts exitCode 0 where the mode's
@@ -216,6 +240,37 @@ int g_hintMany = 0;       // argv "hintmany=<N>": answer N synthetic hints —
 int g_hintDelayMs = 0;    // argv "hintdelay=<N>": hold the answer (the
                           // close-over-in-flight cancel pin)
 int g_hintAsks = 0;       // inlayHint asks this server has ANSWERED
+bool g_pullDiag = false;    // GATE 3 car C (C5): the PULL DIAGNOSTICS
+// authority flag ("pull", RIDES sync mode like every car-C flag: the pull
+// report decodes against the sync frame, so didChange tracking IS the
+// answer's input). Advertises diagnosticProvider — after reading the
+// client's textDocument.diagnostic claim back: absent, or a
+// relatedDocumentSupport claim, is exit 2 — and answers full reports
+// scanned from its own mirror ("err" tokens, kind "full" + a resultId).
+bool g_pullDyn = false;     // argv "pulldynamic" (rides pull): NO static
+// provider — instead a client/registerCapability(textDocument/diagnostic)
+// notification rides out right after the handshake, and the hub's
+// registry-driven re-arm answers the pull from there.
+bool g_pullUnchanged = false; // argv "pullunchanged" (rides pull): answer
+// kind "unchanged" from ask 2 on — the paint-stays pin (the hub writes the
+// door ZERO times on such an answer).
+bool g_pullPublish = false; // argv "pullpublish" (rides pull): a
+// CONTRADICTING textDocument/publishDiagnostics rides after every pull
+// answer — while the pull is live the hub must SUPPRESS it (no "bug" entry
+// ever paints), and once the pull falls through the push route resumes and
+// the very same publish paints (the fallback's legible trail).
+int g_pullFailAfter = -1;   // argv "pullfail=<N>": answer an ERROR (-32601)
+// from ask N+1 on — the FALLBACK pin: the hub flips this document back to
+// push, stops asking (the refused bit, no hammering), and clears ONLY a
+// pull-generation paint.
+int g_pullAsks = 0;         // textDocument/diagnostic asks ANSWERED
+int g_pullLastMarkerLines = -1; // how many mirror lines the LAST FULL
+// report marked, echoed by test/pullState — a mirror-derived report count
+// proves the flush-before-ask rule far-side (an ask that outran didChange
+// could not mark a token the server never saw).
+QString g_pullResultId = QStringLiteral("r1"); // argv "pullid=<S>": the
+// resultId the reports carry (stored by the hub, NEVER sent back — the
+// full-pull rule the featureDiagnostic guard pins far-side).
 int g_hintLastEndLine = -1; // the LAST ask's range end, echoed by test/
 int g_hintLastEndChar = -1; // hintState: the flush-before-ask proof lives in
                             // THESE numbers far-side (an end naming the
@@ -506,16 +561,20 @@ void runBattery()
         QJsonObject unreg;
         unreg.insert(QStringLiteral("id"), QStringLiteral("no-such-id"));
         unreg.insert(QStringLiteral("method"), QStringLiteral("textDocument/hover"));
-        QJsonArray registrations;
-        registrations.append(unreg);
+        QJsonArray unregisterations;
+        unregisterations.append(unreg);
+        // THE SPEC'S KEY is "unregisterations" — the frame once spelled
+        // "registrations", which matched the CLIENT'S bug of the same name
+        // (car C (C5)'s dynamic pull leg fixed the reader and this frame
+        // followed the spec, not the bug).
         steps.push_back(
             {QJsonObject{{QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
                          {QStringLiteral("id"), 9007},
                          {QStringLiteral("method"),
                           QStringLiteral("client/unregisterCapability")},
                          {QStringLiteral("params"),
-                          QJsonObject{{QStringLiteral("registrations"),
-                                       registrations}}}},
+                          QJsonObject{{QStringLiteral("unregisterations"),
+                                       unregisterations}}}},
              [](const QJsonObject& m) {
                  if (!m.contains(QStringLiteral("result"))
                      || !m.value(QStringLiteral("result")).isNull())
@@ -1663,6 +1722,155 @@ void featureInlayHint(const QJsonValue& id, const QJsonObject& params)
     }
 }
 
+// ------------------------------------------------------- the pull reports
+// GATE 3 car C (C5): the PULL oracle. Like the fold/hint oracles the report
+// is scanned from THIS server's own text mirror — the token is "err" (the
+// PUSH oracle's markers are bug/warn/note/hint, and the fixtures keep the
+// two token families DISJOINT: while the pull is live a "bug" token must
+// NEVER paint, and once the pull falls through the contradicting publish's
+// "bug" entry paints — the two authorities told apart by their paint alone).
+// Deliberate wire noise again: a report entry whose range is INVERTED (the
+// decoder swaps it the tolerant way), a generous end line far past the
+// document (clamps to the mirror's last line), an out-of-range severity 9
+// (reads Error), and an entry with NO severity (defaults to Error too) — so
+// the ONE shared decoder (push items vs pull items) is pinned by the same
+// exact-set compare the push slots already give their side.
+QJsonArray pullReportItems(const ModelDoc& d)
+{
+    const QStringList lines = d.text.split(QLatin1Char('\n'));
+    QJsonArray out;
+    int marked = 0;
+    for (int i = 0; i < lines.size(); ++i) {
+        const int at = lines.at(i).indexOf(QStringLiteral("err"));
+        if (at < 0)
+            continue;
+        ++marked;
+        out.append(QJsonObject{ // the honest one: severity 1, exact range
+            {QStringLiteral("range"),
+             QJsonObject{{QStringLiteral("start"),
+                          QJsonObject{{QStringLiteral("line"), i},
+                                      {QStringLiteral("character"), at}}},
+                         {QStringLiteral("end"),
+                          QJsonObject{{QStringLiteral("line"), i},
+                                      {QStringLiteral("character"),
+                                       at + 3}}}}},
+            {QStringLiteral("severity"), 1},
+            {QStringLiteral("message"),
+             QStringLiteral("pull line %1").arg(i)},
+            {QStringLiteral("source"), QStringLiteral("fakesrv-pull")}});
+    }
+    out.append(QJsonObject{ // the INVERTED range {1,10}..{1,2}: the pair
+                            // lands INSIDE kPullFixture's line 1, so the
+                            // decoder's same-line col swap reads it exactly
+                            // as {1,2}..{1,10} (a line-spanning inversion
+                            // would swap the LINES only — a messier pin the
+                            // push route's decoder shares, but the swap
+                            // this noise exercises is the col one)
+        {QStringLiteral("range"),
+         QJsonObject{{QStringLiteral("start"),
+                      QJsonObject{{QStringLiteral("line"), 1},
+                                  {QStringLiteral("character"), 10}}},
+                     {QStringLiteral("end"),
+                      QJsonObject{{QStringLiteral("line"), 1},
+                                  {QStringLiteral("character"), 2}}}}},
+        {QStringLiteral("severity"), 2},
+        {QStringLiteral("message"), QStringLiteral("swapped")},
+        {QStringLiteral("source"), QStringLiteral("fakesrv-pull")}});
+    out.append(QJsonObject{ // a GENEROUS end past the document: clamps to
+                            // the mirror's last line (the flush proof moves
+                            // the clamp with every edit)
+        {QStringLiteral("range"),
+         QJsonObject{{QStringLiteral("start"),
+                      QJsonObject{{QStringLiteral("line"), 999},
+                                  {QStringLiteral("character"), 4}}},
+                     {QStringLiteral("end"),
+                      QJsonObject{{QStringLiteral("line"), 999},
+                                  {QStringLiteral("character"), 9}}}}},
+        {QStringLiteral("message"), QStringLiteral("outdoc")},
+        {QStringLiteral("source"), QStringLiteral("fakesrv-pull")}});
+    out.append(QJsonObject{ // severity 9: out of range, reads Error
+        {QStringLiteral("range"),
+         QJsonObject{{QStringLiteral("start"),
+                      QJsonObject{{QStringLiteral("line"), 0},
+                                  {QStringLiteral("character"), 0}}},
+                     {QStringLiteral("end"),
+                      QJsonObject{{QStringLiteral("line"), 0},
+                                  {QStringLiteral("character"), 1}}}}},
+        {QStringLiteral("severity"), 9},
+        {QStringLiteral("message"), QStringLiteral("sev9")},
+        {QStringLiteral("source"), QStringLiteral("fakesrv-pull")}});
+    out.append(QJsonValue(42)); // a bare number in items: decodes to an
+                                // empty record (the door takes it verbatim
+                                // — the push route's shape of the same
+                                // tolerance, pinned on both sides)
+    g_pullLastMarkerLines = marked; // the test/pullState echo: an ask that
+                                    // outran didChange could not have seen
+                                    // this token count
+    return out;
+}
+
+void featureDiagnostic(const QJsonValue& id, const QJsonObject& params)
+{
+    const QString docUri = params.value(QStringLiteral("textDocument"))
+                               .toObject()
+                               .value(QStringLiteral("uri"))
+                               .toString(); // publishDiagsFor's key (the
+                                            // featureDoc guard below proves
+                                            // this server holds it open)
+    ModelDoc& d = featureDoc(params, QStringLiteral("textDocument/diagnostic"));
+    if (params.contains(QStringLiteral("previousResultId")))
+        fail(QStringLiteral("a textDocument/diagnostic ask carried a "
+                            "previousResultId: this hub only ever pulls "
+                            "FULL (the resultId is stored, never sent)"));
+    if (params.value(QStringLiteral("identifier")).toString()
+        != QStringLiteral("qmn"))
+        fail(QStringLiteral("the pull ask's identifier is not \"qmn\" — the "
+                            "hub's report series name got lost"));
+    ++g_pullAsks;
+    if (g_pullFailAfter >= 0 && g_pullAsks > g_pullFailAfter) {
+        answerErrorTo(id, -32601,
+                      QStringLiteral("diagnostic refused after being "
+                                     "advertised (pullfail)"));
+        if (g_pullPublish)
+            publishDiagsFor(docUri); // the push route's trail rides RIGHT
+                                     // behind the refusal: the hub's
+                                     // suppression guard must open and this
+                                     // publish must PAINT (the fallback, end
+                                     // to end)
+        return;
+    }
+    if (g_pullUnchanged && g_pullAsks >= 2) {
+        send(response(id, QJsonObject{
+            {QStringLiteral("kind"), QStringLiteral("unchanged")},
+            {QStringLiteral("resultId"), g_pullResultId}})); // spec: an
+                                                             // unchanged
+                                                             // report
+                                                             // carries no
+                                                             // items
+        return;
+    }
+    QJsonObject report{{QStringLiteral("kind"), QStringLiteral("full")},
+                       {QStringLiteral("resultId"), g_pullResultId},
+                       {QStringLiteral("items"), pullReportItems(d)}};
+    if (g_pullPublish)
+        publishDiagsFor(docUri); // the CONTRADICTION: the same server pushes
+                                 // while the pull is live — the hub must
+                                 // drop it (no "bug" entry ever paints in
+                                 // pull mode). The publish rides BEFORE the
+                                 // report on the wire: suppression must hold
+                                 // in either arrival order, and a hub that
+                                 // lets it through paints the "bug" entry
+                                 // visibly no matter how the report decoded.
+    send(response(id, report));
+}
+
+void handlePullState(const QJsonValue& id)
+{
+    send(response(id, QJsonObject{
+        {QStringLiteral("asks"), g_pullAsks},
+        {QStringLiteral("markerLines"), g_pullLastMarkerLines}}));
+}
+
 void featureResolveItem(const QJsonValue& id, const QJsonValue& paramsValue)
 {
     if (!g_advertisesResolve)
@@ -2178,6 +2386,37 @@ void checkServerRequestResponse(const QJsonObject& message)
         std::fflush(stderr);
         return;
     }
+    if (what == QLatin1String("pull-register")) {
+        // Car C (C5): the DYNAMIC registration ride. The client registry
+        // must ACCEPT textDocument/diagnostic (LspClient's registrable set)
+        // and answer the spec's null. This exchange rides the HANDSHAKE
+        // window (the request leaves on `initialized`), so no stderr MARKER
+        // here: a tst spy attached after waitReady may not see one. The
+        // fail()s below are the far-side tripwire — a rejecting client
+        // kills the server and the pull paint never comes.
+        if (isError)
+            fail(QStringLiteral("the client REJECTED the dynamic "
+                                "textDocument/diagnostic registration: "
+                                "registrable set broken"));
+        if (!result.isNull() && !result.isUndefined())
+            fail(QStringLiteral("the registerCapability answer is not the "
+                                "spec's null"));
+        return;
+    }
+    if (what.startsWith(QLatin1String("pull-unregister:"))) {
+        // Car C (C5): the un-registration's acknowledgment — the client
+        // answers null, the registry is empty, and the PUSH trail rides out
+        // RIGHT HERE: with the pull authority gone the hub's suppression
+        // guard must open and this very publish must paint (the fallback's
+        // dynamic-legible trail).
+        if (isError || (!result.isNull() && !result.isUndefined()))
+            fail(QStringLiteral("the unregisterCapability answer is not the "
+                                "spec's null"));
+        publishDiagsFor(what.mid(int(qstrlen("pull-unregister:"))));
+        std::fprintf(stderr, "PULLUNREG-OK\n");
+        std::fflush(stderr);
+        return;
+    }
 }
 
 // ------------------------------------------------------------- the server
@@ -2292,6 +2531,44 @@ void handleInitialize(const QJsonObject& request)
                                 "textDocument.inlayHint capability"));
         capabilities.insert(QStringLiteral("inlayHintProvider"), true);
     }
+    if (g_pullDiag && !g_pullDyn) {
+        // Car C (C5): the PULL DIAGNOSTICS authority. The client declared
+        // `diagnostic: {relatedDocumentSupport:false}` — the honest v1 shape
+        // (per-document pulls, no related-document interleaving). THIS read
+        // is also the tripwire for the claim's CONTENT: a client that said
+        // relatedDocumentSupport:true while never pulling related documents
+        // would be lying on the wire, so anything other than the false
+        // claim is exit 2 — the far-side pin that the hub's initialize
+        // really declares relatedDocumentSupport:false.
+        const QJsonObject diagClaim
+            = g_initializeParams
+                  .value(QStringLiteral("capabilities"))
+                  .toObject()
+                  .value(QStringLiteral("textDocument"))
+                  .toObject()
+                  .value(QStringLiteral("diagnostic"))
+                  .toObject();
+        if (!g_initializeParams
+                 .value(QStringLiteral("capabilities"))
+                 .toObject()
+                 .value(QStringLiteral("textDocument"))
+                 .toObject()
+                 .contains(QStringLiteral("diagnostic")))
+            fail(QStringLiteral("a diagnosticProvider was asked to pull "
+                                "while the client declared no "
+                                "textDocument.diagnostic capability"));
+        if (diagClaim.value(QStringLiteral("relatedDocumentSupport"))
+                .toBool(false))
+            fail(QStringLiteral("the client claimed "
+                                "relatedDocumentSupport:true but this hub's "
+                                "v1 pulls are per-document only — the "
+                                "declare must say false"));
+        capabilities.insert(QStringLiteral("diagnosticProvider"),
+                            QJsonObject{
+                                {QStringLiteral("workDoneProgress"), false},
+                                {QStringLiteral("interFileDependencies"),
+                                 false}});
+    }
     if (g_wswu) {
         // The M8 machine 6 declaration: TextDocumentSyncOptions shape — the
         // integer change form can NEVER carry willSaveWaitUntil, and the
@@ -2337,6 +2614,33 @@ void handleInitialized()
     if (g_mode == QLatin1String("requests")) {
         runBattery();
         return;
+    }
+    if (g_pullDyn) {
+        // Car C (C5): the DYNAMIC registration ride — the server advertises
+        // NOTHING at initialize and registers textDocument/diagnostic
+        // right after the handshake instead (a REGISTER Capability request,
+        // the spec's shape; LspClient's real registry answers it and fires
+        // registrationsChanged, and the hub's armPullDiagFeed relay does the
+        // rest). Rides the initialized notification, never before: the M8
+        // ordering pin says no traffic may beat `initialized`.
+        const QString reqId = QStringLiteral("s-pullreg");
+        send(QJsonObject{
+            {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+            {QStringLiteral("id"), reqId},
+            {QStringLiteral("method"),
+             QStringLiteral("client/registerCapability")},
+            {QStringLiteral("params"),
+             QJsonObject{{QStringLiteral("registrations"),
+                          QJsonArray{QJsonObject{
+                              {QStringLiteral("id"),
+                               QStringLiteral("pull-v1")},
+                              {QStringLiteral("method"),
+                               QStringLiteral("textDocument/diagnostic")},
+                              {QStringLiteral("registerOptions"),
+                               QJsonObject{{QStringLiteral(
+                                               "workDoneProgress"),
+                                            false}}}}}}}}});
+        g_outstanding.insert(reqId, QStringLiteral("pull-register"));
     }
     if (g_mode == QLatin1String("basic")) {
         notify(QStringLiteral("window/showMessage"),
@@ -2523,6 +2827,57 @@ void runLoop()
                             "never advertised inlayHintProvider: the hub's "
                             "hint feed ignored the capability gate"));
                     featureInlayHint(id, params.toObject());
+                } else if (method == QLatin1String(
+                               "textDocument/diagnostic")) {
+                    if (!g_pullDiag)
+                        fail(QStringLiteral(
+                            "textDocument/diagnostic reached a server that "
+                            "never took the pull (no `pull` flag, no dynamic "
+                            "registration): the hub's pull feed ignored the "
+                            "gate"));
+                    featureDiagnostic(id, params.toObject());
+                } else if (g_mode == QLatin1String("sync")
+                           && method == QLatin1String("test/pullState")) {
+                    handlePullState(id);
+                } else if (g_mode == QLatin1String("sync")
+                           && id.isUndefined()
+                           && method == QLatin1String("test/pullUnregister")) {
+                    // Car C (C5): the tst asks the server to DROP the dynamic
+                    // pull authority — a client/unregisterCapability REQUEST
+                    // rides back (the spec's shape, the client's registry
+                    // answers null and fires registrationsChanged), and the
+                    // null acknowledgment in checkServerRequestResponse is
+                    // where the push trail resumes. An unknown-id notify
+                    // reaching this branch IS the point: the hub re-modes the
+                    // document the moment the registry empties.
+                    if (!g_pullDyn)
+                        fail(QStringLiteral("test/pullUnregister reached a "
+                                            "server with no dynamic pull "
+                                            "registration to drop"));
+                    const QString uri = params.toObject()
+                                            .value(QStringLiteral("uri"))
+                                            .toString();
+                    if (!g_docs.contains(uri))
+                        fail(QStringLiteral("test/pullUnregister names a "
+                                            "document this server does not "
+                                            "hold open: \"%1\"").arg(uri));
+                    const QString reqId = QStringLiteral("s-pullunreg");
+                    send(QJsonObject{
+                        {QStringLiteral("jsonrpc"), QStringLiteral("2.0")},
+                        {QStringLiteral("id"), reqId},
+                        {QStringLiteral("method"),
+                         QStringLiteral("client/unregisterCapability")},
+                        {QStringLiteral("params"),
+                         QJsonObject{{QStringLiteral("unregisterations"),
+                                      QJsonArray{QJsonObject{
+                                          {QStringLiteral("id"),
+                                           QStringLiteral("pull-v1")},
+                                          {QStringLiteral("method"),
+                                           QStringLiteral(
+                                               "textDocument/diagnostic")}}}}}}});
+                    g_outstanding.insert(reqId,
+                                         QStringLiteral("pull-unregister:")
+                                             + uri);
                 } else if (g_mode == QLatin1String("sync")
                            && method == QLatin1String("test/signatureState")) {
                     handleSignatureState(id);
@@ -2603,6 +2958,12 @@ int main(int argc, char** argv)
                  && !enc.startsWith(QLatin1String("hintfail="))
                  && !enc.startsWith(QLatin1String("hintmany="))
                  && !enc.startsWith(QLatin1String("hintdelay="))
+                 && enc != QLatin1String("pull")
+                 && enc != QLatin1String("pulldynamic")
+                 && enc != QLatin1String("pullunchanged")
+                 && enc != QLatin1String("pullpublish")
+                 && !enc.startsWith(QLatin1String("pullfail="))
+                 && !enc.startsWith(QLatin1String("pullid="))
                  && !enc.startsWith(QLatin1String("completiondelay="))
                  && !enc.startsWith(QLatin1String("sigdelay=")))
             fail(QStringLiteral("sync mode: bad encoding \"%1\"").arg(enc));
@@ -2720,6 +3081,37 @@ int main(int argc, char** argv)
                              .arg(args.at(i)));
                 g_hintDelayMs = ms; // holds the inlayHint answer so a test
                                     // can close over an ask still in flight
+            } else if (args.at(i) == QLatin1String("pull")) {
+                g_pullDiag = true; // the static pull authority: see the
+                                   // g_pullDiag declaration above
+            } else if (args.at(i) == QLatin1String("pulldynamic")) {
+                g_pullDiag = g_pullDyn = true; // rides pull: the provider is
+                                               // DYNAMIC — no capability, a
+                                               // registerCapability notify
+                                               // after the handshake instead
+            } else if (args.at(i) == QLatin1String("pullunchanged")) {
+                g_pullDiag = g_pullUnchanged = true; // rides pull: kind
+                                                     // "unchanged" past ask 1
+            } else if (args.at(i) == QLatin1String("pullpublish")) {
+                g_pullDiag = g_pullPublish = true; // rides pull: the
+                                                   // contradicting push trail
+            } else if (args.at(i).startsWith(QLatin1String("pullfail="))) {
+                bool ok = false;
+                const int after
+                    = args.at(i).mid(int(qstrlen("pullfail="))).toInt(&ok);
+                if (!ok || after < 0)
+                    fail(QStringLiteral("pullfail wants a non-negative number, "
+                                        "got \"%1\"")
+                             .arg(args.at(i)));
+                g_pullDiag = true;
+                g_pullFailAfter = after; // asks 1..N answer reports, the rest
+                                         // REFUSE: the hub must fall back to
+                                         // push and stop asking
+            } else if (args.at(i).startsWith(QLatin1String("pullid="))) {
+                g_pullDiag = true;
+                g_pullResultId
+                    = args.at(i).mid(int(qstrlen("pullid="))); // the
+                                            // report's resultId string
             }
             else if (args.at(i).startsWith(QLatin1String("completiondelay="))) {
                 bool ok = false;

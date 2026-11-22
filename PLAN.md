@@ -2749,7 +2749,8 @@ NULL as a whole-set authority, the cap's wire window, and the
 capability control (ZERO inlayHint bytes, the app's table stands from
 open to close).
 
-C5 PULL DIAGNOSTICS (the registry claim made real). Capability
+C5 PULL DIAGNOSTICS (the registry claim made real) — ✔ CLOSED green
+2026-11-22. Capability
 declare `textDocument.diagnostic {relatedDocumentSupport:false}` —
 clangd FLIPS to pull exactly because we declared it (the push route
 stays armed for servers that never took the pull). PULL MODE live per
@@ -2778,6 +2779,43 @@ mode — static advertise + a DYNAMIC register variant + reports with
 `kind`/`resultId` + a contradicting publish to pin the suppression.
 lsp +3 slots.
 
+C5 CLOSED — ✔ green 2026-11-22 (five slots — the spec said +3, the
+two extra are the unchanged-answer leg and the no-provider control —
+three repeat rounds clean, the lsp binary 95/95, the full ctest 7/7).
+The readings the code settled: (i) the `fed` bit marks ONLY the hub's
+PULL generation — push-published marks stay the server's own trail and
+a close never wipes them (the pre-C5 M8 stance, untouched); a fallback
+or teardown clear wipes a paint ONLY when a pull generation wrote it;
+(ii) the local-refusal band is `reply.code <= RpcClient::kErrTimeout`
+(-33100 is its most positive member — a -32601 refusal and a transport
+death both flip the document back to push, only an open/re-READY edge
+re-arms the pull: the no-hammering rule, pins hold); (iii) `kRegistrable`
+grew `textDocument/diagnostic` (the spec's DiagnosticRegistrationOptions)
+— the lsp layer is C++-only, zero binding surgery; (iv) THE SPEC'S
+unregister key is `unregisterations`, and `LspClient` had been reading
+`registrations` — a silent unregister-NOTHING the C5 dynamic leg caught
+(red test first, the honest order), and the fakeserver's OWN battery
+frame had been written to match that bug — both now speak the spec, and
+the 9007 battery leg proves the reader from the other side; (v) the
+registerCapability exchange rides the HANDSHAKE window (the request
+leaves on `initialized`), so its proof is the client registry itself +
+the fakeserver's fail()s — stderr markers there race a late-attached
+spy. Five slots: the exact decoded report over a no-trailing-newline
+fixture (the ONE shared decoder chewing wire noise — an INVERTED
+same-line pair swapped, severity-9 clamped into the enum, an out-of-doc
+`{999,x}` pair riding the DOCUMENT-END walk, a bare-number item) + the
+flush-before-ask proof TWICE (the edited mirror shows in the next
+decode, and `test/pullState` echoes the server's own scan seeing the
+edited marker count), the `"unchanged"` promise (paint byte-identical,
+ZERO door writes, no fed-bit turn), the dynamic REMODE both ways
+(register arms the pull — the sole paintable source; the tst-fired
+unregister lands the hub back on push and the very "bug" publish the
+pull mode suppressed paints, with ZERO further asks), the refusal
+fallback (push publishes paint again, exactly ONE ask ever, the fed
+door reads false), and the control (no provider: zero asks from any
+trigger, published marks survive a close exactly as they did before
+C5).
+
 Close audit (Car C pinned expectations): `--codegen` rejected log =
 the G3 16-drop baseline + `requestSignatureHelp` (std::function, the
 pinned class) + private-section noise ONLY — the setFoldRanges/
@@ -2787,6 +2825,36 @@ headless run per the four-literal ritual (1.11.0); a live clangd
 probe (`tools/probe_lsp.sh`-style, manual) earns foldingRange +
 inlayHint + pull diagnostics in ONE run against clangd — it is the
 showcase's dress rehearsal (S1).
+
+Car C CLOSED 2026-11-22 at 1.11.0 — every pinned expectation held. The
+`--codegen` audit came back EXACTLY the pinned set: qmn-specific drops =
+the G3 16-drop baseline + `requestSignatureHelp` (its `FeatureHandler`
+is the pinned std::function class) + private-section/Qt-operator noise,
+no surprise doors; the fold pair is BOUND — `FoldRange` grew its own
+wrapper TU (`qmn_view_codeeditor_foldrange_wrapper.cpp`) and the wheel's
+extension strings carry `setFoldRanges`/`clearFoldRanges`/
+`setInlayHints`/`diagnosticsFedFromServer` (and `requestSignatureHelp`
+as the name-only absence). The wheel half ran per the four-literal
+ritual: container `--wheel` rebuilt and repaired to 1.11.0, smoke
+(signals, one Qt6Core + one Qt6Network) and qtmonaco parity green,
+pydemo's path-dep re-pointed, headless pydemo exits 0. The live probe
+grew four legs and ran PROBE-OK (11 steps) twice over against clangd
+23.1.5: signatureHelp answered at the typed-comma position, foldingRange
+put the editor in SERVER mode with two clangd folds over the grammar's
+silenced `@fold`s, the inlayHint feed landed the `firstArg` param-name
+hint through the untouched M5 door — and PULL DIAGNOSTICS OBSERVED THE
+OTHER BRANCH: clangd 23.1.5 claims NO `diagnosticProvider` (static nor
+registered), so the live server keeps the pre-C5 push stance (fed bit
+false, zero asks); the pull machinery itself stays the fakeserver's
+ctest turf. Two probe-side traps found and recorded in the step texts:
+the explicit feature doors need an app-side `syncer->flush()` (the M8
+frame rule, live-proved), and a cpp document's unterminated half-typed
+line swallows the NEXT declaration into parser error recovery — hover
+name-recovers, signatureHelp cannot (the block moved before the broken
+line). `tools/probe_clangd.sh` dropped its `-no-pie` (binutils 2.47
+rejects it against Qt's PROTECTED data symbols; Arch GCC builds PIE by
+default anyway) and grew the `libqmn_dap.a` link (D3's PUBLIC shelf
+dep). Car D (multi-observer core) is the open car next.
 
 ### Car D — multi-observer core (two editors on one CodeDocument)
 
