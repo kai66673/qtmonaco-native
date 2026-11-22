@@ -2335,6 +2335,157 @@ and the M10 close record). The pure engine grows in `src/diff/`
 stays out of v1 by the recorded divergence. The `open_diffs` shim and
 the parity script already pin the semantics this car must not break.
 
+**Machine design (written at car start 2026-11-22, the M8/D-car pattern):**
+
+- **B1 — the word-diff engine (`src/diff/WordDiff.hpp/.cpp`, QtCore-only).**
+  A line PAIR goes in, per-side UTF-16 code-unit span lists come out
+  (deleted-token spans in ORIGINAL coordinates, inserted-token spans in
+  MODIFIED coordinates), plus `changedTokens` (the token edit distance,
+  the test oracle) and `budgetExhausted`. Token grammar: maximal
+  `[letter/digit/_]` runs, maximal whitespace runs, every other
+  CODE POINT its own token (surrogate pairs ride atomically — the view's
+  boundary discipline, not the core's, so the diff layer keeps spans
+  never-splitting-pairs). Miller trim on the token sequences, then the
+  SAME Myers D-loop as the line engine: the kernel moves out of
+  LineDiff.cpp's anonymous namespace into an INTERNAL shared seam
+  (`diff/MyersCore.hpp`, never a public door, never installed —
+  the LineDiff tripwire suite pins the extraction before/after).
+  Spans group per change BLOCK (a block has no Equal tokens by
+  construction, so each side's span is exactly first-token-start..
+  last-token-end), then one ABSORB pass merges spans on one side whose
+  gap is whitespace-only (a word move reads as one wash, not three —
+  presentation only, `changedTokens` stays the honest token count).
+  Budget: per-pair auto cap 256 edits (the (D+1)² trace guard, ~1 MiB
+  transient per pair); exhaustion = whole-line spans both sides, VALID
+  just coarse — the line engine's fallback discipline verbatim.
+- **B2 — the inline wash (view paint, NO new public door).** After every
+  `recomputeDiff`, each REPLACE-hunk row pair (rowKind 0, both cells
+  live) gets a `WordDiff::compute`; the spans live in `DiffState`,
+  invalidated with the engine frame (a fold re-key keeps them). Two NEW
+  additive Theme Roles (`DiffAddedWord`, `DiffDeletedWord` — the
+  decoration-role additive widening is the M5/M10 precedent, Shiboken
+  re-runs on the already-bound Theme class). The modified column paints
+  the inserted wash INSIDE the row's band, the original column the
+  deleted wash; pure insert/delete rows keep the v1 band-only look (the
+  band already covers the whole row there — inline detail would paint
+  the same pixels twice). Latency guard: the inline pass is capped
+  (pairs + elapsed budget, exhaustion = rows stay bare-band, coarse but
+  valid — the engine budget story at the view scale). Pixel tripwires
+  ride the established `grab()` + color-predicate discipline.
+  **B2 BUILD NOTE (landed green 2026-11-22):** the design's "wash INSIDE
+  the row's band" was imprecise and the paint settled the truth — the v1
+  MODIFIED band rect rides the NUMBER CELL only (`[stripRight,
+  contentLeft)`); the text zone of a replace row carries NO band (its
+  only v1 change story is the gutter mark). So the inserted-word wash
+  IS the text zone's whole inline story (VS Code-style), painted by
+  `runDiffInlinePass` (sync tail of `recomputeDiff`, pair order = row
+  order, caps 400 pairs + 150 ms — the cap break leaves the LOWER rows
+  bare, the visible top wins first) and painted in `drawDiffChromeUnder`
+  right after the band/ground fills: modified side via `xForCol` clamped
+  into the modified window, original side via `origXAdvance` clamped
+  into the read window. Layering (deliberate asymmetry, v1's): the
+  modified selection quads run UNDER the chrome pass, so a spanned word
+  covers the selection exactly like the band covers it on its cell; the
+  original wash rides the opaque Base ground UNDER the orig selection
+  wash, so the read side stays selectable-readable. Engine-exhausted
+  and empty-span pairs get NO cache entry (whole-line fallback spans
+  would repaint the row's own ground — bare reads better at view size).
+  Tripwire mechanics pinned here for reuse: the default-theme glyph
+  inks are near-gray, so every AA blend pixel off a ground KEEPS the
+  ground's channel deltas — forced probe inks are chosen OFF that delta
+  line (the v1 test palette (4,5,6)/(16,17,18) family sits ON the Base
+  ground's delta-2 line and would collide with low-coverage glyph AA
+  pixels in whole-frame COUNT scans; point probes dodge it, counts must
+  not). And the caret row's current-line fallback wash composites to an
+  exact documented pixel (`#1F2021`, pinned by `diffChromePaintPixels`)
+  — ground asserts never ride the caret row.
+- **B3 — original-side wrap + the wrap×diff budget math (the deepest
+  surgery).** Soft wrap becomes LIVE inside diff mode on BOTH columns.
+  The row axis goes from weight-1 rows to WEIGHTED rows: weight(r) =
+  max(slots of the ORIGINAL line at the window width, slots of the
+  MODIFIED line at the h-window width), blank cells contribute 1, and a
+  fold-hidden MODIFIED line still zeroes the whole row (the decided
+  honest-v1 twin rule survives). Unmeasured lines keep the M25
+  provisional-1 discipline — the totals stay total and monotone, the
+  frontier walker measures rows on the ONE shared axis, one
+  `kWrapBudgetMs` per pass covers both sides' measurements. The
+  ORIGINAL document gets its OWN wrap-plan cache in `DiffState`
+  (a different width than the editor's own `wrap_` tables; it
+  full-resyncs on original-doc edits — the debounce already recomputes
+  the frame anyway, honest v1). `rowPrefix`/`slotToRow`/`diffRowForSlot`
+  go weighted (a weighted row emits its row number once PER SLOT —
+  materialized inverse, same O(slots) memory as the wrap world);
+  paint/hit/hover/drag on BOTH columns resolve (slot − rowPrefix[row])
+  as the fragment index; the ORIGINAL hit chain drops the NoWrap
+  `OrigLayout` + window-col-clamp for the wrap plan (the recorded
+  "triple-click is the way to take a long line" divergence NARROWS —
+  README/AGENTS wording follows at close). Caret anchoring across a
+  recompute already speaks screen-ROWS via `rowPrefix` — weights just
+  make it true. No new public view door anywhere in the car.
+  **B3 BUILD NOTE (landed green 2026-11-22):** the design held, and the
+  surgery settled these facts on the way in — record them once:
+  (1) `weight(row) = foldHidden(mod) ? 0 : (wrap OFF ? 1 :
+  max(1, modSlots, origSlots))`, every unmeasured line provisional-1 —
+  the axis stays honest-monomotone exactly like M25's world. The engine's
+  fits test is ABSOLUTE (`xAt(col) ≤ rowOrigin + width`): a continuation
+  row gets the FULL window from its own origin (the test-side simulation
+  first got this wrong dimension-wise — the engine's measured totals were
+  right and pinned it).
+  (2) `wrapSlotCount` must NEVER branch on diff (the generic walkers and
+  retune read line-space); the paint-side doors read `lineSlotCount`
+  (diff-aware via modLineToRow → rowWeightOfRow; 0 for hidden/unmapped).
+  (3) An over-tail slot (the ORIGINAL line wraps deeper than the row's
+  MODIFIED cell) is an INVALID RowPlan (`line = -1`): "no mod ink here";
+  a click there degrades to col 0 of the nearest mapped modified line,
+  never to phantom cols, and the caret paints zero there.
+  (4) The original plans validate per-plan only — the epoch/widthKey/
+  textLen trio, no table-wide stamps; an external originalDoc edit
+  inherits v1's stale-alignment edge honestly (the read side is a canvas,
+  not an editing surface — its watcher keys on the READ-WINDOW px: a
+  width change wipes `origWrap` and re-keys the axis from inside
+  `prepareDiffWrapWindow`'s head).
+  (5) `prepareDiffWrapWindow` = eager both sides of the visible rows +
+  two frontier walkers under ONE `kWrapBudgetMs` deadline + one
+  weighted `rebuildDiffRowAxis`; `setSoftWrapEnabled` re-arms both
+  row-cursors and re-keys the axis on BOTH toggle paths.
+  (6) The chrome paints FRAGMENT-CUT: both washes cut at the break
+  (the uncut `xForCol`/`origXAdvance` anchor would bleed the word wash
+  onto sibling slots — tripwire-pinned), the orig selection cut keeps
+  the phantom-newline cell on the LAST fragment only (forVisiblePieces'
+  rule mirrored read-side), glyph clip closes at the fragment end, the
+  layout anchor shifts by −fragOff, the row NUMBER rides slot 0 only,
+  and the selection's hairline frame spans the whole ROW (top at
+  slot == rowPrefix[row], bottom at slot == rowPrefix[row+1] − 1 — no
+  interior stripe ever cuts a wrapped line).
+  (7) `diffOriginalHit`: a MEASURED fragment resolves through
+  `origColAtX(xLocal + origXAdvance(fStart))` clamped into
+  [fStart, fEnd] — the band right of a fragment's last glyph clamps to
+  the FRAGMENT end, not the model line's end; unmeasured rows and the
+  over-tail keep v1's window-clamp verbatim.
+  The five tripwires (`diffWrapKnobInsideDiffWeightsTheRowAxis`,
+  `diffWrapOriginalFragmentClicksSelectTheirFragments`,
+  `diffWrapModifiedFragmentClicksAndOverTailSlots`,
+  `diffWrapInlineWashCutAtTheFragmentBreak`,
+  `diffWrapOrigSelectionFrameSpansTheRowNotTheSlot`) build their
+  EXPECTED cuts by simulating the engine's break discipline
+  (`lineFragCut` in the test file) — never by reading the engine's own
+  tables back; every wrap-OFF twin above stayed green byte-for-byte.
+
+**CAR B CLOSED 2026-11-22 at 1.10.0.** All three machines green:
+tst_diff 25 slots, three B2 + five B3 codeeditor tripwires, full ctest
+7/7. The frozen surface stayed honored — the ONLY public addition in the
+whole car is the pair of additive Theme Roles (they cross the wheel as
+plain enum values of the already-bound Theme class; the three-copies
+were untouched and the `--codegen` rejected-log audit at the close held
+the G3 baseline EXACTLY: the 16 glue drops by their pinned reasons,
+every other entry pre-existing noise, no new drop). The wheel half of
+the ritual ran whole: `qmn_native-1.10.0` rebuilt + auditwheel-repaired,
+smoke + qtmonaco parity green against the repaired wheel, pydemo's
+path-dep bumped and its headless run exits 0. The README M10 snapshot
+line stays verbatim (dated records are snapshots); the divergence
+narrowing is recorded here, in the README Gate 3 checklist and in the
+CHANGELOG. Car C (M8b) is the open car next.
+
 ### Car C — M8b (LSP follow-on)
 
 signatureHelp, LSP inlay hints (the M5 `setInlayHints` door finally

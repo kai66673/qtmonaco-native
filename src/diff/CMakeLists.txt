@@ -2,7 +2,10 @@
 # diff + alignment table, headless like core (tested by tst_diff).
 add_library(qmn_diff STATIC
     LineDiff.hpp
-    LineDiff.cpp)
+    LineDiff.cpp
+    MyersCore.hpp
+    WordDiff.hpp
+    WordDiff.cpp)
 
 target_include_directories(qmn_diff PUBLIC
     $<BUILD_INTERFACE:${CMAKE_CURRENT_SOURCE_DIR}/..>

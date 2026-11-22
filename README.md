@@ -278,8 +278,12 @@ Gate 2 closed; see PLAN.md for the car-by-car design record):
       cliff on one-piece docs (fixed in the CORE: lazy per-piece
       newline-offset lists + window re-cuts at splits, bench tripwire
       601 ms → indexed)
-- [ ] Car B — M10b: word-level inline diff highlight, wrap×diff budget
-      math, original-side wrap
+- [x] Car B — M10b (CLOSED, 1.10.0): word-level inline diff highlight
+      (`WordDiff` + the shared Myers seam + two new Theme roles),
+      wrap×diff budget math (the row axis goes WEIGHTED, one budget
+      covers both sides), original-side wrap (the read column wraps with
+      the knob — clicks ride their fragment; the "triple-click is the
+      way to take a long line" divergence NARROWS)
 - [ ] Car C — M8b: signatureHelp, LSP inlay hints, `foldingRange` over
       the M13 fold API (ONE fold provider per editor), pull diagnostics
 - [ ] Car D — multi-observer core: two editors on one `CodeDocument`

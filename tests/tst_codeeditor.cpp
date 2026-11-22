@@ -422,6 +422,17 @@ private slots:
     void diffOriginalCopyCutClipboardRouting();
     void diffChromePaintPixels();
     void diffOriginalChromeSyntaxHighlight();
+    void diffInlineWordWashPixels();
+    void diffInlineWashSkipsPureInsertDeleteRows();
+    void diffInlinePassCapsLeaveLowerRowsBareBand();
+    // B3 (car B): the wrap knob is LIVE inside diff mode — the weighted
+    // row axis, both sides' fragment clicks, the fragment-cut inline wash
+    // and the row-spanning selection frame.
+    void diffWrapKnobInsideDiffWeightsTheRowAxis();
+    void diffWrapOriginalFragmentClicksSelectTheirFragments();
+    void diffWrapModifiedFragmentClicksAndOverTailSlots();
+    void diffWrapInlineWashCutAtTheFragmentBreak();
+    void diffWrapOrigSelectionFrameSpansTheRowNotTheSlot();
     void standaloneCodeDocumentSignalsFire();
 
     // M8 machine 7 (the qtmonaco parity wrap on the view).
@@ -10872,6 +10883,92 @@ static QColor imgPixel(CodeEditor* e, int x, int y)
     return img.pixelColor(x, y);
 }
 
+// car B machine B2 (the inline word wash): exact-color scans. The probes
+// force theme inks FAR from every glyph/ground blend envelope (anti-
+// aliased text can only produce convex combinations of glyph ink and
+// the ground under it, never a third exact color), so an exact hit can
+// only be the wash ground itself — and an exact MISS (count == 0) is a
+// real negative, not a sampling fluke.
+static int countInk(const QImage& img, const QColor& ink, int x0, int y0,
+                    int x1, int y1)
+{
+    const QRgb rgb = ink.rgb();
+    int n = 0;
+    for (int y = std::max(0, y0); y < std::min(img.height(), y1); ++y)
+        for (int x = std::max(0, x0); x < std::min(img.width(), x1); ++x)
+            if (img.pixel(x, y) == rgb)
+                ++n;
+    return n;
+}
+
+static int countInk(const QImage& img, const QColor& ink)
+{
+    return countInk(img, ink, 0, 0, img.width(), img.height());
+}
+
+// B3 (car B): the expected wrap cut for an EXPECTED value, built by
+// SIMULATING the engine's measurement walk (M25's pinning discipline —
+// never read back the engine's own tables). Exact for the test docs:
+// monospace (every advance is cellWidth_), break chars ' ', no tabs,
+// every token fitting one row. The engine's rules re-derivable from
+// measureWrap: a chunk keeps its row when its right edge fits (<= the
+// window from the row origin; a strict overflow breaks); a ws run never
+// starts a continuation row (the jump skips the whole run); an oversized
+// first chunk on a fresh row re-enters and overflows (never triggered
+// here); a ws run at the line end never opens a trailing empty row.
+struct FragCut {
+    QVector<int> starts; // continuation-row starts (the WrapInfo shape)
+    int slotCount() const { return int(starts.size()) + 1; }
+    int startOf(int f) const { return f == 0 ? 0 : starts[f - 1]; }
+    int endOf(int f, int len) const
+    {
+        return f < int(starts.size()) ? starts[f] : len;
+    }
+    int fragOf(int col) const
+    {
+        int f = 0;
+        while (f < int(starts.size()) && col >= starts[f])
+            ++f;
+        return f;
+    }
+};
+static FragCut lineFragCut(CodeEditor* e, const QString& line, int width)
+{
+    FragCut fc;
+    const double cw = e->cellWidth();
+    const int n = line.size();
+    int rowStart = 0;
+    double ox = 0.0; // xAt(rowStart): the row origin's line-space x
+    int col = 0;
+    while (col < n) {
+        const int chunkStart = col;
+        const bool ws = line.at(col) == QLatin1Char(' ');
+        do
+            ++col;
+        while (col < n && (line.at(col) == QLatin1Char(' ')) == ws);
+        // The engine skips the fits test for the FIRST chunk of a row
+        // (its chunkStart sits at the row origin: ws never pays, an
+        // oversized token re-enters and overflows). A LAST chunk is not
+        // exempt: a trailing token that overflows still starts its own
+        // row (only a trailing WS run dangles, killed by newStart == n).
+        // The test is ABSOLUTE (the engine compares xAt(col) against the
+        // row origin plus the window): a continuation row gets the full
+        // window from its own origin.
+        const bool stays = (chunkStart == rowStart)
+                           || (double(col) * cw <= ox + double(width));
+        if (stays)
+            continue;
+        const int newStart = ws ? col : chunkStart; // ws-sticky rows
+        if (newStart > rowStart && newStart < n) {
+            fc.starts.push_back(newStart);
+            rowStart = newStart;
+            ox = newStart * cw;
+            col = newStart; // the token chunk re-enters the fresh row
+        }
+    }
+    return fc;
+}
+
 // M10 machine 3 (the two-column chrome): geometry identity, click routing,
 // the ORIGINAL gesture, the copy path and the paint frames. chrome == 0
 // outside diff mode is the v1 byte-identity tripwire; inside diff mode the
@@ -11314,6 +11411,494 @@ void TestCodeEditor::diffOriginalChromeSyntaxHighlight()
 
     th->clearTokenColor(CodeEditor::TokenKind::Keyword);
     th->clearTokenColor(CodeEditor::TokenKind::String);
+}
+
+// car B machine B2 (PLAN §GATE 3 / car B): the inline word wash. The
+// probe inks are forced off the AA blend envelope (see countInk): the
+// default-theme glyph inks are near-gray, so every anti-aliased blend
+// pixel keeps the ground's channel deltas — the wash inks carry huge
+// deltas and can only appear as EXACT opaque fills. The token geometry
+// is golden: "alpha " is the equal token prefix, "beta" [6,10) is the
+// deleted span, "gamma" [6,11) the inserted one.
+void TestCodeEditor::diffInlineWordWashPixels()
+{
+    using Theme = qmn::view::CodeEditorTheme;
+    Theme* th = editor->theme();
+    const QColor base(1, 2, 3);
+    const QColor addedWord(250, 12, 7);
+    const QColor deletedWord(9, 250, 21);
+    th->setColor(Theme::Role::Base, base);
+    th->setColor(Theme::Role::DiffAddedWord, addedWord);
+    th->setColor(Theme::Role::DiffDeletedWord, deletedWord);
+
+    editor->setDiffDocuments(QStringLiteral("alpha beta\nkeep"),
+                             QStringLiteral("alpha gamma\nkeep"), QString());
+    editor->grab();
+    const QImage img = editor->grab().toImage();
+    const M3Frame f = m3frame(editor);
+    const int lh = editor->lineHeight();
+    const int yR0 = editor->padding();
+    const double cw = editor->cellWidth();
+    const int textL = editor->contentLeft();
+
+    // MODIFIED column (the text zone; the v1 band rides the NUMBER cell
+    // only — the word wash is the text zone's whole inline story): the
+    // wash exists INSIDE the inserted word's cell window and never in
+    // the equal prefix's window on the same row (the prefix window also
+    // covers the inter-word space cell, col 5: exact-color negatives read
+    // the ground there without naming it — the caret row's current-line
+    // blend ground would make a positive ground assert mechanism-dependent).
+    QVERIFY2(countInk(img, addedWord, textL + int(6 * cw), yR0,
+                      textL + int(11 * cw) + 1, yR0 + lh) > 0,
+             "no inserted-word wash on the modified row");
+    QCOMPARE(countInk(img, addedWord, textL, yR0, textL + int(6 * cw), yR0 + lh), 0);
+    // The equal row below carries NO wash anywhere across the frame (the
+    // pass skips equal pairs; the row is not even kind 0).
+    QCOMPARE(countInk(img, addedWord, 0, yR0 + lh, img.width(), yR0 + 2 * lh), 0);
+
+    // ORIGINAL column (the chrome ground is OPAQUE Base — v1-pinned — so
+    // the space cell right by the span can be probed exactly): the
+    // deleted wash inside "beta", the equal prefix window clean, the
+    // space cell at col 5 exactly Base.
+    QVERIFY2(countInk(img, deletedWord, f.textL + int(6 * cw), yR0,
+                      f.textL + int(10 * cw) + 1, yR0 + lh) > 0,
+             "no deleted-word wash on the original row");
+    QCOMPARE(countInk(img, deletedWord, f.textL, yR0, f.textL + int(6 * cw), yR0 + lh), 0);
+    QCOMPARE(imgPixel(editor, f.textL + int(5 * cw + cw / 2.0), yR0 + lh / 2), base);
+    QCOMPARE(countInk(img, deletedWord, 0, yR0 + lh, img.width(), yR0 + 2 * lh), 0);
+
+    // The whole wash story is diff-mode ink: clearing the session drops
+    // it even though the role overrides stay set (a stray row-kind gate
+    // outside diff mode would keep painting exact wash pixels here).
+    editor->clearDiffDocuments();
+    const QImage cleared = editor->grab().toImage();
+    QCOMPARE(countInk(cleared, addedWord), 0);
+    QCOMPARE(countInk(cleared, deletedWord), 0);
+}
+
+void TestCodeEditor::diffInlineWashSkipsPureInsertDeleteRows()
+{
+    using Theme = qmn::view::CodeEditorTheme;
+    Theme* th = editor->theme();
+    th->setColor(Theme::Role::Base, QColor(1, 2, 3));
+    th->setColor(Theme::Role::DiffAddedBand, QColor(16, 17, 18));
+    th->setColor(Theme::Role::DiffAddedWord, QColor(250, 12, 7));
+    th->setColor(Theme::Role::DiffDeletedWord, QColor(9, 250, 21));
+    th->setColor(Theme::Role::DiffDeletedMarker, QColor(13, 14, 15));
+    th->setColor(Theme::Role::DiffConnectorFill, QColor(7, 8, 9));
+
+    // The unambiguous delete+insert shape (the equal line "keep me" is
+    // the ONLY common line — a replace reading would cost strictly more
+    // edits, and the edit-count-minimal frame is what LineDiff's oracle
+    // tests pin): rows delete/equal/insert, no PAIR to inline anywhere.
+    // The v1 band/hatch/connector chrome must stay fully painted (the
+    // scene is live) while both wash inks stay absent.
+    editor->setDiffDocuments(QStringLiteral("solo one\nkeep me"),
+                             QStringLiteral("keep me\nadded two"), QString());
+    const QImage img = editor->grab().toImage();
+    QVERIFY(countInk(img, QColor(16, 17, 18)) > 0); // the insert row's band
+    QVERIFY(countInk(img, QColor(13, 14, 15)) > 0); // the delete hatch
+    QVERIFY(countInk(img, QColor(7, 8, 9)) > 0);    // the hunk's connector wedges
+    QCOMPARE(countInk(img, QColor(250, 12, 7)), 0);
+    QCOMPARE(countInk(img, QColor(9, 250, 21)), 0);
+}
+
+void TestCodeEditor::diffInlinePassCapsLeaveLowerRowsBareBand()
+{
+    using Theme = qmn::view::CodeEditorTheme;
+    Theme* th = editor->theme();
+    const QColor modBand(4, 5, 23); // b-r delta 19: off every gray-glyph AA
+    const QColor addedWord(250, 12, 7); // blend line off the Base ground (delta 2)
+    th->setColor(Theme::Role::DiffModifiedBand, modBand);
+    th->setColor(Theme::Role::DiffAddedWord, addedWord);
+
+    // 600 replace pairs (the line engine's auto budget 2048 stays clear
+    // at 1200 line edits), more than the view's inline pass cap (400,
+    // CodeEditor's private constants). Pair order IS row order, so the
+    // cap leaves the LOWER rows uncached: the top of the document washes,
+    // the bottom stays plain-inked rows over the full v1 band chrome —
+    // coarse but valid, never a half-washed row.
+    QString orig, mod;
+    for (int i = 0; i < 600; ++i) {
+        if (i) { orig += QLatin1Char('\n'); mod += QLatin1Char('\n'); }
+        orig += QStringLiteral("t%1 one").arg(i);
+        mod += QStringLiteral("t%1 two").arg(i);
+    }
+    editor->setDiffDocuments(orig, mod, QString());
+    editor->grab();
+    const QImage top = editor->grab().toImage();
+    const int lh = editor->lineHeight();
+    const int yR0 = editor->padding();
+    const double cw = editor->cellWidth();
+    const int textL = editor->contentLeft();
+    // Row 0 (inside the cap): "t0" rides cols 0..1, the space col 2, the
+    // changed word "one"/"two" cols 3..5 — the wash is exactly there.
+    QVERIFY2(countInk(top, addedWord, textL + int(3 * cw), yR0,
+                      textL + int(6 * cw) + 1, yR0 + lh) > 0,
+             "the first replace rows did not get the inline wash");
+
+    // Jump to the document end: every VISIBLE row is past the cap — the
+    // wash inks vanish WHOLE (the rows stay banded + marked: the band
+    // chrome is unconditional per kind, existence-scanned across the
+    // number cells so digit glyphs and row clipping cannot bite).
+    QTest::keyClick(editor, Qt::Key_End, Qt::ControlModifier);
+    const QImage bottom = editor->grab().toImage();
+    QCOMPARE(countInk(bottom, addedWord), 0);
+    const M3Frame f = m3frame(editor);
+    QVERIFY(countInk(bottom, modBand, f.stripR, 0, editor->contentLeft(),
+                     bottom.height()) > 0);
+}
+
+// B3 (car B): the wrap knob is LIVE inside diff mode. The row axis is
+// weighted (max of the two sides' fragment counts), both sides' clicks
+// ride their own fragments, the inline wash cuts at the fragment break,
+// and the original-selection hairline spans the whole ROW. Every pin
+// below keeps its wrap-OFF twin: the same v1 tripwires above stay green
+// byte-for-byte.
+
+void TestCodeEditor::diffWrapKnobInsideDiffWeightsTheRowAxis()
+{
+    // The knob flips the axis from alignment rows (weight 1) to WEIGHTED
+    // runs; the total stays HONEST — unmeasured rows are provisional-1
+    // (M25's discipline) and the paint's eager window coverage grows it
+    // monotonically to the measured truth. Wrap OFF restores the v1 axis
+    // exactly (the plans free, the weighted keys vanish).
+    const QString long9 = wordLine(9);
+    const QString short3 = wordLine(3);
+    const QString mod = QStringLiteral("keep0\n") + long9 + QStringLiteral("\nkeep2");
+    const QString orig = QStringLiteral("keep0\n") + short3 + QStringLiteral("\nkeep2");
+    editor->setDiffDocuments(orig, mod, QString());
+    const int modW = editor->horizontalViewportWidth(); // the MOD window:
+                                                        // stable under the
+                                                        // knob (chrome is
+                                                        // there either way)
+    const int origW = editor->diffChromeTextCol();      // the READ window
+    QVERIFY(modW > 0 && origW > 0);
+    const FragCut mc = lineFragCut(editor, long9, modW);
+    const FragCut oc = lineFragCut(editor, short3, origW);
+    const int w = std::max(mc.slotCount(), oc.slotCount());
+    // (The wrap table TRAILS the diff table while the mode is live: the
+    // walkers are row-keyed, so the tail lines' plans arrive with the
+    // paint. Only the MIDDLE line's weight is pinned here — the keep
+    // rows are measured eagerly with their short 1-slot plans.)
+    QVERIFY2(mc.slotCount() >= 2, "the 9-word line does not wrap in the mod window");
+    QCOMPARE(editor->visibleLineTotal(), 3); // the weight-1 alignment axis
+
+    editor->options()->setSoftWrapEnabled(true);
+    QCOMPARE(editor->visibleLineTotal(), 3); // provisional-1: nothing measured
+    editor->grab(); // prepareDiffWrapWindow: eager coverage of the window
+    const int tail = 2 + w; // the fully-measured expectation
+    QVERIFY2(editor->visibleLineTotal() >= std::min(2, w) + 1 + 1
+                 && editor->visibleLineTotal() <= tail,
+             "the weighted total grew outside the honest provisional band");
+    QCOMPARE(editor->visibleIndexOfModelLine(0), 0);
+    QCOMPARE(editor->visibleIndexOfModelLine(1), 1);
+    if (editor->visibleLineTotal() == tail) // the tail lines' plans have
+        QCOMPARE(editor->visibleIndexOfModelLine(2), 1 + w); // arrived (or
+    QCOMPARE(editor->modelLineForVisibleIndex(0), 0);
+    QCOMPARE(editor->modelLineForVisibleIndex(w), 1); // last slot of the run
+    QCOMPARE(editor->modelLineForVisibleIndex(1 + w), 2);
+
+    // The mirror image: now the ORIGINAL side wraps deeper (the weight
+    // is a max over BOTH sides, not a mod-only rule).
+    editor->setDiffDocuments(mod, orig, QString());
+    const FragCut mc2 = lineFragCut(editor, short3, modW);
+    const FragCut oc2 = lineFragCut(editor, long9, origW);
+    const int w2 = std::max(mc2.slotCount(), oc2.slotCount());
+    QVERIFY2(oc2.slotCount() >= 2, "the 9-word line does not wrap in the read window");
+    QCOMPARE(editor->visibleLineTotal(), 3); // the plans died with the rows:
+    editor->grab(); // provisional-1 again, then the measured weighted run
+    QCOMPARE(editor->visibleLineTotal(), 2 + w2);
+    QCOMPARE(editor->modelLineForVisibleIndex(w2), 1);
+    QCOMPARE(editor->visibleIndexOfModelLine(2), 1 + w2);
+
+    editor->options()->setSoftWrapEnabled(false);
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    QCOMPARE(editor->visibleIndexOfModelLine(2), 2);
+    editor->grab();
+    QCOMPARE(editor->visibleLineTotal(), 3); // the axis re-keyed back, paint
+                                             // stable
+}
+
+void TestCodeEditor::diffWrapOriginalFragmentClicksSelectTheirFragments()
+{
+    // The read column wraps WITH the knob: the slot index INSIDE the
+    // weighted row is the original line's fragment number; each click
+    // rides that fragment's own origin, and the band right of a row's
+    // last glyph clamps to the FRAGMENT end (the M25 rule mirrored onto
+    // the read side), never to the model line's end rows below.
+    const QString origLine = wordLine(24); // 119 units: the read window
+                                           // (257px ~ 30.6 cells) puts it
+                                           // on 4 fragments
+    const QString orig = QStringLiteral("keep0\n") + origLine + QStringLiteral("\nkeep2");
+    const QString mod = QStringLiteral("keep0\n") + wordLine(3) + QStringLiteral("\nkeep2");
+    editor->setDiffDocuments(orig, mod, QString());
+    const FragCut oc = lineFragCut(editor, origLine, editor->diffChromeTextCol());
+    QVERIFY2(oc.slotCount() >= 3, "the read window must put the 12-word line on 3+ rows");
+    QVERIFY2(lineFragCut(editor, wordLine(3), editor->horizontalViewportWidth()).slotCount()
+                 == 1,
+             "the mod short line must stay one fragment (over-tail row)");
+    editor->options()->setSoftWrapEnabled(true);
+    editor->grab(); // measure both sides, key the weighted axis
+    const int w = oc.slotCount();
+    QCOMPARE(editor->visibleLineTotal(), 2 + w);
+
+    const M3Frame f = m3frame(editor);
+    const double cw = editor->cellWidth();
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    // A point at ORIGINAL col `col` on the row slot `slot` (row 1 starts
+    // at slot 1): the x rides the FRAGMENT's window (col - fragment
+    // start), the half-cell + nudge centering of origTextPoint.
+    const auto fragPoint = [&](int slot, int col) {
+        const int frg = slot - 1;
+        const double rel = double(col) - double(oc.startOf(frg));
+        return QPoint(f.textL + int(rel * cw + cw / 2.0 + 0.4),
+                      pad + slot * lh + lh / 2);
+    };
+    // (1) a drag INSIDE fragment 1 (the run's second slot): cols resolve
+    // through the fragment's [startOf(1), endOf(1)) window.
+    origDrag(editor, fragPoint(2, oc.startOf(1) + 1),
+             fragPoint(2, oc.startOf(1) + 4));
+    QCOMPARE(editor->originalSelectionText(), origLine.mid(oc.startOf(1) + 1, 3));
+    // (2) the band right of fragment 1's LAST glyph clamps to the
+    // fragment's END — the line's own end lives two rows deeper.
+    origDrag(editor, fragPoint(2, oc.startOf(1) + 1),
+             QPoint(f.textR - 4, pad + 2 * lh + lh / 2));
+    QCOMPARE(editor->originalSelectionText(),
+             origLine.mid(oc.startOf(1) + 1,
+                          oc.endOf(1, origLine.size()) - oc.startOf(1) - 1));
+    // (3) the DEEPEST fragment (last slot of the run): its own origin.
+    const int last = w - 1;
+    origDrag(editor, fragPoint(1 + last, oc.startOf(last) + 1),
+             fragPoint(1 + last, oc.startOf(last) + 3));
+    QCOMPARE(editor->originalSelectionText(),
+             origLine.mid(oc.startOf(last) + 1, 2));
+}
+
+void TestCodeEditor::diffWrapModifiedFragmentClicksAndOverTailSlots()
+{
+    // The same over-tail row read from the WRITE side: a slot WITHOUT a
+    // modified fragment (the original line wraps deeper) carries no mod
+    // ink; a click there degrades to col 0 of the row's modified line
+    // (the map's nearest-below answer), never to phantom cols; the caret
+    // stays on the REAL row — its 2px bar paints zero pixels on every
+    // over-tail slot.
+    const QString modLine = wordLine(3);
+    const int len = modLine.size();
+    const QString orig = QStringLiteral("keep0\n") + wordLine(24) + QStringLiteral("\nkeep2");
+    const QString mod = QStringLiteral("keep0\n") + modLine + QStringLiteral("\nkeep2");
+    editor->setDiffDocuments(orig, mod, QString());
+    const int modW = editor->horizontalViewportWidth();
+    QVERIFY(int(modW / editor->cellWidth()) >= 16); // the caret sanity fits
+    const FragCut mc = lineFragCut(editor, modLine, modW);
+    const FragCut oc = lineFragCut(editor, wordLine(24), editor->diffChromeTextCol());
+    QVERIFY(mc.slotCount() == 1 && oc.slotCount() >= 2);
+    editor->options()->setSoftWrapEnabled(true);
+    editor->grab();
+    const int w = oc.slotCount();
+    QCOMPARE(editor->visibleLineTotal(), 2 + w);
+
+    const int textL = editor->contentLeft();
+    const double cw = editor->cellWidth();
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const auto posEq = [&](qmn::view::TextPosition p, int l, int c) {
+        QVERIFY2(p.line == l && p.col == c,
+                 qPrintable(QStringLiteral("caret at %1:%2, expected %3:%4")
+                                .arg(p.line).arg(p.col).arg(l).arg(c)));
+    };
+    const auto textPoint = [&](int slot, int col) {
+        return QPoint(textL + int(col * cw + cw / 2.0 + 0.4),
+                      pad + slot * lh + lh / 2);
+    };
+    // (1) the real fragment (the row's first slot): the mod plan's own
+    // window at that slot.
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, textPoint(1, 1));
+    posEq(editor->position(), 1, 1);
+    // (2) the band right of the single fragment's last glyph: clamped to
+    // the line end (the row-local M25 clamp; the mod line IS one row).
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, textPoint(1, 60));
+    posEq(editor->position(), 1, len);
+    // (3) the DEEPEST over-tail slot (original-only ink there): no mod
+    // fragment -> col 0 of the mapped modified line.
+    QTest::mousePress(editor, Qt::LeftButton, Qt::NoModifier, textPoint(w, 5));
+    posEq(editor->position(), 1, 0);
+
+    // (4) caret presence: parked at the line end (held by the ONLY real
+    // fragment's segEnd), the caret bar is present on slot 1 and paints
+    // ZERO Cursor pixels on each over-tail slot band.
+    using Theme = qmn::view::CodeEditorTheme;
+    const QColor caretInk(240, 240, 10);
+    editor->theme()->setColor(Theme::Role::Cursor, caretInk);
+    editor->setPosition({1, len});
+    const QImage img = editor->grab().toImage();
+    QVERIFY2(countInk(img, caretInk, textL + int(13 * cw), pad + lh + 2,
+                      textL + int(15 * cw) + 3, pad + 2 * lh - 2) > 0,
+             "the caret bar did not paint on the mod fragment's row");
+    for (int s = 2; s <= w; ++s)
+        QCOMPARE(countInk(img, caretInk, textL, pad + s * lh + 2,
+                          textL + modW, pad + (s + 1) * lh - 2), 0);
+}
+
+void TestCodeEditor::diffWrapInlineWashCutAtTheFragmentBreak()
+{
+    // The inline word wash (B2) cuts at the row's fragment break: the
+    // wash appears ONLY on the slot whose fragment owns the changed
+    // word's cols, and NEVER bleeds onto the row's other fragment slots
+    // (the B2 uncut xForCol/origXAdvance anchor would paint it there —
+    // these negatives are the tripwire for that leak). Both sides: the
+    // added wash in the MOD window, the deleted wash in the chrome.
+    using Theme = qmn::view::CodeEditorTheme;
+    Theme* th = editor->theme();
+    const QColor addedWord(250, 12, 7);
+    const QColor deletedWord(9, 250, 21);
+    th->setColor(Theme::Role::DiffAddedWord, addedWord);
+    th->setColor(Theme::Role::DiffDeletedWord, deletedWord);
+
+    const QString oLine = wordLine(8); // "abcd abcd ..." (8 words, 39)
+    // The cut depends on the WIDTHS, the test words on the cut, the
+    // widths only exist inside diff mode: open the chrome first with a
+    // placeholder pair (content never changes the windows), derive the
+    // break, then set the real documents.
+    editor->setDiffDocuments(oLine, oLine, QString());
+    const FragCut mc =
+        lineFragCut(editor, oLine, editor->horizontalViewportWidth());
+    QVERIFY2(mc.slotCount() >= 2, "the 8-word line must wrap in the mod window");
+    const int b = mc.starts.back() / 5; // first WORD of the mod's last
+                                        // fragment (breaks land on word
+                                        // starts: multiples of 5)
+    const int a = b - 1;                // the word right before the break
+    QVERIFY(a >= 0);
+    QString mA = oLine, mB = oLine;
+    mA.replace(5 * a, 4, QStringLiteral("bbbb")); // changed word ends at
+                                                  // the break, INSIDE frag f
+    mB.replace(5 * b, 4, QStringLiteral("bbbb")); // and starts the next
+    editor->setDiffDocuments(QStringLiteral("%1\n%2").arg(oLine, oLine),
+                             QStringLiteral("%1\n%2").arg(mA, mB), QString());
+    const FragCut oc =
+        lineFragCut(editor, oLine, editor->diffChromeTextCol()); // both orig
+                                                                 // rows: oLine
+    editor->options()->setSoftWrapEnabled(true);
+    editor->grab(); // sync inline pass + eager measures BEFORE the first ink
+    const int w = std::max(mc.slotCount(), oc.slotCount());
+    QCOMPARE(editor->visibleLineTotal(), 2 * w); // two weighted replace rows
+
+    const M3Frame f = m3frame(editor);
+    const int textL = editor->contentLeft();
+    const int winW = editor->horizontalViewportWidth();
+    const double cw = editor->cellWidth();
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const QImage img = editor->grab().toImage();
+    const auto yOf = [&](int slot) { return pad + slot * lh; };
+    const auto holder = [&](const FragCut& c, int col) {
+        const int s = c.startOf(c.fragOf(col));
+        return qMakePair(c.fragOf(col), int(std::round((col - s) * cw)));
+    };
+    // Row 0 (pair A): the changed word [5a, 5a+4) lives wholly in one
+    // fragment on EACH side (breaks never split a word here).
+    const auto [fMa, xa] = holder(mc, 5 * a);
+    const auto [fOa, xo] = holder(oc, 5 * a);
+    QVERIFY2(countInk(img, addedWord, textL + xa + 2, yOf(fMa) + 2,
+                      textL + xa + int(4 * cw) - 2, yOf(fMa) + lh - 2) > 0,
+             "the changed word before the break lost its wash (mod side)");
+    QVERIFY2(countInk(img, deletedWord, f.textL + xo + 2, yOf(fOa) + 2,
+                      f.textL + xo + int(4 * cw) - 2,
+                      yOf(fOa) + lh - 2) > 0,
+             "the changed word before the break lost its wash (orig side)");
+    for (int fr = 0; fr < w; ++fr) {
+        if (fr != fMa)
+            QCOMPARE(countInk(img, addedWord, textL, yOf(fr) + 2, textL + winW,
+                              yOf(fr) + lh - 2), 0); // no leak on the OTHER
+        if (fr != fOa)                               // fragments of row 0
+            QCOMPARE(countInk(img, deletedWord, f.textL + 2, yOf(fr) + 2,
+                              f.stripL - 1, yOf(fr) + lh - 2), 0);
+    }
+    // Row 1 (pair B): the changed word [5b, 5b+4) opens the mod's LAST
+    // fragment (rel 0) — its slots ride rowPrefix[1] = w onward.
+    const auto [fMb, xb] = holder(mc, 5 * b);
+    const auto [fOb, xq] = holder(oc, 5 * b);
+    QVERIFY2(countInk(img, addedWord, textL + xb + 2, yOf(w + fMb) + 2,
+                      textL + xb + int(4 * cw) - 2,
+                      yOf(w + fMb) + lh - 2) > 0,
+             "the changed word after the break lost its wash (mod side)");
+    QVERIFY2(countInk(img, deletedWord, f.textL + xq + 2, yOf(w + fOb) + 2,
+                      f.textL + xq + int(4 * cw) - 2,
+                      yOf(w + fOb) + lh - 2) > 0,
+             "the changed word after the break lost its wash (orig side)");
+    for (int fr = 0; fr < w; ++fr) {
+        if (fr != fMb)
+            QCOMPARE(countInk(img, addedWord, textL, yOf(w + fr) + 2,
+                              textL + winW, yOf(w + fr) + lh - 2), 0);
+        if (fr != fOb)
+            QCOMPARE(countInk(img, deletedWord, f.textL + 2, yOf(w + fr) + 2,
+                              f.stripL - 1, yOf(w + fr) + lh - 2), 0);
+    }
+}
+
+void TestCodeEditor::diffWrapOrigSelectionFrameSpansTheRowNotTheSlot()
+{
+    // The original-selection's hairline frame (DiffChangeGutterMark)
+    // rides the ROW: one top line on the run's FIRST slot, one bottom
+    // line on its LAST, and NO interior hairline cutting a wrapped line
+    // (wrap OFF keeps the v1 per-row frame byte-for-byte — the M10
+    // gesture tests above pin it).
+    using Theme = qmn::view::CodeEditorTheme;
+    const QColor mark(250, 250, 7);
+    editor->theme()->setColor(Theme::Role::DiffChangeGutterMark, mark);
+
+    QString xLine; // all-x-height: no ascender/descender can touch the
+    for (int i = 0; i < 24; ++i) { // frame lines being counted (the read
+        if (i)                     // window puts this on 4 fragments)
+            xLine += QLatin1Char(' ');
+        xLine += QStringLiteral("aaaa");
+    }
+    const QString orig = QStringLiteral("keep0\n") + xLine + QStringLiteral("\nkeep2");
+    const QString mod = QStringLiteral("keep0\n") + QStringLiteral("aaaa aaaa aaaa")
+                        + QStringLiteral("\nkeep2");
+    editor->setDiffDocuments(orig, mod, QString());
+    const FragCut oc = lineFragCut(editor, xLine, editor->diffChromeTextCol());
+    QVERIFY2(oc.slotCount() >= 3, "the read window must put the x-line on 3+ rows");
+    QVERIFY2(lineFragCut(editor, QStringLiteral("aaaa aaaa aaaa"),
+                         editor->horizontalViewportWidth())
+                 .slotCount() == 1,
+             "the mod line must stay one fragment");
+    editor->options()->setSoftWrapEnabled(true);
+    editor->grab();
+    const int w = oc.slotCount();
+    QCOMPARE(editor->visibleLineTotal(), 2 + w);
+
+    // A drag INSIDE the first fragment: the selection lives on row 1,
+    // so the frame spans its whole weighted run.
+    const M3Frame f = m3frame(editor);
+    const double cw = editor->cellWidth();
+    const int lh = editor->lineHeight();
+    const int pad = editor->padding();
+    const auto fragPoint = [&](int slot, int rel) {
+        return QPoint(f.textL + int(rel * cw + cw / 2.0 + 0.4),
+                      pad + slot * lh + lh / 2);
+    };
+    origDrag(editor, fragPoint(1, 1), fragPoint(1, 3));
+    QCOMPARE(editor->originalSelectionText(), xLine.mid(1, 2));
+    const QImage img = editor->grab().toImage();
+    // The frame scan lives in the read window's TEXT zone only (the
+    // kind-0 2px bar sits at the strip's right edge, OUTSIDE stripL, and
+    // the frame's own span reaches only to stripRight - 1).
+    const int scan0 = f.textL, scan1 = f.stripL;
+    QVERIFY2(countInk(img, mark, scan0, pad + lh, scan1, pad + lh + 1) > 0,
+             "the wrapped row lost its top hairline");
+    QVERIFY2(countInk(img, mark, scan0, pad + (w + 1) * lh - 1,
+                      scan1, pad + (w + 1) * lh) > 0,
+             "the wrapped row lost its bottom hairline");
+    for (int t = 2; t <= w; ++t) // the interior slot joints: 2px band
+        QCOMPARE(countInk(img, mark, scan0, pad + t * lh - 1,
+                          scan1, pad + t * lh + 1),
+                 0); // no bottom line for slot t-1 AND no top line for
+                    // slot t (the frame spans the whole row instead)
+    QCOMPARE(countInk(img, mark, scan0, pad + (w + 1) * lh, scan1,
+                      pad + (w + 1) * lh + 1),
+             0); // the keep2 row below: unselected, bare
 }
 
 void TestCodeEditor::standaloneCodeDocumentSignalsFire()

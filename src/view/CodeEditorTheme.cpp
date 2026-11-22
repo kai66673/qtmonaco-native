@@ -73,6 +73,12 @@ const struct {
     {Role::DiffDeletedMarker, QColor(0x4C, 0x8E, 0xDB)},  // #4C8EDB
     {Role::DiffConnectorFill, QColor(0x34, 0x58, 0x84)},  // #345884
     {Role::DiffChangeGutterMark, QColor(0xD2, 0x9E, 0x36)}, // #D29E36
+    // M10b inline word washes: brighter/more saturated than the replace
+    // band under them (the VS Code inline story: the word reads against
+    // its row); the deleted wash rides the steel-blue delete family of
+    // this theme (marker/connector), deeper than its marker sibling.
+    {Role::DiffAddedWord, QColor(0x8F, 0xB9, 0x23)},     // #8FB923 olive-bright
+    {Role::DiffDeletedWord, QColor(0x2E, 0x5A, 0x80)},   // #2E5A80 steel-deep
 };
 // warm/red state-ink family darkens for legibility on white grounds.
 const struct {
@@ -113,6 +119,12 @@ const struct {
     {Role::DiffDeletedMarker, QColor(0x93, 0xC8, 0xFF)},  // #93C8FF
     {Role::DiffConnectorFill, QColor(0xB0, 0xC4, 0xDE)},  // light steel
     {Role::DiffChangeGutterMark, QColor(0xD2, 0x9E, 0x36)}, // shared warm mark
+    // M10b inline word washes (VS Code Light+ inline story): a saturated
+    // green word over the replace band, a saturated red word on the
+    // white read ground (the red is the universal deleted-content ink;
+    // the LIGHT delete CHROME stays the steel-blue family).
+    {Role::DiffAddedWord, QColor(0x8F, 0xD8, 0x8F)},     // #8FD88F green
+    {Role::DiffDeletedWord, QColor(0xF0, 0xA8, 0xA8)},   // #F0A8A8 red
 };
 
 // Byte-for-byte the table HighlightEngine::colorFor ships (see the
@@ -233,6 +245,9 @@ QColor CodeEditorTheme::ink(Role role) const
     case Role::DiffDeletedMarker: return QColor(110, 150, 200);
     case Role::DiffConnectorFill: return QColor(110, 125, 145);
     case Role::DiffChangeGutterMark: return QColor(210, 160, 60);
+    // M10b inline word washes: the brighter-word kin of the two bands.
+    case Role::DiffAddedWord: return QColor(120, 180, 70);
+    case Role::DiffDeletedWord: return QColor(100, 140, 190);
     }
     return QColor(); // unreachable: the enum is closed
 }

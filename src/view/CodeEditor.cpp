@@ -3,6 +3,8 @@
 #include "diff/LineDiff.hpp" // M10 engine (QtCore-only layer; PRIVATE link —
                               // the include stays INSIDE this .cpp: no diff
                               // type crosses the public view header)
+#include "diff/WordDiff.hpp" // car B machine B2: the inline word engine
+                             // (same layer, same PRIVATE link, same rule)
 #include "view/CodeDocument.hpp"
 #include "view/CodeEditorAccessible.hpp"
 #include "view/CodeEditorOptions.hpp"
@@ -60,16 +62,22 @@ namespace qmn::view {
 // place the engine types are even named (PLAN §M10: no diff type crosses
 // the public view header, which is what keeps the doors Shiboken-wrappable).
 // The row axis is the M25 wrap map's prefix-sum algebra RE-KEYED BY ROW:
-// aligned rows are the slot space; weight(row) = 0 when the row's MODIFIED
-// line sits in a collapsed fold's hidden range (the original-side twin on
-// that same row disappears with it — honest v1), else 1 (soft wrap is inert
-// while diff mode is live: diff > wrap > fold/plain, exactly ONE live row
-// space at a time, so the wrap/fold tables stay current underneath and the
-// diff-off world restores byte-for-byte on clear).
+// aligned rows are the slot space; weight(row) (B3, car B) = 0 when the
+// row's MODIFIED line sits in a collapsed fold's hidden range (the
+// original-side twin on that same row disappears with it — honest v1),
+// else max(the MODIFIED line's wrap slots at the h-window width, the
+// ORIGINAL line's wrap slots at the read-window width, 1) — the wrap knob
+// is LIVE inside diff mode, each column wrapping at its own width, blank
+// cells contributing 0 to the max. Wrap OFF every weight is exactly 1:
+// the M10 weight-1 axis, byte-for-byte (diff > fold/plain still restore
+// on clear with the wrap/fold tables kept current underneath).
 struct CodeEditor::DiffState {
     qmn::diff::LineDiff::Result result; // engine frame: hunks + aligned rows
     QVector<int> rowPrefix;   // rowPrefix[r] = slots in rows [0,r); back() = total
-    QVector<int> slotToRow;   // materialized inverse (only weight-1 rows emit)
+    QVector<int> slotToRow;   // materialized inverse (a weight-w row emits w
+                              // entries: the slot -> (row, fragment) map the
+                              // paint/hit side resolves fragment = slot -
+                              // rowPrefix[row] from)
     QVector<int> modLineToRow;// MODIFIED line -> aligned row, -1 hidden/unknown
     QVector<qint8> rowKind;   // machine 3, one code per row (built with the
                               // prefix tables): -1 unchanged, 0 replace,
@@ -78,6 +86,37 @@ struct CodeEditor::DiffState {
     int slotTotal = 0;
     CodeDocument* originalDoc = nullptr; // NON-OWNING (pointer door) or the
                                          // editor-owned standalone child
+    // B2 inline wash (PLAN §GATE 3 / car B): row -> the word spans of a
+    // REPLACE row pair (rowKind 0, both cells live, lines differ, the
+    // word engine stayed under its per-pair auto budget). Rebuilt whole
+    // by recomputeDiff (the engine frame swap invalidates it with the
+    // rows); a fold re-key keeps it — row IDs ride the alignment, which
+    // stands. Rows absent from the map paint BARE bands: the exhausted
+    // pairs and the pairs past the view-side latency caps (B1's coarse-
+    // but-valid fallback discipline at view scale).
+    struct InlineSpans {
+        QVector<qmn::diff::WordDiff::Span> mod;  // inserted spans (MODIFIED coords)
+        QVector<qmn::diff::WordDiff::Span> orig; // deleted spans (ORIGINAL coords)
+    };
+    QHash<int, InlineSpans> inlineSpans;
+    // B3 (car B): the ORIGINAL doc's own wrap cache — the same WrapInfo
+    // shape, but the widthKey is the READ window's width (the chrome
+    // column wraps at its own width, not the editor's h window). Keyed by
+    // ORIGINAL line number, same per-plan validity trio (epoch/widthKey/
+    // textLen). A caller editing the external originalDoc is the v1 stale-
+    // alignment edge already (the view never re-diffs on orig edits, so the
+    // rows themselves address the shifted content); the plans simply
+    // inherit it, validated line by line by their textLen — no table-wide
+    // stamp machinery (the recon decision: per-plan checks are exactly as
+    // honest as the frame they ride).
+    QHash<int, WrapInfo> origWrap;
+    int origWrapCursor_ = 0; // the walker frontier, in ROW space (reset by
+                             // every full recompute: the axis rows moved,
+                             // the line-keyed plans survive)
+    int modWrapCursor_ = 0;  // the MODIFIED-side frontier, same ROW space:
+                             // its plans ride the editor's own wrap_ table
+    int appliedOrigWidth_ = -1; // the read-window width the orig plans were
+                                // keyed to (the prepareDiffWrapWindow watcher)
     // M10 machine 3: the ORIGINAL column's selection (the copy gesture —
     // positions are ORIGINAL-document coordinates, always normalized
     // origSelA_ <= origSelB_; empty == no live selection). origSelActive_
@@ -738,13 +777,17 @@ TextPosition CodeEditor::positionAt(const QPoint& widgetPos) const
     // model line, formula bit-for-bit the old one).
     const int row = (widgetPos.y() - padding_ + vScroll_) / lineHeight_;
     pos.line = modelLineForVisibleIndex(row); // clamps to the visible range
-    if (softWrapEnabled_ && !diff_) {
+    if (softWrapEnabled_) {
         // M25 machine 2: the click lands on a ROW — y picked the slot, the
         // slot's RowPlan owns the col window this x maps into, and the row's
         // own segment origin is the x anchor (hScroll_ is 0 with wrap ON, so
         // the widget x IS the line-space x plus the contentLeft offset).
         // Clicks in the band past a row's last glyph clamp to that row's
         // end (VS Code), never to the model line's end two rows down.
+        // B3 (car B): diff-aware rowPlan — under diff mode the door answers
+        // the MODIFIED fragment of the weighted row; an over-tail/blank slot
+        // (no modified fragment) clamps col 0 onto the row the slot maps to
+        // via the defensive branch below (the nearest-below line, v1's).
         const RowPlan rp = rowPlan(row);
         if (rp.line < 0) {
             pos.col = 0; // hidden/invalid (defensive: the map owns the slots)
@@ -1796,10 +1839,11 @@ void CodeEditor::revealAt(TextPosition pos, RevealMode mode)
 {
     const TextPosition p = clampPos(pos);
     revealLine(p.line); // M13: a folded-away line is unfolded before reveal
-    if (softWrapEnabled_ && !diff_)
+    if (softWrapEnabled_)
         ensureWrapLinesCovered(p.line, p.line); // M25: exact caret row, same
-                                                // eager rule as ensureCaretVisible;
-                                                // M10: inert while diff is live
+                                                // eager rule as ensureCaretVisible
+                                                // (under diff B3 it re-weights
+                                                // the axis inside, see there)
     const int top = slotOfPosition(p) * lineHeight_; // M25: the POSITION's row
     const int bot = top + lineHeight_;               // (wrap OFF: the line's
                                                      // slot, v1 form)
@@ -1868,11 +1912,13 @@ void CodeEditor::ensureCaretVisible()
     // pre-M13 formula exactly).
     if (visibleIndexOfModelLine(caret_.line) < 0)
         revealLine(caret_.line);
-    if (softWrapEnabled_ && !diff_)
+    if (softWrapEnabled_)
         // M25: the caret's row drives the scroll target, so its line is
         // measured EAGERLY - a provisional count would scroll to the wrong
         // row. (Measuring is the same line materialization hitLine already
-        // pays for the caret line, plus the break scan.)
+        // pays for the caret line, plus the break scan.) B3: under diff
+        // mode this measures the MOD plan; ensureWrapLinesCovered re-keys
+        // the weighted axis when that row's weight moved.
         ensureWrapLinesCovered(caret_.line, caret_.line);
     const int caretTop = std::max(0, slotOfPosition(caret_)) * lineHeight_; // M25:
     const int caretBottom = caretTop + lineHeight_;            // the caret's
@@ -2013,6 +2059,10 @@ void CodeEditor::updateScrollBarRange()
             appliedWrapWidth_ = width;
             wrapCursor_ = 0;
             retuneWrapForFolds();
+            if (diff_) { // B3: the row WEIGHTS ride this width too (mod side
+                diff_->modWrapCursor_ = 0; // of max(mod, orig)): one axis
+                rebuildDiffRowAxis();      // re-key, walker re-armed
+            }
         }
     }
     if (!vBar_)
@@ -2661,12 +2711,41 @@ TextPosition CodeEditor::diffOriginalHit(const QPoint& pt) const
     pos.line = line;
     const int len = ob.lineText(line).size(); // core has no lineLength door:
                                               // lineText IS the size source
+    OrigLayout ol;
+    ol.load(font_, cellWidth_, tabStopWidth_, ob.lineText(line), geoMaxUnits());
+    if (softWrapEnabled_) {
+        // B3 (car B): the read column wraps — the click's SLOT (identical
+        // slot math to diffChromeRowAtY's, the row already resolved) picks
+        // the FRAGMENT the y lands on: frag = slot - the weighted row's
+        // start. A measured plan maps the click through that fragment's
+        // own origin (xLocal + the advance to fStart = the line-space x
+        // origColAtX reads) and clamps into the fragment — the band right
+        // of a row's last glyph clamps to the FRAGMENT end (VS Code's
+        // wrap rule), never to the model line's end two rows down. An
+        // unmeasured row (provisional whole-line paint) and the over-tail
+        // slots of a MODIFIED-deeper row keep the v1 window-clamp path
+        // verbatim below.
+        const int total = std::max(1, visibleLineTotal());
+        const int slot = std::clamp((pt.y() - padding_) / lineHeight_, 0,
+                                    total - 1);
+        const int frag = slot - diff_->rowPrefix[row];
+        if (const WrapInfo* op = liveOrigPlan(line);
+            op && frag >= 0 && frag < int(op->starts.size()) + 1) {
+            const int fStart = frag == 0 ? 0 : int(op->starts[frag - 1]);
+            const int fEnd = frag < int(op->starts.size())
+                                 ? int(op->starts[frag])
+                                 : len;
+            const double xLocal = std::max(0.0, double(pt.x() - f.origTextLeft));
+            const double lineX = xLocal + origXAdvance(ol, cellWidth_, fStart);
+            pos.col = std::clamp(origColAtX(ol, cellWidth_, lineX, len),
+                                 fStart, fEnd);
+            return pos;
+        }
+    }
     const double windowW = f.origTextRight - f.origTextLeft;
     const int windowCols = std::max(1, int(windowW / cellWidth_));
     const double x = std::clamp(double(pt.x() - f.origTextLeft), 0.0,
                                 std::min(double(len) * cellWidth_, windowW));
-    OrigLayout ol;
-    ol.load(font_, cellWidth_, tabStopWidth_, ob.lineText(line), geoMaxUnits());
     pos.col = std::min(origColAtX(ol, cellWidth_, x, len),
                        std::min(len, windowCols)); // the window's reach
     return pos;
@@ -2918,24 +2997,164 @@ void CodeEditor::drawDiffChromeUnder(QPainter& p) const
         if (r.originalLine < 0 || r.originalLine >= ob.lineCount())
             continue; // a blank ORIGINAL cell (a pure insert's row): digits
                       // and text are both absent by definition
+        // (2b) B2 (car B): the inline INSERTED-word wash in a replace
+        // row's MODIFIED TEXT zone (the band rect above rides the number
+        // cell only — in v1 the text zone's only change story is the
+        // gutter mark; the word wash IS the new text-zone story, VS
+        // Code-style). Same ground layer as the band (this pass runs
+        // UNDER the modified text loop, so the glyphs ride over it; the
+        // modified selection quads run BEFORE this pass, so on spanned
+        // words the wash covers the selection — the band already does
+        // that on its cell, v1's asymmetry stays) and the same x door
+        // the modified text/hit chain uses (xForCol == contentLeft +
+        // line-space x - hScroll, clamped into the modified window). Rows
+        // absent from the cache (engine-exhausted pairs, pairs past the
+        // view caps) stay plain-inked: coarse but valid, B1's fallback
+        // discipline at view scale.
+        if (kind == 0 && r.modifiedLine >= 0) {
+            if (const auto it = diff_->inlineSpans.constFind(row);
+                it != diff_->inlineSpans.constEnd() && !it->mod.isEmpty()) {
+                const QColor washInk = theme_->ink(Role::DiffAddedWord);
+                if (washInk.isValid()) {
+                    // B3 (car B): under wrap this slot carries only its OWN
+                    // fragment of the modified line — the same [segStart,
+                    // segEnd) window and the same segment-origin anchor the
+                    // generic text loop paints with. Spans are cut at the
+                    // break and their x drops to row space by the advance
+                    // difference at segStart (xInWrapped's own door). Wrap
+                    // OFF / unmeasured: segStart 0, segEnd the line end,
+                    // segX0 0 — the B2 form byte-for-byte.
+                    const int textL = contentLeft();
+                    const int winR = textL + std::max(1, horizontalViewportWidth());
+                    int segStart = 0, segEnd = -1; // -1: no fragment cut
+                    double segX0 = 0.0;
+                    bool modFrag = true;
+                    if (softWrapEnabled_) {
+                        const RowPlan rp = rowPlan(slot);
+                        if (rp.line < 0 || rp.line != r.modifiedLine)
+                            modFrag = false; // over-tail/blank: no mod ink
+                        else {
+                            segStart = rp.segStart;
+                            segEnd = rp.segEnd;
+                            segX0 = xInLine(hitLine(r.modifiedLine), segStart);
+                        }
+                    }
+                    if (modFrag)
+                        for (const qmn::diff::WordDiff::Span& s : it->mod) {
+                            int c0 = s.start, c1 = s.end;
+                            if (segEnd >= 0) { // the fragment cut (wrap ON)
+                                c0 = std::max(c0, segStart);
+                                c1 = std::min(c1, segEnd);
+                            }
+                            if (c1 <= c0)
+                                continue; // the span rides another row
+                            const int x0 = std::clamp(
+                                int(std::round(xForCol(r.modifiedLine, c0) - segX0)),
+                                textL, winR);
+                            const int x1 = std::clamp(
+                                int(std::round(xForCol(r.modifiedLine, c1) - segX0)),
+                                textL, winR);
+                            if (x1 > x0)
+                                p.fillRect(QRect(x0, yTop, x1 - x0, lh), washInk);
+                        }
+                }
+            }
+        }
         const int lineLen = ob.lineText(r.originalLine).size();
         OrigLayout ol;
         ol.load(font_, cellWidth_, tabStopWidth_, ob.lineText(r.originalLine),
                 geoMaxUnits());
         const double baseline = yTop + (ol.valid ? ol.line.ascent() : ascent_);
+        // B3 (car B): the read column wraps WITH the editor's knob — this
+        // slot carries the ORIGINAL line's fragment [fStart, fEnd) of the
+        // weighted row (frag = the slot's index INSIDE the row through the
+        // weighted rowPrefix; on the weight-1 axis frag is always 0, so
+        // wrap OFF keeps the whole-line window verbatim, the B2 paint
+        // byte-for-byte, and so does an UNMEASURED row: provisional-1, the
+        // M25 discipline). A slot deeper than the ORIGINAL line's own
+        // fragment count (the MODIFIED side wraps further) carries no
+        // read-side ink at all: the opaque ground stays, the frag-0 number
+        // rule alone can still fire there.
+        const int frag = slot - diff_->rowPrefix[row];
+        int fStart = 0, fEnd = lineLen;
+        double fragOff = 0.0; // origXAdvance(fStart): the row-space shift
+        bool fragEmpty = false; // this slot has no ORIGINAL fragment
+        bool fragCut = false;   // a MEASURED plan's fragment: interior rows
+        int fragCount = 1;      // cut at fEnd (the last one never does)
+        if (softWrapEnabled_) {
+            if (const WrapInfo* op = liveOrigPlan(r.originalLine)) {
+                fragCount = int(op->starts.size()) + 1;
+                if (frag >= fragCount) {
+                    fragEmpty = true;
+                } else {
+                    fStart = frag == 0 ? 0 : int(op->starts[frag - 1]);
+                    fEnd = frag < int(op->starts.size())
+                               ? int(op->starts[frag])
+                               : lineLen;
+                    fragOff = origXAdvance(ol, cellWidth_, fStart);
+                    fragCut = true;
+                }
+            }
+        }
+        // (2c) B2 (car B): the inline DELETED-word wash on the chrome's
+        // opaque Base ground (the read column's text zone has no band by
+        // v1 design — the wash is its only inline story), under the dim
+        // glyphs and under the selection wash (the read side keeps its
+        // selection readable over the wash — unlike the WRITE side, whose
+        // quads sit UNDER this whole pass: the asymmetry is v1's, the
+        // tripwires pin it). The x rides origXAdvance, the exact door the
+        // selection wash and the hit chain use, clamped into the window.
+        // B3: spans are cut at the fragment break and their x drops to
+        // row space by fragOff (0 wrap-OFF: the B2 form verbatim).
+        if (kind == 0 && !fragEmpty) {
+            if (const auto it = diff_->inlineSpans.constFind(row);
+                it != diff_->inlineSpans.constEnd() && !it->orig.isEmpty()) {
+                const QColor washInk = theme_->ink(Role::DiffDeletedWord);
+                if (washInk.isValid()) {
+                    for (const qmn::diff::WordDiff::Span& s : it->orig) {
+                        int c0 = s.start, c1 = s.end;
+                        if (fragCut) { // the fragment cut (wrap ON, measured)
+                            c0 = std::max(c0, fStart);
+                            c1 = std::min(c1, fEnd);
+                        }
+                        if (c1 <= c0)
+                            continue; // the span rides another row
+                        const int x0 = std::clamp(
+                            int(std::round(f.origTextLeft
+                                          + origXAdvance(ol, cellWidth_, c0) - fragOff)),
+                            f.origTextLeft, f.origTextRight);
+                        const int x1 = std::clamp(
+                            int(std::round(f.origTextLeft
+                                          + origXAdvance(ol, cellWidth_, c1) - fragOff)),
+                            f.origTextLeft, f.origTextRight);
+                        if (x1 > x0)
+                            p.fillRect(QRect(x0, yTop, x1 - x0, lh), washInk);
+                    }
+                }
+            }
+        }
         // (3) the selection wash, under the glyphs. A selection that
         // continues past this row paints the phantom newline cell (the v1
         // visualization rule), clamped into the read window.
-        if (diff_->origSelActive_) {
+        if (diff_->origSelActive_ && !fragEmpty) {
             const TextPosition& a = diff_->origSelA_;
             const TextPosition& b = diff_->origSelB_;
             if (r.originalLine >= a.line && r.originalLine <= b.line) {
-                const int c0 = r.originalLine == a.line ? a.col : 0;
-                const int c1 = r.originalLine == b.line
+                const int c0 = std::max(r.originalLine == a.line ? a.col : 0,
+                                        fStart); // 0 wrap-OFF: v1 verbatim
+                int c1 = r.originalLine == b.line
                     ? b.col
                     : std::max(lineLen, 1); // phantom overhang
-                const double sx = f.origTextLeft + origXAdvance(ol, cellWidth_, c0);
-                const double ex = f.origTextLeft + origXAdvance(ol, cellWidth_, c1);
+                // B3: INTERIOR fragments stop at the break; the LAST one
+                // keeps v1's c1 — the selected newline's phantom cell (and
+                // the empty line's one-cell marker, c1 == max(len,1) over a
+                // fEnd == 0 cut) rides the line's deepest row, never a
+                // continuation (the generic forVisiblePieces rule, mirrored
+                // for the read side).
+                if (fragCut && frag + 1 < fragCount)
+                    c1 = std::min(c1, fEnd);
+                const double sx = f.origTextLeft + origXAdvance(ol, cellWidth_, c0) - fragOff;
+                const double ex = f.origTextLeft + origXAdvance(ol, cellWidth_, c1) - fragOff;
                 const int xa = std::clamp(int(std::round(sx)), f.origTextLeft,
                                           f.origTextRight);
                 const int xb = std::clamp(int(std::round(ex)), f.origTextLeft,
@@ -2958,27 +3177,46 @@ void CodeEditor::drawDiffChromeUnder(QPainter& p) const
         // line when no language is set — keep the GutterDigits pen. The
         // NUMBER below stays baseline-anchored (drawText IS baseline —
         // v1 gutter numbers do the same).
-        if (ol.valid) {
+        if (ol.valid && !fragEmpty) {
             p.save();
-            p.setClipRect(QRect(f.origTextLeft, yTop,
-                                f.origTextRight - f.origTextLeft, lh));
+            // B3: a MEASURED interior fragment also clips at its OWN right
+            // edge — the next fragment's first word lives on the NEXT row
+            // and must not ghost onto this one (the generic text loop's
+            // clip, mirrored). The last fragment, an unmeasured row and
+            // wrap OFF keep the full-window clip verbatim. The anchor
+            // shifts by fragOff so fStart lands on the window's left edge
+            // (0 verbatim everywhere the clip stays v1's).
+            const int clipR = fragCut && frag + 1 < fragCount
+                ? std::min(f.origTextRight,
+                           int(std::ceil(f.origTextLeft
+                                         + origXAdvance(ol, cellWidth_, fEnd) - fragOff)))
+                : f.origTextRight;
+            p.setClipRect(QRect(f.origTextLeft, yTop, clipR - f.origTextLeft, lh));
             p.setPen(theme_->ink(Role::GutterDigits));
             const auto fmts = origHighlight_ && origHighlight_->active()
                                   ? origChromeFormatRanges(r.originalLine,
                                                            ol.text)
                                   : QVector<QTextLayout::FormatRange>{};
             if (fmts.isEmpty())
-                ol.line.draw(&p, QPointF(double(f.origTextLeft), double(yTop)));
+                ol.line.draw(&p, QPointF(double(f.origTextLeft) - fragOff,
+                                         double(yTop)));
             else
-                ol.layout.draw(&p, QPointF(double(f.origTextLeft), double(yTop)),
+                ol.layout.draw(&p, QPointF(double(f.origTextLeft) - fragOff,
+                                           double(yTop)),
                                fmts);
             p.restore();
         }
         // (5) the number, right-aligned in its own column (monospace
-        // digits are exactly cellWidth_ wide — the v1 grid fact).
-        p.setPen(theme_->ink(Role::GutterDigits));
-        const QString num = QString::number(r.originalLine + 1);
-        p.drawText(QPointF(f.origNumRight - num.size() * cellWidth_, baseline), num);
+        // digits are exactly cellWidth_ wide — the v1 grid fact). B3: the
+        // number rides the row's FIRST slot only (frag 0 is always < the
+        // fragment count, and on the weight-1 axis frag is always 0: the
+        // v1 one-number-per-row rule verbatim).
+        if (frag == 0) {
+            p.setPen(theme_->ink(Role::GutterDigits));
+            const QString num = QString::number(r.originalLine + 1);
+            p.drawText(QPointF(f.origNumRight - num.size() * cellWidth_, baseline),
+                       num);
+        }
     }
 }
 
@@ -3036,8 +3274,15 @@ void CodeEditor::drawDiffChromeOver(QPainter& p) const
             if (line < diff_->origSelA_.line || line > diff_->origSelB_.line)
                 continue;
             const int yTop = padding_ + slot * lh - vScroll_;
-            p.drawLine(f.origTextLeft, yTop, f.stripRight - 1, yTop);
-            p.drawLine(f.origTextLeft, yTop + lh - 1, f.stripRight - 1, yTop + lh - 1);
+            // B3 (car B): the frame rides the ROW, not the slot: the
+            // hairline spans the whole weighted run — its top only on the
+            // row's FIRST slot, its bottom only on its LAST (wrap OFF:
+            // every row is one slot, first == last == slot, the v1 frame
+            // byte-for-byte; no interior stripe ever cuts a wrapped line).
+            if (slot == diff_->rowPrefix[row])
+                p.drawLine(f.origTextLeft, yTop, f.stripRight - 1, yTop);
+            if (slot == diff_->rowPrefix[row + 1] - 1)
+                p.drawLine(f.origTextLeft, yTop + lh - 1, f.stripRight - 1, yTop + lh - 1);
         }
     }
     p.setPen(theme_->ink(Role::Text)); // restore the default glyph pen
@@ -3136,6 +3381,14 @@ void CodeEditor::recomputeDiff()
     diff_->result = qmn::diff::LineDiff::compute(collectBufferLines(diff_->originalDoc->buffer_),
                                                  collectBufferLines(buffer_));
     rebuildDiffRowAxis();
+    diff_->origWrapCursor_ = 0; // B3: the row window moved — both walkers
+    diff_->modWrapCursor_ = 0;  // re-arm from the top; the line-keyed plans
+                                // survive (neither document's plans die with
+                                // a re-alignment: the mod plans ride the
+                                // observer-maintained wrap_ table, the orig
+                                // ones the textLen validity trio)
+    runDiffInlinePass(); // B2: the frame swap invalidates the word spans;
+                         // repopulate them before the first repaint
     const int after = diffVisibleIndexOfModLine(caret_.line);
     if (before >= 0 && after >= 0)
         setVScroll(vScroll_ + (after - before) * lineHeight_);
@@ -3206,19 +3459,67 @@ void CodeEditor::rebuildDiffRowAxis()
     }
     for (int r = 0; r < rows; ++r) {
         const int mod = d.result.rows[r].modifiedLine;
-        // The fold overlay, in ROW units: a row dies exactly when the
-        // MODIFIED line it carries sits in a hidden run (its original-side
-        // twin disappears with the row — the decided honest v1); a blank
-        // cell has no line to hide, so it is weight 1 by definition.
-        const bool hidden = mod >= 0 && lineIsHiddenByFold(mod);
-        d.rowPrefix[r + 1] = d.rowPrefix[r] + (hidden ? 0 : 1);
-        if (!hidden) {
-            d.slotToRow.push_back(r);
-            if (mod >= 0 && mod < d.modLineToRow.size())
-                d.modLineToRow[mod] = r;
-        }
+        // B3's weight (the rowWeightOfRow door): the fold overlay is
+        // unchanged — a row dies exactly when its MODIFIED line sits in a
+        // hidden run (the original twin goes with it, the decided honest
+        // v1) — and a live row now costs max(1, the MODIFIED line's wrap
+        // slots, the ORIGINAL line's wrap slots): the wrap knob is live
+        // inside diff mode, unmeasured cells provisional-1. Wrap OFF the
+        // door answers exactly 1: the v1 axis, byte-for-byte (a blank
+        // cell has no line to hide and no slots to wrap, so it stays the
+        // weight-1 survivor by definition).
+        const int w = rowWeightOfRow(r);
+        d.rowPrefix[r + 1] = d.rowPrefix[r] + w;
+        for (int i = 0; i < w; ++i)
+            d.slotToRow.push_back(r); // weight-w rows emit w slots: the
+                                      // inverse stays a plain index lookup
+        if (mod >= 0 && w > 0 && mod < d.modLineToRow.size())
+            d.modLineToRow[mod] = r;
     }
     d.slotTotal = d.rowPrefix[rows];
+}
+
+// B2 inline pass (PLAN §GATE 3 / car B): every REPLACE row pair goes
+// through the word engine. The pair order is row order, so a cap break
+// simply leaves the LOWER rows bare-band — the visible top of a document
+// wins first. Equal-aligned rows inside a replace block (rowKind 0 but
+// equal lines — the engine aligns those) are silent by definition; an
+// engine-exhausted pair is dropped (its whole-line spans would repaint
+// the row's own band, painting the same pixels twice in a different ink
+// — bare-band reads better than a full-width second wash).
+void CodeEditor::runDiffInlinePass()
+{
+    DiffState& d = *diff_;
+    d.inlineSpans.clear();
+    if (d.rowKind.isEmpty())
+        return;
+    d.inlineSpans.reserve(kDiffInlinePairCap * 2);
+    const qmn::core::TextBuffer& ob = d.originalDoc->buffer_;
+    QElapsedTimer timer;
+    timer.start();
+    int pairs = 0;
+    for (int r = 0; r < d.rowKind.size(); ++r) {
+        if (d.rowKind[r] != 0)
+            continue; // only replace rows have a PAIR to inline-detail
+        const qmn::diff::LineDiff::Row& row = d.result.rows[r];
+        if (row.originalLine < 0 || row.originalLine >= ob.lineCount()
+            || row.modifiedLine < 0 || row.modifiedLine >= buffer_.lineCount())
+            continue; // a cell vanished since the frame (transient, defensive)
+        const QString a = ob.lineText(row.originalLine);
+        const QString b = buffer_.lineText(row.modifiedLine);
+        if (a == b)
+            continue;
+        if (++pairs > kDiffInlinePairCap || timer.elapsed() > kDiffInlineBudgetMs)
+            break; // the view-side latency caps (see the doors' constants)
+        const auto w = qmn::diff::WordDiff::compute(a, b);
+        if (w.budgetExhausted
+            || (w.originalSpans.isEmpty() && w.modifiedSpans.isEmpty()))
+            continue;
+        DiffState::InlineSpans sp;
+        sp.mod = std::move(w.modifiedSpans);
+        sp.orig = std::move(w.originalSpans);
+        d.inlineSpans.insert(r, std::move(sp));
+    }
 }
 
 int CodeEditor::diffVisibleIndexOfModLine(int line) const
@@ -3269,6 +3570,235 @@ int CodeEditor::diffRowForSlot(int slot) const
     if (!diff_ || slot < 0 || slot >= diff_->slotToRow.size())
         return -1;
     return diff_->slotToRow[slot];
+}
+
+// --- B3 (car B): the weighted row axis — the ORIGINAL-side wrap doors -----
+// (PLAN §GATE 3 / car B: the wrap knob is LIVE inside diff mode, each side
+// wrapping at its own width; wrap OFF every door below reduces to the M10
+// weight-1 axis byte-for-byte, the tests pinned before B3 keep holding.)
+
+int CodeEditor::diffOrigWindowWidth() const
+{
+    // The read window's px width — diffFrame() derives f.origTextRight -
+    // f.origTextLeft from exactly this door, without the frame's slot math
+    // (rowWeightOfRow sits on the axis-rebuild path: it stays cheap).
+    if (!diff_ || !diff_->originalDoc)
+        return 0;
+    return std::max(0, diffChromeTextCol());
+}
+
+const CodeEditor::WrapInfo* CodeEditor::liveOrigPlan(int line) const
+{
+    if (!diff_ || !diff_->originalDoc || line < 0)
+        return nullptr;
+    const auto it = diff_->origWrap.constFind(line);
+    if (it == diff_->origWrap.constEnd())
+        return nullptr;
+    const WrapInfo& p = it.value();
+    if (p.epoch != wrapPlanEpoch_ // font/zoom/tab-stop wipes kill both sides'
+        || p.widthKey != diffOrigWindowWidth()) // plans at once, and a chrome
+        return nullptr;                          // window move kills the orig
+    const qmn::core::TextBuffer& ob = diff_->originalDoc->buffer_;
+    if (line >= ob.lineCount() // the external-orig-edit edge: a moved line
+        || int(p.textLen) != ob.lineText(line).size())
+        return nullptr; // dies on its own textLen like every wrap plan
+    return &p;
+}
+
+int CodeEditor::measureOrigWrap(int line)
+{
+    if (!diff_ || !diff_->originalDoc)
+        return 0;
+    const qmn::core::TextBuffer& ob = diff_->originalDoc->buffer_;
+    if (line < 0 || line >= ob.lineCount())
+        return 0;
+    const int width = diffOrigWindowWidth();
+    const QString text = ob.lineText(line);
+    WrapInfo info;
+    info.textLen = quint32(text.size());
+    info.widthKey = width;
+    info.epoch = wrapPlanEpoch_;
+    if (!text.isEmpty() && width > 0) {
+        // The chrome's own layout door (B2's exact-x source): the breaks are
+        // measured on the SAME advances the orig paint and hit chain use.
+        OrigLayout ol;
+        ol.load(font_, cellWidth_, tabStopWidth_, text, geoMaxUnits());
+        // measureWrap's break discipline VERBATIM (same break set, ws-sticky
+        // rows, oversized tokens re-enter a fresh row and overflow — the one
+        // x source differs, ol's layout instead of the geo cache):
+        const double wrapW = double(width);
+        const auto isBreakChar = [](QChar ch) {
+            return ch == QLatin1Char(' ') || ch == QLatin1Char('\t');
+        };
+        const auto xAt = [&](int col) { return origXAdvance(ol, cellWidth_, col); };
+        int rowStart = 0;
+        double ox = 0.0;
+        int col = 0;
+        while (col < text.size()) {
+            const int chunkStart = col;
+            if (isBreakChar(text.at(col))) {
+                do
+                    ++col;
+                while (col < text.size() && isBreakChar(text.at(col)));
+            } else {
+                do {
+                    ++col; // a surrogate pair is one atom: never split
+                    if (text.at(col - 1).isHighSurrogate() && col < text.size()
+                        && text.at(col).isLowSurrogate())
+                        ++col;
+                } while (col < text.size() && !isBreakChar(text.at(col)));
+            }
+            if (xAt(chunkStart) > ox && xAt(col) - ox > wrapW) {
+                int newStart = chunkStart;
+                if (isBreakChar(text.at(chunkStart)))
+                    newStart = col; // a ws run never starts a break row
+                else
+                    col = chunkStart; // oversized token: fresh row, OVERFLOW
+                if (newStart > rowStart && newStart < text.size()) {
+                    info.starts.push_back(newStart);
+                    rowStart = newStart;
+                    ox = xAt(rowStart);
+                }
+            }
+        }
+    }
+    diff_->origWrap.insert(line, std::move(info));
+    return int(diff_->origWrap.constFind(line)->starts.size()) + 1;
+}
+
+int CodeEditor::rowWeightOfRow(int row) const
+{
+    if (!diff_)
+        return 1; // defensive: the door answers for the diff axis
+    const DiffState& d = *diff_;
+    if (row < 0 || row >= d.result.rows.size())
+        return 0;
+    const qmn::diff::LineDiff::Row& r = d.result.rows[size_t(row)];
+    if (!softWrapEnabled_) {
+        const bool hidden = r.modifiedLine >= 0
+                            && lineIsHiddenByFold(r.modifiedLine);
+        return hidden ? 0 : 1; // the v1 weight-1 axis, byte-for-byte
+    }
+    if (r.modifiedLine >= 0 && lineIsHiddenByFold(r.modifiedLine))
+        return 0; // the fold overlay is UNCHANGED: a row dies exactly with
+                  // its MODIFIED line (the original twin goes with it)
+    int w = 1;
+    if (r.modifiedLine >= 0) {
+        if (const WrapInfo* p = liveWrapPlan(r.modifiedLine))
+            w = std::max(w, int(p->starts.size()) + 1);
+        // unmeasured: provisional 1 (M25's honest-total discipline)
+    }
+    if (const int o = r.originalLine; o >= 0) {
+        if (const WrapInfo* p = liveOrigPlan(o))
+            w = std::max(w, int(p->starts.size()) + 1);
+    }
+    return w; // a blank cell contributes 0 to the max (no line to wrap);
+              // max() with 1 keeps every live row at least one slot
+}
+
+int CodeEditor::lineSlotCount(int line) const
+{
+    // The paint-side line→slot-run door in the CURRENT row space: the diff
+    // branch reads the weighted axis (0 for a hidden/unmapped line), the
+    // plain branch is the wrap table verbatim. (wrapSlotCount stays LINE-
+    // space truth for the wrap maintenance machinery — retune/walkers — and
+    // must never branch here.)
+    if (diff_) {
+        if (line < 0 || line >= diff_->modLineToRow.size())
+            return 0;
+        const int row = diff_->modLineToRow[line];
+        return row < 0 ? 0 : rowWeightOfRow(row);
+    }
+    return wrapSlotCount(line);
+}
+
+void CodeEditor::prepareDiffWrapWindow(int firstSlot, int lastSlot)
+{
+    // The diff sibling of prepareWrapViewport (the paint's viewport entry
+    // when diff mode is live): EAGER coverage of both sides' window rows,
+    // then the budgeted escalation with two viewports of headroom behind
+    // ONE shared kWrapBudgetMs deadline, then ONE axis rebuild for the
+    // whole batch (M25's batched-rebuild shape, row-keyed instead of line-
+    // keyed — rebuildDiffRowAxis is the diff axis' rebuildPrefixFrom).
+    DiffState& d = *diff_;
+    syncWrapTables(); // the MOD plans ride the plain wrap_ table, kept live
+                      // through diff mode so the diff-off world restores
+    // Read-window width watcher (the mod window's twin lives in
+    // updateScrollBarRange's wrap watcher): resize / gutter / line-number
+    // moves kill the orig plans wholesale (proportional to the cache, never
+    // the document) and re-weight the axis.
+    if (const int ow = diffOrigWindowWidth(); ow != d.appliedOrigWidth_) {
+        d.appliedOrigWidth_ = ow;
+        d.origWrap.clear();
+        d.origWrapCursor_ = 0;
+        rebuildDiffRowAxis();
+    }
+    const int vt = std::max(1, d.slotTotal);
+    firstSlot = std::clamp(firstSlot, 0, vt - 1);
+    lastSlot = std::clamp(lastSlot, firstSlot, vt - 1);
+    const int firstRow = diffRowForSlot(firstSlot);
+    const int lastRow = diffRowForSlot(lastSlot);
+    if (firstRow < 0 || lastRow < 0)
+        return; // empty axis (defensive: every live row carries a slot)
+    const int docLines = buffer_.lineCount();
+    const int rowsN = d.result.rows.size();
+    bool measured = false;
+    int minChanged = docLines;
+    // Eager: both sides of the window's rows (never budgeted — the exact
+    // M25 eager rule, and the paint never shows a blind row).
+    for (int r = firstRow; r <= lastRow && r < rowsN; ++r) {
+        const qmn::diff::LineDiff::Row& row = d.result.rows[size_t(r)];
+        if (const int m = row.modifiedLine;
+            m >= 0 && m < docLines && !lineIsHiddenByFold(m)
+            && !liveWrapPlan(m)) {
+            const int w = measureWrap(m);
+            measured = true;
+            if (wrapWeight_[m] != w) { // keep the line-space mirror current
+                wrapWeight_[m] = w;    // THROUGH diff mode: clearDiff
+                minChanged = std::min(minChanged, m); // restores the plain
+            }                                       // wrap totals exactly
+        }
+        if (const int o = row.originalLine; o >= 0 && !liveOrigPlan(o)) {
+            measureOrigWrap(o);
+            measured = true;
+        }
+    }
+    if (minChanged < docLines)
+        rebuildPrefixFrom(minChanged);
+    // Budgeted escalation: two viewports of headroom (the plain walker's
+    // shape), both frontiers under one deadline.
+    QElapsedTimer timer;
+    timer.start();
+    static const qint64 kBudgetNs = qint64(kWrapBudgetMs * 1'000'000.0);
+    const int cap = std::min(rowsN - 1,
+                             lastRow + 2 * (lastRow - firstRow + 1) + 8);
+    minChanged = docLines;
+    while (d.modWrapCursor_ <= cap && timer.nsecsElapsed() <= kBudgetNs) {
+        const qmn::diff::LineDiff::Row& row =
+            d.result.rows[size_t(d.modWrapCursor_++)];
+        if (const int m = row.modifiedLine;
+            m >= 0 && m < docLines && !lineIsHiddenByFold(m)
+            && !liveWrapPlan(m)) {
+            const int w = measureWrap(m);
+            measured = true;
+            if (wrapWeight_[m] != w) {
+                wrapWeight_[m] = w;
+                minChanged = std::min(minChanged, m);
+            }
+        }
+    }
+    while (d.origWrapCursor_ <= cap && timer.nsecsElapsed() <= kBudgetNs) {
+        if (const int o = d.result.rows[size_t(d.origWrapCursor_++)].originalLine;
+            o >= 0 && !liveOrigPlan(o)) {
+            measureOrigWrap(o);
+            measured = true;
+        }
+    }
+    if (minChanged < docLines)
+        rebuildPrefixFrom(minChanged);
+    if (measured)
+        rebuildDiffRowAxis(); // ONE axis pass for the whole batch: the new
+                              // plans (either side) may have grown weights
 }
 
 bool CodeEditor::indentFoldsActive() const
@@ -3712,12 +4242,12 @@ const CodeEditor::WrapInfo* CodeEditor::liveWrapPlan(int line) const
 
 int CodeEditor::wrapSlotCount(int line) const
 {
-    // M10: soft wrap is INERT while diff mode is live (the row space is the
-    // alignment axis, every surviving row is weight 1): the band slot-runs
-    // and the M25 span-cut layers must see one row per line, matching what
-    // the paint loop walks through the diff doors.
-    if (diff_)
-        return 1;
+    // B3 (car B): this door stays LINE-space truth for the wrap
+    // maintenance machinery (retune's restore, the walkers) — even while
+    // diff mode is live, the wrap_ table keeps measuring the MODIFIED
+    // lines at the h window so the diff-off world restores exactly. The
+    // paint-side doors that must see the weighted ROW space read
+    // lineSlotCount instead (the diff branch lives there).
     const WrapInfo* plan = liveWrapPlan(line);
     return plan ? int(plan->starts.size()) + 1 : 1; // unmeasured (or dead):
                                                     // the honest wrap-off row
@@ -4052,6 +4582,11 @@ void CodeEditor::ensureWrapLinesCovered(int fromLine, int toLine)
     }
     if (minChanged < docLines)
         rebuildPrefixFrom(minChanged);
+    if (diff_ && minChanged < docLines)
+        rebuildDiffRowAxis(); // B3: the wrapWeight_ move means a measured
+                              // MODIFIED line's slot count moved — the
+                              // weighted diff axis re-keys once for it
+                              // (rowWeightOfRow reads the fresh plans)
     // The walker frontier does NOT come back: rows below it were already
     // measured, and a caret line measured early simply joins the cache.
 }
@@ -4074,13 +4609,53 @@ void CodeEditor::prepareWrapViewport(int firstSlot, int rows)
 
 CodeEditor::RowPlan CodeEditor::rowPlan(int slot) const
 {
-    // Invalid (slot < 0) whenever wrap is OFF or diff mode is live: the
-    // v1.6.1 paint/hit/caret geometry keeps its own line-space math and
-    // must never branch here (M10: wrap is inert in diff v1).
+    // Invalid (slot < 0) whenever wrap is OFF: the v1.6.1 paint/hit/caret
+    // geometry keeps its own line-space math and must never branch here.
+    // B3 (car B): under diff mode the door answers for the MODIFIED side's
+    // fragments of the weighted row — the fragment index is slot -
+    // rowPrefix[row]; a slot past the MODIFIED line's own fragment count
+    // (the ORIGINAL side wraps deeper) carries NO modified fragment: the
+    // invalid plan (line < 0, segIdx = frag so the gutter's frag-0 rule
+    // skips the number) is the paint's "blank mod cell here" signal.
     RowPlan p;
-    if (!softWrapEnabled_ || diff_ || slot < 0)
+    if (!softWrapEnabled_ || slot < 0)
         return p; // invalid: the v1.6.1 paint/hit/caret geometry keeps its
                   // own line-space math and must never branch here
+    if (diff_) {
+        const int row = diffRowForSlot(slot);
+        if (row < 0 || row >= diff_->result.rows.size())
+            return p; // defensive: the paint window is axis-bounded
+        const int mod = diff_->result.rows[size_t(row)].modifiedLine;
+        const int frag = slot - diff_->rowPrefix[row];
+        if (mod < 0 || mod >= buffer_.lineCount()
+            || lineIsHiddenByFold(mod)) {
+            p.segIdx = frag; // blank/hidden mod cell: the gutter rule below
+            return p;        // (segIdx > 0) skips continuation chrome
+        }
+        const WrapInfo* plan = liveWrapPlan(mod);
+        const int len = lineLength(mod);
+        p.slot = slot;
+        p.line = mod;
+        p.segIdx = frag;
+        if (!plan) { // unmeasured: provisional whole-line on the row's
+            if (frag > 0) { // FIRST row only (the axis grew from the other
+                p.line = -1; // side's plan — no continuation is known yet)
+                return p;
+            }
+            p.segs = 1;
+            p.segStart = 0;
+            p.segEnd = len;
+            return p;
+        }
+        if (frag >= int(plan->starts.size()) + 1) {
+            p.line = -1; // over-tail: the mod fragments ran out below this
+            return p;    // slot (the orig side keeps wrapping: B2's
+        }                // whole-row paint sites must not re-draw
+        p.segs = int(plan->starts.size()) + 1;
+        p.segStart = frag == 0 ? 0 : plan->starts[frag - 1];
+        p.segEnd = frag < int(plan->starts.size()) ? plan->starts[frag] : len;
+        return p;
+    }
     const int line = wrapLineForSlot(slot);
     if (line < 0 || lineIsHiddenByFold(line))
         return p; // a slot outside the map, or inside a fold's hole
@@ -4125,11 +4700,22 @@ int CodeEditor::segIndexOfCol(int line, int col) const
 
 int CodeEditor::slotOfPosition(TextPosition p) const
 {
-    if (!softWrapEnabled_ || diff_)
+    if (!softWrapEnabled_)
         return visibleIndexOfModelLine(p.line); // the fold map's door (v1:
                                                 // slot == model line); M10:
                                                 // in diff mode this IS the
                                                 // row door (one row per line)
+    if (diff_) {
+        // B3: the weighted diff axis — the MODIFIED line's row, plus the
+        // fragment col falls in (live wrap_ plan; unmeasured lines ride the
+        // row's first slot, M25's provisional rule).
+        if (p.line < 0 || p.line >= diff_->modLineToRow.size())
+            return -1;
+        const int row = diff_->modLineToRow[p.line];
+        if (row < 0)
+            return -1; // fold-hidden or unmapped (transient mid-debounce)
+        return diff_->rowPrefix[row] + segIndexOfCol(p.line, p.col);
+    }
     const int first = wrapIndexOfLine(p.line); // -1 hidden/out of range
     if (first < 0)
         return -1;
@@ -4159,11 +4745,15 @@ TextPosition CodeEditor::rowStepTarget(TextPosition from, bool up) const
         }
         return pos;
     };
-    // M10: diff mode rides the plain fold-aware MODEL-line walk (the
-    // degrade path is the whole story): Up/Down skips to the next visible
-    // modified line and never stops on a blank alignment row — a blank
-    // cell has no caret space to land on.
-    if (diff_)
+    // M10: with wrap OFF, diff mode rides the plain fold-aware MODEL-line
+    // walk (the degrade path is the whole story): Up/Down skips to the next
+    // visible modified line and never stops on a blank alignment row — a
+    // blank cell has no caret space to land on. B3 (car B): with wrap ON
+    // inside diff mode the slot walk below IS the row walk (diff-aware
+    // doors): the blank-cell and over-tail rows return invalid RowPlans,
+    // and the degrade path lands on the next visible MODIFIED line — the
+    // v1 skip-blanks story in row units.
+    if (diff_ && !softWrapEnabled_)
         return degrade(up);
     const int mySlot = slotOfPosition(from);
     if (mySlot < 0)
@@ -4237,6 +4827,17 @@ void CodeEditor::setSoftWrapEnabled(bool enabled)
         wrapCursor_ = 0;
         wrapTotal_ = 0;
         appliedWrapWidth_ = 0;
+    }
+    if (diff_) {
+        // B3 (car B): the weighted row axis follows the knob — weights
+        // move 1 ⇄ max(mod, orig), so the axis re-keys ONCE and both
+        // walkers re-arm (their plans measure at the new unit; the ORIG
+        // plans were keyed to the read window, which the gutter change
+        // this knob causes moves too — the prepareDiffWrapWindow watcher
+        // catches that width next frame).
+        diff_->modWrapCursor_ = 0;
+        diff_->origWrapCursor_ = 0;
+        rebuildDiffRowAxis();
     }
     updateScrollBarRange(); // the row space changed units: vBar range follows
     update();
@@ -5277,9 +5878,16 @@ void CodeEditor::paintEvent(QPaintEvent*)
     int firstSlot = std::clamp((vScroll_ - padding_) / lh, 0, vt - 1); // the slot past
     int lastSlot = std::min(vt - 1, firstSlot + visibleLineCount());   // the last line
     if (softWrapEnabled_ && !diff_) {
-        // M10: diff mode never enters the wrap viewport entry (wrap inert);
-        // the row window above already came from the diff row totals.
         prepareWrapViewport(firstSlot, lastSlot - firstSlot + 1);
+        vt = std::max(1, visibleLineTotal());
+        firstSlot = std::clamp((vScroll_ - padding_) / lh, 0, vt - 1);
+        lastSlot = std::min(vt - 1, firstSlot + visibleLineCount());
+    } else if (softWrapEnabled_ && diff_) {
+        // B3 (car B): the wrap knob is live inside diff mode — the weighted
+        // axis' own viewport entry (eager both sides + budgeted walkers +
+        // one batched axis re-key); it can move the totals, so the window
+        // is re-derived right after, exactly like the plain branch.
+        prepareDiffWrapWindow(firstSlot, lastSlot);
         vt = std::max(1, visibleLineTotal());
         firstSlot = std::clamp((vScroll_ - padding_) / lh, 0, vt - 1);
         lastSlot = std::min(vt - 1, firstSlot + visibleLineCount());
@@ -5362,7 +5970,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
         if (s0 < 0)                                        // paint window
             return false;                                  // (-1 = fold-hidden)
         a = std::max(firstSlot, s0);
-        b = std::min(lastSlot, s0 + wrapSlotCount(line) - 1);
+        b = std::min(lastSlot, s0 + lineSlotCount(line) - 1);
         return a <= b;
     };
     // M25 machine 2: the ONE span-cut shared by the per-line ink layers
@@ -5380,9 +5988,19 @@ void CodeEditor::paintEvent(QPaintEvent*)
         const int s0 = visibleIndexOfModelLine(line);
         if (s0 < 0)
             return; // fold-hidden: no rows exist
-        const int n = wrapSlotCount(line);
+        const int n = lineSlotCount(line); // B3 (car B): the run length in
+                                           // the CURRENT (weighted) row space
         const int len = lineLength(line);
-        for (int i = 0; i < n; ++i) {
+        // B3: the PIECE walk rides the MODIFIED line's own fragment count —
+        // the weighted row can run DEEPER than the mod fragments (the
+        // ORIGINAL side wraps further: the over-tail slots carry no mod
+        // ink), and an unmeasured line walks exactly its provisional one.
+        // Plain wrap: the plan count IS the run length, byte-for-byte v1.
+        int pieces = 1;
+        if (const WrapInfo* wp = liveWrapPlan(line))
+            pieces = int(wp->starts.size()) + 1;
+        pieces = std::min(pieces, n); // the walk never leaves the row
+        for (int i = 0; i < pieces; ++i) {
             const int slot = s0 + i;
             if (slot < firstSlot)
                 continue;
@@ -5393,7 +6011,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
                 continue; // defensive: never ink the wrong line
             const int pc0 = std::max(c0, rp.segStart);
             int pc1 = std::min(c1, rp.segEnd);
-            if (i + 1 == n && c1 > len)
+            if (i + 1 == pieces && c1 > len)
                 pc1 = rp.segEnd + (c1 - len); // the phantom overhang, last row
             if (pc1 < pc0)
                 continue; // the span does not touch this row at all
@@ -5627,8 +6245,8 @@ void CodeEditor::paintEvent(QPaintEvent*)
                     // (eSlot == -1, zero-weight) and the band shrinks to the
                     // header's whole run — the v1 shrink, in row units.
                     bot = std::min(lastSlot, eSlot >= 0
-                        ? eSlot + wrapSlotCount(hoverFoldEnd_) - 1
-                        : sSlot + wrapSlotCount(hoverFoldStart_) - 1);
+                        ? eSlot + lineSlotCount(hoverFoldEnd_) - 1
+                        : sSlot + lineSlotCount(hoverFoldStart_) - 1);
                 if (top <= bot)
                     p.fillRect(QRect(foldLeft, padding_ + top * lh - vScroll_,
                                      fz, (bot - top + 1) * lh), theme_->ink(Role::FoldRegion));
@@ -5716,7 +6334,7 @@ void CodeEditor::paintEvent(QPaintEvent*)
     // performance story on top of the slot-shrunk scroll space).
     // M25: the caret's ink rides its OWN row (the slot of its segment,
     // -1 when the caret line is fold-hidden) — resolved once per frame.
-    const int caretRowSlot = softWrapEnabled_ && !diff_ ? slotOfPosition(caret_) : -1;
+    const int caretRowSlot = softWrapEnabled_ ? slotOfPosition(caret_) : -1;
     for (int slot = firstSlot; slot <= lastSlot; ++slot) {
         // M10 machine 2: a blank alignment cell paints nothing (the
         // interim single-column rule; machine 3 turns it into the
@@ -5735,6 +6353,11 @@ void CodeEditor::paintEvent(QPaintEvent*)
         // so every expression below keeps its v1.6.1 form EXCEPT for the
         // added branch tests — the frozen wrap-off cost (PLAN §M25).
         const RowPlan rp = rowPlan(slot);
+        if (softWrapEnabled_ && rp.line < 0)
+            continue; // B3 (car B): a weighted row's OVER-TAIL slot — the
+                      // ORIGINAL side wraps deeper, so this slot carries no
+                      // MODIFIED fragment (plain wrap never produces an
+                      // invalid plan inside the painted window: defensive)
         const bool seg = softWrapEnabled_ && rp.line == line; // defensive: a
                                                              // valid row always
                                                              // maps to its line
@@ -5990,7 +6613,7 @@ void CodeEditor::paintOverviewRuler(QPainter& p) const
             return;
         // M25: a wrapped marker line owns a SLOT RUN, and its stripe
         // spans all of its rows (wrap OFF: count 1, the v1 band verbatim).
-        const int lastRow = slot + (softWrapEnabled_ ? wrapSlotCount(line) - 1 : 0);
+        const int lastRow = slot + (softWrapEnabled_ ? lineSlotCount(line) - 1 : 0);
         const int y0 = rulerY(padding_ + slot * lineHeight_);
         const int y1 = rulerY(padding_ + (lastRow + 1) * lineHeight_);
         p.fillRect(QRect(g.left() + 3, y0, kOverviewRulerWidth - 6, qMax(minThick, y1 - y0)), c);

@@ -92,6 +92,14 @@ public:
         DiffConnectorFill,    // the hunk connectors in the gutter gap strip
         DiffChangeGutterMark, // small mark at the modified number of a
                               // replace-hunk line (a 1-for-1 pair anchor)
+        // Car B machine B2 (PLAN §GATE 3 / car B, M10b): the INLINE word
+        // washes inside a replace-hunk row pair — the inserted-token spans
+        // ride the MODIFIED column's band, the deleted-token spans the
+        // ORIGINAL column's opaque ground. Pure insert/delete rows paint
+        // neither (the v1 band/hatch already covers the whole row there).
+        // Opaque like the bands; glyphs paint over them.
+        DiffAddedWord,        // inserted-word wash (modified column)
+        DiffDeletedWord,      // deleted-word wash (original column)
     };
     Q_ENUM(Role)
 

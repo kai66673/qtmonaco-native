@@ -1697,12 +1697,55 @@ private:
     // (fold mutations ride this WITHOUT a recompute; rows mutations ride
     // it after every recompute).
     void rebuildDiffRowAxis();
+    // B2 (PLAN §GATE 3 / car B): pair the replace-hunk rows through
+    // qmn::diff::WordDiff after every FULL recompute; results live in
+    // DiffState::inlineSpans. The two caps bound one recompute's inline
+    // work: past either, the remaining rows stay bare-band (coarse but
+    // valid — the engine's own budget-fallback story at view scale).
+    void runDiffInlinePass();
+    static constexpr int kDiffInlinePairCap = 400; // word pairs per recompute
+    static constexpr qint64 kDiffInlineBudgetMs = 150; // wall-clock cap
     // The diff half of the three visible* doors (line == MODIFIED line).
     int diffVisibleIndexOfModLine(int line) const;
     int diffModLineForSlot(int slot) const;
     // The alignment row under a visible slot (-1 out of range): the
     // blank-cell-aware door for the paint/hit side (machine 3).
     int diffRowForSlot(int slot) const;
+    // B3 (PLAN §GATE 3 / car B): the row axis turns WEIGHTED while the
+    // wrap knob is live inside diff mode. weight(row) = max(the MODIFIED
+    // line's slots at the h-window width — the wrap_ table —, the
+    // ORIGINAL line's slots at the READ-window width — DiffState's own
+    // origWrap cache —, 1); a blank cell contributes 0 to the max, and a
+    // fold-hidden MODIFIED line still zeroes the whole row. Wrap OFF,
+    // every door below reduces to the v1 weight-1 axis (byte-identity).
+    int diffOrigWindowWidth() const; // the read window's px width (frame door)
+    // The live ORIGINAL-line plan, null when absent/stale — the same
+    // per-plan validity trio as liveWrapPlan (epoch, widthKey == the READ
+    // window, textLen), no table-wide machinery: an external originalDoc
+    // edit is already v1's stale-alignment edge (the view never re-diffs
+    // on orig edits), and the plans simply inherit it, validated line by
+    // line by their textLen.
+    const WrapInfo* liveOrigPlan(int line) const;
+    // Measure one ORIGINAL line at the read window's width: measureWrap's
+    // break discipline verbatim (same break set, ws-sticky rows, oversized
+    // tokens re-enter and overflow), x source the chrome's own OrigLayout
+    // door. Returns the line's slot count.
+    int measureOrigWrap(int line);
+    // The weighted slot count of one row (the ONE weight authority: the
+    // prefix build, lineSlotCount's diff branch and the walker all read
+    // it): 0 fold-hidden, 1 when wrap is off, else max(1, mod, orig) with
+    // unmeasured cells provisional-1 (M25's honest-total discipline).
+    int rowWeightOfRow(int row) const;
+    // A model line's slot run in the CURRENT row space (paint side only —
+    // wrapSlotCount stays line-space truth for the wrap maintenance
+    // machinery and must never branch): the diff axis' weighted count, or
+    // the plain wrap table's (0 hidden/out of range).
+    int lineSlotCount(int line) const;
+    // The paint's viewport entry for the weighted axis: eager coverage of
+    // the window's rows, then the budgeted escalation with headroom
+    // (kWrapBudgetMs shared with the plain wrap walker), then ONE axis
+    // rebuild for the whole batch (M25's batched-rebuild shape, row-keyed).
+    void prepareDiffWrapWindow(int firstSlot, int lastSlot);
     // Guard the external original pointer: destroyed() -> clear the mode.
     void watchDiffOriginal(CodeDocument* doc);
 

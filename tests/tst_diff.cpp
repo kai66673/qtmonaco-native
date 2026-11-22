@@ -3,10 +3,12 @@
 // naive references (row projections, LCS DP). QtCore only, guiless.
 
 #include "diff/LineDiff.hpp"
+#include "diff/WordDiff.hpp"
 
 #include <QtTest>
 
 using qmn::diff::LineDiff;
+using qmn::diff::WordDiff;
 
 namespace {
 
@@ -61,6 +63,181 @@ int naiveLcsLength(const QStringList& a, const QStringList& b)
         std::swap(prev, cur);
     }
     return prev[b.size()];
+}
+
+// --- car B machine B1 (PLAN §GATE 3 / car B): the word-engine helpers -----
+// The token-level oracles: re-tokenize a line into its token strings,
+// build/mutate token PIECE lists (joined to make the lines), naive token
+// LCS, and the geometry that must hold for EVERY word result: strictly
+// increasing disjoint non-empty spans inside the line, every span edge
+// sitting on a token edge (the absorb pass only ever widens a span
+// across whitespace, which lands on token edges too), no two spans
+// separated by a whitespace-only gap (that IS the absorb pass: maximal
+// modulo whitespace), and the token tiling covering the line exactly.
+
+QStringList tokenStringsOf(const QString& line)
+{
+    QStringList out;
+    for (const WordDiff::Token& t : WordDiff::tokenize(line))
+        out << line.mid(t.start, t.end - t.start);
+    return out;
+}
+
+QString joinPieces(const QStringList& pieces)
+{
+    QString s;
+    for (const QString& p : pieces)
+        s += p;
+    return s;
+}
+
+// Word/separator alternating piece lists; the join tokenizes exactly to
+// the pieces while classes alternate (mutations may merge neighbors into
+// one token — harmless: the oracles re-tokenize the JOINED line, never
+// the piece list).
+QStringList wordPieces(int words, int alphabet, quint64& seed)
+{
+    QStringList out;
+    for (int i = 0; i < words; ++i) {
+        if (i > 0) {
+            switch (rngNext(seed) % 4) {
+            case 0: out << QLatin1String(" "); break;
+            case 1: out << QLatin1String("  "); break;
+            case 2: out << QLatin1String(","); break;
+            default: out << QLatin1String("\t"); break;
+            }
+        }
+        out << QStringLiteral("w%1").arg(int(rngNext(seed) % alphabet));
+    }
+    return out;
+}
+
+QStringList mutatePieces(const QStringList& pieces, int edits, quint64& seed)
+{
+    QStringList out = pieces;
+    for (int e = 0; e < edits; ++e) {
+        const quint64 roll = rngNext(seed);
+        switch (roll % 3) {
+        case 0:
+            out.insert(int(roll % quint64(out.size() + 1)),
+                       QStringLiteral("z%1").arg(int(rngNext(seed) % 9)));
+            break;
+        case 1:
+            if (!out.isEmpty())
+                out.removeAt(int(roll % quint64(out.size())));
+            break;
+        default:
+            if (!out.isEmpty())
+                out[int(roll % quint64(out.size()))] =
+                    QStringLiteral("z%1").arg(int(rngNext(seed) % 9));
+            break;
+        }
+    }
+    return out;
+}
+
+// The token grammar's char classes, re-derived independently of the
+// engine (class 0 = any other single code point):
+int charClassOf(const QChar c)
+{
+    if (c.isSpace())
+        return 1;
+    if (c == QLatin1Char('_') || c.isLetterOrNumber())
+        return 2;
+    return 0;
+}
+
+// Token-level invariants: tiling covers the line exactly, every token is
+// homogeneous (one class, or one code point / one surrogate pair), and
+// adjacent tokens never share a word/space class (the grammar never
+// misses a merge opportunity).
+void verifyTokenGrammar(const QString& line)
+{
+    const QByteArray ctx = "line=" + line.toUtf8() + ' ';
+    const auto toks = WordDiff::tokenize(line);
+    int pos = 0;
+    const QChar nul;
+    QChar prevLast = nul;
+    for (const WordDiff::Token& t : toks) {
+        QVERIFY2(t.start == pos, ctx.constData());
+        QVERIFY2(t.end > t.start, ctx.constData());
+        const int len = t.end - t.start;
+        const int cls = charClassOf(line.at(t.start));
+        if (cls == 0) {
+            QVERIFY2(len == 1 || (len == 2 && line.at(t.start).isHighSurrogate()
+                                      && line.at(t.start + 1).isLowSurrogate()),
+                     ctx.constData());
+        } else {
+            for (int i = t.start; i < t.end; ++i)
+                QVERIFY2(charClassOf(line.at(i)) == cls, ctx.constData());
+        }
+        QVERIFY2(!(cls != 0 && charClassOf(prevLast) == cls),
+                 (ctx + "adjacent same-class tokens").constData());
+        prevLast = line.at(t.end - 1);
+        pos = t.end;
+    }
+    QVERIFY2(pos == int(line.size()), ctx.constData());
+}
+
+// The naive token LCS distance, the changedTokens oracle at small
+// scale (bounded piece lists keep the LCS cells under 65k, so the
+// row type can be a narrow quint16 — the memo-overflow anti-pattern).
+int naiveWordLcsDistance(const QStringList& a, const QStringList& b)
+{
+    const int n = a.size();
+    const int m = b.size();
+    if (n == 0 || m == 0)
+        return n + m;
+    Q_ASSERT(n <= 255 && m <= 255); // keeps quint16 provably safe here
+    QVector<quint16> prev(m + 1, 0);
+    QVector<quint16> cur(m + 1, 0);
+    for (int i = 1; i <= n; ++i) {
+        cur[0] = 0;
+        for (int j = 1; j <= m; ++j) {
+            if (a.at(i - 1) == b.at(j - 1))
+                cur[j] = quint16(prev[j - 1] + 1);
+            else
+                cur[j] = prev[j] > cur[j - 1] ? prev[j] : cur[j - 1];
+        }
+        std::swap(prev, cur);
+    }
+    return n + m - 2 * int(prev[m]);
+}
+
+void verifyWordSpans(const QString& line, const QVector<WordDiff::Span>& spans,
+                     const char* where)
+{
+    const QByteArray ctx = QByteArray(where) + " line=" + line.toUtf8() + ' ';
+
+    QSet<int> edges;
+    int pos = 0;
+    for (const WordDiff::Token& t : WordDiff::tokenize(line)) {
+        QVERIFY2(t.start == pos, ctx.constData());
+        edges.insert(t.end);
+        pos = t.end;
+    }
+    edges.insert(0);
+    QVERIFY2(pos == int(line.size()), ctx.constData());
+
+    int prevEnd = -1;
+    for (const WordDiff::Span& s : spans) {
+        QVERIFY2(s.start >= 0 && s.end <= int(line.size()), ctx.constData());
+        QVERIFY2(s.start < s.end, ctx.constData());
+        QVERIFY2(s.start > prevEnd, ctx.constData());
+        QVERIFY2(edges.contains(s.start) && edges.contains(s.end),
+                 (ctx + "span edge off a token edge").constData());
+        if (prevEnd >= 0) { // maximality modulo whitespace: the gap must
+            bool gapAllSpace = true; // carry a non-space token, else absorb
+            for (int i = prevEnd; i < s.start; ++i) { // was lazy and it
+                if (!line.at(i).isSpace()) {          // failed hard
+                    gapAllSpace = false;
+                    break;
+                }
+            }
+            QVERIFY2(!gapAllSpace, (ctx + "whitespace-only span gap").constData());
+        }
+        prevEnd = s.end;
+    }
 }
 
 QByteArray describe(const QStringList& a, const QStringList& b, const LineDiff::Result& r)
@@ -427,6 +604,262 @@ private slots:
         QCOMPARE(totalEdits(r), 42); // 20 edits + 1 delete + 1 insert
         verifyCommonInvariants(a, b, r, Q_FUNC_INFO);
         QVERIFY2(elapsed < 250, qPrintable(QStringLiteral("diff took %1 ms").arg(elapsed)));
+    }
+// --- car B machine B1: the word-diff engine (PLAN §GATE 3 / car B) -------
+
+    void wordTokenizationTilesTheLine()
+    {
+        const QStringList samples = {
+            QString(), QStringLiteral("hello world"), QStringLiteral("a,b  c\td"),
+            QStringLiteral("   "), QStringLiteral("x_1 42 + ="),
+            QStringLiteral("\U0001F600x"), QStringLiteral("a\U0001F600b"),
+        };
+        for (const QString& line : samples)
+            verifyTokenGrammar(line);
+
+        // Surrogate pairs are ONE token (the view-painting discipline this
+        // layer keeps; a split here would paint half a grapheme).
+        const auto emo = WordDiff::tokenize(QStringLiteral("\U0001F600x"));
+        QCOMPARE(emo.size(), 2);
+        QCOMPARE(emo.at(0).start, 0);
+        QCOMPARE(emo.at(0).end, 2);
+        QCOMPARE(emo.at(1).start, 2);
+        QCOMPARE(emo.at(1).end, 3);
+        const auto mixed = WordDiff::tokenize(QStringLiteral("a\U0001F600b"));
+        QCOMPARE(mixed.size(), 3);
+        QCOMPARE(mixed.at(0).end, 1);
+        QCOMPARE(mixed.at(1).end, 3);
+        QCOMPARE(mixed.at(2).end, 4);
+    }
+
+    void wordSpansSitOnTokenEdgesAndStayOrdered()
+    {
+        quint64 seed = 0xC0FFEE;
+        for (int iter = 0; iter < 300; ++iter) {
+            const QStringList pieces = wordPieces(1 + int(rngNext(seed) % 13), 7, seed);
+            const QStringList mod = mutatePieces(pieces, 1 + int(rngNext(seed) % 3), seed);
+            const QString a = joinPieces(pieces);
+            const QString b = joinPieces(mod);
+            const auto r = WordDiff::compute(a, b);
+            verifyWordSpans(a, r.originalSpans, Q_FUNC_INFO);
+            verifyWordSpans(b, r.modifiedSpans, Q_FUNC_INFO);
+        }
+    }
+
+    void wordChangedTokenCountMatchesNaiveLcs()
+    {
+        quint64 seed = 0xBEEF;
+        for (int iter = 0; iter < 150; ++iter) {
+            const QStringList pieces = wordPieces(1 + int(rngNext(seed) % 12), 5, seed);
+            const QStringList mod = mutatePieces(pieces, 1 + int(rngNext(seed) % 4), seed);
+            const QString a = joinPieces(pieces);
+            const QString b = joinPieces(mod);
+            const auto r = WordDiff::compute(a, b);
+            QVERIFY2(!r.budgetExhausted, Q_FUNC_INFO); // small pairs, far from 256
+            QCOMPARE(r.changedTokens,
+                     naiveWordLcsDistance(tokenStringsOf(a), tokenStringsOf(b)));
+        }
+    }
+
+    void wordSpansAbsorbWhitespaceOnlyGaps()
+    {
+        // Two words changed across a plain space: ONE whole-line wash per
+        // side (the absorb pass; the edit COUNT stays 4 tokens).
+        auto r = WordDiff::compute(QStringLiteral("a b"), QStringLiteral("X Y"));
+        QCOMPARE(r.changedTokens, 4);
+        QCOMPARE(r.originalSpans.size(), 1);
+        QCOMPARE(r.originalSpans.at(0).start, 0);
+        QCOMPARE(r.originalSpans.at(0).end, 3);
+        QCOMPARE(r.modifiedSpans.size(), 1);
+        QCOMPARE(r.modifiedSpans.at(0).start, 0);
+        QCOMPARE(r.modifiedSpans.at(0).end, 3);
+
+        // An unchanged NON-space token between the changes forbids the
+        // merge (only whitespace gaps absorb).
+        r = WordDiff::compute(QStringLiteral("a q b"), QStringLiteral("X q Y"));
+        QCOMPARE(r.changedTokens, 4);
+        QCOMPARE(r.originalSpans.size(), 2);
+        QCOMPARE(r.originalSpans.at(0).start, 0);
+        QCOMPARE(r.originalSpans.at(0).end, 1);
+        QCOMPARE(r.originalSpans.at(1).start, 4);
+        QCOMPARE(r.originalSpans.at(1).end, 5);
+        QCOMPARE(r.modifiedSpans.size(), 2);
+        QCOMPARE(r.modifiedSpans.at(1).start, 4);
+        QCOMPARE(r.modifiedSpans.at(1).end, 5);
+
+        // One word changed: the span sits exactly on the token.
+        r = WordDiff::compute(QStringLiteral("foo  bar"), QStringLiteral("foo  baz"));
+        QCOMPARE(r.changedTokens, 2);
+        QCOMPARE(r.originalSpans.size(), 1);
+        QCOMPARE(r.originalSpans.at(0).start, 5);
+        QCOMPARE(r.originalSpans.at(0).end, 8);
+        QCOMPARE(r.modifiedSpans.size(), 1);
+        QCOMPARE(r.modifiedSpans.at(0).start, 5);
+        QCOMPARE(r.modifiedSpans.at(0).end, 8);
+
+        // A wider (double-space) absorb gap: still one whole-line wash.
+        r = WordDiff::compute(QStringLiteral("a  b"), QStringLiteral("X  Y"));
+        QCOMPARE(r.changedTokens, 4);
+        QCOMPARE(r.originalSpans.size(), 1);
+        QCOMPARE(r.originalSpans.at(0).end, 4);
+        QCOMPARE(r.modifiedSpans.size(), 1);
+        QCOMPARE(r.modifiedSpans.at(0).end, 4);
+    }
+
+    void wordDiffBudgetFallbackCoversWholeLines()
+    {
+        // The pair the auto cap trips on (602 token edits > 256): whole-
+        // line spans on both non-empty sides + the coarse changedTokens
+        // (every token of both sides counted) — the line engine's valid-
+        // but-coarser fallback discipline, verbatim.
+        const QString small = QStringLiteral("l16 EDIT");
+        QStringList ys;
+        for (int i = 0; i <= 300; ++i)
+            ys << QStringLiteral("Y%1").arg(i);
+        const QString heavy = ys.join(QLatin1Char(' ')) + QLatin1Char(' ') + small;
+        const auto r = WordDiff::compute(heavy, small);
+        QVERIFY2(r.budgetExhausted, Q_FUNC_INFO);
+        QCOMPARE(r.originalSpans.size(), 1);
+        QCOMPARE(r.originalSpans.at(0).start, 0);
+        QCOMPARE(r.originalSpans.at(0).end, heavy.size());
+        QCOMPARE(r.modifiedSpans.size(), 1);
+        QCOMPARE(r.modifiedSpans.at(0).start, 0);
+        QCOMPARE(r.modifiedSpans.at(0).end, small.size());
+        QCOMPARE(r.changedTokens,
+                 WordDiff::tokenize(heavy).size() + WordDiff::tokenize(small).size());
+
+        // An explicit budget above the cap lets the SAME pair through:
+        // one delete-block span over exactly the Y run (the small line is
+        // a token SUFFIX of the heavy one), no modified-side span, and
+        // the minimal token edit count.
+        const auto r2 = WordDiff::compute(heavy, small, 1000);
+        QVERIFY2(!r2.budgetExhausted, Q_FUNC_INFO);
+        QVERIFY2(r2.modifiedSpans.isEmpty(), Q_FUNC_INFO);
+        QCOMPARE(r2.originalSpans.size(), 1);
+        QCOMPARE(r2.originalSpans.at(0).start, 0);
+        QCOMPARE(r2.originalSpans.at(0).end, heavy.indexOf(small));
+        QCOMPARE(r2.changedTokens,
+                 WordDiff::tokenize(heavy).size() - WordDiff::tokenize(small).size());
+
+        // Budget 0: any difference in the trimmed-in region collapses the
+        // pair to whole lines...
+        const auto r3 = WordDiff::compute(heavy, small, 0);
+        QVERIFY2(r3.budgetExhausted, Q_FUNC_INFO);
+        QCOMPARE(r3.originalSpans.size(), 1);
+        QCOMPARE(r3.modifiedSpans.size(), 1);
+
+        // ...while a fully-trimmed equal pair stays silent at ANY budget.
+        const auto r4 = WordDiff::compute(heavy, heavy, 0);
+        QVERIFY2(!r4.budgetExhausted, Q_FUNC_INFO);
+        QVERIFY2(r4.changedTokens == 0, Q_FUNC_INFO);
+        QVERIFY2(r4.originalSpans.isEmpty() && r4.modifiedSpans.isEmpty(), Q_FUNC_INFO);
+
+        // Equal-and-empty pairs are silent at the auto budget too:
+        // identical lines produce no spans at all...
+        const auto r5 = WordDiff::compute(QStringLiteral("x y z"),
+                                          QStringLiteral("x y z"));
+        QVERIFY2(r5.changedTokens == 0 && r5.originalSpans.isEmpty()
+                     && r5.modifiedSpans.isEmpty() && !r5.budgetExhausted, Q_FUNC_INFO);
+        // ...and a whole-line vs empty pair is one block span exactly as
+        // large as the non-empty side's token extent (the whole line).
+        const auto r6 = WordDiff::compute(QStringLiteral(""),
+                                          QStringLiteral("a b"));
+        QVERIFY2(r6.originalSpans.isEmpty(), Q_FUNC_INFO);
+        QCOMPARE(r6.modifiedSpans.size(), 1);
+        QCOMPARE(r6.modifiedSpans.at(0).start, 0);
+        QCOMPARE(r6.modifiedSpans.at(0).end, 3);
+        QCOMPARE(r6.changedTokens, 3);
+        const auto r7 = WordDiff::compute(QStringLiteral("a b"),
+                                          QStringLiteral(""));
+        QVERIFY2(r7.modifiedSpans.isEmpty(), Q_FUNC_INFO);
+        QCOMPARE(r7.originalSpans.size(), 1);
+        QCOMPARE(r7.originalSpans.at(0).end, 3);
+        QCOMPARE(r7.changedTokens, 3);
+    }
+
+    void wordDiffInlinePassSkipsExhaustedPairs()
+    {
+        // The pair-level story the view's inline pass (B2) rides, run
+        // engine-side inside ONE line-alignment frame: replace-hunk pairs
+        // whose token D exceeds kAutoEditBudget come back
+        // budgetExhausted while the others stay exact — the view can
+        // therefore skip exactly the coarse rows and wash the rest. (The
+        // LINE engine's far larger auto budget does NOT trip on this
+        // document: only the word engine's per-pair cap does.)
+        QStringList a;
+        for (int i = 0; i < 40; ++i)
+            a << QStringLiteral("l%1 EDIT").arg(i);
+        QStringList b = a;
+        for (int i = 13; i <= 15; ++i)
+            b[i] = QStringLiteral("l%1 EDIT2").arg(i); // light: 2 token edits
+        QStringList ys;
+        for (int i = 0; i <= 300; ++i)
+            ys << QStringLiteral("Y%1").arg(i);
+        const QString yRun = ys.join(QLatin1Char(' '));
+        for (int i = 16; i <= 24; ++i)
+            b[i] = yRun + QLatin1Char(' ') + a[i]; // heavy: 602 token edits
+
+        const auto frame = LineDiff::compute(a, b);
+        QVERIFY2(!frame.budgetExhausted, Q_FUNC_INFO); // the line engine is fine
+        QCOMPARE(frame.rows.size(), 40);
+
+        // The inline walk over the frame's rows, exactly as B2 will run it.
+        QVector<WordDiff::Span> modifiedSpans;
+        QVector<WordDiff::Span> originalSpans;
+        QElapsedTimer timer;
+        timer.start();
+        for (const auto& row : frame.rows) {
+            if (row.originalLine < 0 || row.modifiedLine < 0)
+                continue; // a blank cell never pairs
+            if (a.at(row.originalLine) == b.at(row.modifiedLine))
+                continue; // an aligned equal row needs no inline detail
+            const auto r = WordDiff::compute(a.at(row.originalLine),
+                                             b.at(row.modifiedLine));
+            if (r.budgetExhausted)
+                continue; // the row stays bare-band: coarse but valid
+            modifiedSpans << r.modifiedSpans;
+            originalSpans << r.originalSpans;
+        }
+        const qint64 elapsed = timer.elapsed();
+        QVERIFY2(elapsed < 800, qPrintable(QStringLiteral("inline storm took %1 ms").arg(elapsed)));
+        QCOMPARE(modifiedSpans.size(), 3); // the three light pairs survived
+        QCOMPARE(originalSpans.size(), 3);
+        QCOMPARE(modifiedSpans.at(0).start, 4); // "l13 EDIT2": the EDIT token
+        QCOMPARE(modifiedSpans.at(0).end, b.at(13).size());
+        QCOMPARE(originalSpans.at(0).start, 4);
+        QCOMPARE(originalSpans.at(0).end, a.at(13).size());
+    }
+
+    void wordDiffCapSurvivesBudgetExhaustedPairs()
+    {
+        // A storm of cap-tripping pairs: the D-loop work stays bounded by
+        // the cap (256^2/2 diagonals per pair, NOT the pair size), every
+        // result stays a VALID whole-line geometry, and the storm costs
+        // real but bounded time. (The line engine's own budget slot above
+        // pins the line-shape version of this story.)
+        QStringList base;
+        for (int i = 0; i < 160; ++i)
+            base << QStringLiteral("t%1").arg(i);
+        const QString a = base.join(QLatin1Char(' '));
+        QStringList other;
+        for (int i = 0; i < 160; ++i)
+            other << QStringLiteral("u%1").arg(i);
+        const QString b = other.join(QLatin1Char(' '));
+        QElapsedTimer timer;
+        timer.start();
+        for (int iter = 0; iter < 300; ++iter) {
+            const auto r = WordDiff::compute(a, b);
+            QVERIFY2(r.budgetExhausted, Q_FUNC_INFO);
+            QCOMPARE(r.originalSpans.size(), 1);
+            QCOMPARE(r.originalSpans.at(0).start, 0);
+            QCOMPARE(r.originalSpans.at(0).end, a.size());
+            QCOMPARE(r.modifiedSpans.size(), 1);
+            QCOMPARE(r.modifiedSpans.at(0).end, b.size());
+            QVERIFY2(r.changedTokens == WordDiff::tokenize(a).size()
+                                   + WordDiff::tokenize(b).size(), Q_FUNC_INFO);
+        }
+        const qint64 elapsed = timer.elapsed();
+        QVERIFY2(elapsed < 800, qPrintable(QStringLiteral("cap storm took %1 ms").arg(elapsed)));
     }
 };
 

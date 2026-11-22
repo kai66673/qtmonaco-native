@@ -3,6 +3,71 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.10.0] — 2026-11-22 — GATE 3 car B (M10b) CLOSED — word-level inline diff, the wrap×diff budget math, and the read column that wraps
+
+### Added
+- **Word-level inline highlight inside replace hunks** (the first M10b
+  machine): `src/diff/WordDiff` — a line PAIR goes in, per-side UTF-16
+  span lists come out (deleted-token spans in original coordinates,
+  inserted-token spans in modified), plus `changedTokens` (the token
+  edit distance, the test oracle). Token grammar: maximal
+  `[letter/digit/_]` runs, maximal whitespace runs, every other code
+  point its own token; Miller trim then the SAME Myers D-loop as the
+  line engine — the kernel moved into an internal shared seam
+  (`diff/MyersCore.hpp`, never a public door; the LineDiff suite pins
+  the extraction). Spans group per change block, then an absorb pass
+  merges whitespace-only gaps (a word move reads as one wash). Per-pair
+  cap 256 edits; exhaustion = whole-line spans, valid but coarse.
+  `tests/tst_diff.cpp` grew to 25 slots.
+- **The inline wash in the view** (no new public door): a sync tail of
+  `recomputeDiff` computes the pair spans per replace row; the modified
+  window paints the inserted wash, the chrome the deleted wash, under
+  the glyphs. Two NEW additive Theme Roles (`DiffAddedWord`,
+  `DiffDeletedWord`) — the decoration-role widening is the M5/M10
+  precedent, and they cross the wheel as plain enum values of the
+  already-bound Theme class (three-copies untouched). Latency guards:
+  400 pairs + 150 ms per pass, exhaustion leaves lower rows bare-band
+  (the visible top wins first). Tripwires:
+  `diffInlineWordWashPixels`,
+  `diffInlineWashSkipsPureInsertDeleteRows`,
+  `diffInlinePassCapsLeaveLowerRowsBareBand`.
+- **Soft wrap is LIVE inside diff mode on BOTH columns** (the deepest
+  machine): the alignment row axis goes WEIGHTED —
+  `weight(row) = foldHidden(mod) ? 0 : (wrap OFF ? 1 : max(1, modSlots,
+  origSlots))`, unmeasured lines provisional-1 (M25's honest-monomotone
+  discipline verbatim), one `kWrapBudgetMs` deadline per pass covers
+  both sides' frontier walkers, the ORIGINAL document gets its own
+  wrap-plan cache in `DiffState` (read-window px as its width key).
+  Paint/hit/hover/drag on both columns resolve `(slot − rowPrefix[row])`
+  as the fragment index: clicks ride their fragment, the band right of a
+  fragment's last glyph clamps to the FRAGMENT end, over-tail slots (the
+  other side wraps deeper) carry no modified ink and clicks there
+  degrade to col 0 of the mapped line, the inline/selection washes and
+  the glyph clip cut at the break, the row number rides the first slot
+  only, and the original selection's hairline frame spans the whole row
+  (no interior stripe cuts a wrapped line). Five tripwires
+  (`diffWrapKnobInsideDiffWeightsTheRowAxis` …
+  `diffWrapOrigSelectionFrameSpansTheRowNotTheSlot`) build expected
+  cuts by simulating the break discipline, never by reading the
+  engine's tables back; every wrap-OFF twin stayed green byte-for-byte.
+
+### Changed
+- The recorded M10 divergence "the read column does not wrap —
+  triple-click is the way to take a long line" NARROWS: with the wrap
+  knob on, the original column wraps too and clicks/drags/hover select
+  per fragment.
+- The engine's wrap fits test is pinned ABSOLUTE
+  (`xAt(col) ≤ rowOrigin + width`): a continuation row gets the full
+  window from its own origin (the test-side simulation first got the
+  dimension wrong; the engine's measured totals were right).
+
+### Wheel half of the close (the four-literal ritual)
+`qmn_native-1.10.0` rebuilt in the container; smoke + qtmonaco parity
+green against the repaired wheel (one Qt6Core, one Qt6Network); the
+`--codegen` rejected-log audit holds the G3 baseline EXACTLY (the 16
+glue drops, all other entries pre-existing noise, NO new drop);
+pydemo's path-dep bumped to the new wheel and its headless run exits 0.
+
 ## [1.9.2] — 2026-11-22 — GATE 3 car 0 close: the recorded defect pair — the a11y undo-mark drift and the overview-ruler O(doc) cliff
 
 ### Fixed
