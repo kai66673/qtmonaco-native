@@ -186,6 +186,17 @@ public:
     qint64 resolveCompletionItem(qmn::view::CodeEditor* editor,
                                  const QJsonObject& item,
                                  const FeatureHandler& onReply);
+    // GATE 3 car C (C2): textDocument/signatureHelp. The context rides the
+    // SAME triggerKind rule as requestCompletion: empty triggerCharacter =
+    // Invoked (1), a character = TriggerForCharacter (2) riding with it. The
+    // client declares textDocument.signatureHelp {contextSupport:true} in
+    // initialize (and NOTHING about signatureInformation — a plain-text
+    // popup cannot paint parameter documentation or an active-parameter
+    // underline, so the client never claims it can).
+    qint64 requestSignatureHelp(qmn::view::CodeEditor* editor,
+                                const qmn::view::TextPosition& position,
+                                const FeatureHandler& onReply,
+                                const QString& triggerCharacter = QString());
     // The v1 codeAction request is the zero-width range AT the position plus
     // this document's CURRENT diagnostics in context (clangd's quickfixes
     // depend on them — the hub re-encodes its own decoded set).
@@ -215,6 +226,20 @@ public:
     //   The cursorMoved that pairs with an editApplied is the edit's OWN
     //   move (typing never hovers), and hover is skipped while a completion
     //   is in flight or visible.
+    //   signatureHelp (GATE 3 car C, C2) — the SAME typing edit also re-arms
+    //   a kSignatureTriggerMs debounce; at fire time the unit BEFORE the
+    //   caret is classified: one of the signatureHelpProvider's advertised
+    //   triggerCharacters (default "(" and "," when the provider names none)
+    //   asks TriggerForCharacter (2); anything else SUPERSEDES an in-flight
+    //   ask and hides a signature-owned popup (typing ")" or a plain unit
+    //   ends the round). The popup is the SHARED hover popup: the hub shows
+    //   signatures[activeSignature] (clamped) with its label VERBATIM,
+    //   zero-width anchored at the fire-time caret; activeParameter is
+    //   DROPPED (a plain-text popup never underlines it — the recorded
+    //   plain-label divergence, the m6 no-markdown bullet extended). Hover
+    //   and signature never share the moment: each skips while the other
+    //   owns the popup or rides in flight, and typing only arms signature,
+    //   non-typing moves only arm hover.
     //
     // Decoded feeds (the view doors are plain-Qt payloads, PLAN's popup
     // shape): completion items -> {label, detail}, the list capped at
@@ -236,8 +261,9 @@ public:
     // OFF by default, per editor: a hub that never opts in changes not one
     // wire byte (every existing test's traffic stays byte-identical). The
     // door needs an OPEN document (triggers ride the registration); turning
-    // OFF stops the timers, cancels the in-flight completion and hides both
-    // popups. The ACCEPT route rides this door too (post-1.8.0 sliver): a
+    // OFF stops the timers, cancels the in-flight completion AND the in-flight
+    // signature ask, and hides both popups. The ACCEPT route rides this door
+    // too (post-1.8.0 sliver): a
     // row the user accepts in the popup reaches the hub through the view's
     // completionAccepted signal, and the hub applies the row's textEdit via
     // applyTextEdits — ONE undo group, the syncer riding textChanged like
@@ -246,9 +272,71 @@ public:
     // document, is a silent refusal.
     static constexpr int kCompletionTriggerMs = 150;
     static constexpr int kHoverTriggerMs = 500;
+    static constexpr int kSignatureTriggerMs = 150;
     static constexpr int kMaxCompletionRows = 100;
     void setPopupTriggers(qmn::view::CodeEditor* editor, bool on);
     bool popupTriggersEnabled(qmn::view::CodeEditor* editor) const;
+
+    // --- fold feed (GATE 3 car C, C3): textDocument/foldingRange ------------
+    // The hub-internal half of the fold-provider seam (the VIEW-side seam is
+    // the C1 pair `setFoldRanges`/`clearFoldRanges`): when the serving server
+    // OFFERS folds — initialize `foldingRangeProvider` or the registry's
+    // dynamic `textDocument/foldingRange` registration — the hub asks and
+    // feeds, and the C1 seam makes that feed the editor's ONE fold source
+    // (grammar `@fold` and the indent fallback go silent: one provider per
+    // editor, enforced by construction). No FeatureHandler door crosses here
+    // (the hub owns the feed, no std::function in any signature), so the
+    // wheel's rejected log gains NOTHING new.
+    //
+    // The client declares `textDocument.foldingRange {lineFoldingOnly:true}`
+    // — honest, because the view folds LINES: the wire's startCharacter/
+    // endCharacter are DECODED NOWHERE. The spec's `endLine` is INCLUSIVE and
+    // the view's FoldRange pair is too, so the two line pairs meet directly.
+    // Decode discipline: clamp each line into the document, DROP `end <=
+    // start` (a fold that hides nothing), sort start asc / end desc and keep
+    // ONE entry per start (the WIDEST) — the tie rule of the view door
+    // `setFoldRanges` verbatim (its documented contract), so the decode and
+    // the door can never disagree about what a chatty wire means.
+    //
+    // Edges: after didOpen (a session already READY when the document opens),
+    // after every re-READY, and debounced on EVERY editApplied — a
+    // document replace is the core's one whole-document EditEvent, so the
+    // same tap covers it (the C1 seam already cleared the stale override at
+    // the replace itself). The ask FLUSHES the syncer first (like every
+    // feature door: the request asks about the text the server agrees with)
+    // and one ask is in flight per document, the re-arm discipline of the
+    // completion timer. The answer shapes:
+    //   ARRAY  -> feed (even when EMPTY: empty is the authority "nothing is
+    //             foldable", the grammar stays mute while the claim stands);
+    //   NULL   -> the same empty feed (the spec's own null means "no folds");
+    //   ERROR  -> the claim FELL THROUGH: `clearFoldRanges()` hands the fold
+    //             source back to the grammar, and THIS document stops asking
+    //             until an open/re-READY edge re-arms it (a server that said
+    //             no to an advertised provider is not hammered on every
+    //             keystroke — the recorded reading);
+    // teardown (closeDocument/editor death) cancels the in-flight ask and
+    // clears ONLY A SET THE HUB ACTUALLY FED (the single-writer convention D3
+    // minted for hints: never wipe an override some other writer installed).
+    static constexpr int kFoldRefreshMs = 300;
+    // A fold ask answers a plain line table; a HINT ask is heavier (label +
+    // position per hint), so its window is wider and CAPPED on both sides:
+    // `kInlayHintRangeLines` lines of document per ask, `kMaxLspInlayHints`
+    // hints per set (stop adding past the cap, then pin the whole decoded
+    // window to the view door — the cap rides the wire, not the paint).
+    static constexpr int kHintRefreshMs = 300;
+    static constexpr int kMaxLspInlayHints = 500;
+    static constexpr int kInlayHintRangeLines = 2000;
+    // Test/inspection door: did the fold feed for this document EVER hand the
+    // view a set (the teardown-clear's precondition, and the honest answer to
+    // "is this editor folding what the server said?").
+    bool foldsFedFromServer(qmn::view::CodeEditor* editor) const;
+
+    // car C (C4): the same two questions about the M5 INLAY-HINT door — the
+    // hub's hint feed is the other half of D3's "single-writer convention"
+    // over that door (qmn reads inlayHints() after a DAP stop-feed clears;
+    // here the LSP side writes the same door, and a teardown clears ONLY a
+    // set this hub fed).
+    bool hintsFedFromServer(qmn::view::CodeEditor* editor) const;
 
     // --- the write path: WorkspaceEdit application ------------------------
     // Both directions of the same machinery: a SERVER-primed edit
@@ -381,7 +469,13 @@ private:
         const qmn::lsp::DocumentSyncer* syncer,
         const qmn::view::TextPosition& pos) const;
     void registerClient(const QString& specName, SpecClient& entry);
-    void releaseRegistration(const QString& uri);
+    void releaseRegistration(const QString& uri,
+                             bool editorAlive
+                             = true); // false ONLY from the QObject::destroyed
+                                      // relay: the CodeEditor part is gone by
+                                      // then, so the fold-feed teardown skips
+                                      // the (pointless) view clear — its
+                                      // cancel + state death still happen
     QString resolveUri(qmn::view::CodeEditor* editor, const QString& uri);
     // The popup trigger machinery (the doors above): state lives per
     // registration key, born with the first setPopupTriggers(true) and gone
@@ -409,6 +503,55 @@ private:
     void onTriggerMouseHover(const QString& uri,
                              const qmn::view::TextPosition& pos);
     void fireCompletionTrigger(const QString& uri);
+    void fireSignatureTrigger(const QString& uri); // car C (C2): the
+                                                   // signatureHelp twin,
+                                                   // classified at fire time
+    // The fold feed (car C, C3): the state lives per registration key NEXT
+    // TO the trigger state but is NOT gated by its `on` bit — the feed is
+    // hub-internal, a hub that never touched setPopupTriggers still feeds.
+    struct FoldFeed; // timer + in-flight id + the two authority bits;
+                     // defined in the .cpp
+    struct HintFeed; // timer + in-flight id + the fed bit; .cpp-defined
+    FoldFeed* foldFeedEntry(const QString& uri); // creates it (fold-provider
+                                                 // gate ALREADY passed)
+    bool foldingRangeLive(const QString& uri) const; // registration + client
+                                                     // + offered-or-registered
+    void armFoldFeed(const QString& uri,
+                     bool authorityEdge = false); // re-arm the kFoldRefreshMs
+                                          // debounce (open / re-READY / edit
+                                          // edges). `authorityEdge` is the
+                                          // open/READY shape: it CLEARS the
+                                          // refused bit (a fresh session or a
+                                          // fresh document is a fresh claim);
+                                          // a plain edit edge stays down while
+                                          // the refusal stands
+    void requestFoldsNow(const QString& uri); // the fire-time body: flush,
+                                              // supersede, ask, decode, feed
+    void handBackFolds(const QString& specName); // client-death: every fed
+                                                 // document of this spec goes
+                                                 // back to the grammar
+    // car C (C4): the whole-document inlayHint ask + its decode. Positions
+    // come through the PositionConverter against the SYNCER MIRROR (the only
+    // frame that keeps wire offsets honest); the view door is a whole-set
+    // write, like folds'.
+    HintFeed* hintFeedEntry(const QString& uri); // creates it (gate ALREADY
+                                                 // passed)
+    // The provider gate, folds' shape verbatim: offered at initialize OR
+    // dynamic-registered (workspace/didChangeConfiguration). The hub
+    // declares `inlayHintProvider: {}` and never asks for semanticTokens, so
+    // `textDocument/inlayHint` can never arrive as a dynamic registration —
+    // the OR branch stays for symmetry with folds and costs nothing.
+    bool inlayHintLive(const QString& uri) const;
+    // re-arm the kHintRefreshMs debounce on an edge (open / re-READY /
+    // edit). No `refused` bit: an error answer leaves the LAST hint set
+    // standing, and the next edge re-arms (the door has no grammar to hand
+    // back to — recorded in the close-out).
+    void armHintFeed(const QString& uri);
+    void requestHintsNow(const QString& uri);
+    // clear the hub's OWN hint sets for a dying claim — NEVER a producer this
+    // hub never fed (an app's hints, DAP's stop table: the fed bit is the
+    // gate, single-writer convention).
+    void handBackHints(const QString& specName);
     void fireHoverTrigger(const QString& uri); // caret wrapper: reads the
                                                // LATEST caret at fire time
     void fireHoverAt(const QString& uri,
@@ -427,6 +570,13 @@ private:
     // uri -> trigger state. std::map (NOT QMap/QHash): the values are
     // move-only, and Qt 6.9+'s detachable containers need copyable ones.
     std::map<QString, std::unique_ptr<TriggerState>> triggers_;
+    // uri -> fold-feed state (car C, C3). Same std::map reason, and the SAME
+    // life: born with the registration, gone with it.
+    std::map<QString, std::unique_ptr<FoldFeed>> folds_;
+    // per-DOCUMENT hint state (C4): the debounce timer is one per document,
+    // like every feed's; the fed bit protects a producer the hub never
+    // installed (an app's hints, DAP's stop table).
+    std::map<QString, std::unique_ptr<HintFeed>> hints_;
     int debounceMs_ = 400; // PLAN default; the hub's test seam
     int nextUntitled_ = 0; // uris the app never set get an "untitled:" key
     bool closingDown_ = false;

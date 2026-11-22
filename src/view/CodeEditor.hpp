@@ -823,6 +823,33 @@ public:
     void collapseAll();
     void expandAll();
 
+    // --- fold PROVIDER seam (M8b car C, C1): server folds -------------
+    // A foldingRange provider REPLACES the view's own fold source while
+    // installed — the one-provider-per-editor knot ENFORCED by
+    // construction: grammar `@fold` captures AND the indent fallback go
+    // SILENT, no second feed can ever reach the one M13 store (the
+    // store/machinery/slot-space layers are untouched; only the SOURCE
+    // switches). The fed ranges are VERBATIM authority: the view never
+    // shifts them across edits (the provider re-feeds; until then moved
+    // blocks keep stale foldables — the honest staleness), only
+    // DOCUMENT clamping applies, at read time. SOURCE SWITCHES — install
+    // OR clear — unfold everything first: a collapsed fold belongs to
+    // its source, no alien hidden run survives a provider change (same
+    // event class as the doc-replace clear). A RE-FEED while active (the
+    // debounced refresh) KEEPS collapsed state — refreshes must not
+    // fight the user's folds — and a start the new feed dropped
+    // auto-expands on the next paint (the third removal route). A
+    // document replace CLEARS the override exactly where M13 clears fold
+    // state (ranges speak line numbers; stale by definition). In server
+    // mode foldableRanges() reports the WHOLE fed set (clamped, ends
+    // exact — no window slice, no lazy resolution) and
+    // isFoldable/foldLine answer for any line. An EMPTY feed is the
+    // authority "nothing is foldable" — only clearFoldRanges() restores
+    // the grammar/indent source (byte-for-byte, incl. the indent
+    // fallback being mute in grammar-fold modes, as always).
+    void setFoldRanges(const QVector<FoldRange>& ranges);
+    void clearFoldRanges();
+
     // --- M10 diff view (Gate 2; semantics: PLAN GATE 2 §M10) ---------------
     // Diff mode puts TWO documents in ONE widget (the "one editor per
     // document" contract untouched): the editor's OWN attached document IS
@@ -1504,6 +1531,19 @@ private:
     // keeps it warm.
     mutable QVector<FoldState> foldables_; // sorted by start, one per start
     void recomputeFoldables(int firstModel, int lastModel);
+    // C1 (M8b): the installed fold-PROVIDER ranges, normalized at feed
+    // time (clamped to the doc, end>start kept, sorted start asc / end
+    // desc, one per start — outermost leads). serverFoldsActive_ is TRUE
+    // for an EMPTY feed too: the PRESENCE of the override is the switch,
+    // not its content (empty = authority "nothing is foldable"). The
+    // vector is NEVER shifted by edits (verbatim authority); shrinking
+    // docs are handled by read-time clamping — see setFoldRanges docs.
+    QVector<FoldState> serverFoldRanges_;
+    bool serverFoldsActive_ = false;
+    void recomputeServerFoldables(int firstModel, int lastModel); // window
+    // slice of the feed + the drop-on-re-feed auto-expand (paint path)
+    int serverFoldEndForLine(int line) const; // read-time-clamped exact end,
+    // -1 when the line is not a (still real) feed start
     int foldEndForLine(int line); // exact end (engine full query, else indent scan)
     int indentOfModelLine(int line) const; // leading ws units; -1 = blank line
     // M21: one visible line's indent guides, painted in the text slot loop

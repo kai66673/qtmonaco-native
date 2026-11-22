@@ -78,6 +78,27 @@
 //            and every accepted settings object echoes back as a
 //            window/showMessage "CONFIG-<n> <compact-json>" so the test sees
 //            the payload and the order of what actually crossed the wire.
+//            GATE 3 car C adds the fold authority: "foldingrange" advertises
+//            foldingRangeProvider (after reading the CLIENT's
+//            lineFoldingOnly claim back — a client that asks for folds without
+//            declaring it is exit 2) and answers every ask from its OWN text
+//            mirror, so an edit changes the answer; "foldempty" answers the
+//            empty array, "foldfail=<N>" refuses asks past N (the claim that
+//            fell through), "folddelay=<N>" holds the answer so a test can
+//            close the document over an ask still in flight. A foldingRange
+//            ask that reaches a server WITHOUT the flag is a hub gate bug:
+//            exit 2, like the other OFF providers. Car C adds the hint
+//            authority next to the fold one: "inlayhint" advertises
+//            inlayHintProvider (after reading the CLIENT's textDocument.
+//            inlayHint claim back — absent is exit 2) and answers every ask
+//            from its own text mirror, echoing the LAST ask's range end
+//            through "test/hintState" (that end naming the CURRENT mirror IS
+//            the flush-before-ask proof, far-side); "hintnull" answers NULL
+//            (the empty-set authority), "hintfail=<N>" refuses past N (the
+//            hint door's ASYMMETRY with folds: the last set stands),
+//            "hintmany=<N>" answers N synthetic hints (the client cap pin),
+//            "hintdelay=<N>" holds the answer for the close-over-in-flight
+//            cancel pin. An inlayHint ask without the flag is exit 2 too.
 //
 // The exit code IS the oracle for the answers the client side cannot see
 // (the battery's wire shapes); tst_lsp asserts exitCode 0 where the mode's
@@ -149,6 +170,57 @@ bool g_hoverOn = false;   // argv flag (rides features): FLIPS hoverProvider
                           // trigger sliver's door. Without it the machine-5
                           // OFF-provider tripwire stands (hover reaching the
                           // server still exits 2).
+bool g_sigHelp = false;   // GATE 3 car C (C2): the "signaturehelp" mode's
+                          // provider flag — signatureHelpProvider with "("
+                          // and "," triggerCharacters, hoverProvider FALSE
+                          // (the shared popup keeps one owner per mode), the
+                          // SIGSTATE echo door, and the sigdelay hold.
+                          // completionon rides it to light BOTH debounces.
+QStringList g_completionTriggers; // the ADVERTISED completion trigger set,
+                                  // mirrored from the capability block so the
+                                  // handler's refusal of an un-advertised
+                                  // char can never drift from what the client
+                                  // was told (features: ["."]; the car C
+                                  // completionon shape: ["s"])
+bool g_foldRange = false; // GATE 3 car C (C3): foldingRangeProvider + the
+                          // foldReport answer. RIDES sync mode: the fold
+                          // oracle reads this server's own text MIRROR (the
+                          // didOpen/didChange tracking sync owns), and the
+                          // test/* echo doors are sync's too.
+bool g_foldEmpty = false; // argv "foldempty" (rides foldingrange): answer the
+                          // EMPTY array — the "the authority says nothing is
+                          // foldable" pin (the grammar must stay mute)
+int g_foldFailAfter = -1; // argv "foldfail=<N>" (rides foldingrange): answer
+                          // an ERROR from ask N+1 onward — the claim-fell-
+                          // through pin (the hub hands folds back to its
+                          // grammar and stops asking)
+int g_foldAsks = 0;       // foldingRange asks this server has ANSWERED
+int g_foldDelayMs = 0;    // argv "folddelay=<N>": hold the answer N ms so a
+                          // test can close the document over an IN-FLIGHT ask
+                          // (the $/cancelRequest teardown pin)
+bool g_inlayHint = false; // GATE 3 car C (C4): inlayHintProvider + the
+                          // featureInlayHint answer. RIDES sync mode exactly
+                          // like the fold flags: the hint oracle reads this
+                          // server's own text MIRROR, and the hint POSITIONS
+                          // are only honest after the sync didChange bytes
+                          // have arrived.
+bool g_hintNull = false;  // argv "hintnull" (rides inlayhint): answer NULL —
+                          // the spec's "no hints", a whole-set authority the
+                          // hub must paint as the EMPTY set
+int g_hintFailAfter = -1; // argv "hintfail=<N>": answer an ERROR from ask
+                          // N+1 onward — the hint door's recorded ASYMMETRY
+                          // with folds: the last set STANDS and the next edge
+                          // re-arms (no refused bit, nothing to hand back to)
+int g_hintMany = 0;       // argv "hintmany=<N>": answer N synthetic hints —
+                          // the client-side cap pin (kMaxLspInlayHints)
+int g_hintDelayMs = 0;    // argv "hintdelay=<N>": hold the answer (the
+                          // close-over-in-flight cancel pin)
+int g_hintAsks = 0;       // inlayHint asks this server has ANSWERED
+int g_hintLastEndLine = -1; // the LAST ask's range end, echoed by test/
+int g_hintLastEndChar = -1; // hintState: the flush-before-ask proof lives in
+                            // THESE numbers far-side (an end naming the
+                            // CURRENT mirror means the didChange bytes led
+                            // the ask)
 bool g_reqLog = false;    // argv flag: every feature request logs
                           // "REQ <method>" to stderr (the hub-relayed STDERR
                           // channel: the trigger tests' traffic oracle)
@@ -158,6 +230,18 @@ int g_completionDelayMs = 0; // argv "completiondelay=<N>": N ms of latency
                              // BEFORE the completion reply, so a test can
                              // supersede an IN-FLIGHT request (the hub's
                              // $/cancelRequest path)
+int g_sigDelayMs = 0;        // argv "sigdelay=<N>": the same latency trick
+                             // for the signatureHelp reply (car C supersede
+                             // pin — an IN-FLIGHT ask the hub must cancel)
+// The signatureHelp mode's server-side record (car C, C2): what the LAST
+// signatureHelp request carried, decoded in this server's own frame, plus
+// the ask counter — the door that makes the hub's WIRE SHAPE (triggerKind,
+// triggerCharacter, the position it aimed at) checkable, not inferred.
+int g_sigAsks = 0;
+int g_sigLastKind = 0;
+QString g_sigLastChar;
+int g_sigLastOffset = -1;
+
 bool g_initializedSeen = false; // the `initialized` notification landed
 int g_configsSeen = 0;          // configs this server has accepted
 bool g_advertisesResolve = false; // features && !completiononly, decided at
@@ -224,16 +308,22 @@ void notify(const QString& method, const QJsonValue& params)
     send(m);
 }
 
-void answerError(const QJsonObject& request, int code)
+void answerErrorTo(const QJsonValue& id, int code, const QString& text)
 {
     QJsonObject error;
     error.insert(QStringLiteral("code"), code);
-    error.insert(QStringLiteral("message"), QStringLiteral("server-side check"));
+    error.insert(QStringLiteral("message"), text);
     QJsonObject m;
     m.insert(QStringLiteral("jsonrpc"), QStringLiteral("2.0"));
-    m.insert(QStringLiteral("id"), request.value(QStringLiteral("id")));
+    m.insert(QStringLiteral("id"), id);
     m.insert(QStringLiteral("error"), error);
     send(m);
+}
+
+void answerError(const QJsonObject& request, int code)
+{
+    answerErrorTo(request.value(QStringLiteral("id")), code,
+                  QStringLiteral("server-side check"));
 }
 
 // --------------------------------------------------------- battery oracles
@@ -1152,9 +1242,10 @@ void featureCompletion(const QJsonValue& id, const QJsonObject& params)
     if (triggerKind == 2 && triggerCharacter.isEmpty())
         fail(QStringLiteral("completion triggerKind 2 without a "
                             "\"triggerCharacter\""));
-    if (triggerKind == 2 && triggerCharacter != QLatin1String("."))
-        fail(QStringLiteral("completion triggered by \"%1\": the only "
-                            "advertised triggerCharacters is [\".\"]")
+    if (triggerKind == 2 && !g_completionTriggers.contains(triggerCharacter))
+        fail(QStringLiteral("completion triggered by \"%1\": the advertised "
+                            "triggerCharacters set is what the hub must "
+                            "classify against")
                  .arg(triggerCharacter));
     // The proof rides LEGAL fields: labels this test pins verbatim, so the
     // frame the hub built is visible in the reply itself.
@@ -1216,6 +1307,359 @@ void featureCompletion(const QJsonValue& id, const QJsonObject& params)
         });
     } else {
         send(response(id, result));
+    }
+}
+
+// GATE 3 car C (C2): the signatureHelp answer — the SPEC shape kept minimal
+// but deliberately THREE-signature, so picking signatures[0] when the server
+// says activeSignature:1 shows up as the wrong popup text. The two labels
+// this test asserts verbatim; activeParameter rides along unread (the
+// plain-text popup has no underline — PLAN's recorded divergence).
+void featureSignatureHelp(const QJsonValue& id, const QJsonObject& params)
+{
+    ModelDoc& d = featureDoc(params, QStringLiteral("textDocument/signatureHelp"));
+    const int offset = featureOffset(d, params,
+                                     QStringLiteral("textDocument/signatureHelp"));
+    // contextSupport is advertised TRUE and the hub's door ALWAYS builds a
+    // context (spec: omitting it is only legal when the server never
+    // declares support) — a request without one is an encoder bug.
+    if (!params.contains(QStringLiteral("context")))
+        fail(QStringLiteral("textDocument/signatureHelp without a \"context\" "
+                            "object: the hub advertises contextSupport"));
+    const QJsonObject context = params.value(QStringLiteral("context")).toObject();
+    const QJsonValue kindValue = context.value(QStringLiteral("triggerKind"));
+    if (!kindValue.isDouble())
+        fail(QStringLiteral("textDocument/signatureHelp context has no "
+                            "\"triggerKind\""));
+    const int triggerKind = kindValue.toInt();
+    const QString triggerCharacter
+        = context.value(QStringLiteral("triggerCharacter")).toString();
+    if (triggerKind != 1 && triggerKind != 2)
+        fail(QStringLiteral("signatureHelp triggerKind %1 is neither Invoked "
+                            "(1) nor TriggerForCharacter (2)")
+                 .arg(triggerKind));
+    if (triggerKind == 1 && !triggerCharacter.isEmpty())
+        fail(QStringLiteral("signatureHelp triggerKind 1 carried a "
+                            "\"triggerCharacter\" (\"%1\")")
+                 .arg(triggerCharacter));
+    if (triggerKind == 2 && triggerCharacter.isEmpty())
+        fail(QStringLiteral("signatureHelp triggerKind 2 without a "
+                            "\"triggerCharacter\""));
+    if (triggerKind == 2 && triggerCharacter != QLatin1String("(")
+            && triggerCharacter != QLatin1String(","))
+        fail(QStringLiteral("signatureHelp triggered by \"%1\": the "
+                            "advertised triggerCharacters set is [\"(\", "
+                            "\",\"]").arg(triggerCharacter));
+    // A caret INSIDE brackets is the only place this server has a signature
+    // for: the "(" run the caret sits in names the call. OUTSIDE one, the
+    // spec's null answer rides (the hub must hide the popup).
+    QString sigName;
+    for (int i = offset - 1; i >= 0; --i) {
+        const QChar c = d.text.at(i);
+        if (c == QLatin1Char(')'))
+            break;
+        if (c == QLatin1Char('(')) {
+            int start = i;
+            while (start > 0 && (d.text.at(start - 1).isLetterOrNumber()
+                                 || d.text.at(start - 1) == QLatin1Char('_')))
+                --start;
+            sigName = d.text.mid(start, i - start);
+            break;
+        }
+    }
+    ++g_sigAsks;
+    g_sigLastKind = triggerKind;
+    g_sigLastChar = triggerCharacter;
+    g_sigLastOffset = offset;
+    if (sigName.isEmpty()) {
+        if (g_sigDelayMs > 0) {
+            QTimer::singleShot(g_sigDelayMs, [id] {
+                send(response(id, QJsonValue(QJsonValue::Null)));
+            });
+        } else {
+            send(response(id, QJsonValue(QJsonValue::Null)));
+        }
+        return;
+    }
+    const QJsonObject report{
+        {QStringLiteral("signatures"),
+         QJsonArray{
+             QJsonObject{{QStringLiteral("label"),
+                          sigName + QStringLiteral("(first)")},
+                         {QStringLiteral("parameters"),
+                          QJsonArray{QJsonObject{
+                              {QStringLiteral("label"),
+                               QStringLiteral("first")}}}}},
+             QJsonObject{{QStringLiteral("label"),
+                          sigName + QStringLiteral("(second one, more)")},
+                         {QStringLiteral("documentation"),
+                          QStringLiteral("the ACTIVE one — the popup must "
+                                         "carry this label")}},
+             QJsonObject{{QStringLiteral("label"),
+                          sigName + QStringLiteral("(third)")}}}},
+        {QStringLiteral("activeSignature"), 1},
+        {QStringLiteral("activeParameter"), 1}};
+    if (g_sigDelayMs > 0) {
+        // The supersede hold: the reply is NOT in yet, so the hub has a real
+        // in-flight request to $/cancelRequest.
+        QTimer::singleShot(g_sigDelayMs, [id, report] {
+            send(response(id, report));
+        });
+    } else {
+        send(response(id, report));
+    }
+}
+
+// The hub's own ask, counted and echoed by the SERVER: the wire-shape proof
+// (which triggerKind, which character, which offset) rides fields this
+// server decoded from its OWN frame — the hub can only paint what it asked.
+void handleSignatureState(const QJsonValue& id)
+{
+    send(response(id, QJsonObject{
+        {QStringLiteral("asks"), g_sigAsks},
+        {QStringLiteral("lastKind"), g_sigLastKind},
+        {QStringLiteral("lastCharacter"), g_sigLastChar},
+        {QStringLiteral("lastOffset"), g_sigLastOffset}}));
+}
+
+void handleHintState(const QJsonValue& id)
+{
+    send(response(id, QJsonObject{
+        {QStringLiteral("asks"), g_hintAsks},
+        {QStringLiteral("lastEndLine"), g_hintLastEndLine},
+        {QStringLiteral("lastEndChar"), g_hintLastEndChar}}));
+}
+
+// ------------------------------------------------------------- the folds
+// GATE 3 car C (C3): the fold oracle. The ranges come from THIS server's own
+// text MIRROR — a brace-depth scan (a line ending in `{` opens, a line whose
+// first non-space character is `}` closes it: the shape every fold fixture
+// here is written in) — so an EDIT to the document changes the ANSWER, and the
+// hub's debounced re-feed is checked end to end instead of against a table the
+// test could have hard-coded.
+//
+// The deliberate NOISE at the end rides every report, and it exists to make
+// the client's decode discipline observable: line numbers the document never
+// had (the client must CLAMP them), an inverted range and an empty one (both
+// must be DROPPED: a fold that hides nothing is not a fold), a duplicate start
+// WIDER than the real one (the widest wins — the tie rule of the view door the
+// hub feeds), and two malformed entries (a bare number, and an object with no
+// `endLine`: both must be skipped without breaking the others). Every entry
+// carries a `kind` the line-only client must decode NOWHERE.
+QJsonArray foldReport(const ModelDoc& d)
+{
+    const QStringList lines = d.text.split(QLatin1Char('\n'));
+    QJsonArray out;
+    QVector<int> openLines; // line numbers of unclosed `{` lines, innermost LAST
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString trimmed = lines.at(i).trimmed();
+        if (trimmed.endsWith(QLatin1Char('{'))) {
+            openLines.append(i);
+        } else if (trimmed.startsWith(QLatin1Char('}')) && !openLines.isEmpty()) {
+            out.append(QJsonObject{{QStringLiteral("startLine"),
+                                    openLines.takeLast()},
+                                   {QStringLiteral("endLine"), i},
+                                   {QStringLiteral("kind"),
+                                    QStringLiteral("region")}});
+        }
+    }
+    out.append(QJsonObject{{QStringLiteral("startLine"), -3},
+                           {QStringLiteral("endLine"), 1},
+                           {QStringLiteral("kind"), QStringLiteral("region")}});
+    out.append(QJsonObject{{QStringLiteral("startLine"), 2},
+                           {QStringLiteral("endLine"), 40},
+                           {QStringLiteral("kind"), QStringLiteral("import")}});
+    out.append(QJsonObject{{QStringLiteral("startLine"), 7},
+                           {QStringLiteral("endLine"), 99},
+                           {QStringLiteral("kind"), QStringLiteral("commentblock")}});
+    out.append(QJsonObject{{QStringLiteral("startLine"), 5},
+                           {QStringLiteral("endLine"), 3}});
+    out.append(QJsonObject{{QStringLiteral("startLine"), 4},
+                           {QStringLiteral("endLine"), 4}});
+    out.append(QJsonObject{{QStringLiteral("startLine"), 8},
+                           {QStringLiteral("endLine"), 100}});
+    out.append(QJsonValue(42)); // a bare number in the array
+    out.append(QJsonObject{{QStringLiteral("startLine"), 3}}); // no endLine
+    return out;
+}
+
+void featureFoldingRange(const QJsonValue& id, const QJsonObject& params)
+{
+    // featureDoc IS the second half of the flush-before-ask pin: a fold ask
+    // that arrived for a document the server never saw OPEN exits 2 here.
+    ModelDoc& d = featureDoc(params, QStringLiteral("textDocument/foldingRange"));
+    // FoldingRangeParams is the BARE `{textDocument}`. A foldingRangeContext
+    // describes folding FINER than lines — this client declared it folds lines
+    // only, so a context on the wire is a capability lie in the other
+    // direction (and the columns this server's report leaves out would be a
+    // second one).
+    if (params.contains(QStringLiteral("context")))
+        fail(QStringLiteral("textDocument/foldingRange carried a \"context\" "
+                            "object: the hub declared lineFoldingOnly"));
+    ++g_foldAsks;
+    if (g_foldEmpty) {
+        send(response(id, QJsonArray{})); // the authority: nothing is foldable
+        return;
+    }
+    if (g_foldFailAfter >= 0 && g_foldAsks > g_foldFailAfter) {
+        answerErrorTo(id, -32601,
+                      QStringLiteral("foldingRange refused after being "
+                                     "advertised (foldfail)"));
+        return;
+    }
+    const QJsonArray report = foldReport(d);
+    if (g_foldDelayMs > 0) {
+        QTimer::singleShot(g_foldDelayMs,
+                           [id, report] { send(response(id, report)); });
+    } else {
+        send(response(id, report));
+    }
+}
+
+// ------------------------------------------------------------- the hints
+// GATE 3 car C (C4): the hint oracle, over THIS server's own text MIRROR —
+// the same discipline that makes the fold answer track edits: an inlayHint
+// report's POSITIONS speak the synced frame, so the flush-before-ask rule is
+// checked end to end (and far-side: the LAST ask's range end echoes through
+// test/hintState, an end naming the CURRENT mirror proves the didChange
+// bytes LED the ask). The anchor tokens make the answer line up with the
+// shared fixture; the fixed NOISE at the end exists to make the client's
+// decode discipline observable — an out-of-document position (must CLAMP
+// tolerantly the way a generous position reads), parts + both paddings (the
+// no-labelSupport client concatenates and bakes the paddings as real
+// spaces), an empty label and a position-less and a bare-number entry (all
+// DROPPED without breaking the others) — and every sane entry carries a
+// `kind` this line/col-only paint client must decode NOWHERE.
+QJsonArray hintReport(const ModelDoc& d)
+{
+    const QStringList lines = d.text.split(QLatin1Char('\n'));
+    QJsonArray out;
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString& text2 = lines.at(i);
+        QString tag; // the ANCHOR tokens: the answer follows the mirror
+        if (text2.contains(QStringLiteral("alpha")))
+            tag = QStringLiteral("A");
+        else if (text2.contains(QStringLiteral("beta")))
+            tag = QStringLiteral("B");
+        else if (text2.contains(QStringLiteral("gamma")))
+            tag = QStringLiteral("C");
+        if (tag.isEmpty())
+            continue;
+        out.append(QJsonObject{
+            {QStringLiteral("position"),
+             QJsonObject{{QStringLiteral("line"), i},
+                         {QStringLiteral("character"), text2.length()}}},
+            {QStringLiteral("label"), QStringLiteral("RET") + tag},
+            {QStringLiteral("kind"), QStringLiteral("type")}});
+    }
+    // A PARTS label with BOTH paddings: the client claims no labelSupport,
+    // so the parts shape is what it gets — and the hub concatenates the
+    // values and bakes each padding as exactly one space into the painted
+    // text (the recorded M5-record divergence).
+    out.append(QJsonObject{
+        {QStringLiteral("position"),
+         QJsonObject{{QStringLiteral("line"), 0},
+                     {QStringLiteral("character"), 0}}},
+        {QStringLiteral("label"),
+         QJsonArray{QJsonObject{{QStringLiteral("value"),
+                                 QStringLiteral("<")}},
+                    QJsonObject{{QStringLiteral("value"),
+                                 QStringLiteral("h")}},
+                    QJsonObject{{QStringLiteral("value"),
+                                 QStringLiteral(">")}}}},
+        {QStringLiteral("paddingLeft"), true},
+        {QStringLiteral("paddingRight"), true},
+        {QStringLiteral("kind"), QStringLiteral("parameter")}});
+    out.append(QJsonObject{ // a plain label, right-padded
+        {QStringLiteral("position"),
+         QJsonObject{{QStringLiteral("line"), 0},
+                     {QStringLiteral("character"), 11}}},
+        {QStringLiteral("label"), QStringLiteral("PAD")},
+        {QStringLiteral("paddingRight"), true},
+        {QStringLiteral("kind"), QStringLiteral("type")}});
+    out.append(QJsonObject{ // OUT OF THE DOCUMENT: the converter reads a
+                            // generous position the tolerant way (the LAST
+                            // line of the mirror frame), never a fault
+        {QStringLiteral("position"),
+         QJsonObject{{QStringLiteral("line"), 400},
+                     {QStringLiteral("character"), 0}}},
+        {QStringLiteral("label"), QStringLiteral("OUT")},
+        {QStringLiteral("kind"), QStringLiteral("parameter")}});
+    out.append(QJsonObject{ // an empty label: nothing to paint, DROPPED
+        {QStringLiteral("position"),
+         QJsonObject{{QStringLiteral("line"), 1},
+                     {QStringLiteral("character"), 0}}},
+        {QStringLiteral("label"), QStringLiteral("")}});
+    out.append(QJsonObject{ // no anchor at all: malformed, DROPPED
+        {QStringLiteral("label"), QStringLiteral("NOPOS")}});
+    out.append(QJsonValue(42)); // a bare number in the array: DROPPED
+    return out;
+}
+
+void featureInlayHint(const QJsonValue& id, const QJsonObject& params)
+{
+    // featureDoc IS the flush-before-ask far-side pin again: an ask naming a
+    // document this server never saw OPEN exits 2 here.
+    ModelDoc& d = featureDoc(params, QStringLiteral("textDocument/inlayHint"));
+    // THE v1 ASK IS WHOLE-DOCUMENT: no range is a hub bug (the client
+    // declared an inlayHint capability precisely so providers answer the
+    // document); a range not STARTING at {0,0} is not the document. The END
+    // is not asserted here — its honesty is the test's, read back through
+    // test/hintState (the mirror it names IS the flush proof).
+    if (!params.contains(QStringLiteral("range")))
+        fail(QStringLiteral("textDocument/inlayHint arrived without a "
+                            "\"range\": this hub's v1 feed always asks the "
+                            "whole document"));
+    const QJsonObject start
+        = params.value(QStringLiteral("range"))
+              .toObject()
+              .value(QStringLiteral("start"))
+              .toObject();
+    if (start.value(QStringLiteral("line")).toInt(-1) != 0
+        || start.value(QStringLiteral("character")).toInt(-1) != 0)
+        fail(QStringLiteral("the whole-document hint ask does not start at "
+                            "{0,0}: range is not the document"));
+    g_hintLastEndLine = params.value(QStringLiteral("range"))
+                            .toObject()
+                            .value(QStringLiteral("end"))
+                            .toObject()
+                            .value(QStringLiteral("line"))
+                            .toInt(-1);
+    g_hintLastEndChar = params.value(QStringLiteral("range"))
+                            .toObject()
+                            .value(QStringLiteral("end"))
+                            .toObject()
+                            .value(QStringLiteral("character"))
+                            .toInt(-1);
+    ++g_hintAsks;
+    if (g_hintNull) {
+        send(response(id, QJsonValue(QJsonValue::Null))); // spec "no hints":
+                                                          // a whole-set
+                                                          // authority — the
+                                                          // hub paints EMPTY
+        return;
+    }
+    if (g_hintFailAfter >= 0 && g_hintAsks > g_hintFailAfter) {
+        answerErrorTo(id, -32601, QStringLiteral("inlayHint refused after "
+                                                 "being advertised (hintfail)"));
+        return;
+    }
+    QJsonArray report;
+    if (g_hintMany > 0) {
+        for (int i = 0; i < g_hintMany; ++i)
+            report.append(QJsonObject{
+                {QStringLiteral("position"),
+                 QJsonObject{{QStringLiteral("line"), 0},
+                             {QStringLiteral("character"), 0}}},
+                {QStringLiteral("label"), QStringLiteral("h%1").arg(i)}});
+    } else {
+        report = hintReport(d);
+    }
+    if (g_hintDelayMs > 0) {
+        QTimer::singleShot(g_hintDelayMs,
+                           [id, report] { send(response(id, report)); });
+    } else {
+        send(response(id, report));
     }
 }
 
@@ -1745,7 +2189,35 @@ void handleInitialize(const QJsonObject& request)
         fail(QStringLiteral("initialize params lack \"capabilities\""));
     g_initializeParams = request.value(QStringLiteral("params")).toObject();
     QJsonObject capabilities;
-    if (g_completionOnly) {
+    if (g_sigHelp) {
+        // GATE 3 car C (C2): the signatureHelp round's provider set. The
+        // triggerCharacters list is ADVERTISED here — the hub classifies the
+        // unit before the caret against THIS list and only falls back to its
+        // own default pair when a provider names none. hoverProvider is
+        // FALSE: the hover popup is the shared surface, and a mode where
+        // both owners could ask would hide a no-clobber bug behind the other
+        // route's traffic. completionon (`completiononly`) rides it for the
+        // one slot that pins a single keystroke lighting BOTH debounces.
+        capabilities.insert(QStringLiteral("hoverProvider"), false);
+        capabilities.insert(
+            QStringLiteral("signatureHelpProvider"),
+            QJsonObject{{QStringLiteral("triggerCharacters"),
+                         QJsonArray{QStringLiteral("("),
+                                    QStringLiteral(",")}}});
+        if (g_completionOnly) {
+            // The BOTH-debounce shape: one "(" press arms the completion AND
+            // the signature debounce (the shared typing tap), and the reqlog
+            // oracle shows both round trips. "(" is advertised as a
+            // completion trigger HERE so the one press is a trigger for both
+            // routes (kind 2 each) — the pin is the two asks from one burst.
+            QJsonObject completion;
+            completion.insert(QStringLiteral("triggerCharacters"),
+                              QJsonArray{QStringLiteral("(")});
+            capabilities.insert(QStringLiteral("completionProvider"),
+                                completion);
+            g_completionTriggers = QStringList{QStringLiteral("(")};
+        }
+    } else if (g_completionOnly) {
         // The nested capability gate's pin: completionProvider WITHOUT
         // resolveProvider, and NOTHING else advertised. The completion door
         // itself must still WORK (its reply is the plain list shape); the
@@ -1756,6 +2228,7 @@ void handleInitialize(const QJsonObject& request)
         completion.insert(QStringLiteral("triggerCharacters"),
                           QJsonArray{QStringLiteral(".")});
         capabilities.insert(QStringLiteral("completionProvider"), completion);
+        g_completionTriggers = QStringList{QStringLiteral(".")};
     } else if (g_features) {
         // The machine-5 provider set. One deliberately OFF shape rides it:
         // hoverProvider FALSE (the hub must refuse hover locally; a hover
@@ -1773,6 +2246,7 @@ void handleInitialize(const QJsonObject& request)
                           QJsonArray{QStringLiteral(".")});
         completion.insert(QStringLiteral("resolveProvider"), true);
         capabilities.insert(QStringLiteral("completionProvider"), completion);
+        g_completionTriggers = QStringList{QStringLiteral(".")};
         capabilities.insert(QStringLiteral("codeActionProvider"), true);
         capabilities.insert(QStringLiteral("documentFormattingProvider"), true);
         capabilities.insert(QStringLiteral("renameProvider"),
@@ -1780,6 +2254,43 @@ void handleInitialize(const QJsonObject& request)
                                          false}});
     } else {
         capabilities.insert(QStringLiteral("hoverProvider"), true);
+    }
+    if (g_foldRange) {
+        // Car C (C3): the fold authority. Before this server agrees to be
+        // one, it reads the CLIENT's claim back: this report is line-only and
+        // carries no columns, so a client that asks for folds without
+        // declaring textDocument.foldingRange.lineFoldingOnly is holding a
+        // shape it never said it folds.
+        const QJsonObject clientFolding = g_initializeParams
+                                              .value(QStringLiteral("capabilities"))
+                                              .toObject()
+                                              .value(QStringLiteral("textDocument"))
+                                              .toObject()
+                                              .value(QStringLiteral("foldingRange"))
+                                              .toObject();
+        if (!clientFolding.value(QStringLiteral("lineFoldingOnly")).toBool())
+            fail(QStringLiteral("a foldingRange provider was asked for folds "
+                                "while the client declared no "
+                                "textDocument.foldingRange.lineFoldingOnly"));
+        capabilities.insert(QStringLiteral("foldingRangeProvider"), true);
+    }
+    if (g_inlayHint) {
+        // Car C (C4): the hint authority. The client declared
+        // `inlayHint: {}` — the honest no-claim shape (no labelSupport, so
+        // this server answers label PARTS knowing the client concatenates,
+        // and no before/afterLines claim, so anchors must be exact). A
+        // provider for a client that declared nothing about hints would be
+        // a capability conversation nobody had.
+        if (!g_initializeParams
+                 .value(QStringLiteral("capabilities"))
+                 .toObject()
+                 .value(QStringLiteral("textDocument"))
+                 .toObject()
+                 .contains(QStringLiteral("inlayHint")))
+            fail(QStringLiteral("an inlayHintProvider was asked for hints "
+                                "while the client declared no "
+                                "textDocument.inlayHint capability"));
+        capabilities.insert(QStringLiteral("inlayHintProvider"), true);
     }
     if (g_wswu) {
         // The M8 machine 6 declaration: TextDocumentSyncOptions shape — the
@@ -1989,9 +2500,35 @@ void runLoop()
                 } else if ((g_features)
                            && method == QLatin1String("textDocument/references")) {
                     featureReferences(id, params.toObject());
-                } else if ((g_features)
+                } else if ((g_features || (g_sigHelp && g_completionOnly))
                            && method == QLatin1String("textDocument/completion")) {
                     featureCompletion(id, params.toObject());
+                } else if (g_sigHelp
+                           && method == QLatin1String(
+                                  "textDocument/signatureHelp")) {
+                    featureSignatureHelp(id, params.toObject());
+                } else if (method == QLatin1String(
+                               "textDocument/foldingRange")) {
+                    if (!g_foldRange)
+                        fail(QStringLiteral(
+                            "textDocument/foldingRange reached a server that "
+                            "never advertised foldingRangeProvider: the hub's "
+                            "fold feed ignored the capability gate"));
+                    featureFoldingRange(id, params.toObject());
+                } else if (method == QLatin1String(
+                               "textDocument/inlayHint")) {
+                    if (!g_inlayHint)
+                        fail(QStringLiteral(
+                            "textDocument/inlayHint reached a server that "
+                            "never advertised inlayHintProvider: the hub's "
+                            "hint feed ignored the capability gate"));
+                    featureInlayHint(id, params.toObject());
+                } else if (g_mode == QLatin1String("sync")
+                           && method == QLatin1String("test/signatureState")) {
+                    handleSignatureState(id);
+                } else if (g_mode == QLatin1String("sync")
+                           && method == QLatin1String("test/hintState")) {
+                    handleHintState(id);
                 } else if ((g_features)
                            && method == QLatin1String("textDocument/codeAction")) {
                     featureCodeActions(id, params.toObject());
@@ -2055,7 +2592,19 @@ int main(int argc, char** argv)
                  && enc != QLatin1String("hoveron")
                  && enc != QLatin1String("reqlog")
                  && enc != QLatin1String("cancellog")
-                 && !enc.startsWith(QLatin1String("completiondelay=")))
+                 && enc != QLatin1String("sighelp")
+                 && enc != QLatin1String("completionon")
+                 && enc != QLatin1String("foldingrange")
+                 && enc != QLatin1String("foldempty")
+                 && enc != QLatin1String("inlayhint")
+                 && enc != QLatin1String("hintnull")
+                 && !enc.startsWith(QLatin1String("foldfail="))
+                 && !enc.startsWith(QLatin1String("folddelay="))
+                 && !enc.startsWith(QLatin1String("hintfail="))
+                 && !enc.startsWith(QLatin1String("hintmany="))
+                 && !enc.startsWith(QLatin1String("hintdelay="))
+                 && !enc.startsWith(QLatin1String("completiondelay="))
+                 && !enc.startsWith(QLatin1String("sigdelay=")))
             fail(QStringLiteral("sync mode: bad encoding \"%1\"").arg(enc));
         for (int i = 2; i < args.size(); ++i) {
             if (args.at(i) == QLatin1String("crashonce"))
@@ -2082,6 +2631,96 @@ int main(int argc, char** argv)
                 g_reqLog = true;
             else if (args.at(i) == QLatin1String("cancellog"))
                 g_cancelLog = true;
+            else if (args.at(i) == QLatin1String("sighelp"))
+                g_sigHelp = true; // GATE 3 car C (C2): the signatureHelp
+                                  // provider set + the featureSignatureHelp
+                                  // answer. It RIDES sync mode — the doc
+                                  // mirror, the test/* echo doors and the
+                                  // crashonce drill are already sync's, and
+                                  // the trigger tests need all three.
+            else if (args.at(i) == QLatin1String("foldingrange"))
+                g_foldRange = true; // GATE 3 car C (C3): the fold authority —
+                                    // foldingRangeProvider + foldReport over
+                                    // this server's own text mirror. It RIDES
+                                    // sync mode for the same reason sighelp
+                                    // does: didOpen/didChange tracking IS the
+                                    // fold answer's input, and the fold ask
+                                    // must find the mirror already current.
+            else if (args.at(i) == QLatin1String("foldempty"))
+                g_foldEmpty = g_foldRange = true; // rides foldingrange: the
+                                                  // EMPTY-array answer (the
+                                                  // authority that says nothing
+                                                  // is foldable)
+            else if (args.at(i).startsWith(QLatin1String("foldfail="))) {
+                bool ok = false;
+                const int after
+                    = args.at(i).mid(int(qstrlen("foldfail="))).toInt(&ok);
+                if (!ok || after < 0)
+                    fail(QStringLiteral("foldfail wants a non-negative number, "
+                                        "got \"%1\"")
+                             .arg(args.at(i)));
+                g_foldFailAfter = after; // asks 1..N answer folds, the rest are
+                                         // REFUSED: the claim-fell-through pin
+            } else if (args.at(i).startsWith(QLatin1String("folddelay="))) {
+                bool ok = false;
+                const int ms
+                    = args.at(i).mid(int(qstrlen("folddelay="))).toInt(&ok);
+                if (!ok || ms < 0)
+                    fail(QStringLiteral("folddelay wants a non-negative number, "
+                                        "got \"%1\"")
+                             .arg(args.at(i)));
+                g_foldDelayMs = ms; // holds the foldingRange answer so a test
+                                    // can close the document over an ask still
+                                    // in flight
+            } else if (args.at(i) == QLatin1String("inlayhint")) {
+                g_inlayHint = true; // GATE 3 car C (C4): the hint authority —
+                                    // inlayHintProvider + featureInlayHint
+                                    // over this server's own text mirror.
+                                    // RIDES sync mode like the fold flags:
+                                    // the hint POSITIONS speak the synced
+                                    // frame, so didChange tracking IS the
+                                    // answer's input (and the flush-before-
+                                    // ask rule is proved far-side by the
+                                    // range the ask carries — see test/
+                                    // hintState).
+            } else if (args.at(i) == QLatin1String("hintnull")) {
+                g_hintNull = g_inlayHint = true; // rides inlayhint: the NULL
+                                                 // answer (spec "no hints" —
+                                                 // the hub paints the empty
+                                                 // set)
+            } else if (args.at(i).startsWith(QLatin1String("hintfail="))) {
+                bool ok = false;
+                const int after
+                    = args.at(i).mid(int(qstrlen("hintfail="))).toInt(&ok);
+                if (!ok || after < 0)
+                    fail(QStringLiteral("hintfail wants a non-negative number, "
+                                        "got \"%1\"")
+                             .arg(args.at(i)));
+                g_hintFailAfter = after; // asks 1..N answer hints, the rest
+                                         // are REFUSED: the last set must
+                                         // STAND (folds' refused-bit shape
+                                         // must NOT show up here)
+            } else if (args.at(i).startsWith(QLatin1String("hintmany="))) {
+                bool ok = false;
+                const int n = args.at(i).mid(int(qstrlen("hintmany="))).toInt(
+                    &ok);
+                if (!ok || n <= 0)
+                    fail(QStringLiteral("hintmany wants a positive number, got "
+                                        "\"%1\"")
+                             .arg(args.at(i)));
+                g_hintMany = n; // N synthetic hints: the kMaxLspInlayHints
+                                // cap pin rides the WIRE window
+            } else if (args.at(i).startsWith(QLatin1String("hintdelay="))) {
+                bool ok = false;
+                const int ms
+                    = args.at(i).mid(int(qstrlen("hintdelay="))).toInt(&ok);
+                if (!ok || ms < 0)
+                    fail(QStringLiteral("hintdelay wants a non-negative number, "
+                                        "got \"%1\"")
+                             .arg(args.at(i)));
+                g_hintDelayMs = ms; // holds the inlayHint answer so a test
+                                    // can close over an ask still in flight
+            }
             else if (args.at(i).startsWith(QLatin1String("completiondelay="))) {
                 bool ok = false;
                 const int ms
@@ -2091,6 +2730,15 @@ int main(int argc, char** argv)
                                         "non-negative number, got \"%1\"")
                              .arg(args.at(i)));
                 g_completionDelayMs = ms;
+            } else if (args.at(i).startsWith(QLatin1String("sigdelay="))) {
+                bool ok = false;
+                const int ms
+                    = args.at(i).mid(int(qstrlen("sigdelay="))).toInt(&ok);
+                if (!ok || ms < 0)
+                    fail(QStringLiteral("sigdelay wants a non-negative number, "
+                                        "got \"%1\"").arg(args.at(i)));
+                g_sigDelayMs = ms; // holds the signatureHelp answer so a test
+                                   // can supersede an IN-FLIGHT ask
             }
         }
     }

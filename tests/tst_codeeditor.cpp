@@ -337,6 +337,13 @@ private slots:
     void foldZoneGutterConstant();
     void foldAutoExpandOnSourceDeath();
     void foldlessEditKeepsPaintSlotCache();
+    // M8b car C (C1): the fold PROVIDER seam — server folds replace the
+    // grammar/indent source while installed (the one-provider knot).
+    void serverFoldRangesDriveTheFoldStore();
+    void serverFoldRangesSilenceGrammarFolds();
+    void providerSwitchResetsCollapsedFolds();
+    void serverFoldRangesStayVerbatimAcrossEdits();
+    void documentReplaceClearsFoldOverride();
     // M22 fold-gutter hover region + innermost-fold click.
     void foldHoverRegionPaintsAndClears();
     void foldHoverTrackingGatedByFoldStrip();
@@ -8734,6 +8741,217 @@ void TestCodeEditor::foldlessEditKeepsPaintSlotCache()
     QCOMPARE(editor->visibleLineTotal(), 100); // and the bar re-shrinks:
     QVERIFY(QApplication::sendEvent(editor, &deepDown));
     QCOMPARE(editor->verticalScrollOffset(), maxAt100);
+}
+
+// --- M8b car C (C1): the fold PROVIDER seam (server folds) -----------------
+// The design knot (PLAN Car C record): ONE provider per editor — while a
+// foldingRange feed is installed the grammar `@fold` captures AND the indent
+// fallback are SILENT; the feed is verbatim authority (read-time doc clamps
+// only, edits never shift it) and SOURCE SWITCHES unfold everything (folded
+// state belongs to its source). In server mode foldableRanges() reports the
+// whole normalized feed — the built-in oracle for every assertion below.
+
+void TestCodeEditor::serverFoldRangesDriveTheFoldStore()
+{
+    // Indent-mode doc (the indent source would make ONLY {0,3} foldable),
+    // fed a deliberately unsorted, partly invalid set: normalization (drop
+    // end<=start, clamp to the doc, one entry per start — OUTERMOST wins),
+    // then the whole M13 machinery over server ranges, through public doors.
+    editor->setPlainText(foldDoc()); // 6 lines
+    editor->setFoldRanges({{4, 2},        // end <= start: DROPPED
+                           {0, 10},       // end clamps to the doc: {0,5}
+                           {0, 2},        // same start: inner loses
+                           {1, 3},
+                           {4, 5}});
+    const auto ranges = editor->foldableRanges();
+    QCOMPARE(ranges.size(), 3);
+    QVERIFY(ranges == (QVector<CodeEditor::FoldRange>{
+        {0, 5}, {1, 3}, {4, 5}})); // sorted start asc, clamped, deduped
+    QVERIFY(editor->isFoldable(4)); // a line the indent source NEVER made
+    QVERIFY(editor->isFoldable(1)); // foldable — the feed says so
+    QVERIFY(editor->foldLine(4));   // {4,5} hides line 5 ("last")
+    QCOMPARE(editor->visibleLineTotal(), 5);
+    QCOMPARE(editor->visibleIndexOfModelLine(5), -1);
+    QVERIFY(editor->unfoldLine(4));
+    QCOMPARE(editor->visibleLineTotal(), 6);
+    // nesting rides the same rules as grammar folds: foldLine on a hidden
+    // start refuses (public contract)
+    QVERIFY(editor->foldLine(0));   // {0,5} hides 1..5
+    QCOMPARE(editor->visibleLineTotal(), 1);
+    QVERIFY(!editor->foldLine(1));  // hidden start: unfold the outer first
+    QVERIFY(editor->isFolded(0));
+    editor->expandAll();
+    QCOMPARE(editor->visibleLineTotal(), 6);
+    // collapseAll over the FEED (outer-first: inner starts hide themselves
+    // out of the run, exactly like the grammar pass)
+    editor->collapseAll();
+    QCOMPARE(editor->visibleLineTotal(), 1);
+    QVERIFY(editor->isFolded(0));
+    QVERIFY(!editor->isFolded(1));
+    editor->expandAll();
+    QCOMPARE(editor->visibleLineTotal(), 6);
+    // an EMPTY feed is the authority "nothing is foldable" — STILL server
+    // mode: the indent {0,3} stays mute, only clearFoldRanges frees it
+    editor->setFoldRanges({});
+    QCOMPARE(editor->foldableRanges().size(), 0);
+    QVERIFY(!editor->isFoldable(0));
+    QVERIFY(!editor->foldLine(0));
+}
+
+void TestCodeEditor::serverFoldRangesSilenceGrammarFolds()
+{
+    // The far-side pin of the one-provider knot: a js doc whose GRAMMAR fold
+    // is {2,4} (the multiline call) stops folding its own braces the moment
+    // a feed lands — and clearFoldRanges() restores grammar folds
+    // byte-for-byte, triangle for triangle.
+    editor->setPlainText(QStringLiteral(
+        "a();\n    b();\nc(\n  x\n);\n"));
+    editor->setLanguage(QStringLiteral("javascript"));
+    editor->grab(); // paint-warm the grammar fold cache
+    QVERIFY(editor->isFoldable(2)); // grammar fold before the override
+    const auto grammarRanges = editor->foldableRanges();
+    QCOMPARE(grammarRanges.size(), 1);
+    QCOMPARE(grammarRanges[0].startLine, 2);
+
+    editor->setFoldRanges({{0, 1}}); // a feed sharing NOTHING with it
+    QVERIFY(!editor->isFoldable(2)); // grammar source mute while installed
+    QVERIFY(!editor->foldLine(2));   // the grammar brace is NOT the user's
+                                     // fold anymore (the knot, enforced)
+    QVERIFY(editor->isFoldable(0));
+    QVERIFY(editor->foldLine(0));    // hides line 1 ("    b();")
+    QCOMPARE(editor->visibleLineTotal(), editor->lineCount() - 1);
+    QVERIFY(editor->unfoldLine(0));
+
+    editor->clearFoldRanges();       // grammar serves again...
+    editor->grab();
+    QVERIFY(editor->foldableRanges() == grammarRanges); // ...byte-for-byte
+    QVERIFY(editor->isFoldable(2));
+    QVERIFY(editor->foldLine(2));
+    QCOMPARE(editor->visibleLineTotal(), editor->lineCount() - 2);
+    editor->expandAll();
+    editor->clearFoldRanges();       // clear on a NEVER-installed override
+    QCOMPARE(editor->foldableRanges().size(), 1); // is a byte-for-byte no-op
+}
+
+void TestCodeEditor::providerSwitchResetsCollapsedFolds()
+{
+    // (a) A GRAMMAR fold collapsed at feed time comes back UNFOLDED — the
+    // collapsed entry belongs to its source and must not survive into the
+    // server set as an alien hidden run. Same-shape feed does not exempt
+    // the reset: the SWITCH is the event, not the content.
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    QVERIFY(editor->foldLine(0));            // indent fold {0,3}, vt 6->3
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    editor->setFoldRanges({{0, 3}});
+    QVERIFY(!editor->isFolded(0));           // reset, no paint needed
+    QCOMPARE(editor->visibleLineTotal(), 6);
+    // (b) the mirror: a SERVER fold collapsed at clear time unfolds too
+    QVERIFY(editor->foldLine(0));            // same span, server source now
+    QVERIFY(editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    editor->clearFoldRanges();
+    QVERIFY(!editor->isFolded(0));
+    QCOMPARE(editor->visibleLineTotal(), 6);
+    editor->grab();
+    QVERIFY(editor->isFoldable(0));          // grammar/indent serving again
+    QVERIFY(editor->foldLine(0));            // ...and folding exactly as before
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    editor->expandAll();
+
+    // (c) A RE-FEED while active KEEPS collapsed state — the debounced
+    // refresh must not fight the user's folds...
+    editor->setFoldRanges({{0, 2}, {3, 4}});
+    QVERIFY(editor->foldLine(0));            // hides 1..2
+    QVERIFY(editor->foldLine(3));            // hides 4
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    editor->setFoldRanges({{0, 2}, {3, 4}}); // same set re-fed: state KEPT
+    QVERIFY(editor->isFolded(0));
+    QVERIFY(editor->isFolded(3));
+    QCOMPARE(editor->visibleLineTotal(), 3);
+    // ...and a start the NEW feed drops auto-expands on the next paint
+    // (the third removal route, next to the user's unfold and the sweep)
+    editor->setFoldRanges({{3, 4}});
+    editor->grab();
+    QVERIFY(!editor->isFolded(0));           // dropped start: unfolded
+    QVERIFY(editor->isFolded(3));            // kept start: the user's fold
+    QCOMPARE(editor->visibleLineTotal(), 5);
+}
+
+void TestCodeEditor::serverFoldRangesStayVerbatimAcrossEdits()
+{
+    // The two halves of the VERBATIM stance in one test: the FEED never
+    // shifts (the provider re-feeds; read-time doc clamps are all the view
+    // applies), while a COLLAPSED fold born from the feed still rides the
+    // M13 edit sweep (shift/die) like any other collapsed entry. The edits
+    // here keep the caret on VISIBLE lines on purpose: a caret that ends up
+    // hidden is unfolded by the reveal choke-point (ensureCaretVisible) —
+    // the caret rule working correctly, not a fold-store failure.
+    editor->setPlainText(foldDoc());         // 6 lines
+    editor->setFoldRanges({{2, 4}});
+    QVERIFY(editor->isFoldable(2));
+    QVERIFY(editor->foldLine(2));            // hides 3..4, vt 6->4
+    QVERIFY(editor->isFolded(2));
+    QCOMPARE(editor->visibleLineTotal(), 4);
+    editor->setPosition({0, 0});
+    QTest::keyClicks(editor, QStringLiteral("x")); // +1 line ABOVE the fold
+    QTest::keyClick(editor, Qt::Key_Return);
+    QCOMPARE(editor->lineCount(), 7);
+    // the sweep half: the collapsed entry shifted with its lines...
+    QVERIFY(!editor->isFolded(2));
+    QVERIFY(editor->isFolded(3));
+    QCOMPARE(editor->visibleLineTotal(), 5); // 7 lines, run 4..5 hidden
+    // ...while the FEED stayed doc-shape-blind, verbatim:
+    QVERIFY(editor->foldableRanges() == (QVector<CodeEditor::FoldRange>{{2, 4}}));
+    QVERIFY(editor->isFoldable(2));          // the feed, not the current shape
+    QVERIFY(editor->unfoldLine(3));
+    QCOMPARE(editor->visibleLineTotal(), 7);
+    // read-time CLAMP: shrink the doc under the feed's end and past its
+    // start — the stored feed is untouched, only the READS change (the next
+    // hub re-feed is what actually fixes the truth).
+    QTest::keyClick(editor, Qt::Key_A, Qt::ControlModifier);
+    QTest::keyClick(editor, Qt::Key_Backspace);
+    QTest::keyClicks(editor, QStringLiteral("a")); // 3 lines
+    QTest::keyClick(editor, Qt::Key_Return);
+    QTest::keyClicks(editor, QStringLiteral("b"));
+    QTest::keyClick(editor, Qt::Key_Return);
+    QTest::keyClicks(editor, QStringLiteral("cd"));
+    QCOMPARE(editor->foldableRanges().size(), 0); // end clamps to 2: a fold
+    QVERIFY(!editor->isFoldable(2));              // hiding nothing is dead
+    QTest::keyClick(editor, Qt::Key_A, Qt::ControlModifier);
+    QTest::keyClick(editor, Qt::Key_Backspace);
+    QTest::keyClicks(editor, QStringLiteral("x")); // 2 lines
+    QTest::keyClick(editor, Qt::Key_Return);
+    QTest::keyClicks(editor, QStringLiteral("y"));
+    QCOMPARE(editor->foldableRanges().size(), 0); // the start slid off the doc
+    QVERIFY(!editor->isFoldable(2));
+    QVERIFY(!editor->isFoldable(9));         // past-the-end reads: no crash
+    // and the MODE survived every clamp: a RE-FEED while active installs
+    // without any source-switch dance (the far side of "still server mode")
+    editor->setFoldRanges({{0, 1}});
+    QVERIFY(editor->foldLine(0));            // "x" hides "y"
+    QCOMPARE(editor->visibleLineTotal(), 1);
+}
+
+void TestCodeEditor::documentReplaceClearsFoldOverride()
+{
+    // Ranges speak line numbers: stale by definition after a
+    // setPlainText-class replace — the override goes exactly where M13
+    // clears fold state, and the own source starts serving immediately
+    // (the hub re-feeds after the next foldingRange answer).
+    editor->setPlainText(foldDoc());
+    editor->setFoldRanges({{1, 4}});
+    QVERIFY(editor->isFoldable(1));
+    QVERIFY(!editor->isFoldable(0)); // indent source mute BEFORE the replace
+    editor->setPlainText(foldDoc());
+    editor->grab();
+    const auto ranges = editor->foldableRanges();
+    QCOMPARE(ranges.size(), 1);      // the INDENT {0,3} serves again
+    QVERIFY(ranges == (QVector<CodeEditor::FoldRange>{{0, 3}}));
+    QVERIFY(editor->isFoldable(0));
+    QVERIFY(!editor->isFoldable(1)); // the stale feed is GONE, not shifted
+    QVERIFY(editor->foldLine(0));
+    QCOMPARE(editor->visibleLineTotal(), 3);
 }
 
 // --- M22 fold-gutter hover (region paint + innermost click) ----------------

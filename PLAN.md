@@ -2497,6 +2497,297 @@ registration). PRE-DECIDED KNOT: ONE fold provider per editor at a time
 anti-pattern list warns about); the fold store stays M13's, no new view
 doors — the six popup doors carry signatureHelp as they carried hover.
 
+#### Car C design record (written at the car start, 2026-11-22)
+
+FIVE machines, each green before the next opens. Version rhythm: the
+car closes at **1.11.0** (additive minor).
+
+Code facts the design rides (read 2026-11-22, all verified in code):
+`FoldRange` + `InlayHint` are ALREADY bound types (typesystem
+value-entries + `_generated` TUs since 1.6.x) — a plain-Qt-typed door
+carrying either crosses the wheel with ZERO three-copies edit (M8 m7
+precedent); `LspClient::isRegistered(method)` is the generic registry
+(the claim "the registry already routes the registration" VERIFIED —
+`textDocument/diagnostic` counts the day it registers); the push decode
+lives in `LspHub::onDiagnostics` and refactors into ONE decoder for
+both wire shapes; the popup-trigger machinery (`editApplied`/`cursorMoved`
+taps, debounce timers, `$/cancelRequest` supersede rule) is the route
+signatureHelp and the refresh passes ride.
+
+C1 THE VIEW FOLD-PROVIDER SEAM (view only, zero wire) — ✔ CLOSED
+green 2026-11-22: five tripwires in tst_codeeditor, the ctest 7/7
+whole. The seam works EXACTLY as written below; C3 feeds it. The honest door
+reading of the pre-decided knot: the M8 car's sentence "no new view
+doors" cannot hold for foldingRange — M13's `foldLine` folds only lines
+its OWN sources made foldable (grammar `@fold` / indent fallback), and
+the fold store has no injection seam. The knot is about the STORE, not
+about zero doors: the fix grows the fold SOURCE, never a second store.
+The surface widens additively — the exact class m6's six popup doors
+were: `void setFoldRanges(const QVector<FoldRange>&)` +
+`void clearFoldRanges()`. Semantics:
+- Installing (ANY vector, empty included) switches the fold source to
+  SERVER mode: grammar captures AND the indent fallback go SILENT while
+  installed — the one-provider knot ENFORDED on the view side, the
+  mismatch bug cannot exist by construction. `clearFoldRanges()`
+  restores the grammar/indent source byte-for-byte.
+- Server ranges are VERBATIM authority: the view never shifts them
+  across edits (the SERVER is authoritative; C3 re-requests after the
+  debounced edit — until the re-feed, a moved block keeps stale
+  foldables, the same honest staleness the diff alignment carries
+  between recomputes). Collapsed folds THEMSELVES keep riding M13's
+  edit sweep (shift/die/undo-consistent, view state as always).
+- The source-exists auto-expand check SKIPS in server mode (the view
+  owns no source to re-check); a server fold lives until the user
+  unfolds it, the range dies in an edit sweep, or the next re-feed
+  drops it.
+- Every M13/hidden-run/slot-space machinery untouched: toggle doors,
+  fold zone triangles, caret nav, fold×wrap, the diff row-axis zeroing.
+  `foldableRanges()` reports the fed ranges (clamped, ends EXACT — no
+  lazy resolution in server mode) — that is the test oracle;
+  `isFoldable`/`isFolded` semantics unchanged.
+- A document replace (`setPlainText`-class) CLEARS the override exactly
+  where M13 clears fold state (ranges speak line numbers; stale by
+  definition after a replace); the hub re-feeds after the next answer.
+- SOURCE SWITCH CLEARS COLLAPSED STATE, both directions (owner Q&A
+  2026-11-22): collapsed folds BELONG to their source — a grammar fold
+  collapsed before the server feed is un-recognized in the server set
+  (a hidden run with an alien triangle), and a server fold collapsed
+  then grammar-restored is the mirror lie. So installing OR clearing
+  the override unfolds everything first (the M13 store/machinery stays
+  whole; only its STATE resets — same event class as the doc-replace
+  clear). Mid-session the grammar stays the serving source UNTIL the
+  first foldingRange ANSWER arrives: the switch is atomic at the feed,
+  never preempted — until then the user folds grammar folds honestly.
+- `FoldRange` already bound → BOTH doors cross the wheel byte-clean;
+  the `--codegen` check pins the module init gains them and the
+  rejected log gains NOTHING for this machine.
+Tripwires (tst_codeeditor): fed ranges drive foldLine/hidden runs/
+visibleLineTotal; the GRAMMAR triangles vanish while a server fold is
+installed (the knot pinned from the far side — a js doc fed ranges
+stops folding its own braces); `clearFoldRanges` restores grammar
+folds byte-for-byte; nested fed ranges fold/unfold like nested grammar
+folds; a doc replace clears the override; an edit does NOT shift the
+fed range (verbatim stance) while a collapsed fold inside it still
+shifts/dies on the sweep; and the SOURCE-SWITCH RESET — a grammar fold
+collapsed at feed time, and a server fold collapsed at clear time,
+both come UNFOLDED (no alien hidden runs survive a provider switch).
+
+C2 SIGNATUREHELP (hub + fakeserver + popup; zero new view types) — ✔
+CLOSED green 2026-11-22 (all six slots, three repeat runs clean, the
+lsp binary + the full ctest 7/7).
+Initialize capability: `signatureHelpProvider{triggerCharacters
+["(", ","]}` (static; the registry covers a dynamic counterpart for
+free). The hub grows `requestSignatureHelp(editor, position,
+FeatureHandler)` — the SEVENTH FeatureHandler door, so the wheel's
+rejected log gains EXACTLY this one entry (unknown-`std::function`
+reason, the pinned class): the Car C audit RE-PINS the baseline to
+17 + new private-section noise, per risk 2 "RE-PINNED, not eyeballed".
+Composition rides the SIX popup doors verbatim (the pre-decided knot):
+the hub picks `signatures[activeSignature]` (clamped to range), the
+plainText is the signature's `label` VERBATIM, the popup is the HOVER
+popup anchored at the caret (zero-width `HoverRange`). The ACTIVE
+parameter cannot be underlined in a plain-text popup — `activeParameter`
+is honored ONLY in picking which signature shows; recorded as the
+plain-label divergence (the m6 "no markdown renderer" bullet extended,
+never a snippet-engine re-open). Trigger via `setPopupTriggers`: at
+fire time the char before the caret is classified — in the server's
+advertised `signatureHelpProvider.triggerCharacters` (default `"(" `
+and `","`) → fire after `kSignatureTriggerMs`; typing `)` or any other
+char CLEARS a visible signature popup; superseded in-flight asks ride
+`$/cancelRequest` (the completion rule verbatim). Hover collision:
+hover asks already skip while a popup is owned; typing arms signature,
+non-typing caret moves arm hover — the two routes are exclusive by
+construction, pinned by a no-clobber slot. Fakeserver: `sighelp` rides
+as a FLAG of the `sync` MODE (decided at implementation, not a new
+mode): the doc mirror, the `test/*` echo doors (`test/signatureState`
+counts the asks and echoes kind/character/offset from the server's OWN
+frame) and the crashonce drill are already sync's, and the trigger
+tests need all three — a separate mode would have had to re-invent the
+tracking (the first cut learned this the hard way). Flags: `sighelp`,
+`sigdelay=<N>` (holds the answer so a supersede is observable), and
+`completiononly` riding it for the both-debounce pin (there `"("` is
+also the advertised completion trigger, so one press is kind 2 for
+BOTH routes). The mode advertises `hoverProvider:false` — one owner
+for the shared popup, the clobber guard is pinned hub-side — and
+answers a THREE-signature report with `activeSignature:1`, so picking
+`[0]` can never hide behind a shared string. lsp binary +6 slots
+(the round, the supersede+teardown kill, the door's Invoked contract +
+the initialize-side `contextSupport:true` read back by the server, the
+null-answer hide, both-debounce co-existence, the disarm cancels the
+in-flight ask). One REAL discovery in the trigger tap: the view's M18
+auto-close PAIR press is a TWO-unit pure insertion — pressing `(` IS
+the signature gesture — so `onTriggerEdit` recognizes the pair shape
+(`isAutoClosePair`, a hand-mirrored copy of the view's `kPairRules`;
+the view exports no pair table and none is added) and arms the taps
+with `typedChar` = the pressed opener.
+
+C3 FOLDINGRANGE wire → the C1 seam — ✔ CLOSED green 2026-11-22 (five
+slots, three repeat rounds clean, the lsp binary + the full ctest 7/7).
+Implemented as written below, with three READINGS settled in the code:
+(i) the dedupe TIE RULE is the view door's — sort start asc / end desc,
+keep the WIDEST per start — NOT "first wire entry" (a decode that kept
+the first would delete a range the door folds widest, and the two
+layers would disagree about one wire); (ii) the fakeserver's folds are
+ANOTHER `sync`-mode FLAG (`foldingrange`, C2's lesson learned up front,
+never a separate mode) and its report is scanned from ITS OWN TEXT
+MIRROR (brace depth: a line ending `{` opens, a line starting `}`
+closes), so an edit changes the ANSWER and the debounced re-feed is
+checked end to end — plus deliberate wire noise on every report (start
+-3, ends 40/99/100, an inverted 5/3, an empty 4/4, a duplicate start 2
+WIDER than the real one, a bare number, an object with no `endLine`) so
+the clamp/drop/tie discipline is pinned by ONE exact-set compare: the
+shared 9-line js fixture decodes to exactly
+{0:1, 1:6, 2:8, 3:4, 7:8} and after `deleteLineAt(6)` to {0:1, 2:7,
+3:4}; (iii) `releaseRegistration` grew an `editorAlive` flag — the
+`QObject::destroyed` relay must NOT knock a fold door on an object
+whose CodeEditor part is gone (UB), and the clear there is pointless
+anyway; the client-DEATH shape of the hand-back is a separate walk
+(`handBackFolds(specName)` off the `failed` relay). The `refused` bit
+clears ONLY on an open/re-READY edge (`armFoldFeed(uri,
+authorityEdge=true)`), never on an edit edge — that is the no-hammering
+rule on the wire, counted through the fakeserver's `reqlog`. NEW
+fakeserver tripwire that costs nothing: a `textDocument/foldingRange`
+ask reaching a server WITHOUT the flag is exit 2, so every existing
+sync-mode test is also the "the gate keeps the wire silent" pin — and
+the fifth slot makes it legible (ZERO `REQ foldingRange` lines for the
+same fixture on a provider-less server, whose grammar folds must stay).
+
+Hub-INTERNAL: no FeatureHandler door — the hub owns the feed, no
+std::function crosses, so the rejected log grows NOTHING new here
+beyond private noise. Capability
+`foldingRange{lineFoldingOnly:true}` — honest: the view folds LINES,
+wire columns are ignored. Request `{textDocument}` fires: after
+didOpen/re-READY, after a document replace, and debounced on
+`editApplied` (`kFoldRefreshMs`, one in-flight, the re-arm discipline
+of the completion timer). Decode `[{startLine,startCharacter,endLine,
+endCharacter,kind}]` → `FoldRange{startLine, endLine}` — the spec's
+endLine is INCLUSIVE (the view pair is too); characters DROPPED (the
+declared `lineFoldingOnly` makes that conforming); clamp to
+`[0, lineCount()-1]`, drop `end <= start` (a fold hiding nothing),
+sort + dedupe starts (the door's own contract does it — decode keeps
+it honest first). FEED `setFoldRanges`. The null-vs-error asymmetry
+recorded: an ERROR answer (server advertised, then refused) →
+`clearFoldRanges()` (the grammar serves again — the claim fell through);
+null/EMPTY array → server mode with NOTHING foldable (empty is
+authority, grammar stays mute while the claim stands). Teardown/
+client-death → `clearFoldRanges` (the single-writer convention D3's
+hint clear minted). Fakeserver: `foldingrange` mode — nested ranges +
+`kind` fields + out-of-range lines (client clamps) + the error-answ
+path. lsp +2–3 slots.
+
+C4 LSP INLAY HINTS (hub-internal feed into the ALREADY-BOUND M5 door
+`setInlayHints` — the hint record crosses the wheel since 1.6.x, zero
+three-copies; this is the D3 record's prophecy paying: the door named
+for DAP carries its LSP meaning NEXT TO DAP's). Capability
+`inlayHintProvider: {}`. Request `{textDocument, range}` — v1 asks the
+WHOLE document (`range` = [0,0]..[lineCount,last-line-length] capped at
+`kInlayHintRangeLines` 2000 — the viewport range would need a scroll
+signal the hub does not have; the cap is the guard, recorded). Decode:
+label string OR `InlayHintLabelPart[]` parts CONCATENATED verbatim;
+position through PositionConverter against the MIRROR (the only frame
+that keeps the offsets honest); `paddingLeft/paddingRight` → ONE space
+baked into `text` (the view anchors at (line,col) — no new record
+field, pinned); `kind` carried NOWHERE yet (Type/Parameter share one
+paint role — a restyle is a Theme-role ask, not this car). Caps:
+`kMaxLspInlayHints` 500 (stop, do not sort-then-trim); out-of-document
+positions clamp TOLERANTLY through the PositionConverter (the C3 reading
+stands: a generous position reads the way a generous server means it —
+a past-the-end line walks to the document's END, so the clamp MOVES
+with the mirror and its movement is itself the flush-before-ask proof;
+"DROPPED" was the pre-code reading, the code settled on the tolerant
+read and the exact decoded-set compare pins both). Refresh: debounced
+`editApplied` + re-READY + doc replace; teardown clears its OWN set
+(single-writer convention). THE
+CO-EXISTENCE STANCE (recorded, not hidden): the door is whole-set and
+two producers exist — DAP paints only while a session is STOPPED, LSP
+refreshes on every edit; LAST full-set writer wins, a DAP teardown
+clears and the next LSP re-fire restores, LSP+DAP hints never coexist
+in one set. A merge-by-producer tag on `InlayHint` is a FUTURE door
+ask — this car keeps the convention honest instead. Fakeserver: the
+hint authority RIDES the `sync` mode as flags (C2/C3's lesson: a
+separate mode loses the didOpen/didChange tracking the hint POSITIONS
+are only honest on top of) — `inlayhint` advertises
+`inlayHintProvider` (after reading the client's `textDocument.
+inlayHint` claim back — absent is exit 2) and answers from ITS OWN
+TEXT MIRROR (anchor tokens alpha/beta/gamma: an edit changes the
+answer, so the debounced re-feed is checked end to end) + fixed wire
+noise (a parts label with BOTH paddings at {0,0}, a right-padded
+plain label at line 0's exact end, an out-of-doc {400,0}, an empty
+label, a position-less entry, a bare number — every sane entry also
+carries a `kind` the paint client must decode NOWHERE), so the shared
+7-line fixture decodes to exactly {" <h> " @0:0, "PAD " @0:11, RETA
+@1:7, RETB @2:8, OUT clamped to the document end}; `hintnull` answers
+NULL (the spec's "no hints" — a whole-set authority that paints the
+EMPTY set and turns the fed bit), `hintfail=<N>` refuses past ask N
+(the ASYMMETRY with folds: NO refused bit, the last set STANDS, the
+next edge re-arms — folds stop asking, hints keep asking),
+`hintmany=<N>` floods N synthetic hints (the cap pin rides the WIRE
+window: a 600-report leaves exactly h0..h499 in the door),
+`hintdelay=<N>` holds the answer for the close-over-in-flight cancel
+pin, and `test/hintState` echoes the LAST ask's range end — an end
+naming the CURRENT mirror is the flush-before-ask proof, FAR SIDE. An
+inlayHint ask reaching a provider-less server is exit 2 (the fold
+tripwire's twin). lsp +6 slots.
+
+C4 CLOSED — ✔ green 2026-11-22 (all six slots, three repeat rounds
+clean, the lsp binary 90/90, the full ctest 7/7). Hub-internal feed as
+written; the readings the code settled: (i) the tolerant clamp above
+(replacing "DROPPED"); (ii) NO `refused` bit at all for hints — the
+fold door hands folds BACK TO A GRAMMAR when the claim stumbles, the
+hint door has no grammar under it, and wiping an authority's last set
+on a transient error would let a flaky server erase the paint;
+(iii) `hintsFedFromServer` reads the SYNCER's uri — the feed key is
+the registration key, the `documentUri` PROPERTY is a different thing
+entirely (the fold getter already read it this way). Six slots: the
+exact decoded FEED + far-side flush proof (asks counted 1→2→3, the
+asked range end walks 6:6 → 7:6 with the mirror), the COEXISTENCE
+stance both ways (a fed answer overwrites an app's earlier table; a
+close over an in-flight NEVER-FED ask clears NOTHING — D3's
+single-writer convention verbatim), the error-answer asymmetry (the
+set stands, three asks fire anyway, the fed set clears only at close),
+NULL as a whole-set authority, the cap's wire window, and the
+capability control (ZERO inlayHint bytes, the app's table stands from
+open to close).
+
+C5 PULL DIAGNOSTICS (the registry claim made real). Capability
+declare `textDocument.diagnostic {relatedDocumentSupport:false}` —
+clangd FLIPS to pull exactly because we declared it (the push route
+stays armed for servers that never took the pull). PULL MODE live per
+client when `capabilityOffered("diagnosticProvider")` OR
+`isRegistered("textDocument/diagnostic")` (dynamic registration rides
+the generic registry — verified). In pull mode: (1) incoming
+`publishDiagnostics` from THAT client is DROPPED (a server that took
+the pull and pushes anyway would race two authorities — pinned by a
+reqlog spy that paints NOTHING from the push in pull mode); (2) pull
+triggers: after didOpen/re-READY, after didSave, debounced
+`editApplied` (`kPullDiagnosticMs` 600). Request `textDocument/
+diagnostic {textDocument, identifier:"qmn"}` — NEVER a
+`previousResultId` (always a full pull; a `resultId` is stored and
+unused, recorded): `kind:"full"` → decode; `"unchanged"` → ignore the
+answer (paint stays); `"partial"` is spec-impossible without our
+previous id — read as a FULL report (the tolerant read, pinned).
+`items[]` share the decode function with the push route (ONE decoder
+for both wire shapes: `params.diagnostics[]` vs `report.items[]` —
+C5's refactor; the severity/range-clamp/swap discipline exists ONCE).
+A -32601/-32601-style refusal mid-pull (advertised then refused) →
+the client FALLS BACK to push mode (the armed decoder resumes). The
+dynamic-registration path: `client/registerCapability`
+`textDocument/diagnostic` → `registrationsChanged()` re-modes the hub
+mid-session (the registry signal already exists). Fakeserver: `pull`
+mode — static advertise + a DYNAMIC register variant + reports with
+`kind`/`resultId` + a contradicting publish to pin the suppression.
+lsp +3 slots.
+
+Close audit (Car C pinned expectations): `--codegen` rejected log =
+the G3 16-drop baseline + `requestSignatureHelp` (std::function, the
+pinned class) + private-section noise ONLY — the setFoldRanges/
+clearFoldRanges pair must appear BOUND (module init symbols on
+CodeEditor), the hint doors byte-unchanged; wheel rebuild + pydemo
+headless run per the four-literal ritual (1.11.0); a live clangd
+probe (`tools/probe_lsp.sh`-style, manual) earns foldingRange +
+inlayHint + pull diagnostics in ONE run against clangd — it is the
+showcase's dress rehearsal (S1).
+
 ### Car D — multi-observer core (two editors on one CodeDocument)
 
 The CodeDocument record's v1 clause ("one editor per document — a

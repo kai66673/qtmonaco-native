@@ -58,6 +58,7 @@ QJsonObject deepMerge(const QJsonObject& base, const QJsonObject& patch)
 struct LspHub::TriggerState {
     QTimer completionTimer; // single-shot -> fireCompletionTrigger
     QTimer hoverTimer;      // single-shot -> fireHoverTrigger
+    QTimer signatureTimer;  // single-shot -> fireSignatureTrigger (car C)
     bool on = false;
     QChar typedChar;                // the one unit to classify at fire time
     bool pendingTypingMove = false; // an editApplied just fired: the next
@@ -68,11 +69,49 @@ struct LspHub::TriggerState {
     qint64 pendingCompletion = 0;   // 0 = nothing in flight (local refusals
                                     // return 0 from the door, -1 from the
                                     // client — neither is a cancelable id)
+    qint64 pendingSignature = 0;    // the signatureHelp twin (car C, C2)
+    bool signatureVisible = false;  // the SHARED hover popup is currently
+                                    // OWNED by the signature route: hover
+                                    // asks skip over it (the completion-owns-
+                                    // the-moment rule, mirrored)
     qmn::view::TextPosition lastMouseHoverPos{-1, -1}; // post-1.8.0 sliver:
                                     // the last mouse-dwell point that got a
                                     // hover ask (a re-settle INSIDE the same
                                     // visible hover = no second wire ask);
                                     // the caret path and (re)arming clear it
+};
+
+struct LspHub::HintFeed {
+    QTimer refreshTimer;      // single-shot -> requestHintsNow
+    qint64 pendingRequest = 0; // 0 = nothing in flight (the same re-arm
+                              // discipline: a newer fire cancels the older ask)
+    bool fed = false;         // did THIS feed ever write the hint door? The
+                              // teardown clear's precondition — a whole-set
+                              // door shared with the app and (since D3) with
+                              // DAP, so "last FULL-SET writer wins" is the
+                              // coexistence rule, and a hub that never wrote
+                              // clears NOTHING
+};
+
+// The fold-feed state (GATE 3 car C, C3): one debounced foldingRange ask per
+// OPEN document whose server offered folds. Defined up next to TriggerState
+// for the same reason — releaseRegistration tears it down long before the
+// member functions below. NOT gated by the trigger's `on` bit: the feed is
+// hub-internal, and a hub that never called setPopupTriggers still feeds.
+struct LspHub::FoldFeed {
+    QTimer refreshTimer;      // single-shot -> requestFoldsNow
+    qint64 pendingRequest = 0; // 0 = nothing in flight (the re-arm rule: a
+                              // newer fire cancels the older ask, the
+                              // completion discipline verbatim)
+    bool refused = false;     // an ERROR answer fell the claim through: the
+                              // fold source went back to the grammar and this
+                              // document stops asking until an open/re-READY
+                              // edge clears the bit (no hammering)
+    bool fed = false;         // did THIS feed ever hand the view a set? THE
+                              // teardown clear's precondition (the single-
+                              // writer convention: never wipe an override
+                              // some OTHER writer — an app using C1's public
+                              // door — installed)
 };
 
 namespace {
@@ -83,6 +122,47 @@ namespace {
 bool isTriggerUnit(QChar c)
 {
     return c.isLetterOrNumber() || c == QLatin1Char('_');
+}
+
+// The view's M18 auto-close PAIRS (kPairRules in CodeEditor.cpp): pressing an
+// opener inserts BOTH sides and parks the caret between them, so the edit
+// lands as a TWO-unit pure insertion. The trigger taps must read that press
+// as typing — the "(" press IS the signatureHelp gesture — which means the
+// glue has to recognize the pair shape here. The set mirrors kPairRules by
+// hand (the view exports no pair table across the API and none is added for
+// this); if a pair rule is ever added to the view, this list is the mirror
+// to update.
+bool isAutoClosePair(const QString& inserted)
+{
+    static const QString kPairs
+        = QStringLiteral("()[]{}\"\"''``"); // six pairs, adjacent open/close
+    for (int i = 0; i + 1 < kPairs.size(); i += 2) {
+        if (inserted.size() == 2 && inserted.at(0) == kPairs.at(i)
+            && inserted.at(1) == kPairs.at(i + 1))
+            return true;
+    }
+    return false;
+}
+
+// The signature route's trigger set (car C, C2): the server's advertised
+// signatureHelpProvider.triggerCharacters; the classic pair is the default
+// when the provider object names none (the spec leaves the list optional).
+QStringList advertisedSigTriggers(const qmn::lsp::LspClient* client)
+{
+    if (client) {
+        const QJsonArray chars
+            = client->serverCapabilities()
+                  .value(QStringLiteral("signatureHelpProvider"))
+                  .toObject()
+                  .value(QStringLiteral("triggerCharacters"))
+                  .toArray();
+        QStringList out;
+        for (const QJsonValue& value : chars)
+            out << value.toString();
+        if (!out.isEmpty())
+            return out;
+    }
+    return QStringList{QStringLiteral("("), QStringLiteral(",")};
 }
 
 // LSP's hover contents shapes — string | MarkupContent | MarkedString |
@@ -440,7 +520,41 @@ QJsonObject LspHub::buildInitializeParams(const ServerSpec& spec) const
                                                 {QStringLiteral("valueSupport"),
                                                  true},
                                                 {QStringLiteral("value"),
-                                                 1}}}}}}}}},
+                                                 1}}}}}}},
+                          // GATE 3 car C (C2): the signatureHelp round trips
+                          // carry a SignatureHelpContext, so contextSupport
+                          // is TRUE; signatureInformation (documentation
+                          // formats, parameter lists, the active-parameter
+                          // underline) is deliberately NOT claimed — the
+                          // popups are plain text and cannot paint any of
+                          // it, and an honest false beats a lie the server
+                          // would hold us to (PLAN's plain-label divergence).
+                          {QStringLiteral("signatureHelp"),
+                           QJsonObject{{QStringLiteral("contextSupport"),
+                                        true}}},
+                          // GATE 3 car C (C3): the client folds LINES, so the
+                          // honest claim is `lineFoldingOnly:true` — the wire's
+                          // startCharacter/endCharacter are then decoded
+                          // NOWHERE, and a server that can only fold by
+                          // character columns answers null. No foldingRange
+                          // `context` is ever SENT (the spec only asks for one
+                          // when the client folds finer than lines).
+                          {QStringLiteral("foldingRange"),
+                           QJsonObject{{QStringLiteral("lineFoldingOnly"),
+                                        true}}},
+                          // GATE 3 car C (C4): the INLAY HINT claim. The
+                          // empty object is the honest shape: no labelSupport
+                          // (a labelParts answer is decoded by CONCATENATION
+                          // — exactly what the spec prescribes for a client
+                          // that claims no rich-label support), no
+                          // before/afterLines (we paint at the anchor the
+                          // server names), no offset encoding claim of our
+                          // own beyond the positionEncoding already
+                          // negotiated. The answer rides the ALREADY-BOUND
+                          // M5 setInlayHints door — no new view API, and NO
+                          // semanticTokens request is ever made or declared:
+                          // the hub asks for hints, never for colored runs.
+                          {QStringLiteral("inlayHint"), QJsonObject{}}}},
             {QStringLiteral("window"),
              QJsonObject{{QStringLiteral("workDoneProgress"), false}}}});
     // The template deep-merges ON TOP (its ${WORKSPACE_ROOT} expands first,
@@ -489,6 +603,18 @@ void LspHub::registerClient(const QString& specName, SpecClient& entry)
             });
     connect(client, &qmn::lsp::LspClient::failed, this,
             [this, specName](const QString& reason) {
+                // Car C (C3): a dead session cannot be the fold authority any
+                // more, and folds are LINE numbers — ranges the dying server
+                // may have answered against a text the hub no longer agrees
+                // with. So the fold source goes back to the grammar here; the
+                // one auto-restart's ready() edge re-arms the feed (PLAN's
+                // "teardown/client-death -> clearFoldRanges").
+                handBackFolds(specName);
+                // Car C (C4): the same for the hint door — a dead server's
+                // generation must not linger in the paint when its session
+                // does. ONLY sets this hub fed (single-writer convention,
+                // D3's shape): an app's hints and DAP's stop table stand.
+                handBackHints(specName);
                 emit serverFailed(specName, reason);
             });
     connect(client,
@@ -520,8 +646,19 @@ void LspHub::registerClient(const QString& specName, SpecClient& entry)
     connect(client, &qmn::lsp::LspClient::ready, this, [this, specName] {
         for (auto it = registrations_.constBegin();
              it != registrations_.constEnd(); ++it) {
-            if (it->specName == specName)
+            if (it->specName == specName) {
                 pushWorkspaceConfiguration(it.key());
+                // Car C (C3): every re-READY re-arms the fold feed — a
+                // restarted server may answer foldingRange this time (the
+                // `refused` bit is what this edge clears), and a document
+                // that opened while the session was still coming up gets
+                // its first ask here.
+                armFoldFeed(it.key(), true);
+                // Car C (C4): hints refresh on the same edges — a restarted
+                // server re-answers the whole set, and a document that
+                // opened mid-startup gets its first ask here.
+                armHintFeed(it.key());
+            }
         }
     });
 }
@@ -629,9 +766,13 @@ bool LspHub::openDocument(qmn::view::CodeEditor* editor, const QString& uri,
             [syncer = reg.syncer](int start, int end, const QString& inserted) {
                 syncer->applyDelta(start, end, inserted);
             });
-    // The editor dying releases the wiring (the document dies with it).
+    // The editor dying releases the wiring (the document dies with it). The
+    // false says what the fold teardown must know: by the time destroyed()
+    // fires the CodeEditor part is already gone, so the view-side fold clear
+    // is skipped (it would be pointless — the fold store died with the
+    // widget — and knocking a dead object is UB).
     connect(editor, &QObject::destroyed, this, [this, key] {
-        releaseRegistration(key);
+        releaseRegistration(key, /*editorAlive=*/false);
     });
     // M8 machine 7: the live re-push of the view's stored workspace
     // configuration (qtmonaco's `update_workspace_configuration`). Context is
@@ -664,10 +805,41 @@ bool LspHub::openDocument(qmn::view::CodeEditor* editor, const QString& uri,
                                                // (post-1.8.0 sliver): the
                                                // view dwelled, the hub asks
             });
+    // The fold-feed tap (car C, C3): connected for EVERY registration like
+    // the trigger taps, and inert until the foldingRange gate says this
+    // server is a fold authority. The document REPLACE is covered by this tap
+    // too — the core emits a whole-document EditEvent for it, and the C1 seam
+    // already cleared the stale override at the replace itself (a fold range
+    // speaks line numbers, stale by definition across a replace, so the
+    // re-ask is the only honest route).
+    connect(doc, &qmn::view::CodeDocument::editApplied, reg.syncer,
+            [this, key](int /*start*/, int /*end*/, const QString&) {
+                armFoldFeed(key);
+                // Car C (C4): hints ride the same edit edge (the hint table
+                // speaks the edited document's offsets as loudly as folds'
+                // line numbers do).
+                armHintFeed(key);
+            });
 
     reg.syncer->open(doc->toPlainText(), languageId); // didOpen now, or on
                                                       // ready() if the server
                                                       // is still coming up
+    // Car C (C3): the didOpen edge of the fold feed. When the session is
+    // already READY (another document of this language opened first) this is
+    // the ask's arming point; when it is still coming up, foldingRangeLive is
+    // false, the arm is a no-op, and the ready() relay arms it instead — the
+    // two edges together are the "after didOpen" rule. The fold ask FLUSHES
+    // the syncer first (requestFoldsNow), so the didOpen bytes LEAD every
+    // foldingRange ask; the fakeserver's fold oracle proves it far-side — it
+    // answers folds ONLY from the mirror didOpen/didChange maintain, and exits
+    // 2 (featureDoc) if an ask names a document it never saw open.
+    armFoldFeed(key, true);
+    // Car C (C4): the hint feed opens on the SAME edges — armHintFeed gates on
+    // inlayHintLive, so a provider-less server never sees one byte, and the
+    // hint ask's own flush-before-ask keeps the positions honest (the
+    // converter decodes against the MIRROR, which the flush just made
+    // current).
+    armHintFeed(key);
     // A buffer set BEFORE this document was registered: the session may
     // already be READY (another document of this language opened first), so
     // the open is a push edge too. An empty buffer makes it a no-op.
@@ -685,7 +857,7 @@ void LspHub::closeDocument(qmn::view::CodeEditor* editor)
     }
 }
 
-void LspHub::releaseRegistration(const QString& uri)
+void LspHub::releaseRegistration(const QString& uri, bool editorAlive)
 {
     auto it = registrations_.find(uri);
     if (it == registrations_.end())
@@ -707,6 +879,46 @@ void LspHub::releaseRegistration(const QString& uri)
     }
     if (trig && trig->pendingCompletion != 0 && client)
         client->cancel(trig->pendingCompletion);
+    if (trig && trig->pendingSignature != 0 && client)
+        client->cancel(trig->pendingSignature); // car C: same die-with-the-
+                                                // registration discipline for
+                                                // the signature ask
+    // The fold feed (car C, C3) dies the same way: timer off, the in-flight
+    // foldingRange ask canceled (its handler re-looks-up folds_ + this
+    // registration and finds neither), and the VIEW-side override wiped —
+    // but ONLY a set this feed actually installed (the single-writer
+    // convention D3 minted for hints: an app that used C1's public door on
+    // this editor keeps its own fold authority), and only while the editor is
+    // still a live object. On the editor-destroyed path the fold store dies
+    // with the widget, so there is nothing to wipe (and knocking a destroyed
+    // CodeEditor is UB — this is why the door carries the liveness flag).
+    std::unique_ptr<FoldFeed> fold;
+    auto fit = folds_.find(uri);
+    if (fit != folds_.end()) {
+        fold = std::move(fit->second);
+        folds_.erase(fit);
+    }
+    if (fold && fold->pendingRequest != 0 && client)
+        client->cancel(fold->pendingRequest);
+    if (fold && fold->fed && editorAlive && reg.editor) {
+        fold->fed = false;
+        reg.editor->clearFoldRanges(); // the grammar serves again
+    }
+    // Car C (C4): the hint teardown, same walk (cancel the in-flight ask,
+    // and clear ONLY a set this hub wrote — D3's single-writer convention,
+    // the door the app or DAP filled last stands untouched).
+    std::unique_ptr<HintFeed> hint;
+    auto hit = hints_.find(uri);
+    if (hit != hints_.end()) {
+        hint = std::move(hit->second);
+        hints_.erase(hit);
+    }
+    if (hint && hint->pendingRequest != 0 && client)
+        client->cancel(hint->pendingRequest);
+    if (hint && hint->fed && editorAlive && reg.editor) {
+        hint->fed = false;
+        reg.editor->setInlayHints({}); // whole-set door: empty clears
+    }
     if (reg.syncer) {
         reg.syncer->close(); // didClose (a stopped server drops it silently,
                              // the M2 notify rule)
@@ -1103,6 +1315,28 @@ qint64 LspHub::resolveCompletionItem(qmn::view::CodeEditor* editor,
                              QJsonValue(item), onReply);
 }
 
+qint64 LspHub::requestSignatureHelp(qmn::view::CodeEditor* editor,
+                                    const qmn::view::TextPosition& position,
+                                    const FeatureHandler& onReply,
+                                    const QString& triggerCharacter)
+{
+    FeatureTarget t;
+    if (!featureGate(editor, QStringLiteral("signatureHelpProvider"), onReply,
+                     &t))
+        return 0;
+    QJsonObject params = wireDocumentPosition(t.syncer, position);
+    QJsonObject context;
+    if (triggerCharacter.isEmpty()) {
+        context.insert(QStringLiteral("triggerKind"), 1); // Invoked
+    } else {
+        context.insert(QStringLiteral("triggerKind"), 2); // TriggerForCharacter
+        context.insert(QStringLiteral("triggerCharacter"), triggerCharacter);
+    }
+    params.insert(QStringLiteral("context"), context);
+    return t.client->request(QStringLiteral("textDocument/signatureHelp"),
+                             params, onReply);
+}
+
 qint64 LspHub::requestCodeActions(qmn::view::CodeEditor* editor,
                                   const qmn::view::TextPosition& position,
                                   const FeatureHandler& onReply)
@@ -1211,10 +1445,13 @@ LspHub::TriggerState* LspHub::triggerEntry(const QString& uri)
     TriggerState* raw = state.get();
     raw->completionTimer.setSingleShot(true);
     raw->hoverTimer.setSingleShot(true);
+    raw->signatureTimer.setSingleShot(true);
     connect(&raw->completionTimer, &QTimer::timeout, this,
             [this, uri] { fireCompletionTrigger(uri); });
     connect(&raw->hoverTimer, &QTimer::timeout, this,
             [this, uri] { fireHoverTrigger(uri); });
+    connect(&raw->signatureTimer, &QTimer::timeout, this,
+            [this, uri] { fireSignatureTrigger(uri); });
     triggers_.emplace(uri, std::move(state));
     return raw;
 }
@@ -1243,12 +1480,19 @@ void LspHub::setPopupTriggers(qmn::view::CodeEditor* editor, bool on)
         t->on = false;
         t->completionTimer.stop();
         t->hoverTimer.stop();
+        t->signatureTimer.stop(); // car C: the signature round ends here too
         t->pendingTypingMove = false;
+        t->signatureVisible = false;
         t->lastMouseHoverPos = {-1, -1};
         if (t->pendingCompletion != 0) {
             if (qmn::lsp::LspClient* client = clientForUri(syncer->uri()))
                 client->cancel(t->pendingCompletion);
             t->pendingCompletion = 0;
+        }
+        if (t->pendingSignature != 0) { // car C: the same supersede rule
+            if (qmn::lsp::LspClient* client = clientForUri(syncer->uri()))
+                client->cancel(t->pendingSignature);
+            t->pendingSignature = 0;
         }
         editor->hideCompletionList();
         editor->hideHover();
@@ -1277,13 +1521,25 @@ void LspHub::onTriggerEdit(const QString& uri, int start, int end,
     // editApplied, and the view re-emits cursorMoved once the caret is
     // remapped): typing never hovers.
     t->pendingTypingMove = true;
-    if (end != start || inserted.size() != 1)
-        return; // only TYPING counts: a pure one-unit insertion
-    t->typedChar = inserted.at(0);
+    if (end != start)
+        return; // only INSERTIONS count: deletions and pastes stay quiet
+    const bool pair = inserted.size() == 2 && isAutoClosePair(inserted);
+    if (inserted.size() != 1 && !pair)
+        return; // one typed unit — or the view's auto-close PAIR (M18),
+                // which inserts both sides and leaves the caret BETWEEN them:
+                // pressing "(" is exactly the C2 signature gesture, so the
+                // pair press must arm the taps like any other keystroke
+    t->typedChar = inserted.at(0); // the unit the USER pressed (for a pair,
+                                   // the opening side)
     t->completionTimer.start(kCompletionTriggerMs); // every keystroke
                                                     // RE-ARMS the debounce:
                                                     // a burst coalesces into
                                                     // one request
+    // The signature route re-arms on the SAME keystroke (car C, C2): what
+    // it does at fire time is decided by the unit BEFORE the caret then,
+    // not by this typed unit — typing "(" arms an ask, typing "a" arms a
+    // supersede-and-hide pass. Hover stays out: typing never hovers.
+    t->signatureTimer.start(kSignatureTriggerMs);
 }
 
 void LspHub::onTriggerCaretMoved(const QString& uri,
@@ -1321,8 +1577,10 @@ void LspHub::onTriggerMouseHover(const QString& uri,
     if (reg == registrations_.constEnd() || !reg->editor)
         return;
     qmn::view::CodeEditor* editor = reg->editor;
-    if (editor->completionListVisible() || t->pendingCompletion != 0)
-        return;
+    if (editor->completionListVisible() || t->pendingCompletion != 0
+        || t->signatureVisible || t->pendingSignature != 0)
+        return; // the mouse route honors BOTH popup owners (car C: the
+                // signature round owns the shared hover popup too)
     if (pos == t->lastMouseHoverPos && editor->hoverVisible())
         return; // same point, same popup: no second ask
     t->lastMouseHoverPos = pos;
@@ -1445,6 +1703,532 @@ void LspHub::fireCompletionTrigger(const QString& uri)
                                             // in flight to supersede
 }
 
+// The signatureHelp route (car C, C2): re-armed by EVERY typing keystroke,
+// classified at FIRE time by the unit BEFORE the caret — in the server's
+// advertised trigger set (default "(" and ",") means ask (2)+the char;
+// anything else supersedes an in-flight ask and hides a signature-owned
+// popup (the round closed). The popup is the SHARED hover popup, and the
+// composition is the design's flat reading of the spec: signatures
+// [activeSignature] (clamped to range), label VERBATIM, zero-width frame at
+// the fire-time caret; activeParameter is DROPPED — a plain-text popup has
+// no underline (PLAN's plain-label divergence, the m6 no-markdown bullet
+// extended, never a snippet-engine re-open).
+void LspHub::fireSignatureTrigger(const QString& uri)
+{
+    TriggerState* t = triggerFor(uri);
+    if (!t || !t->on)
+        return;
+    auto reg = registrations_.constFind(uri);
+    if (reg == registrations_.constEnd() || !reg->editor)
+        return; // the document is gone
+    qmn::view::CodeEditor* editor = reg->editor;
+    const qmn::view::TextPosition caret = editor->position();
+    QString before; // the unit the FIRE-TIME caret sits behind (empty when
+                    // the caret starts a line or the column is out of range)
+    if (caret.col > 0 && caret.line >= 0
+        && caret.line < editor->document()->lineCount()) {
+        const QString line = editor->document()->lineText(caret.line);
+        if (caret.col - 1 < line.size()
+            && !line.at(caret.col - 1).isLowSurrogate())
+            before = QString(line.at(caret.col - 1));
+    }
+    qmn::lsp::LspClient* client = clientForUri(uri);
+    if (!advertisedSigTriggers(client).contains(before)) {
+        // NOT a reason to ask: still SUPERSEDE (a stale answer against a
+        // stale frame must never paint over what the user typed since) and
+        // close the popup the signature route owned.
+        if (t->pendingSignature != 0) {
+            if (client)
+                client->cancel(t->pendingSignature);
+            t->pendingSignature = 0;
+        }
+        if (t->signatureVisible) {
+            editor->hideHover();
+            t->signatureVisible = false;
+        }
+        return;
+    }
+    if (t->pendingSignature != 0) {
+        if (client)
+            client->cancel(t->pendingSignature);
+        t->pendingSignature = 0;
+    }
+    const qint64 id = requestSignatureHelp(
+        editor, caret,
+        [this, uri, caret](const qmn::protocol::RpcClient::Reply& reply) {
+            if (TriggerState* s = triggerFor(uri))
+                s->pendingSignature = 0; // over by whatever route
+            auto reg2 = registrations_.constFind(uri);
+            if (reg2 == registrations_.constEnd() || !reg2->editor)
+                return; // nowhere to show
+            qmn::view::CodeEditor* ed = reg2->editor;
+            TriggerState* s = triggerFor(uri);
+            if (reply.isError)
+                return; // refusals/cancels/timeouts show NOTHING
+            const QJsonArray signatures
+                = reply.result.isObject()
+                      ? reply.result.toObject()
+                            .value(QStringLiteral("signatures"))
+                            .toArray()
+                      : QJsonArray();
+            if (signatures.isEmpty()) { // null or empty report = the server
+                                        // says "no signature here": hide
+                if (s)
+                    s->signatureVisible = false;
+                ed->hideHover();
+                return;
+            }
+            int active = reply.result.toObject()
+                             .value(QStringLiteral("activeSignature"))
+                             .toInt(0);
+            if (active < 0)
+                active = 0;
+            if (active >= signatures.size())
+                active = signatures.size() - 1;
+            const QString label = signatures.at(active)
+                                      .toObject()
+                                      .value(QStringLiteral("label"))
+                                      .toString();
+            if (label.isEmpty()) { // a signature without a label is nothing
+                                   // to paint in a plain-text popup
+                if (s)
+                    s->signatureVisible = false;
+                ed->hideHover();
+                return;
+            }
+            // The ZERO-WIDTH anchor at the fire-time caret: the popup marks
+            // the call position, not a word (the hover frame rule does not
+            // apply to this owner).
+            ed->showHover({caret.line, caret.col, caret.line, caret.col},
+                          label);
+            if (s)
+                s->signatureVisible = true;
+        },
+        QString(before));
+    t->pendingSignature = id > 0 ? id : 0; // refused locally (no provider:
+                                           // the common quiet case — a hub
+                                           // whose server never advertised
+                                           // signatureHelp never puts a byte
+                                           // on the wire from this route)
+}
+
+// --------------------------------------------------------------- fold feed
+// GATE 3 car C (C3): the hub-internal foldingRange route. No FeatureHandler
+// door (the hub owns the feed end-to-end), so nothing new crosses to the
+// wheel. The VIEW side of the seam is C1's setFoldRanges/clearFoldRanges pair
+// — the feed below is the only writer the hub ever is, and the only writer it
+// ever CLEARS.
+bool LspHub::foldingRangeLive(const QString& uri) const
+{
+    auto reg = registrations_.constFind(uri);
+    if (reg == registrations_.constEnd() || !reg->editor)
+        return false;
+    qmn::lsp::LspClient* client = clientForUri(uri);
+    if (!client || !client->isReady())
+        return false; // a session still coming up answers nothing about folds
+    // The static initialize provider OR the registry's dynamic registration
+    // (LspClient::isRegistered — the same generic half C5's diagnostics make
+    // central): either makes this server a fold authority.
+    return capabilityOffered(client, QStringLiteral("foldingRangeProvider"))
+        || client->isRegistered(QStringLiteral("textDocument/foldingRange"));
+}
+
+LspHub::FoldFeed* LspHub::foldFeedEntry(const QString& uri)
+{
+    auto it = folds_.find(uri);
+    if (it != folds_.end())
+        return it->second.get();
+    auto feed = std::make_unique<FoldFeed>();
+    FoldFeed* raw = feed.get();
+    raw->refreshTimer.setSingleShot(true);
+    connect(&raw->refreshTimer, &QTimer::timeout, this,
+            [this, uri] { requestFoldsNow(uri); });
+    folds_.emplace(uri, std::move(feed));
+    return raw;
+}
+
+void LspHub::armFoldFeed(const QString& uri, bool authorityEdge)
+{
+    if (closingDown_ || !foldingRangeLive(uri))
+        return; // NO fold authority: not one wire byte (the byte-identical
+                // rule every pre-C3 test rides — the feed NEVER arms for a
+                // server that never offered foldingRangeProvider)
+    FoldFeed* feed = foldFeedEntry(uri);
+    if (feed->refused) {
+        if (!authorityEdge)
+            return; // the claim fell through: quiet until an open/re-READY
+                    // edge (no hammering a server that said no to its own
+                    // advertised provider)
+        feed->refused = false; // THE re-arm: a new session/new document is a
+                               // new claim
+    }
+    feed->refreshTimer.start(kFoldRefreshMs); // every edge RE-ARMS: a burst
+                                              // coalesces into one ask
+}
+
+bool LspHub::foldsFedFromServer(qmn::view::CodeEditor* editor) const
+{
+    const qmn::lsp::DocumentSyncer* syncer = syncerFor(editor);
+    if (!syncer)
+        return false;
+    auto it = folds_.find(syncer->uri());
+    return it != folds_.end() && it->second->fed;
+}
+
+// The client-death shape of the hand-back: every document this spec serves
+// whose folds the hub FED gets the view back (the single-writer rule again —
+// a feed that never fed has nothing to wipe, and an app's own C1 override
+// stays). The `refused` bit is NOT touched here: a restart is a fresh claim
+// through the ready() edge.
+void LspHub::handBackFolds(const QString& specName)
+{
+    for (auto it = registrations_.constBegin();
+         it != registrations_.constEnd(); ++it) {
+        if (it->specName != specName || !it->editor)
+            continue;
+        auto fit = folds_.find(it.key());
+        if (fit == folds_.end() || !fit->second->fed)
+            continue;
+        fit->second->fed = false;
+        it->editor->clearFoldRanges();
+    }
+}
+
+LspHub::HintFeed* LspHub::hintFeedEntry(const QString& uri)
+{
+    auto found = hints_.find(uri);
+    if (found != hints_.end())
+        return found->second.get();
+    auto feed = std::make_unique<HintFeed>();
+    HintFeed* raw = feed.get();
+    feed->refreshTimer.setSingleShot(true);
+    QObject::connect(&feed->refreshTimer, &QTimer::timeout, this,
+                     [this, uri] { requestHintsNow(uri); });
+    hints_.emplace(uri, std::move(feed));
+    return raw;
+}
+
+bool LspHub::hintsFedFromServer(qmn::view::CodeEditor* editor) const
+{
+    if (!editor)
+        return false;
+    const qmn::lsp::DocumentSyncer* syncer = syncerFor(editor);
+    if (!syncer)
+        return false;
+    auto found = hints_.find(syncer->uri()); // THE syncer's uri is the feed
+                                             // key — the documentUri property
+                                             // is a different thing entirely
+    return found != hints_.end() && found->second->fed;
+}
+
+bool LspHub::inlayHintLive(const QString& uri) const
+{
+    auto reg = registrations_.constFind(uri);
+    if (reg == registrations_.constEnd() || !reg->editor)
+        return false;
+    qmn::lsp::LspClient* client = clientForUri(uri);
+    if (!client || !client->isReady())
+        return false; // a session still coming up answers nothing about hints
+    // folds' gate shape verbatim: the static initialize provider OR the
+    // registry's dynamic registration.
+    return capabilityOffered(client, QStringLiteral("inlayHintProvider"))
+        || client->isRegistered(QStringLiteral("textDocument/inlayHint"));
+}
+
+void LspHub::armHintFeed(const QString& uri)
+{
+    if (closingDown_)
+        return;
+    auto found = registrations_.constFind(uri);
+    if (found == registrations_.constEnd())
+        return; // document gone mid-edge
+    if (!inlayHintLive(uri))
+        return; // provider never offered/registered: not one byte on the wire
+    hintFeedEntry(uri)->refreshTimer.start(kHintRefreshMs);
+}
+
+void LspHub::handBackHints(const QString& specName)
+{
+    for (auto it = registrations_.constBegin();
+         it != registrations_.constEnd(); ++it) {
+        if (it->specName != specName || !it->editor)
+            continue;
+        auto hit = hints_.find(it.key());
+        if (hit == hints_.end() || !hit->second->fed)
+            continue;
+        hit->second->fed = false;
+        it->editor->setInlayHints({}); // whole-set door: empty clears
+    }
+}
+
+void LspHub::requestHintsNow(const QString& uri)
+{
+    if (!hints_.contains(uri))
+        return; // the timer that fired guarantees a feed — unless a teardown
+                // already erased it mid-fire (closeDocument cancelled the
+                // timer too, but a queued timeout can still land: this is
+                // that guard)
+    auto reg = registrations_.constFind(uri);
+    if (reg == registrations_.constEnd() || !reg->editor)
+        return; // the document is gone
+    qmn::lsp::DocumentSyncer* syncer = syncerFor(reg->editor);
+    if (!syncer || !syncer->isOpen())
+        return;
+    if (!inlayHintLive(uri))
+        return; // the authority died mid-debounce (a session that failed in
+                // the kHintRefreshMs window): nothing to ask
+    syncer->flush(); // THE FLUSH BEFORE THE ASK (the fold rule verbatim): the
+                     // hint POSITIONS speak the server's frame, so the
+                     // didChange bytes must lead this request — and the
+                     // fakeserver's featureDoc guard answers an ask that
+                     // outran didOpen with exit 2, far-side proof.
+    // SUPERSEDE (the completion/folds discipline verbatim): one ask in
+    // flight, the older one canceled — the door is a whole-set write and two
+    // half answers racing in would paint a mix of two generations.
+    qmn::lsp::LspClient* client = clientForUri(uri);
+    HintFeed* feed = hintFeedEntry(uri);
+    if (feed->pendingRequest != 0 && client)
+        client->cancel(feed->pendingRequest);
+    feed->pendingRequest = 0;
+
+    // THE WHOLE-DOCUMENT ASK (PLAN's v1 reading): a viewport ask would need
+    // a scroll signal the hub does not have, so v1 asks the document and the
+    // `kInlayHintRangeLines` cap is the guard. The range speaks the DOCUMENT
+    // frame (lineCount is always >= 1; the end is the last line's end, minus
+    // a trailing newline if lineText carries one) and rides out through
+    // wirePosition — the mirror's encoding frame.
+    qmn::view::CodeDocument* doc = reg->editor->document();
+    const int lineCount = doc ? doc->lineCount() : 1;
+    const int lastLine = qMin(lineCount, kInlayHintRangeLines) - 1;
+    QString tail = doc ? doc->lineText(lastLine) : QString();
+    if (tail.endsWith(QLatin1Char('\n')))
+        tail.chop(1); // lineText carries the terminator except on the last
+                      // line; the end position must point AFTER the last
+                      // character, at the line's edge — never onto the next
+                      // line
+    const qint64 id = client->request(
+        QStringLiteral("textDocument/inlayHint"),
+        QJsonObject{{QStringLiteral("textDocument"),
+                     QJsonObject{{QStringLiteral("uri"), uri}}},
+                    {QStringLiteral("range"),
+                     QJsonObject{
+                         {QStringLiteral("start"),
+                          QJsonObject{{QStringLiteral("line"), 0},
+                                      {QStringLiteral("character"), 0}}},
+                         {QStringLiteral("end"),
+                          wirePosition(syncer,
+                                       qmn::view::TextPosition{
+                                           lastLine, qMax(0, tail.length())})}}}},
+        [this, uri](const qmn::protocol::RpcClient::Reply& reply) {
+            auto hit = hints_.find(uri);
+            auto reg2 = registrations_.constFind(uri);
+            if (hit == hints_.end() || reg2 == registrations_.constEnd()
+                || !reg2->editor || !reg2->editor->document())
+                return; // canceled with the registration: nothing to paint
+            qmn::view::CodeEditor* ed = reg2->editor;
+            if (reply.isError) {
+                // NO refused-bit for hints (the recorded asymmetry with
+                // folds): an error answer leaves the LAST full set STANDING —
+                // nothing was installed-then-revoked, the server keeps its
+                // provider, and the next edit edge re-arms. The fold door
+                // hands back to a GRAMMAR when the claim falls through; the
+                // hint door has no grammar underneath it, and silently
+                // wiping an authority's old hints on a transient error would
+                // let a flaky server erase the paint.
+                return;
+            }
+            // ARRAY or NULL both mean "these are the hints": null is "none",
+            // an empty array the same — either way the whole-set write paints
+            // nothing, and the fed bit turns true (the authority spoke).
+            QVector<qmn::view::CodeEditor::InlayHint> hints;
+            if (reply.result.isArray()) {
+                const QString text = reg2->syncer->mirrorText();
+                const qmn::lsp::PositionConverter::Encoding enc
+                    = reg2->syncer->encoding();
+                for (const QJsonValue& value : reply.result.toArray()) {
+                    if (hints.size() >= kMaxLspInlayHints)
+                        break; // the CAP: stop taking — no sort-then-trim
+                               // game, the first N in wire order ride out
+                    if (!value.isObject())
+                        continue; // malformed entry: nothing to paint
+                    const QJsonObject hint = value.toObject();
+                    const QJsonValue label = hint.value(
+                        QStringLiteral("label"));
+                    QString label2; // the CONCATENATED label
+                    if (label.isString()) {
+                        label2 = label.toString(); // the easy shape, verbatim
+                    } else if (label.isArray()) {
+                        // InlayHintLabelPart[]: the part VALUES in order,
+                        // verbatim. A part's location/command/data ride
+                        // nowhere yet (clickable parts are a commands story,
+                        // and commands are a later wheel) — the same decode
+                        // the spec prescribes for a client that claims no
+                        // labelSupport, which is exactly what initialize said.
+                        for (const QJsonValue& part : label.toArray()) {
+                            if (part.isObject())
+                                label2 += part.toObject()
+                                              .value(QStringLiteral("value"))
+                                              .toString();
+                        }
+                    } else {
+                        continue; // no label at all: malformed
+                    }
+                    if (label2.isEmpty())
+                        continue; // an empty label paints nothing; skip
+                                  // BEFORE spending a position conversion
+                    if (!hint.value(QStringLiteral("position")).isObject())
+                        continue; // a hint without an anchor is malformed
+                    const QJsonObject at = hint.value(
+                        QStringLiteral("position")).toObject();
+                    // WIRE frame -> MODEL frame in one hop (toModelPosition
+                    // clamps tolerantly — a generous line/character reads the
+                    // way a generous server means it). The mirror is THE
+                    // frame: the flush above made it current, so a decoded
+                    // position cannot land in a stale document.
+                    const qmn::lsp::ModelPosition model
+                        = qmn::lsp::PositionConverter::toModelPosition(
+                              text, at.value(QStringLiteral("line")).toInt(),
+                              at.value(QStringLiteral("character")).toInt(),
+                              enc);
+                    // The paddings become REAL SPACES in the text (the view
+                    // anchors a hint at (line,col) and draws its text
+                    // verbatim; widening the frozen M5 record with a padding
+                    // field is not on the additive menu — the no-new-geometry
+                    // rule stands). Recorded divergence.
+                    if (hint.value(QStringLiteral("paddingLeft")).toBool())
+                        label2.prepend(QLatin1Char(' '));
+                    if (hint.value(QStringLiteral("paddingRight")).toBool())
+                        label2.append(QLatin1Char(' '));
+                    hints.append({model.line, model.col, label2});
+                }
+            }
+            // `kind` rides NOWHERE: Type and Parameter hints share the one
+            // M5 paint role (the view has no second hint ink to give them;
+            // inventing a Theme role is an ask for a later car, recorded).
+            hit->second->fed = true; // THE AUTHORITY SPOKE (array or null):
+                                     // the teardown clear's precondition
+            ed->setInlayHints(hints); // whole-set write, the fold door's
+                                      // shape — the view sorts by (line,col)
+            // (no cap-tell to the view: kMaxLspInlayHints already rode the
+            // WIRE window — the cap cut the DECODE, so what the door gets is
+            // exactly the first-window set)
+        });
+    feed->pendingRequest = id > 0 ? id : 0; // locally refused (the gate above
+                                            // makes this nearly unreachable)
+}
+
+// The wire shape is the BARE `{textDocument}` — the client claimed
+// `lineFoldingOnly:true`, so no context (the spec's foldingRangeContext is
+// only for a server that folds by line CHARACTER columns too).
+void LspHub::requestFoldsNow(const QString& uri)
+{
+    FoldFeed* feed = foldFeedEntry(uri); // the timer that fired guarantees a
+                                         // feed exists; entry() also covers
+                                         // the refused check below
+    if (feed->refused)
+        return;
+    auto reg = registrations_.constFind(uri);
+    if (reg == registrations_.constEnd() || !reg->editor)
+        return; // the document is gone
+    qmn::lsp::DocumentSyncer* syncer = syncerFor(reg->editor);
+    if (!syncer || !syncer->isOpen())
+        return;
+    if (!foldingRangeLive(uri))
+        return; // the authority died mid-debounce (a session that failed in
+                // the kFoldRefreshMs window): nothing to ask
+    syncer->flush(); // the feature-door rule: ask about the text the SERVER
+                     // agrees with (the didChange bytes lead this request)
+    // SUPERSEDE (the completion discipline verbatim): one ask in flight, the
+    // older one canceled so its handler finds nothing and a late answer can
+    // never paint over a newer feed.
+    qmn::lsp::LspClient* client = clientForUri(uri);
+    if (feed->pendingRequest != 0 && client)
+        client->cancel(feed->pendingRequest);
+    feed->pendingRequest = 0;
+
+    const qint64 id = client->request(
+        QStringLiteral("textDocument/foldingRange"),
+        QJsonObject{{QStringLiteral("textDocument"),
+                     QJsonObject{{QStringLiteral("uri"), uri}}}},
+        [this, uri](const qmn::protocol::RpcClient::Reply& reply) {
+            auto fit = folds_.find(uri);
+            auto reg2 = registrations_.constFind(uri);
+            if (fit == folds_.end() || reg2 == registrations_.constEnd()
+                || !reg2->editor)
+                return; // canceled with the registration: nothing to feed
+            qmn::view::CodeEditor* ed = reg2->editor;
+            if (reply.isError) {
+                // The claim FELL THROUGH (advertised, then refused/canceled/
+                // timed out): the fold source goes back to the grammar, and
+                // this document stops asking until an open/re-READY edge
+                // re-arms. The clear is the single-writer kind: only a set
+                // THIS feed installed is wiped.
+                fit->second->refused = true;
+                if (fit->second->fed) {
+                    fit->second->fed = false;
+                    ed->clearFoldRanges();
+                }
+                return;
+            }
+            // ARRAY or NULL both mean "the server is the fold authority":
+            // the spec's null is "no folds", and an EMPTY array is the same
+            // authority — either way the grammar stays MUTE (C1's empty-feed
+            // rule), so the feed is the empty vector.
+            QVector<qmn::view::CodeEditor::FoldRange> ranges;
+            if (reply.result.isArray()) {
+                const int lastLine = ed->document()
+                                         ? ed->document()->lineCount() - 1
+                                         : 0; // the DOCUMENT frame the range
+                                              // numbers speak (lineCount is
+                                              // always >= 1)
+                for (const QJsonValue& value : reply.result.toArray()) {
+                    if (!value.isObject())
+                        continue; // a malformed entry is nothing to fold
+                    const QJsonObject entry = value.toObject();
+                    if (!entry.contains(QStringLiteral("startLine"))
+                        || !entry.contains(QStringLiteral("endLine")))
+                        continue; // the two line keys are the ONLY decoded
+                                  // fields: startCharacter/endCharacter/kind
+                                  // ride nowhere (lineFoldingOnly)
+                    int start
+                        = entry.value(QStringLiteral("startLine")).toInt();
+                    int end = entry.value(QStringLiteral("endLine")).toInt();
+                    if (start < 0)
+                        start = 0; // the wire may name lines the document
+                    if (end > lastLine)
+                        end = lastLine; // never had: CLAMP, and a range
+                    if (start > lastLine)
+                        start = lastLine; // left with nothing to hide falls
+                    if (end <= start)
+                        continue; // below the fold's own definition
+                    ranges.append({start, end});
+                }
+                // Sort start ASC / end DESC and keep ONE entry per start (the
+                // WIDEST): this is the VIEW door's own tie rule verbatim
+                // (setFoldRanges sorts and de-duplicates the same way, its
+                // documented contract — the outermost-leads rule of the fold
+                // engine, VS Code's fold-outermost UX). Decoding it here first
+                // is honesty, not a crutch; and it MUST be the same rule,
+                // because a decode that kept the FIRST wire entry instead would
+                // delete a range the door would have folded widest.
+                std::stable_sort(ranges.begin(), ranges.end(),
+                                 [](const qmn::view::CodeEditor::FoldRange& a,
+                                    const qmn::view::CodeEditor::FoldRange& b) {
+                                     if (a.startLine != b.startLine)
+                                         return a.startLine < b.startLine;
+                                     return a.endLine > b.endLine;
+                                 });
+                for (int i = ranges.size() - 1; i > 0; --i)
+                    if (ranges.at(i).startLine == ranges.at(i - 1).startLine)
+                        ranges.removeAt(i);
+            }
+            fit->second->fed = true;
+            ed->setFoldRanges(ranges);
+        });
+    feed->pendingRequest = id > 0 ? id : 0; // locally refused (the gate above
+                                            // makes this nearly unreachable)
+}
+
 // The diagnostics half of the SHARED hover popup (post-1.8.0 sliver, the
 // user-decided VS Code shape): the records are the VIEW's decoration state
 // (onDiagnostics fed them; the view holds them sorted). Match = the range
@@ -1534,8 +2318,11 @@ void LspHub::fireHoverAt(const QString& uri, const qmn::view::TextPosition& at)
         return;
     qmn::view::CodeEditor* editor = reg->editor;
     // Completion and hover NEVER share the moment: the hover is skipped
-    // while completion owns the popup — in flight or visible.
-    if (editor->completionListVisible() || t->pendingCompletion != 0)
+    // while completion owns the popup — in flight or visible. The
+    // signatureHelp route (car C) owns the SHARED hover popup itself and
+    // rides in flight on the same rule: hover yields to it too.
+    if (editor->completionListVisible() || t->pendingCompletion != 0
+        || t->signatureVisible || t->pendingSignature != 0)
         return;
     // The SHARED hover popup (post-1.8.0 sliver): the hovered line's
     // decoded diagnostics LEAD the popup and the server's hover contents

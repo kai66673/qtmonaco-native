@@ -482,6 +482,107 @@ struct FeatureProbe {
     }
 };
 
+// The fold set as ONE comparable string list ("start:end", the door's own
+// start-ascending order) — car C (C3)'s oracle: the hub's decode and the C1
+// seam's normalization both show up here, and nothing else.
+QStringList foldSet(qmn::view::CodeEditor* editor)
+{
+    QStringList out;
+    for (const qmn::view::CodeEditor::FoldRange& r : editor->foldableRanges())
+        out << QStringLiteral("%1:%2").arg(r.startLine).arg(r.endLine);
+    return out;
+}
+
+QString foldDump(qmn::view::CodeEditor* editor)
+{
+    return foldSet(editor).isEmpty()
+               ? QStringLiteral("<no foldables>")
+               : foldSet(editor).join(QLatin1Char(','));
+}
+
+// Counts one method's `REQ <method>` lines on the STDERR channel (the
+// fakeserver logs EVERY feature request it sees), so "how many asks did this
+// edge really produce" is wire traffic, not a guess.
+int reqCount(const QSignalSpy& stderrSpy, const QString& method)
+{
+    int n = 0;
+    const QString needle = QStringLiteral("REQ %1").arg(method);
+    for (const QList<QVariant>& ev : stderrSpy)
+        if (ev.at(0).toString().contains(needle))
+            ++n;
+    return n;
+}
+
+// The car C (C3) fold fixture: nine lines (0..8), a js-shaped brace nest.
+// Chosen so the GRAMMAR's own folds and the SERVER's report differ in ways a
+// compare can see: the grammar folds the three blocks (starts 1, 2, 3), while
+// the report's out-of-document noise puts folds at starts 0 and 7 — lines with
+// nothing foldable about them at all. The fakeserver's oracle scans ITS OWN
+// mirror (a line ending `{` opens, a line starting `}` closes it), so the
+// report tracks every edit; the noise entries are fixed and documented in
+// tests/fakeserver/main.cpp (foldReport). The decoded answer for this document
+// is exactly {0:1, 1:6, 2:8, 3:4, 7:8} — the clamp of the out-of-document
+// ranges, the drop of the inverted/empty ones, and the widest-wins tie at
+// start 2 all ride that one line.
+const QString kFoldFixture = QStringLiteral(
+    "header line\n"
+    "alpha {\n"
+    "  beta {\n"
+    "    gamma {\n"
+    "    }\n"
+    "  }\n"
+    "  }\n"
+    "tail a\n"
+    "tail b");
+
+// The car C (C4) hint fixture: seven lines (0..6) carrying the fakeserver's
+// ANCHOR tokens (alpha on line 1, beta on line 2 — gamma is deliberately
+// ABSENT and an edit inserts it, so the answer visibly FOLLOWS THE MIRROR).
+// The fakeserver's hintReport is scanned from ITS OWN MIRROR plus fixed wire
+// noise (parts label with both paddings at {0,0}, "PAD" right-padded at
+// {0,11} — line 0's exact length, an out-of-document {400,0}, an empty
+// label, a position-less entry, a bare number), so the shared fixture decodes
+// to exactly: 0:0 " <h> " (parts concatenated, both paddings baked as one
+// space each), 0:11 "PAD ", 1:7 RETA, 2:8 RETB, and OUT clamped to the
+// DOCUMENT'S END (PositionConverter walks a past-the-end line to EOF, so
+// {400,0} lands at the LAST line's END — 6:6 here; the clamp rides the
+// current frame, which is also the flush-before-ask proof the hintState
+// door echoes back through the ask's own range end).
+const QString kHintFixture = QStringLiteral(
+    "header line\n"
+    "alpha {\n"
+    "  beta {\n"
+    "  }\n"
+    "  }\n"
+    "tail a\n"
+    "tail b");
+
+QStringList hintExpected() // the five-entry decode above, one list
+{
+    return {QStringLiteral("0:0| <h> "), QStringLiteral("0:11|PAD "),
+            QStringLiteral("1:7|RETA"), QStringLiteral("2:8|RETB"),
+            QStringLiteral("6:6|OUT")};
+}
+
+// The hint set as ONE comparable list ("line:col|text", the M5 door's own
+// (line,col) sort) — car C (C4)'s oracle: parts-concatenation, the baked
+// paddings, the tolerant clamp, the malformed drops and the wire-window cap
+// all show up here and nothing else does.
+QStringList hintDump(qmn::view::CodeEditor* editor)
+{
+    QStringList out;
+    for (const qmn::view::CodeEditor::InlayHint& h : editor->inlayHints())
+        out << QStringLiteral("%1:%2|%3").arg(h.line).arg(h.col).arg(h.text);
+    return out;
+}
+
+QString hintDumpText(qmn::view::CodeEditor* editor)
+{
+    return hintDump(editor).isEmpty()
+               ? QStringLiteral("<no hints>")
+               : hintDump(editor).join(QLatin1Char(','));
+}
+
 } // namespace
 
 class TstLsp : public QObject {
@@ -2833,6 +2934,17 @@ private slots:
                      qint64(0));
             QVERIFY(rename.arrived);
             QCOMPARE(rename.reply.code, -32601);
+            // GATE 3 car C (C2): the signatureHelp door rides the SAME
+            // capability gate — plain sync advertises no signatureHelpProvider,
+            // so the door is refused LOCALLY (never a wire byte).
+            FeatureProbe signature;
+            QCOMPARE(h.hub.requestSignatureHelp(
+                         &editor, qmn::view::TextPosition(0, 1),
+                         signature.handler()),
+                     qint64(0));
+            QVERIFY(signature.arrived);
+            QVERIFY(signature.reply.isError);
+            QCOMPARE(signature.reply.code, -32601);
         }
         { // the features-mode set: hoverProvider FALSE (the hub must refuse
           // locally; the fakeserver exits 2 if anything reaches it) and a
@@ -4649,6 +4761,1122 @@ private slots:
         }
         QCOMPARE(hoverReqs, 1); // still exactly ONE ask
         QCOMPARE(label->text(), QStringLiteral("HOVER foo off=12"));
+    }
+
+    // ================================================= GATE 3 car C (C2):
+    // the signatureHelp route. The trigger tap is SHARED with completion,
+    // the popup is SHARED with hover, and the composition is the spec's
+    // FLAT reading: signatures[activeSignature] (clamped), label VERBATIM,
+    // activeParameter dropped (a plain-text popup has no underline). The
+    // fakeserver's `sync` + `sighelp` flag mode advertises "(" + "," and
+    // answers a
+    // THREE-signature report with activeSignature 1 — so picking [0] can
+    // never hide behind a shared string.
+    //
+    // Paint + the server-side wire shape (kind 2 carrying "(" at the caret
+    // one unit past the typed "(") + the shared-popup ownership rule: a
+    // non-typing idle move WOULD arm hover (500 ms), but the signature
+    // owns the moment and hover never asks.
+    void hubSignatureOnTypedOpenParenPaintsTheActiveLabel()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("sighelp"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000); // the wire stays spare: only feature REQs
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("beta"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///sig-1.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show(); // the visibility getters read QWidget::isVisible
+        editor.setPosition({0, 4});
+        h.hub.setPopupTriggers(&editor, true);
+
+        const auto reqCount = [&](const QString& method) {
+            int n = 0;
+            const QString needle = QStringLiteral("REQ %1").arg(method);
+            for (const QList<QVariant>& ev : stderrSpy)
+                if (ev.at(0).toString().contains(needle))
+                    ++n;
+            return n;
+        };
+
+        QTest::keyClick(&editor, Qt::Key_ParenLeft); // the ADVERTISED trigger
+        QVERIFY2(editor.toPlainText() == QStringLiteral("beta()"),
+                 qPrintable(QStringLiteral("the pair press landed \"%1\"")
+                                .arg(editor.toPlainText())));
+        QVERIFY2(editor.position() == (qmn::view::TextPosition{0, 5}),
+                 "the auto-close caret did not park inside the pair");
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/signatureHelp")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return editor.hoverVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QLabel* label =
+            editor.findChild<QLabel*>(QStringLiteral("qmn-hover-label"));
+        QVERIFY(label);
+        QCOMPARE(label->text(), QStringLiteral("beta(second one, more)"));
+        QVERIFY(!editor.completionListVisible()); // no provider: the
+                                                  // completion half never asked
+        QCOMPARE(reqCount(QStringLiteral("textDocument/completion")), 0);
+        QCOMPARE(reqCount(QStringLiteral("textDocument/hover")), 0);
+        QCOMPARE(reqCount(QStringLiteral("textDocument/signatureHelp")), 1);
+
+        // The wire shape, decoded by the SERVER from its own frame:
+        // TriggerForCharacter (2) carrying "(" — and the position aimed at
+        // offset 5, the caret AFTER the typed unit (the hub classifies the
+        // unit before the caret at FIRE time, never the typed unit itself).
+        const QJsonObject state
+            = askServer(client, QStringLiteral("test/signatureState"),
+                        QJsonObject{});
+        QCOMPARE(state.value(QStringLiteral("asks")).toInt(), 1);
+        QCOMPARE(state.value(QStringLiteral("lastKind")).toInt(), 2);
+        QCOMPARE(state.value(QStringLiteral("lastCharacter")).toString(),
+                 QStringLiteral("("));
+        QCOMPARE(state.value(QStringLiteral("lastOffset")).toInt(), 5);
+
+        // ONE owner for the SHARED popup: this non-typing move arms the hover
+        // debounce (500 ms), and the hub must skip it — no hover byte on the
+        // wire, the signature text still standing.
+        editor.setPosition({0, 2});
+        QTest::qWait(900); // past kHoverTriggerMs with margin
+        QCOMPARE(reqCount(QStringLiteral("textDocument/hover")), 0);
+        QVERIFY(editor.hoverVisible());
+        QCOMPARE(label->text(), QStringLiteral("beta(second one, more)"));
+        QCOMPARE(reqCount(QStringLiteral("textDocument/signatureHelp")), 1);
+    }
+
+    // The ROUND CLOSED: a typed unit that is NOT an advertised trigger (here
+    // a plain "x", then ")") supersedes the IN-FLIGHT ask ($/cancelRequest)
+    // and asks NOTHING more; with 600 ms of server latency the cancel is
+    // observable, and no popup ever paints.
+    void hubSignatureNonTriggerUnitSupersedesAndClosesTheRound()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("sighelp"),
+                                 QStringLiteral("reqlog"),
+                                 QStringLiteral("cancellog"),
+                                 QStringLiteral("sigdelay=600")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("beta"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///sig-2.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        editor.setPosition({0, 4});
+        h.hub.setPopupTriggers(&editor, true);
+
+        const auto countMarker = [&](const QString& needle) {
+            int n = 0;
+            for (const QList<QVariant>& ev : stderrSpy)
+                if (ev.at(0).toString().contains(needle))
+                    ++n;
+            return n;
+        };
+
+        QTest::keyClick(&editor, Qt::Key_ParenLeft);
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/signatureHelp")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY(!editor.hoverVisible()); // the reply is still brewing
+
+        QTest::keyClick(&editor, Qt::Key_Comma); // still a trigger: the
+                                                 // in-flight ask is stale
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("CANCELREQ")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] {
+                     return countMarker(
+                                QStringLiteral("REQ textDocument/signatureHelp"))
+                        == 2;
+                 }),
+                 qPrintable(stderrDump(stderrSpy)));
+
+        QTest::keyClick(&editor, Qt::Key_X); // the unit before the caret is
+                                             // "x": NOT a trigger — supersede
+                                             // the second ask, ask nothing
+        QVERIFY2(waitUntil([&] { return countMarker(QStringLiteral("CANCELREQ")) == 2; }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QTest::keyClick(&editor, Qt::Key_ParenRight); // ")" closes the call:
+                                                      // the same non-trigger
+                                                      // path, nothing pending
+        QTest::qWait(900); // the two delayed replies are past due: the client
+                           // dropped them with the cancels — nothing paints
+        QCOMPARE(countMarker(QStringLiteral("REQ textDocument/signatureHelp")),
+                 2);
+        QCOMPARE(countMarker(QStringLiteral("CANCELREQ")), 2);
+        QVERIFY(!editor.hoverVisible());
+        QCOMPARE(editor.toPlainText(), QStringLiteral("beta(,x)"));
+
+        // TEARDOWN kills the ask too: re-open a round (the pair press again)
+        // and close the DOCUMENT while the answer is still brewing — the hub
+        // cancels the in-flight signature request with the registration, so
+        // a late reply can never paint over a closed document.
+        QTest::keyClick(&editor, Qt::Key_ParenLeft); // "()" again, the caret
+                                                     // parks inside
+        QVERIFY2(waitUntil([&] {
+                     return countMarker(
+                                QStringLiteral("REQ textDocument/signatureHelp"))
+                            == 3;
+                 }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY(h.hub.popupTriggersEnabled(&editor));
+        h.hub.closeDocument(&editor);
+        QVERIFY2(waitUntil([&] { return countMarker(QStringLiteral("CANCELREQ")) == 3; }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QTest::qWait(700); // the delayed reply's due passes: the closed
+                           // document's handler found no registration
+        QVERIFY(!editor.hoverVisible());
+        QCOMPARE(countMarker(QStringLiteral("REQ textDocument/signatureHelp")),
+                 3);
+        QVERIFY(client->isReady()); // the cancel was a LOCAL fulfill + a wire
+                                    // $/cancelRequest: the session stands
+    }
+
+    // The public DOOR over the live server: the client's initialize contract
+    // (contextSupport TRUE, and NOTHING about signatureInformation — the
+    // popup cannot paint documentation or an underline), the Invoked (1)
+    // context with NO triggerCharacter, and the report arriving intact for
+    // the app to compose. The outside-the-brackets caret gets the spec's
+    // NULL answer — the shape the trigger route's hide reads.
+    void hubSignatureDoorSendsInvokedContextAndCarriesTheReport()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("sighelp"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("beta()"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///sig-3.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+
+        // The initialize side of the contract, read back by the SERVER (the
+        // door hands the initialize PARAMS straight back).
+        const QJsonObject init = serverInitializeParams(client);
+        const QJsonObject textDoc = init.value(QStringLiteral("capabilities"))
+                                        .toObject()
+                                        .value(QStringLiteral("textDocument"))
+                                        .toObject();
+        const QJsonObject sigClient
+            = textDoc.value(QStringLiteral("signatureHelp")).toObject();
+        QCOMPARE(sigClient.value(QStringLiteral("contextSupport")).toBool(),
+                 true);
+        QVERIFY2(!textDoc.contains(QStringLiteral("signatureInformation")),
+                 "the client must not claim signatureInformation: the popup "
+                 "paints none of it");
+        // And the server's advertised trigger set the hub classifies against.
+        const QJsonArray advertised = client->serverCapabilities()
+                                          .value(QStringLiteral(
+                                              "signatureHelpProvider"))
+                                          .toObject()
+                                          .value(QStringLiteral("triggerCharacters"))
+                                          .toArray();
+        QCOMPARE(advertised.size(), 2);
+
+        struct Probe {
+            bool done = false;
+            bool isError = false;
+            int code = 0;
+            QJsonValue result;
+        };
+        Probe inside;
+        const qint64 id = h.hub.requestSignatureHelp(
+            &editor, {0, 5}, // INSIDE the brackets: the "(" is at offset 4
+            [&](const qmn::protocol::RpcClient::Reply& reply) {
+                inside.done = true;
+                inside.isError = reply.isError;
+                inside.code = reply.code;
+                inside.result = reply.result;
+            });
+        QVERIFY(id > 0); // the provider IS advertised: the door is live
+        QTRY_VERIFY_WITH_TIMEOUT(inside.done, 5000);
+        QVERIFY2(!inside.isError,
+                 qPrintable(QStringLiteral("signatureHelp refused: %1 (%2)")
+                                .arg(inside.result.toString())
+                                .arg(inside.code)));
+        const QJsonObject report = inside.result.toObject();
+        QCOMPARE(report.value(QStringLiteral("signatures")).toArray().size(), 3);
+        QCOMPARE(report.value(QStringLiteral("activeSignature")).toInt(), 1);
+        QCOMPARE(report.value(QStringLiteral("activeParameter")).toInt(), 1);
+        QCOMPARE(report.value(QStringLiteral("signatures"))
+                     .toArray()
+                     .at(1)
+                     .toObject()
+                     .value(QStringLiteral("label"))
+                     .toString(),
+                 QStringLiteral("beta(second one, more)"));
+
+        const QJsonObject state
+            = askServer(client, QStringLiteral("test/signatureState"),
+                        QJsonObject{});
+        QCOMPARE(state.value(QStringLiteral("asks")).toInt(), 1);
+        QCOMPARE(state.value(QStringLiteral("lastKind")).toInt(),
+                 1); // Invoked: the door's empty triggerCharacter
+        QCOMPARE(state.value(QStringLiteral("lastCharacter")).toString(),
+                 QString());
+        QCOMPARE(state.value(QStringLiteral("lastOffset")).toInt(), 5);
+
+        // OUTSIDE the brackets: the spec's null (the trigger route reads the
+        // same shape as "hide the popup").
+        Probe outside;
+        QVERIFY(h.hub.requestSignatureHelp(
+                    &editor, {0, 0},
+                    [&](const qmn::protocol::RpcClient::Reply& reply) {
+                        outside.done = true;
+                        outside.isError = reply.isError;
+                        outside.result = reply.result;
+                    }) > 0);
+        QTRY_VERIFY_WITH_TIMEOUT(outside.done, 5000);
+        QVERIFY2(!outside.isError, qPrintable(outside.result.toString()));
+        QVERIFY(outside.result.isNull());
+    }
+
+    // The NULL answer HIDES a popup that is ALREADY painted: the second "("
+    // this server has no signature for (an empty call name), and the hub
+    // must take the shared popup down instead of leaving the stale label.
+    void hubSignatureNullAnswerHidesThePaintedPopup()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("sighelp"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("beta"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///sig-4.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        editor.setPosition({0, 4});
+        h.hub.setPopupTriggers(&editor, true);
+
+        QTest::keyClick(&editor, Qt::Key_ParenLeft);
+        QVERIFY2(waitUntil([&] { return editor.hoverVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+
+        QTest::keyClick(&editor, Qt::Key_ParenLeft); // "((" — the unit before
+                                                     // the caret IS a trigger,
+                                                     // so the ask goes out,
+                                                     // and the answer is null
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/signatureHelp")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return !editor.hoverVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QTest::qWait(300); // and it stays down
+        QVERIFY(!editor.hoverVisible());
+    }
+
+    // ONE keystroke, TWO debounces (the typing tap is SHARED): with
+    // completionProvider riding the same mode, the typed "(" lights the
+    // completion ask (Invoked, "(" is not ITS trigger) and the signature
+    // ask (2, "("), and the popups sit side by side — the design's answer
+    // to a burst that qualifies for both.
+    void hubSignatureTypingArmsBothDebounces()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("sighelp"),
+                                 QStringLiteral("completiononly"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("beta"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///sig-5.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        editor.setPosition({0, 4});
+        h.hub.setPopupTriggers(&editor, true);
+
+        QTest::keyClick(&editor, Qt::Key_ParenLeft);
+        QVERIFY2(waitUntil([&] { return editor.completionListVisible()
+                                    && editor.hoverVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        int completions = 0, signatures = 0;
+        for (const QList<QVariant>& ev : stderrSpy) {
+            const QString line = ev.at(0).toString();
+            if (line.contains(QStringLiteral("REQ textDocument/completion")))
+                ++completions;
+            if (line.contains(QStringLiteral("REQ textDocument/signatureHelp")))
+                ++signatures;
+        }
+        QCOMPARE(completions, 1);
+        QCOMPARE(signatures, 1);
+        QLabel* label =
+            editor.findChild<QLabel*>(QStringLiteral("qmn-hover-label"));
+        QVERIFY(label);
+        QCOMPARE(label->text(), QStringLiteral("beta(second one, more)"));
+        QListWidget* list = editor.findChild<QListWidget*>(
+            QStringLiteral("qmn-completion-list"));
+        QVERIFY(list);
+        // "(" is ALSO this mode's completion trigger: the completion half
+        // asks as TriggerForCharacter (2) with "(" — the tk=/tc= rows echo
+        // what the SERVER decoded, so both halves' wire shapes are pinned.
+        QCOMPARE(list->count(), 4);
+        QCOMPARE(list->item(1)->text(), QStringLiteral("tk=2"));
+        QCOMPARE(list->item(2)->text(), QStringLiteral("tc=("));
+    }
+
+    // DISARMING the taps mid-round: the in-flight signature ask is canceled
+    // (the same die-with-the-taps discipline completion follows), the shared
+    // popup goes down, and the taps stay quiet behind it — the same gesture
+    // asks NOTHING more.
+    void hubTriggersDisarmCancelsTheInFlightSignatureAsk()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("sighelp"),
+                                 QStringLiteral("reqlog"),
+                                 QStringLiteral("cancellog"),
+                                 QStringLiteral("sigdelay=600")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("python"));
+        editor.setPlainText(QStringLiteral("beta"));
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///sig-6.py"),
+                                   QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        editor.setPosition({0, 4});
+        h.hub.setPopupTriggers(&editor, true);
+
+        QTest::keyClick(&editor, Qt::Key_ParenLeft);
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/signatureHelp")),
+                 qPrintable(stderrDump(stderrSpy)));
+        h.hub.setPopupTriggers(&editor, false); // mid-round: cancel + hide
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("CANCELREQ")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY(!editor.hoverVisible());
+        const int settled = stderrSpy.count();
+        QTest::keyClick(&editor, Qt::Key_Comma); // the taps are DISARMED: the
+                                                 // same gesture asks nothing
+        QTest::qWait(700); // and the canceled delayed reply's due passes on a
+                           // handler whose state is gone: still nothing
+        QCOMPARE(stderrSpy.count(), settled);
+        QVERIFY(!editor.hoverVisible());
+        QVERIFY(client->isReady()); // a LOCAL fulfill + a wire $/cancelRequest:
+                                    // the session stands
+    }
+
+    // ================================================= GATE 3 car C (C3):
+    // textDocument/foldingRange over the C1 fold-provider seam. The hub owns
+    // this route END TO END (no FeatureHandler door, so the wheel gains no new
+    // Python door), the client declares `lineFoldingOnly:true`, and the answer
+    // is a plain line table the view takes verbatim. What the five slots pin:
+    // the FEED (exact decoded set: clamps, drops, the widest-wins tie), the
+    // grammar going MUTE while the claim stands, the RE-ASK following the
+    // server's mirror, EMPTY being authority, an ERROR answer handing the fold
+    // source BACK to the grammar (and no hammering after it), teardown
+    // canceling an in-flight ask, and the capability gate keeping the wire
+    // silent for a server that never offered folds.
+    //
+    // The fold refresh debounce is kFoldRefreshMs (300 ms, hub-fixed); every
+    // slot's sync debounce is huge, so the only feature bytes on the wire are
+    // foldingRange asks.
+
+    // THE FEED, exact: after open the view folds what the SERVER said —
+    // including two folds the grammar could never make (starts 0 and 7) — and
+    // after one line is deleted the set follows this server's own text mirror
+    // (the (1,6) fold's close is gone, the clamp follows the shorter document).
+    void hubFoldingRangeFeedTakesOverTheFoldStore()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("foldingrange"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("jssrv"), {QStringLiteral("javascript")});
+        h.hub.setDebounceMs(5000); // only the fold feed's timer may put bytes
+                                   // on the wire
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("javascript"));
+        editor.setPlainText(kFoldFixture);
+        editor.grab(); // paint-warm the GRAMMAR fold cache: the folds it would
+                       // make are what "the grammar went mute" means
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///fold-1.js"),
+                                   QStringLiteral("javascript")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("jssrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/foldingRange")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return editor.isFoldable(0); }),
+                 qPrintable(QStringLiteral("folds [%1] | %2")
+                                .arg(foldDump(&editor),
+                                     stderrDump(stderrSpy))));
+        QCOMPARE(foldSet(&editor),
+                 (QStringList{"0:1", "1:6", "2:8", "3:4", "7:8"}));
+        QCOMPARE(editor.visibleLineTotal(), editor.lineCount()); // nothing
+                                                                 // collapsed:
+                                                                 // a feed is
+                                                                 // foldable
+                                                                 // lines, not
+                                                                 // hidden ones
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/foldingRange")),
+                 1); // the didOpen/re-READY edge asked ONCE
+
+        // The edit leg: one line gone, and the answer must come from the
+        // mirror as it is NOW — the flush-before-ask rule is what makes that
+        // true (the syncer's didChange bytes lead the request), and the
+        // fakeserver's featureDoc guard is the far-side proof no ask ever
+        // outran didOpen. One ask per edit BURST (the re-arm discipline).
+        editor.deleteLineAt(6); // the outer `}` line: its fold's CLOSE is gone
+        QVERIFY2(waitUntil([&] {
+                     return foldSet(&editor)
+                         == (QStringList{"0:1", "2:7", "3:4"});
+                 }),
+                 qPrintable(QStringLiteral("folds [%1] | %2")
+                                .arg(foldDump(&editor),
+                                     stderrDump(stderrSpy))));
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/foldingRange")),
+                 2);
+        QVERIFY(!editor.isFoldable(1)); // the (1,*) fold is GONE: only a fresh
+                                        // answer over the fresh mirror knows
+                                        // that
+        QVERIFY(editor.isFoldable(0));  // the noise fold stands, re-clamped
+    }
+
+    // EMPTY IS AUTHORITY, not "no news": a report of [] keeps the view in
+    // SERVER mode with NOTHING foldable — the grammar (which folds this very
+    // fixture at starts 1, 2, 3) stays mute while the claim stands.
+    void hubFoldingRangeEmptyAnswerIsTheAuthority()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("foldingrange"),
+                                 QStringLiteral("foldempty"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("jssrv"), {QStringLiteral("javascript")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("javascript"));
+        editor.setPlainText(kFoldFixture);
+        editor.grab();
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///fold-2.js"),
+                                   QStringLiteral("javascript")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("jssrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/foldingRange")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return !editor.isFoldable(1); }),
+                 qPrintable(QStringLiteral("folds [%1] | %2")
+                                .arg(foldDump(&editor),
+                                     stderrDump(stderrSpy))));
+        QVERIFY(editor.foldableRanges().isEmpty());
+        for (int line = 0; line < editor.lineCount(); ++line)
+            QVERIFY2(!editor.isFoldable(line),
+                     qPrintable(QStringLiteral("line %1 foldable: the empty "
+                                               "report did not hold authority")
+                                    .arg(line)));
+        QVERIFY(!editor.foldLine(1)); // the grammar's brace is NOT the user's
+                                      // fold anymore — the knot, enforced
+    }
+
+    // THE CLAIM FELL THROUGH: a server that advertised folds and then ANSWERS
+    // AN ERROR hands the fold source back to the grammar (clearFoldRanges —
+    // the noise starts vanish, the block folds return), and this document
+    // stops asking: a server that said no to its own provider is not hammered
+    // on every keystroke.
+    void hubFoldingRangeErrorAnswerHandsFoldsBackToTheGrammar()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("foldingrange"),
+                                 QStringLiteral("foldfail=1"), // ask 1 folds,
+                                                                // ask 2+ are
+                                                                // REFUSED
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("jssrv"), {QStringLiteral("javascript")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("javascript"));
+        editor.setPlainText(kFoldFixture);
+        editor.grab();
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///fold-3.js"),
+                                   QStringLiteral("javascript")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("jssrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        QVERIFY2(waitUntil([&] { return editor.isFoldable(0); }),
+                 qPrintable(QStringLiteral("folds [%1] | %2")
+                                .arg(foldDump(&editor),
+                                     stderrDump(stderrSpy))));
+        QCOMPARE(foldSet(&editor),
+                 (QStringList{"0:1", "1:6", "2:8", "3:4", "7:8"}));
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/foldingRange")),
+                 1);
+
+        editor.insertTextAt({8, 6}, QStringLiteral("\n")); // one line longer:
+                                                           // the re-ask is
+                                                           // armed
+        QVERIFY2(waitUntil([&] { return !editor.isFoldable(0); }),
+                 qPrintable(QStringLiteral("the error answer did not hand the "
+                                           "fold store back: folds [%1] | %2")
+                                .arg(foldDump(&editor),
+                                     stderrDump(stderrSpy))));
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/foldingRange")),
+                 2);
+        editor.grab(); // the grammar's fold cache re-slices on the next paint
+                       // (C1's clear does the same reset it always did)
+        const QStringList after = foldSet(&editor);
+        QVERIFY2(!editor.isFoldable(0) && !editor.isFoldable(7)
+                     && !editor.isFoldable(8),
+                 qPrintable(QStringLiteral("grammar serving, noise folds back: "
+                                           "[%1]")
+                                .arg(after.join(QLatin1Char(',')))));
+        QVERIFY2(editor.isFoldable(1) && editor.isFoldable(2),
+                 qPrintable(QStringLiteral("the grammar's own block folds did "
+                                           "not come back: [%1]")
+                                .arg(after.join(QLatin1Char(',')))));
+        QVERIFY2(!after.contains(QStringLiteral("2:8")),
+                 qPrintable(QStringLiteral("the widest noise fold still "
+                                           "stands: [%1]")
+                                .arg(after.join(QLatin1Char(',')))));
+        QVERIFY(editor.foldLine(1)); // the user may fold them again — these
+                                     // ARE the grammar's folds now
+        editor.unfoldLine(1);
+
+        // No hammering: further edits arm NOTHING for this document — the
+        // refusal stands until an open/re-READY edge.
+        const int settled = stderrSpy.count();
+        editor.insertTextAt({9, 0}, QStringLiteral("z"));
+        QTest::qWait(900); // past kFoldRefreshMs twice over
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/foldingRange")),
+                 2);
+        QCOMPARE(stderrSpy.count(), settled); // and NOTHING else crossed
+    }
+
+    // TEARDOWN, both shapes: closing OVER an in-flight ask cancels it (and a
+    // feed that never fed clears NOTHING — an app's or the grammar's own fold
+    // source stays untouched), and closing a document whose folds the hub DID
+    // feed hands the view back to the grammar.
+    void hubFoldingRangeCloseCancelsInFlightAndClearsTheFeed()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("foldingrange"),
+                                 QStringLiteral("folddelay=600"),
+                                 QStringLiteral("reqlog"),
+                                 QStringLiteral("cancellog")});
+        h.installSpec(QStringLiteral("jssrv"), {QStringLiteral("javascript")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("javascript"));
+        editor.setPlainText(kFoldFixture);
+        editor.grab();
+
+        // Round 1: the ask is IN FLIGHT when the document closes.
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///fold-4a.js"),
+                                   QStringLiteral("javascript")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("jssrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/foldingRange")),
+                 qPrintable(stderrDump(stderrSpy)));
+        h.hub.closeDocument(&editor); // over the pending answer
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("CANCELREQ")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QTest::qWait(800); // the delayed answer's due passes on a handler
+                           // whose feed AND registration are gone
+        editor.grab();
+        QVERIFY(!editor.isFoldable(0)); // NEVER fed: nothing was overridden
+        QVERIFY(editor.isFoldable(1));  // the grammar served all along
+        QVERIFY2(!foldSet(&editor).contains(QStringLiteral("0:1")),
+                 qPrintable(foldDump(&editor)));
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/foldingRange")),
+                 1);
+
+        // Round 2: the same editor, a fresh document, and this time the feed
+        // LANDS (the refusal bit is not in play: this server answers folds).
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///fold-4b.js"),
+                                   QStringLiteral("javascript")));
+        QVERIFY2(waitUntil([&] { return editor.isFoldable(0); }),
+                 qPrintable(QStringLiteral("folds [%1] | %2")
+                                .arg(foldDump(&editor),
+                                     stderrDump(stderrSpy))));
+        QCOMPARE(foldSet(&editor),
+                 (QStringList{"0:1", "1:6", "2:8", "3:4", "7:8"}));
+        h.hub.closeDocument(&editor); // the fed override must go with it
+        editor.grab();
+        QVERIFY(!editor.isFoldable(0));
+        QVERIFY(editor.isFoldable(1));
+        QVERIFY2(!foldSet(&editor).contains(QStringLiteral("2:8")),
+                 qPrintable(QStringLiteral("the fed set outlived the document: "
+                                           "[%1]")
+                                .arg(foldDump(&editor))));
+        QVERIFY(client->isReady()); // a cancel is not a death: the session
+                                    // stands for the next document
+    }
+
+    // THE CONTROL for the two claims above: the SAME fixture, the SAME
+    // language, and a server that never offered folds — the grammar keeps
+    // serving and not one foldingRange byte crosses the wire (the fakeserver
+    // answers an un-advertised ask with exit 2, and the count below is the
+    // legible version of that same pin).
+    void hubFoldingRangeStaysSilentWithoutTheProvider()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("jssrv"), {QStringLiteral("javascript")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("javascript"));
+        editor.setPlainText(kFoldFixture);
+        editor.grab();
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///fold-5.js"),
+                                   QStringLiteral("javascript")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("jssrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        QTest::qWait(900); // past kFoldRefreshMs: an ask WOULD have shown
+        editor.grab();
+        QVERIFY2(!editor.foldableRanges().isEmpty(),
+                 "this fixture must be grammar-foldable, or the mute pins "
+                 "above mean nothing");
+        QVERIFY(editor.isFoldable(1));
+        QVERIFY(!editor.isFoldable(0)); // starts 0/7 belong to NO ordinary
+        QVERIFY(!editor.isFoldable(7)); // grammar fold of this document
+        editor.deleteLineAt(6);
+        QTest::qWait(900);
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/foldingRange")),
+                 0);
+        editor.grab();
+        QVERIFY(editor.isFoldable(1)); // the grammar is still the source
+    }
+
+    // ================================================= GATE 3 car C (C4):
+    // textDocument/inlayHint into the ALREADY-BOUND M5 door (setInlayHints —
+    // no new view API, no new wheel door, three copies untouched). The hub
+    // owns this route end to end like folds'; the client declares
+    // `inlayHint: {}` and asks the WHOLE document (`kInlayHintRangeLines`
+    // cap, never semanticTokens); positions decode through the Position-
+    // Converter against the MIRROR; label parts CONCATENATE and paddings
+    // bake as real spaces (the recorded M5-record divergence); `kind` rides
+    // nowhere; `kMaxLspInlayHints` cuts the WIRE window. What the slots pin:
+    // the exact decoded FEED + the far-side FLUSH proof (the ask's range end
+    // names the CURRENT mirror, echoed through test/hintState), the whole-
+    // set COEXISTENCE rule (last FULL-SET writer wins, the fed bit gates
+    // every teardown clear — D3's single-writer convention over a door DAP
+    // shares), the recorded ASYMMETRY with folds on an error answer (the
+    // last set STANDS, no refused silence, the next edge re-arms), NULL as
+    // a whole-set authority, the cap, and the capability gate keeping the
+    // wire silent. Every slot's sync debounce is huge, so the only feature
+    // bytes on the wire are inlayHint asks (kHintRefreshMs = 300 fixed).
+
+    // THE FEED, exact — and the flush-before-ask rule proved FAR SIDE: the
+    // ask's range END names this server's CURRENT mirror (an ask that
+    // outran didChange could not name a line the server had never seen).
+    void hubInlayHintFeedPaintsTheDecodedSet()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("inlayhint"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("jssrv"), {QStringLiteral("javascript")});
+        h.hub.setDebounceMs(5000); // only the hint feed's own timer may put
+                                   // bytes on the wire
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("javascript"));
+        editor.setPlainText(kHintFixture);
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///hint-1.js"),
+                                   QStringLiteral("javascript")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("jssrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/inlayHint")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return editor.inlayHints().size() == 5; }),
+                 qPrintable(QStringLiteral("hints [%1] | %2")
+                                .arg(hintDumpText(&editor),
+                                     stderrDump(stderrSpy))));
+        QCOMPARE(hintDump(&editor), hintExpected());
+        QVERIFY(h.hub.hintsFedFromServer(&editor)); // the teardown gate,
+                                                    // read honestly
+        QCOMPARE(
+            reqCount(stderrSpy, QStringLiteral("textDocument/inlayHint")),
+            1); // the didOpen/re-READY edge asked ONCE
+
+        // THE FLUSH PROOF, far side: the fakeserver echoes the LAST ask's
+        // range end — {6,6} on this document means the ask was built over a
+        // mirror that already agreed with the view (and featureDoc proves no
+        // ask outran didOpen: it exits 2 then).
+        const QJsonObject st = askServer(client,
+                                         QStringLiteral("test/hintState"),
+                                         QJsonObject{});
+        QCOMPARE(st.value(QStringLiteral("asks")).toInt(), 1);
+        QCOMPARE(st.value(QStringLiteral("lastEndLine")).toInt(), 6);
+        QCOMPARE(st.value(QStringLiteral("lastEndChar")).toInt(), 6);
+
+        // EDIT A: gamma enters line 5 — the answer comes from the mirror AS
+        // IT IS NOW (the same end-to-end discipline as the fold re-feed).
+        editor.insertTextAt({5, 0}, QStringLiteral("gamma "));
+        QVERIFY2(waitUntil([&] {
+                     return hintDump(&editor).contains(
+                         QStringLiteral("5:12|RETC"));
+                 }),
+                 qPrintable(QStringLiteral("hints [%1] | %2")
+                                .arg(hintDumpText(&editor),
+                                     stderrDump(stderrSpy))));
+        QCOMPARE(
+            reqCount(stderrSpy, QStringLiteral("textDocument/inlayHint")),
+            2); // one ask per edit BURST
+
+        // EDIT B: a NEW last line — OUT's tolerant clamp MOVES with the
+        // mirror, and the ask that produced it NAMED line 7 (flush pin the
+        // second: the old clamp would say 6:6 forever).
+        editor.insertTextAt({6, 6}, QStringLiteral("\ntail c"));
+        QVERIFY2(waitUntil([&] {
+                     const QStringList d = hintDump(&editor);
+                     return d.contains(QStringLiteral("7:6|OUT"))
+                         && !d.contains(QStringLiteral("6:6|OUT"));
+                 }),
+                 qPrintable(QStringLiteral("hints [%1] | %2")
+                                .arg(hintDumpText(&editor),
+                                     stderrDump(stderrSpy))));
+        const QJsonObject st2 = askServer(client,
+                                          QStringLiteral("test/hintState"),
+                                          QJsonObject{});
+        QCOMPARE(st2.value(QStringLiteral("asks")).toInt(), 3);
+        QCOMPARE(st2.value(QStringLiteral("lastEndLine")).toInt(), 7);
+        QCOMPARE(st2.value(QStringLiteral("lastEndChar")).toInt(), 6);
+    }
+
+    // THE COEXISTENCE STANCE, both halves of D3's single-writer convention
+    // over the door qmn-demo reads after a DAP stop-feed clears: a feed that
+    // ANSWERED wins over an app's earlier table (last FULL-SET writer), and
+    // a teardown of a document the hub NEVER fed clears NOTHING.
+    void hubInlayHintCoexistenceLastFullSetWins()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("inlayhint"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("jssrv"), {QStringLiteral("javascript")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("javascript"));
+        editor.setPlainText(kHintFixture);
+        editor.setInlayHints({{0, 0, QStringLiteral("APP")}}); // the app
+                                                               // paints
+                                                               // FIRST
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///hint-2.js"),
+                                   QStringLiteral("javascript")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("jssrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        QVERIFY2(waitUntil([&] {
+                     return hintDump(&editor).contains(
+                         QStringLiteral("1:7|RETA"));
+                 }),
+                 qPrintable(QStringLiteral("hints [%1] | %2")
+                                .arg(hintDumpText(&editor),
+                                     stderrDump(stderrSpy))));
+        QCOMPARE(hintDump(&editor), hintExpected()); // last full-set writer:
+                                                     // the whole-set door
+                                                     // took the server's
+                                                     // generation, APP gone
+        h.hub.closeDocument(&editor); // the document dies WITH the fed set:
+                                      // the hub clears its own generation
+        QVERIFY(editor.inlayHints().isEmpty());
+
+        // The NEVER-FED half: close OVER an in-flight ask (the answer is
+        // held 4 s) — the cancel rides the wire, and the fed-bit gate keeps
+        // the APP's table: a hub that never wrote must never wipe.
+        HubHarness h2(QStringList{QStringLiteral("sync"),
+                                  QStringLiteral("utf-16"),
+                                  QStringLiteral("inlayhint"),
+                                  QStringLiteral("hintdelay=4000"),
+                                  QStringLiteral("reqlog"),
+                                  QStringLiteral("cancellog")});
+        h2.installSpec(QStringLiteral("jssrv"),
+                       {QStringLiteral("javascript")});
+        h2.hub.setDebounceMs(5000);
+        editor.setInlayHints({{0, 0, QStringLiteral("APP")}});
+        QVERIFY(h2.hub.openDocument(&editor,
+                                    QStringLiteral("file:///hint-2b.js"),
+                                    QStringLiteral("javascript")));
+        auto* client2 = h2.hub.clientForSpec(QStringLiteral("jssrv"));
+        QVERIFY(client2);
+        QVERIFY(waitReady(client2));
+        QSignalSpy stderrSpy2(client2, &qmn::lsp::LspClient::serverStderr);
+        QVERIFY2(waitMarker(stderrSpy2,
+                            QStringLiteral("REQ textDocument/inlayHint")),
+                 qPrintable(stderrDump(stderrSpy2)));
+        h2.hub.closeDocument(&editor); // over the pending answer
+        QVERIFY2(waitMarker(stderrSpy2, QStringLiteral("CANCELREQ")),
+                 qPrintable(stderrDump(stderrSpy2)));
+        QCOMPARE(hintDump(&editor),
+                 (QStringList{QStringLiteral("0:0|APP")})); // NEVER FED:
+                                                            // nothing was
+                                                            // cleared
+        QTest::qWait(500);
+        QVERIFY(client2->isReady()); // a cancel is not a death
+        QVERIFY(!h2.hub.hintsFedFromServer(&editor)); // the feed DIED with
+                                                      // the document
+    }
+
+    // THE RECORDED ASYMMETRY WITH FOLDS on an error answer: no refused bit,
+    // no hand-back (the door has no grammar UNDER it) — the LAST full set
+    // STANDS untouched and the next edge re-arms. A server that stumbles on
+    // its own advertised provider must not have its hints wiped, and must
+    // not silence the feed either; folds stop asking, hints keep asking.
+    void hubInlayHintErrorAnswerKeepsTheLastSet()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("inlayhint"),
+                                 QStringLiteral("hintfail=1"), // ask 1
+                                                               // answers,
+                                                               // ask 2+ are
+                                                               // REFUSED
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("jssrv"), {QStringLiteral("javascript")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("javascript"));
+        editor.setPlainText(kHintFixture);
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///hint-3.js"),
+                                   QStringLiteral("javascript")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("jssrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        QVERIFY2(waitUntil([&] { return editor.inlayHints().size() == 5; }),
+                 qPrintable(QStringLiteral("hints [%1] | %2")
+                                .arg(hintDumpText(&editor),
+                                     stderrDump(stderrSpy))));
+        QCOMPARE(hintDump(&editor), hintExpected());
+
+        editor.insertTextAt({5, 0}, QStringLiteral("gamma ")); // arms ask 2
+        QVERIFY2(waitUntil([&] {
+                     return reqCount(stderrSpy,
+                                     QStringLiteral("textDocument/inlayHint"))
+                         == 2;
+                 }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QTest::qWait(400); // the refusal's reply has had its due
+        QCOMPARE(hintDump(&editor), hintExpected()); // THE SET STANDS — no
+                                                     // wipe, no partial
+                                                     // decode of the newer
+                                                     // document
+        QVERIFY(h.hub.hintsFedFromServer(&editor));
+
+        // And NO refused silence: the next edge re-arms (folds would have
+        // stopped at two asks — hints deliberately do not).
+        editor.insertTextAt({6, 6}, QStringLiteral("\ntail c"));
+        QVERIFY2(waitUntil([&] {
+                     return reqCount(stderrSpy,
+                                     QStringLiteral("textDocument/inlayHint"))
+                         == 3;
+                 }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QTest::qWait(400);
+        QCOMPARE(hintDump(&editor), hintExpected()); // still standing
+        h.hub.closeDocument(&editor);
+        QVERIFY(editor.inlayHints().isEmpty()); // FED: the teardown clears
+                                                // the hub's own generation
+    }
+
+    // NULL IS A WHOLE-SET AUTHORITY TOO: the spec's "no hints" answer paints
+    // the EMPTY set (an app's earlier table loses to it like any full write),
+    // and the fed bit turns true — the authority SPOKE, the teardown gate
+    // reads honestly.
+    void hubInlayHintNullAnswerIsAWholeSetToo()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("inlayhint"),
+                                 QStringLiteral("hintnull"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("jssrv"), {QStringLiteral("javascript")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("javascript"));
+        editor.setPlainText(kHintFixture);
+        editor.setInlayHints({{0, 0, QStringLiteral("APP")}});
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///hint-4.js"),
+                                   QStringLiteral("javascript")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("jssrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        QVERIFY2(waitMarker(stderrSpy,
+                            QStringLiteral("REQ textDocument/inlayHint")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return editor.inlayHints().isEmpty(); }),
+                 qPrintable(QStringLiteral("the null answer did not paint the "
+                                           "empty set: hints [%1] | %2")
+                                .arg(hintDumpText(&editor),
+                                     stderrDump(stderrSpy))));
+        QVERIFY(h.hub.hintsFedFromServer(&editor)); // the authority spoke —
+                                                    // the fed bit is not a
+                                                    // "nonempty paint" flag
+    }
+
+    // THE CAP rides the WIRE WINDOW: kMaxLspInlayHints (500) cuts the
+    // DECODE (stop taking, no sort-then-trim game), so a 600-hint report
+    // leaves EXACTLY the first 500 in the door — no h500 or h599 ever
+    // crosses into the view.
+    void hubInlayHintCapStopsAtTheWireWindow()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("inlayhint"),
+                                 QStringLiteral("hintmany=600"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("jssrv"), {QStringLiteral("javascript")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("javascript"));
+        editor.setPlainText(kHintFixture);
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///hint-5.js"),
+                                   QStringLiteral("javascript")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("jssrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        QVERIFY2(waitUntil([&] { return editor.inlayHints().size() == 500; }),
+                 qPrintable(QStringLiteral("hint count %1 | %2")
+                                .arg(editor.inlayHints().size())
+                                .arg(stderrDump(stderrSpy))));
+        // The M5 door sorts by (line,col) and ALL these hints share 0:0, so
+        // compare the LABEL MULTISET: exactly h0..h499, the wire's first
+        // window — the cap cut the decode, and the door kept every one of
+        // the window it was handed.
+        QStringList labels;
+        for (const qmn::view::CodeEditor::InlayHint& hint
+             : editor.inlayHints())
+            labels << hint.text;
+        QStringList want;
+        for (int i = 0; i < 500; ++i)
+            want << QStringLiteral("h%1").arg(i);
+        labels.sort();
+        want.sort();
+        QCOMPARE(labels, want);
+    }
+
+    // THE CONTROL for every claim above: the SAME fixture, the SAME
+    // language, and a server that never offered hints — the app's own table
+    // stands from open to close and not one inlayHint byte crosses the wire
+    // (the fakeserver answers an un-advertised ask with exit 2; the zero
+    // count below is the legible version of that same pin).
+    void hubInlayHintStaysSilentWithoutTheProvider()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("jssrv"), {QStringLiteral("javascript")});
+        h.hub.setDebounceMs(5000);
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("javascript"));
+        editor.setPlainText(kHintFixture);
+        editor.setInlayHints({{0, 0, QStringLiteral("APP")}});
+        QVERIFY(h.hub.openDocument(&editor,
+                                   QStringLiteral("file:///hint-6.js"),
+                                   QStringLiteral("javascript")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("jssrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        editor.show();
+        QTest::qWait(900); // past kHintRefreshMs twice over: an ask WOULD
+                           // have shown
+        QCOMPARE(
+            reqCount(stderrSpy, QStringLiteral("textDocument/inlayHint")),
+            0);
+        QCOMPARE(hintDump(&editor),
+                 (QStringList{QStringLiteral("0:0|APP")})); // the app's own
+        QVERIFY(!h.hub.hintsFedFromServer(&editor));
+        editor.insertTextAt({5, 0}, QStringLiteral("gamma "));
+        QTest::qWait(900);
+        QCOMPARE(
+            reqCount(stderrSpy, QStringLiteral("textDocument/inlayHint")),
+            0); // edits arm NOTHING without the provider
+        h.hub.closeDocument(&editor);
+        QCOMPARE(hintDump(&editor),
+                 (QStringList{QStringLiteral("0:0|APP")})); // the teardown
+                                                            // cleared
+                                                            // NOTHING it
+                                                            // never wrote
     }
 
 };

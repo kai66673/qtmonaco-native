@@ -609,6 +609,10 @@ void CodeEditor::setPlainText(const QString& text)
     collapsed_.clear(); // M13: fold state is per-document; a document
     foldables_.clear(); // replace drops every fold (the whole-document
     hiddenRuns_.clear(); // EditEvent the core emits would otherwise shift
+    serverFoldRanges_.clear(); // C1 (M8b): the fold PROVIDER override goes
+    serverFoldsActive_ = false; // too — ranges speak line numbers, stale by
+                                // definition after a replace (the hub
+                                // re-feeds after the next foldingRange answer)
     foldVisibleTotal_ = buffer_.lineCount(); // stale folds across the replace)
     foldDocLines_ = buffer_.lineCount();
     if (softWrapEnabled_) {
@@ -3917,10 +3921,26 @@ bool CodeEditor::indentFoldSourceAlive(int header) const
     return false; // only blanks below: the block is gone
 }
 
+int CodeEditor::serverFoldEndForLine(int line) const
+{
+    // Read-time clamping is the whole doc-follow story of the VERBATIM
+    // stance (public docs at setFoldRanges): the feed is never shifted by
+    // edits, a shrinking document just clamps the stored end — and a
+    // start that slid off the end stops being foldable (-1).
+    auto it = std::lower_bound(serverFoldRanges_.begin(), serverFoldRanges_.end(),
+                               line, [](const FoldState& f, int l) { return f.start < l; });
+    if (it == serverFoldRanges_.end() || it->start != line)
+        return -1;
+    const int end = std::min(it->end, buffer_.lineCount() - 1);
+    return end > line ? end : -1;
+}
+
 int CodeEditor::foldEndForLine(int line)
 {
     if (line < 0 || line >= buffer_.lineCount())
         return -1;
+    if (serverFoldsActive_)
+        return serverFoldEndForLine(line); // exact stored ends, clamped at read
     // Grammar source first (exact ends from the CURRENT tree; a whole-doc
     // fold query at an explicit user action may pay one O(tree) walk —
     // paint never comes through here). One start line can carry several
@@ -3986,6 +4006,10 @@ int CodeEditor::foldEndForLine(int line)
 void CodeEditor::recomputeFoldables(int firstModel, int lastModel)
 {
     foldables_.clear();
+    if (serverFoldsActive_) { // C1 (M8b): the provider feed is the ONLY
+        recomputeServerFoldables(firstModel, lastModel); // source while
+        return; // installed (the one-provider knot by construction)
+    }
     const bool useIndent = indentFoldsActive(); // grammar modes: engine ONLY
     const auto& ef = highlight_->folds(); // (start asc, end desc)
     size_t i = 0;
@@ -4080,6 +4104,54 @@ void CodeEditor::recomputeFoldables(int firstModel, int lastModel)
         updateScrollBarRange(); // the slot space grew back: bar follows
         update();
     }
+}
+
+// The server-feed slice of the paint window (C1, M8b): starts inside the
+// window that have a row to mark, ends EXACT (no lazy resolution, no
+// parse escalation — the feed is a plain line table). The ONE lifecycle
+// check server mode keeps: a VISIBLE collapsed fold whose start the
+// latest feed no longer lists auto-expands — this is how a RE-FEED drops
+// a fold (the design's third removal route, next to the user's unfold
+// and the edit sweep's body-deletion death). There is no source-existence
+// probe here: in this mode the view owns no source, so the M13
+// grammar/indent re-check has nothing to re-check.
+void CodeEditor::recomputeServerFoldables(int firstModel, int lastModel)
+{
+    for (const FoldState& f : serverFoldRanges_) {
+        if (f.start > lastModel)
+            break; // sorted start asc
+        if (f.start < firstModel)
+            continue;
+        if (visibleIndexOfModelLine(f.start) < 0)
+            continue; // start hidden inside a collapsed run: no row to mark
+        foldables_.push_back(f);
+    }
+    QVector<int> unfoldNow; // collapsed starts the new feed dropped
+    for (int slot = std::max(0, visibleIndexOfModelLine(firstModel));; ++slot) {
+        if (slot >= visibleLineTotal())
+            break;
+        const int line = modelLineForVisibleIndex(slot);
+        if (line > lastModel)
+            break;
+        if (line < firstModel)
+            continue;
+        if (isFolded(line) && !isFoldable(line))
+            unfoldNow.push_back(line);
+    }
+    if (unfoldNow.isEmpty())
+        return;
+    for (const int line : unfoldNow) {
+        auto at = std::lower_bound(
+            collapsed_.begin(), collapsed_.end(), line,
+            [](const FoldState& f, int l) { return f.start < l; });
+        while (at != collapsed_.end() && at->start == line)
+            at = collapsed_.erase(at);
+    }
+    rebuildHiddenRuns();
+    if (softWrapEnabled_)
+        retuneWrapForFolds(); // the returned lines bring their rows back
+    updateScrollBarRange(); // the slot space grew back: bar follows
+    update(); // one more pass: this frame's window was computed pre-expansion
 }
 
 // Open every collapsed fold strictly containing `line` (start visible, so
@@ -4871,6 +4943,21 @@ int CodeEditor::foldZoneLeft() const
 
 QVector<CodeEditor::FoldRange> CodeEditor::foldableRanges()
 {
+    if (serverFoldsActive_) {
+        // C1 (M8b): the WHOLE feed, read-time clamped — not the paint-
+        // window slice (that windowing is a grammar-perf artifact the
+        // public door never promised; with a plain line table there is
+        // nothing to resolve, so server mode reports the honest full
+        // truth and this doubles as the feed observable/test oracle).
+        QVector<FoldRange> out;
+        out.reserve(serverFoldRanges_.size());
+        for (const FoldState& f : serverFoldRanges_) {
+            const int end = std::min(f.end, buffer_.lineCount() - 1);
+            if (f.start < buffer_.lineCount() && end > f.start)
+                out.push_back(FoldRange{f.start, end});
+        }
+        return out;
+    }
     // Exact public view of the paint cache: ends are ALWAYS re-resolved
     // through foldEndForLine — the cached ones may be lazy sentinels
     // (indent-rule starts) or grammar ends a viewport-clamped parse
@@ -4889,6 +4976,8 @@ QVector<CodeEditor::FoldRange> CodeEditor::foldableRanges()
 
 bool CodeEditor::isFoldable(int line) const
 {
+    if (serverFoldsActive_) // whole-feed lookup (server mode has no window
+        return serverFoldEndForLine(line) >= 0; // quirk: the set is a plain table)
     // lower_bound (element-first comparator: the one order libstdc++ gets
     // right everywhere) + equality: the foldables cache is sorted by start.
     auto it = std::lower_bound(foldables_.begin(), foldables_.end(), line,
@@ -4977,6 +5066,22 @@ bool CodeEditor::innermostFoldAt(int row, FoldState* out)
     if (const int selfEnd = foldEndForLine(row); selfEnd > row) {
         *out = FoldState{row, selfEnd};
         return true;
+    }
+    if (serverFoldsActive_) {
+        // Server source (C1, M8b): reverse-walk the sorted feed — nearest
+        // start below the row wins, which IS the innermost (start asc);
+        // no scan cap needed, the feed is a plain table of the real folds.
+        for (int i = serverFoldRanges_.size() - 1; i >= 0; --i) {
+            const FoldState& f = serverFoldRanges_[i];
+            if (f.start >= row)
+                continue;
+            const int end = std::min(f.end, buffer_.lineCount() - 1);
+            if (end >= row) {
+                *out = FoldState{f.start, end};
+                return true;
+            }
+        }
+        return false;
     }
     if (indentFoldsActive()) {
         // Indent source: walk model rows above the hovered one; the first
@@ -5067,6 +5172,19 @@ void CodeEditor::leaveEvent(QEvent* event)
 
 void CodeEditor::collapseAll()
 {
+    if (serverFoldsActive_) {
+        // Server source (C1, M8b): the feed IS the whole fold set (whole
+        // document by definition, ends exact) — already outer-first
+        // sorted, so foldLine's hidden-start rule skips inner starts for
+        // free, exactly like the grammar pass below.
+        bool changed = false;
+        for (const FoldState& f : serverFoldRanges_)
+            if (foldLine(f.start))
+                changed = true;
+        if (changed)
+            update();
+        return;
+    }
     // Explicit whole-document pass (O(document) allowed here): engine
     // folds first (whole tree), then indent starts the engine does not
     // cover. Outer-first order (start asc, end desc) means every already
@@ -5113,6 +5231,84 @@ void CodeEditor::expandAll()
         retuneWrapForFolds(); // M25: every hidden line returns to the map
     updateScrollBarRange();
     clearFoldHoverState(); // M22: fold mutations invalidate the hover region
+    update();
+}
+
+// --- fold PROVIDER seam (M8b car C, C1) ---------------------------------
+// Semantics: the public block at the declaration (one provider per editor
+// while installed, verbatim authority with read-time clamps, the source-
+// switch unfold reset). The implementation keeps the M13 machinery whole:
+// these doors only (a) normalize the feed, (b) flip the source bit, and
+// (c) run the reset — every consumer (paint cache, gutter triangles,
+// foldLine/unfoldLine, caret reveal, fold x wrap, the diff row axis)
+// routes through the existing foldEndForLine/recomputeFoldables choke
+// points, which grew one server branch each.
+
+void CodeEditor::setFoldRanges(const QVector<FoldRange>& ranges)
+{
+    // Normalize at FEED time (the one place that ever rewrites the set;
+    // edits never touch it): clamp to the doc, drop folds that hide
+    // nothing (end <= start — a wire `endLine == startLine` answer is
+    // read as "not foldable", the tolerant way), sort start asc / end
+    // desc, and keep ONE entry per start — the outermost (widest end),
+    // mirroring the engine's outermost-leads rule and VS Code's fold-
+    // outermost UX. Same-start duplicates from a chatty server collapse
+    // into the outermost single fold the user can take at that line.
+    QVector<FoldState> norm;
+    norm.reserve(ranges.size());
+    const int docLines = buffer_.lineCount();
+    for (const FoldRange& r : ranges) {
+        const int start = std::max(0, r.startLine);
+        const int end = std::min(r.endLine, docLines - 1);
+        if (end > start)
+            norm.push_back(FoldState{start, end});
+    }
+    std::sort(norm.begin(), norm.end(),
+              [](const FoldState& a, const FoldState& b) {
+                  if (a.start != b.start)
+                      return a.start < b.start;
+                  return a.end > b.end;
+              });
+    norm.erase(std::unique(norm.begin(), norm.end(),
+                           [](const FoldState& a, const FoldState& b) {
+                               return a.start == b.start;
+                           }),
+               norm.end());
+    const bool switchIn = !serverFoldsActive_; // grammar/indent -> server:
+    serverFoldRanges_ = std::move(norm); // a SOURCE SWITCH, whatever the
+    serverFoldsActive_ = true; // (empty) content says
+    if (switchIn) {
+        // The unfold reset (public docs): collapsed folds belong to their
+        // source, and a grammar-born collapsed fold has no twin in the
+        // fresh server set. A RE-FEED while active keeps the state — the
+        // debounced refresh must not fight the user's folds (starts the
+        // new feed dropped auto-expand on the next paint instead).
+        collapsed_.clear();
+        rebuildHiddenRuns();
+        if (softWrapEnabled_)
+            retuneWrapForFolds(); // M25: freed rows come back batched
+    }
+    foldables_.clear(); // the next paint re-slices the new source
+    updateScrollBarRange(); // the slot space may have grown back
+    clearFoldHoverState(); // M22: the hover region rode the old source
+    update();
+}
+
+void CodeEditor::clearFoldRanges()
+{
+    if (!serverFoldsActive_)
+        return; // never installed: a byte-for-byte no-op (the grammar/
+                // indent source was serving all along — nothing to undo)
+    serverFoldsActive_ = false;
+    serverFoldRanges_.clear();
+    collapsed_.clear(); // the switch-OUT reset mirrors the switch-IN one:
+    rebuildHiddenRuns(); // a server-born fold is alien to the grammar set
+    if (softWrapEnabled_)
+        retuneWrapForFolds();
+    foldables_.clear(); // grammar/indent re-slices on the next paint,
+                        // byte-for-byte the pre-override behavior
+    updateScrollBarRange();
+    clearFoldHoverState();
     update();
 }
 
