@@ -5,7 +5,7 @@ Native code editor widget for Qt6, built from scratch on a raw `QWidget`
 QPlainTextEdit, no Chromium. Long-term hobby project; roadmap in `README.md`,
 phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
 
-## Current state (v1.9.1 — GATE 2 CLOSED 2026-11-21) — gates and the frozen surface
+## Current state (v1.12.0 — GATE 2 CLOSED 2026-11-21, GATE 3 cars 0/B/C/D CLOSED) — gates and the frozen surface
 
 - Gate 1 (editor v1) froze the public API at tag `v1.0`; Gate 1.5 (usability
   train M20–M24) closed 2026-11-12 at tag `v1.5.0`; **GATE 2 CLOSED
@@ -20,7 +20,15 @@ inline wash + two Theme roles, the WEIGHTED diff row axis, original-side
 wrap) → M8b (CLOSED at 1.11.0 — fold-provider seam, signatureHelp, LSP
 inlay hints, pull diagnostics; the live clangd probe grew four legs, 11
 steps PROBE-OK on clangd 23.1.5) →
-  multi-observer core → wheel-2 (DAP across + answer routes) → S1
+  **multi-observer core (CLOSED at 1.12.0 — the ONE public widening is the
+  attach ctor `CodeEditor(CodeDocument*, QWidget*)`: the core keeps an
+  observer LIST (not a slot) and the document installs its own mux slot
+  re-asserted LAST, the document owns ONE shared `HighlightEngine` whose
+  viewport is a per-surface SET, and `LspHub`/`ProjectSession` go
+  DOCUMENT-scoped — the view JOIN (one `didOpen`, one syncer, one version
+  stream whoever types), paint fan-out over the view list, and the
+  owner-death HANDOVER that keeps the wire and the feeds standing)** →
+  wheel-2 (DAP across + answer routes) → S1
   (qmn-demo grows into the showcase, NO second binary) → S2 (pydemo
   mirrors it door-for-door) → PyPI/cibuildwheel. Grapheme segmentation
   is OWNER-EXCLUDED from this gate (its own future train — the README
@@ -146,6 +154,41 @@ Include headers relative to `src/` (CMake adds `src/` as a PUBLIC include dir):
   backspace/delete are surrogate-safe). Don't add that safety to core.
 - `lineCount()` is always `>= 1`, even for an empty document.
 - `lineColAt(offset)` pointing at a `'\n'` resolves to the position *before* it.
+- **CAR D: ONE document, MANY views** (replaced the v1 "one editor per
+  document" rule). `CodeEditor(CodeDocument*, QWidget*)` attaches a view at
+  CTOR only — `buffer_` is a REFERENCE member, there is no attach/detach
+  door, and a view never switches documents. **The document must OUTLIVE
+  every view of it** (the safe shapes: declare the views after the document,
+  or move the document out first — `document()->setParent(other)` — before
+  `delete`ing a view; the death pins ride that legal extension). The core
+  keeps an observer LIST, not a slot; each `CodeDocument` installs its own
+  mux slot and RE-ASSERTS it as the LAST slot whenever another observer
+  lands, so the v1.11 per-mutation signal order is byte-identical for a
+  single view. The document owns the ONE shared `HighlightEngine`
+  (`setLanguage` is the only creator — `existingParse()` READS and never
+  materializes; language is document state, LAST-WRITER-WINS, while
+  LanguageProperties stay per-view) and its viewport is a per-SURFACE SET
+  (`setViewport(const void* key, …)`/`dropViewport`; the parse window is
+  the monotone bounding-box union of the live surfaces).
+- **CAR D: the LSP glue is DOCUMENT-scoped** (`LspHub`/`ProjectSession`).
+  One registration per uri carries a `views` list (owner ≡ `views.first()`);
+  `openDocument` for a second view of an already-registered document is a
+  **JOIN** — no second `didOpen`, no second syncer, no version-stream
+  restart (the fakeserver's `documentCount` + its exit-2 guards are the
+  far-side oracle). An EMPTY uri on a registered document resolves to that
+  registration's key (the hub's own one-document-one-uri leg, ahead of the
+  `untitled:` mint). Feature doors, `saveDocument` and
+  `setPopupTriggers`/`popupTriggersEnabled` resolve through ANY view; every
+  decoration paint and every hub-driven popup dismissal FANS OUT over the
+  view list; the owner view's death **HANDS OVER** (syncer, version stream,
+  feeds and wire all stand) while a joined view's death is a plain removal
+  and the LAST view's death releases the document. `ProjectSession` keeps
+  ONE entry per uri and mirrors every rule (alias join, `documentOpened`
+  does NOT re-fire on a join, the squatter refusal stays, the mirror-half
+  refusal is a document already registered under another uri). Recorded
+  divergences: the `workspaceConfiguration` push is OWNER-only, the mouse
+  no-refire pin is SAME-view-only, and DAP's breakpoint paint lands on the
+  OWNER view only (`DapHub::editorForSourcePath`).
 - **Highlighting engine is vendored tree-sitter** (pinned v0.27.2, ABI 15,
   in `third_party/tree-sitter/`). Fed `TSInputEncodingUTF16LE` straight from
   piece-table chunks — never transcode. A tree-sitter byte offset (and
@@ -334,7 +377,13 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
   QObjects (`CodeEditor`/`CodeEditorOptions`/`CodeEditorTheme`/
   `CodeDocument`, ctors removed — editor-owned; the M10 standalone
   `CodeDocument()` stays C++-only, the diff view's detached original is fed
-  through the string door instead), `TextPosition`, the eight nested record
+  through the string door instead; CAR D added one more REMOVE rule, not a
+  new type — the attach ctor `CodeEditor(qmn::view::CodeDocument*,QWidget*)`
+  is `remove="all"`, an honest absence: Python has no document to attach
+  (the consumer-owned `CodeDocument()` stays removed too, and a
+  garbage-collected owner decides car D's lifetime contract badly), so
+  opening that door to Python is a lifetime-pin question for a later car,
+  recorded in PLAN), `TextPosition`, the eight nested record
   structs (the five decoration records + M8 m5's `TextEdit` write record +
   M8 m6's `CompletionItem`/`HoverRange` popup payloads) and every nested
   enum (M8 m7 added NO new type — its doors are plain
@@ -418,6 +467,23 @@ g++ -O3 -std=c++20 tools/bench_model.cpp -Isrc/core/.. \
     build/src/core/libqmn_core.a \
     -isystem /usr/include/qt6/QtCore -isystem /usr/include/qt6 \
     -lQt6Core -o bench_model && ./bench_model <big-file>
+```
+
+**A perf claim here means an interleaved pair from ONE build.** Two traps
+car D's close ran into (1.12.0): (1) hand-invoked core archives are a
+different build — `g++ -fPIC -c` without `-DQT_NO_DEBUG` /
+`-mno-direct-extern-access` runs the same bench ~5x slower, and pointing
+`-Isrc` at a FOREIGN `TextBuffer.cpp` pairs one tree's header with another
+tree's TU and segfaults the bench; (2) an absolute µs/op figure is not a
+baseline — the same v1.11.0 source read 7.2 µs/op and 11.0 µs/op in two
+runs of one session. To A/B a core change, build BOTH sides the release
+way, in a throwaway worktree for the baseline:
+
+```bash
+git worktree add /tmp/wt-base HEAD~1 && cmake -S /tmp/wt-base -B /tmp/wt-base/build \
+    -G Ninja -DCMAKE_BUILD_TYPE=Release && ninja -C /tmp/wt-base/build qmn_core
+# then link bench_model against each archive with -I<that tree>/src, and
+# interleave the runs (4+ each), never "measure now vs a number in a file"
 ```
 
 The perf-table document (61 MiB / 1,000,001 lines) is regenerable

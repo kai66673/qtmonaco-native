@@ -334,8 +334,13 @@ void HighlightEngine::clearState()
     spansDirty_ = true;
     mode_ = Mode::Full;
     spansMode_ = Mode::Full;
-    viewportSet_ = false;
     windowDirty_ = false;
+    vpStart_ = vpEnd_ = 0; // the union recomputes on the next feed; NOTE
+    // windows_ itself SURVIVES (D4): a language flip changes the parse,
+    // not the set of viewing surfaces — their windows (from lineStarts
+    // generations that may now be empty) refresh on each view's next
+    // paint, and a stale union never parses garbage: every feed clamps
+    // into the CURRENT buffer.
     covStart_ = covEnd_ = 0;
     spanQStart_ = spanQEnd_ = 0;
     lastParseMs_ = 0.0;
@@ -830,18 +835,65 @@ bool HighlightEngine::reparseViewport()
     return true;
 }
 
-void HighlightEngine::setViewport(int startUnit, int endUnit)
+// The viewport SET (D4): entries ride in feed order; the union is
+// recomputed on every mutation of the set (the set is a handful of
+// entries — one per viewing surface — so a linear scan is the honest
+// cost). Key addresses are never dereferenced; the caller releases the
+// entry when its surface goes away (dropViewport).
+void HighlightEngine::setViewport(const void* viewKey, int startUnit, int endUnit)
 {
     if (!lang_) {
-        viewportSet_ = false;
+        for (const ViewWindow& w : windows_) {
+            if (w.key == viewKey) { // keep the set consistent even plain
+                dropViewport(viewKey);
+                break;
+            }
+        }
         return;
     }
     const int n = buffer_->charCount();
     startUnit = std::clamp(startUnit, 0, n);
     endUnit = std::clamp(endUnit, startUnit, n);
-    if (!viewportSet_ || startUnit != vpStart_ || endUnit != vpEnd_) {
-        vpStart_ = startUnit;
-        vpEnd_ = endUnit;
+    for (ViewWindow& w : windows_) {
+        if (w.key != viewKey)
+            continue;
+        if (w.start == startUnit && w.end == endUnit)
+            return; // same window: no-op (the per-frame paint cadence)
+        w.start = startUnit;
+        w.end = endUnit;
+        recomputeUnion();
+        return;
+    }
+    windows_.push_back(ViewWindow{viewKey, startUnit, endUnit});
+    recomputeUnion();
+}
+
+void HighlightEngine::dropViewport(const void* viewKey)
+{
+    const int i = int(std::find_if(windows_.begin(), windows_.end(),
+                                   [viewKey](const ViewWindow& w) { return w.key == viewKey; })
+                      - windows_.begin());
+    if (i >= int(windows_.size()))
+        return;
+    windows_.erase(windows_.begin() + i);
+    recomputeUnion();
+}
+
+void HighlightEngine::recomputeUnion()
+{
+    if (windows_.empty()) {
+        viewportSet_ = false; // back to "never fed": unscoped policy
+        vpStart_ = vpEnd_ = 0;
+        return;
+    }
+    int lo = windows_.front().start, hi = windows_.front().end;
+    for (const ViewWindow& w : windows_) {
+        lo = std::min(lo, w.start);
+        hi = std::max(hi, w.end);
+    }
+    if (!viewportSet_ || lo != vpStart_ || hi != vpEnd_) {
+        vpStart_ = lo;
+        vpEnd_ = hi;
         windowDirty_ = true;
         viewportSet_ = true;
     }
@@ -854,8 +906,8 @@ void HighlightEngine::refreshIfNeeded()
     if (!lang_)
         return;
 
-    // A moved window needs a fresh tree only in Viewport mode (the old
-    // window-tree does not cover the new lines); scroll cost measured
+    // A moved union window needs a fresh tree only in Viewport mode (the
+    // old window-tree does not cover the new lines); scroll cost measured
     // 0.04-0.4ms. Full-mode trees always cover the whole document.
     const bool needsParse =
         dirty_ || (mode_ == Mode::Viewport && viewportSet_ && windowDirty_);
@@ -865,9 +917,11 @@ void HighlightEngine::refreshIfNeeded()
             vpDone = reparseViewport();
         else
             reparseFull();
+        ++parseCount_; // the machine's oracle counts PASSES actually run
         if (mode_ == Mode::Viewport && !vpDone) {
             mode_ = Mode::Full;
             reparseFull();
+            ++parseCount_;
         }
         // Adaptive switch: a busted budget means this grammar's
         // incremental reuse is dead weight (python's indent scanner);
@@ -881,7 +935,13 @@ void HighlightEngine::refreshIfNeeded()
     // Query scoping: once the document is big, never walk whole-document
     // captures again (js measured 24.3ms/196k captures per keystroke);
     // the visible window is enough for paint, and spansFor() re-queries
-    // synchronously for programmatic requests outside it.
+    // synchronously for programmatic requests outside it. D4 NOTE: the
+    // window here is the union of the viewport SET (vpStart_/vpEnd_ are
+    // the union), and the SET's union only ever GROWS while every
+    // surface lives — so the scoped query window is monotone across the
+    // attached views' alternating paints: at most ONE re-query per union
+    // growth, never a per-frame flip-flop (the pre-D4 single-window
+    // re-shrink this car kills).
     const bool scoped = viewportSet_ && buffer_->charCount() >= kViewportMinUnits;
     const int qStart = scoped ? vpStart_ : -1;
     const int qEnd = scoped ? vpEnd_ : -1;

@@ -370,6 +370,24 @@ CodeEditor::CodeEditor(QWidget* parent)
       document_(new CodeDocument(this)),
       buffer_(document_->buffer_)
 {
+    initCommon();
+}
+
+// Car D machine D2 — the attach ctor (the car's one public widening). The
+// document's views_ list and per-view pass order carry the contract
+// (CodeDocument.hpp); attach can never reseat the buffer_ reference, so a
+// view belongs to its document for life.
+CodeEditor::CodeEditor(CodeDocument* document, QWidget* parent)
+    : QWidget(parent),
+      document_(document),
+      buffer_(document->buffer_)
+{
+    document->attachView(this);
+    initCommon();
+}
+
+void CodeEditor::initCommon()
+{
     setFocusPolicy(Qt::StrongFocus);
     setAccessibleName(QStringLiteral("code editor"));
     // M16: the widget accepts text drops (dropEvent filters on hasText;
@@ -397,14 +415,15 @@ CodeEditor::CodeEditor(QWidget* parent)
     // itself (idempotent: one static installFactory call per process).
     CodeEditorAccessible::install();
 
-    // M4: one core EditEvent per primitive mutation keeps the highlight
-    // tree current (ts_tree_edit happens inside the engine; the reparse
-    // itself waits for refreshIfNeeded() in paint, so a whole key press -
-    // multi-caret fan-out included - reparses at most once).
-    highlight_ = std::make_unique<HighlightEngine>();
-    highlight_->attach(&buffer_);
-    buffer_.setEditObserver([this](const qmn::core::TextBuffer::EditEvent& ev) {
-        highlight_->onEdit(ev);
+    // Car D (D4): no engine here anymore — the DOCUMENT owns the one
+    // parse over its buffer and rides the core observer list directly.
+    // This is the view's PER-VIEW PASS on a shared list — registered
+    // (not installed: the document's mux slot already sits on the
+    // buffer), and the document re-asserts the mux LAST right after,
+    // so the pass order per mutation is [view passes in attach order,
+    // parse, mux]. Everything below runs once per mutation for THIS
+    // view only.
+    viewObserverToken_ = buffer_.addEditObserver([this](const qmn::core::TextBuffer::EditEvent& ev) {
         findDirty_ = true; // M6: typing invalidates the match set lazily;
                            // the next paint (or find action) refreshes it
         // M13: keep collapsed-fold indices aligned with the model (a
@@ -448,19 +467,43 @@ CodeEditor::CodeEditor(QWidget* parent)
                 QAccessible::updateAccessibility(&ins);
             }
         }
-        // M25: the document half of the edit bus — the LSP-shaped editApplied
-        // delta + the document's own textChanged ping + the modified flag
-        // (v1: any edit sets it; only markSaved() clears it). Fires here, in
-        // the observer pass, so it covers exactly what the core covers: every
-        // primitive mutation, undo/redo replay and setText's whole-doc op
-        // alike. Note: the flag transition leads, then editApplied, then the
-        // document ping, then the editor's textChanged below.
-        document_->noteEdit(ev);
-        // Phase F: the detail-free document ping — unconditional (no AT
-        // gate), emitted once per primitive mutation, observers of the
-        // parity textChanged door ride it.
-        emit textChanged();
+        // Car D (D3): the FOREIGN half of the pass. The origin tag (see
+        // the per-view-pass head above and CodeDocument.hpp's contract)
+        // says some OTHER view authored this mutation — the sweep above
+        // (fold/wrap/find/diff) is event-driven and rode
+        // foreign events already; what the shared document adds is the
+        // half the view maintains for itself: caret/selection mapping,
+        // redo-mark re-stamping, popup dismissal, a11y motion events.
+        // A SELF edit never enters reconcileForeignEdit: the single-view
+        // pass is the v1.11 one verbatim (the headline byte-identical pin;
+        // the whole existing suite guards it). actionDepth_ == 0 means no
+        // tagged door is in flight (only reachable for zero-view
+        // documents' own replaces and diff feeds — no views to map).
+        if (document_->actionDepth_ > 0 && document_->actor_ != this)
+            reconcileForeignEdit(ev);
+        // M25 (D2-moved): the document half of the edit bus — the modified
+        // flag, the LSP-shaped editApplied delta and the doc ping — plus
+        // this view's own detail-free textChanged ping now ride the
+        // document's mux slot (CodeDocument::emitEditTrio + this view's
+        // notifyDocumentEditTail), which fires LAST after every view's
+        // pass above. One trio on the wire per mutation, one textChanged
+        // per view; with one view that is the v1.11 order byte-identically.
     });
+    document_->reassertMuxLast(); // the standing invariant after every attach
+
+    // Car D (D3): align THIS view's mark stacks with the document's shared
+    // history (an attach to a document that already has history starts its
+    // mirror aligned: the attach-frame mark pairs with every pre-attach
+    // group; the frame can never drift again without this view mapping it).
+    while (undoMarks_.size() < buffer_.undoDepth())
+        undoMarks_.append(captureEditMark());
+    if (undoMarks_.size() > buffer_.undoDepth())
+        undoMarks_.remove(0, undoMarks_.size() - buffer_.undoDepth());
+    redoMarks_.clear(); // (the redo branch of a shared history: pad below,
+    while (redoMarks_.size() < buffer_.redoDepth()) // an undone-and-dropped
+        redoMarks_.append(captureEditMark()); // view leaves groups standing)
+    lastPushSerial_ = buffer_.undoPushSerial();
+    markDepthsBookkept();
 
     // M11: the caret/selection half of the a11y event bus. cursorMoved and
     // selectionChanged are the editor's own truth doors (every caret or
@@ -564,6 +607,13 @@ CodeEditor::CodeEditor(QWidget* parent)
 
 CodeEditor::~CodeEditor()
 {
+    // Car D (D2): leave the document's view list AND the shared buffer's
+    // observer list first. The dtor body runs BEFORE ~QObject deletes
+    // children, so an editor-owned document (and its buffer) is still
+    // alive here; for a consumer-owned document the lifetime contract
+    // guarantees the same (CodeDocument.hpp).
+    document_->detachView(this);
+
     // M10 destruction-order trap (release-only SIGSEGV found in car 2):
     // child QObjects are deleted LATER, inside ~QObject::deleteChildren()
     // — after every member of CodeEditor is gone — and a dying child
@@ -574,8 +624,14 @@ CodeEditor::~CodeEditor()
     // double-free the DiffState. Tear the mode down HERE, while the
     // members are alive: the guard then sees a true nullptr for free.
     diffRecomputeTimer_.stop();
-    if (diff_ && diff_->originalDoc)
+    if (diff_ && diff_->originalDoc) {
         disconnect(diff_->originalDoc, nullptr, this, nullptr);
+        // D4: release this view's BORROW window from the original doc's
+        // shared parse (the entry lives in a document this one does not
+        // own and may outlive it; detachView only covers the OWN doc).
+        if (CodeDocument* od = diff_->originalDoc; od->existingParse())
+            od->existingParse()->dropViewport(this);
+    }
     diff_.reset();
 
     if (perf_.count > 0) {
@@ -593,10 +649,27 @@ QSize CodeEditor::sizeHint() const
 void CodeEditor::setPlainText(const QString& text)
 {
     preedit_.clear(); // a programmatic document replace ends any composition
+    // Car D (D3): the replace door is an action too — the tag arms the
+    // other views' mirrors so their mark stacks COLLAPSE with the buffer's
+    // (clearUndoHistory keeps the serial: the mirror's collapse branch
+    // reads that) and their carets ride the one whole-doc EditEvent.
+    MutationAction tagAction(this);
+    // Car D (D2) replace bracket: the whole-doc EditEvent the core fires
+    // INSIDE setText is EATEN by the document's mux (deferred, see
+    // CodeDocument::endReplace) and the trio goes out exactly once when
+    // this outermost bracket closes below — after every view's per-view
+    // sweep ran (it ran during the event) and after this view's caret/
+    // scroll/undo-mark/fold/wrap resets. editApplied handlers never see a
+    // half-replaced document; the v1.11 trio-before-selectionChanged tail
+    // order survives.
+    document_->beginReplace();
     buffer_.setText(text); // also clears the core undo/redo stacks
     undoMarks_.clear();
     redoMarks_.clear();
     lastPushSerial_ = buffer_.undoPushSerial();
+    markDepthsBookkept(); // (D3) this view's stacks match the cleared buffer;
+                          // the other views' mirrors collapse theirs at the
+                          // action-end diff (depth 0 with an unreset serial)
     caret_ = {};
     anchor_ = {};
     hasSelection_ = false;
@@ -628,6 +701,8 @@ void CodeEditor::setPlainText(const QString& text)
         rebuildPrefixFrom(0);
     }
     updateScrollBarRange();
+    document_->endReplace(); // the deferred trio fires here (D2): hooks
+                             // done, selectionChanged still after the ping
     emit selectionChanged();
     update();
 }
@@ -1101,6 +1176,10 @@ void CodeEditor::cut()
         clearDiffOriginalSelection();
     // Unbracketed: the cut's delete may coalesce with an adjacent delete
     // chain (the preceding selection motion already froze any older chain).
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark pre = captureEditMark();
     if (!extraCarets_.isEmpty()) {
         // Multi-caret cut (D1). VS Code line-cut semantics with selections
@@ -1272,6 +1351,10 @@ void CodeEditor::pasteText(const QString& text)
     const QString clean = sanitizeLineEnds(text);
     if (clean.isEmpty())
         return; // empty clipboard: paste is a no-op, not a delete
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark pre = captureEditMark();
     // Paste is its own undo step: the bracket fences it off from the
     // typing chain (even when inserted right after typed text) and merges
@@ -1319,6 +1402,229 @@ void CodeEditor::reconcileUndoMarks(const UndoMark& pre)
     if (buffer_.redoDepth() == 0)
         redoMarks_.clear(); // the core truncated the redo branch
     Q_ASSERT(undoMarks_.size() == static_cast<int>(buffer_.undoDepth()));
+    markDepthsBookkept();
+}
+
+// The depth pair our mark stacks are aligned to (the mirror's move-branch
+// precondition). Bookkept at every quiescent point: after reconcile, after
+// the undo/redo moves, after a replace clear, at attach. -1 (never set)
+// makes the mirror FALL BACK to fill/trim instead of MOVING marks — the
+// pre-D3 v1.11 semantics — so a missed bookkeep point can never corrupt,
+// only be approximate.
+void CodeEditor::markDepthsBookkept()
+{
+    lastMarkUndoDepth_ = buffer_.undoDepth();
+    lastMarkRedoDepth_ = buffer_.redoDepth();
+}
+
+void CodeEditor::beginSelfAction() { document_->beginAction(this); }
+void CodeEditor::endSelfAction() { document_->endAction(); }
+
+// --- car D machine D3: the foreign mirror ---------------------------------
+// Contract: CodeDocument.hpp "THE ORIGIN TAG" + CodeEditor.hpp's mirror
+// block. The algebra is ONE static function used by every position that
+// rides it (caret, anchor, extra slots, selection ends, redo marks):
+
+static int mapOffsetThroughEdit(int off, const qmn::core::TextBuffer::EditEvent& ev)
+{
+    // Offsets AT or BEFORE the edit's start never move; an offset INSIDE
+    // the eaten range clamps to the start; strictly after shifts by the
+    // net delta. A pure insert (end == start) leaves an offset equal to
+    // the insertion point alone, exactly like a real editor's caret.
+    if (off <= ev.start)
+        return off;
+    if (off <= ev.end)
+        return ev.start;
+    return off + static_cast<int>(ev.inserted.size()) - (ev.end - ev.start);
+}
+
+void CodeEditor::reconcileForeignEdit(const qmn::core::TextBuffer::EditEvent& ev)
+{
+    // Map everything this view maintains that a foreign mutation can
+    // invalidate. Positions re-resolve through lineColAt in the POST-op
+    // frame (a foreign delete of whole LINES must not leave a bogus line
+    // number lazily forgiven by selRangeOf's clamp — the state gets
+    // honest instead); a wholly-eaten selection collapses to an empty one
+    // at the clamp. Scroll/h-scroll/docWidthPx_ deliberately do NOT
+    // move: content slides under a viewport that stays put (the same
+    // stance no edit takes toward docWidthPx_ in v1), and the fold/wrap/
+    // find/diff halves already rode the pass above.
+    // THE frame trap (D3 debug caught it on a foreign whole-line delete):
+    // by the time an observer runs, the buffer has ALREADY mutated — so
+    // offsetOf/lineColAt speak the POST-op frame while the positions a
+    // bystander still carries were written in the PRE-op one. Feeding a
+    // pre-op position to the post-op offsetOf silently clamps a stale
+    // line to the shrunken document and maps a bystander below the edit
+    // to the document origin (a line delete caught exactly this: (2,2)
+    // resolved to offset 2 and the caret landed at {0,0}). The fix is the
+    // frame the ARM chose: armForeignMirror (at beginAction, BEFORE the
+    // first mutation) snapshots this view's caret state as OFFSETS, and
+    // those offsets ride the pure algebra across every event of the
+    // action — offset algebra is frame-correct by construction (each
+    // event's start/end/inserted describe exactly the frame the carried
+    // offsets live in), and positions only ever RE-RESOLVE through
+    // lineColAt in a frame that is CURRENT (each event's post-op), so a
+    // stale line number can never be lazily forgiven by selRangeOf's
+    // clamp. The state gets honest, never merely clamped.
+    // A view that never armed has nothing to map: either it authored this
+    // action (the hook gate above already excludes it) or it attached
+    // MID-action — its state was just aligned at attach against the live
+    // frame, so mapping the pre-attach algebra would shift it twice.
+    if (!foreignArmed_)
+        return;
+    const auto mapOff = [&ev](int& off) { const int mapped = mapOffsetThroughEdit(off, ev); off = mapped; };
+    const auto writePos = [this](const int& off, TextPosition& p) {
+        const qmn::core::TextBuffer::LineCol lc = buffer_.lineColAt(off);
+        p = TextPosition{lc.line, lc.col};
+    };
+    mapOff(mirrorFrame_.caretOff);
+    mapOff(mirrorFrame_.anchorOff);
+    writePos(mirrorFrame_.caretOff, caret_);
+    writePos(mirrorFrame_.anchorOff, anchor_);
+    if (hasSelection_ && caret_ == anchor_)
+        hasSelection_ = false; // (a wholly-eaten selection collapses)
+    const int mappedSlots = qMin(extraCarets_.size(), mirrorFrame_.extras.size());
+    for (int i = 0; i < mappedSlots; ++i) {
+        CaretSlot& s = extraCarets_[i];
+        mapOff(mirrorFrame_.extras[i].caretOff);
+        mapOff(mirrorFrame_.extras[i].anchorOff);
+        writePos(mirrorFrame_.extras[i].caretOff, s.caret);
+        writePos(mirrorFrame_.extras[i].anchorOff, s.anchor);
+        if (s.hasSelection && s.caret == s.anchor)
+            s.hasSelection = false;
+    }
+    // BOTH mark stacks deliberately ride RAW: every entry is FRAME-PAIRED
+    // with its group slot (undoMarks_ = the frame as it was lived before
+    // the group applied, redoMarks_ = the frame as it was lived when the
+    // matching undo was pressed), and the core's tape invariant means a
+    // replay lands the text byte-back INTO that exact state — so mapping
+    // a mark through the replaying event would restamp it in the WRONG
+    // frame (positions resolve offsetOf against text that no longer has
+    // the group). Foreign mutations that neither move groups nor touch
+    // the redo branch do not exist (any typed bump makes the core clear
+    // the redo branch, and the mirror clears the marks with it).
+    // Popups: an open completion/hover popup in THIS view while another
+    // view typed is a stale anchor, not a partial truth — close it (the
+    // anchors froze at show time, and asking again happens on the user's
+    // own gesture, per the no-arm rule below).
+    hidePopupsForInteraction();
+    // LOUD to the AT bridge, SILENT to the view's own motion signals:
+    // cursorMoved/selectionChanged stay unemitted (the hub's hover/popup
+    // taps ride them — a foreign edit must not arm asks; and the user
+    // did not move), while the QAccessible cursor/selection events fire
+    // with the freshly mapped offsets (ATs must follow the text). Same
+    // event pair and construction as the signal-riding connects in
+    // initCommon, fired directly.
+    if (QAccessible::isActive()) {
+        const int caretOff = buffer_.offsetOf(caret_.line, caret_.col);
+        QAccessibleTextCursorEvent cur(this, caretOff);
+        QAccessible::updateAccessibility(&cur);
+        const int anchorOff = buffer_.offsetOf(anchor_.line, anchor_.col);
+        // NOTE the explicit ints: std::minmax over two call RESULTS yields
+        // a pair of dangling references (temporaries die with the statement).
+        QAccessibleTextSelectionEvent sel(this, std::min(caretOff, anchorOff),
+                                          std::max(caretOff, anchorOff));
+        QAccessible::updateAccessibility(&sel);
+    }
+}
+
+void CodeEditor::armForeignMirror()
+{
+    // Called by the document at another view's action BEGIN: store THIS
+    // view's caret state as the pre-action frame — exactly the frame the
+    // mark(s) for any group that action pushes must pair with. Idempotent
+    // across nesting: the OUTERMOST arm keeps its frame.
+    if (foreignArmed_)
+        return;
+    foreignArmed_ = true;
+    foreignSnap_ = captureEditMark();
+    // (D3 fix) The SAME frame, in OFFSETS: the only moment this view's
+    // positions are guaranteed to match the buffer's own frame is right
+    // here — before the action's first mutation. offsetOf at observer
+    // time speaks the POST-op frame and silently clamps stale lines (the
+    // frame trap in reconcileForeignEdit); offsetOf HERE is honest, and
+    // the captured offsets ride the pure algebra from then on.
+    mirrorFrame_ = MirrorFrame{};
+    mirrorFrame_.caretOff = buffer_.offsetOf(caret_.line, caret_.col);
+    mirrorFrame_.anchorOff = buffer_.offsetOf(anchor_.line, anchor_.col);
+    mirrorFrame_.extras.reserve(extraCarets_.size());
+    for (const CaretSlot& s : extraCarets_)
+        mirrorFrame_.extras.append({buffer_.offsetOf(s.caret.line, s.caret.col),
+                                    buffer_.offsetOf(s.anchor.line, s.anchor.col)});
+}
+
+void CodeEditor::mirrorForeignAction()
+{
+    // Called by the document at EVERY action END (self-gated): the shared
+    // undo stack's state is final here (a group lands only when the
+    // outermost beginEditGroup closes). The diff is per-view truth versus
+    // the buffer, so it is self-correcting under nesting and even an
+    // untagged region in between (the design record's mark-alignment
+    // rule: every view reconciles every group, foreign or not).
+    if (!foreignArmed_)
+        return; // this view authored the action (its own capture/
+                // reconcile pairs handled it) or was never armed
+    foreignArmed_ = false;
+    const int u = buffer_.undoDepth();
+    const qint64 s = buffer_.undoPushSerial();
+    if (s > lastPushSerial_) {
+        // A fresh group landed (at most one per action today — the loop
+        // guards batching without re-reading the serial each pass): its
+        // mark is the ARM frame, the pre-action state as of BEGIN.
+        const int bumps = static_cast<int>(s - lastPushSerial_);
+        for (int i = 0; i < bumps; ++i)
+            undoMarks_.append(foreignSnap_);
+        // The history cap may have dropped the OLDEST group in the same
+        // breath — the reconcile formula verbatim (append at the end,
+        // trim at the front).
+        if (undoMarks_.size() > buffer_.undoDepth())
+            undoMarks_.remove(0, undoMarks_.size() - buffer_.undoDepth());
+        // (A view attached to a document with history fills its stacks
+        // with the arm frame here: lastPushSerial_ rode the attach-time
+        // serial, so a no-bump fill covers exactly the pre-attach groups,
+        // and an attach-frame mark is honest for them — the frame cannot
+        // move again without this view mapping it.)
+    } else {
+        // The serial moved NOTHING, so only the DEPTH did: another view
+        // undid, redid, or cleared (undo/redo MOVE groups between the
+        // stacks without touching the serial — the core's clearUndoHistory
+        // comment keeps the same discipline). MOVE our marks across in the
+        // same breath the core moved their groups: the mark pairs with the
+        // group and the pairing survives the trip.
+        const int su = int(lastMarkUndoDepth_);
+        const int sr = int(lastMarkRedoDepth_);
+        const int rd = buffer_.redoDepth();
+        if (su >= 0 && u < su && u == su - 1 && rd == sr + 1) { // one foreign undo
+            // The group moved to the redo branch, so the arm mark it
+            // leaves behind is DEAD (the replay just consumed its frame)
+            // and the honest REDO frame is what this view lived when the
+            // foreign undo was PRESSED — the pre-action snapshot, exactly
+            // the pairing the self path's undo door captures.
+            if (!undoMarks_.isEmpty())
+                undoMarks_.removeLast();
+            redoMarks_.append(foreignSnap_);
+        } else if (sr >= 0 && u > su && u == su + 1 && rd == sr - 1) { // one foreign redo
+            if (!redoMarks_.isEmpty())
+                redoMarks_.removeLast(); // (symmetric: the dead redo
+            undoMarks_.append(foreignSnap_); // frame is replaced by the
+        } else if (su >= 0 && u < su) {     // frame lived at the press)
+            undoMarks_.clear(); // a history collapse (a foreign setPlainText's
+            lastMarkUndoDepth_ = u; // clear, or a cap drop this view never saw):
+        }
+        while (undoMarks_.size() < u)
+            undoMarks_.append(foreignSnap_); // (late-attach fill, see above)
+        if (redoMarks_.size() > rd)
+            redoMarks_.remove(redoMarks_.size() - rd,
+                              redoMarks_.size() - rd); // tail trim
+        lastMarkUndoDepth_ = u;
+        lastMarkRedoDepth_ = rd;
+    }
+    lastPushSerial_ = s;
+    if (buffer_.redoDepth() == 0)
+        redoMarks_.clear(); // reconcile's rule, shared
+    markDepthsBookkept(); // stacks now align with the buffer for the next diff
+    Q_ASSERT(undoMarks_.size() == static_cast<int>(buffer_.undoDepth()));
+    Q_ASSERT(redoMarks_.size() == static_cast<int>(buffer_.redoDepth()));
 }
 
 void CodeEditor::applyEditMark(const UndoMark& m)
@@ -1720,12 +2026,17 @@ void CodeEditor::undo()
         return;
     if (!buffer_.canUndo() || undoMarks_.isEmpty())
         return; // out of sync would be a bug; refuse rather than corrupt
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark current = captureEditMark(); // what redo must restore
     const UndoMark pre = undoMarks_.takeLast();
     buffer_.undo();
     redoMarks_.append(current);
     lastPushSerial_ = buffer_.undoPushSerial(); // a move does not bump it
     applyEditMark(pre);
+    markDepthsBookkept(); // (D3) our moved marks pair with the moved group
 }
 
 void CodeEditor::redo()
@@ -1734,12 +2045,17 @@ void CodeEditor::redo()
         return;
     if (!buffer_.canRedo() || redoMarks_.isEmpty())
         return;
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark current = captureEditMark(); // the group's pre-state again
     const UndoMark after = redoMarks_.takeLast(); // state the undo tore down
     buffer_.redo();
     undoMarks_.append(current);
     lastPushSerial_ = buffer_.undoPushSerial();
     applyEditMark(after);
+    markDepthsBookkept(); // (D3) symmetry with undo()
 }
 
 void CodeEditor::insertTextAt(TextPosition pos, const QString& text)
@@ -1770,6 +2086,10 @@ void CodeEditor::deleteLineAt(int line)
     // Same mirror discipline as every view edit action: capture the pre
     // state, ride the door, reconcile the mark stack against the core
     // (which pushed — or coalesced into — exactly one group).
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark pre = captureEditMark();
     deleteSelection(); // refuses while readOnly (guarded above anyway)
     reconcileUndoMarks(pre);
@@ -1819,6 +2139,10 @@ int CodeEditor::applyTextEdits(const QVector<TextEdit>& edits)
             return 0;
     }
 
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark pre = captureEditMark();
     buffer_.beginEditGroup(); // ONE undo group for the whole batch
     for (int i = ops.size() - 1; i >= 0; --i) { // bottom-up: nothing shifts
@@ -2343,14 +2667,15 @@ void CodeEditor::setDiffDocuments(CodeDocument* original, CodeDocument* modified
                                   const QString& language)
 {
     // Silent refusals on bad input (the v1 door style): the original must
-    // be STANDALONE — an attached original belongs to some editor's caret/
+    // carry ZERO views — a viewed original belongs to some editor's caret/
     // undo world and the diff view must never make it editable — and a
-    // `modified` attached to ANOTHER editor is that editor's writable
-    // truth, not ours to diff in place.
-    if (!original || !modified || original->editor_ ||
-        (modified->editor_ && modified->editor_ != this))
+    // `modified` attached to ANOTHER view is that view's writable truth,
+    // not ours to diff in place (car D re-read these refusal gates as
+    // VIEW-LIST gates: the rule and the refusals are the same).
+    if (!original || !modified || !original->views_.isEmpty() ||
+        (!modified->views_.isEmpty() && !modified->views_.contains(this)))
         return;
-    if (modified->editor_ != this) {
+    if (modified->views_.isEmpty()) {
         // Standalone modified: one-shot TEXT feed through our own replace
         // machinery (caret reset, fold drop, scroll reset come for free);
         // the editor's document stays the single writable truth.
@@ -2397,13 +2722,18 @@ void CodeEditor::clearDiffDocuments()
 {
     if (!diff_)
         return;
-    if (diff_->originalDoc)
+    if (diff_->originalDoc) {
         disconnect(diff_->originalDoc, nullptr, this, nullptr);
+        // D4: the chrome's BORROW window leaves the original document's
+        // shared parse with the session (the parse itself belongs to that
+        // document and stays — for a standalone string-door doc it rides
+        // on to the next session, tree and all: the fresh-session engine
+        // the M10 comment promised is now just the document's own parse
+        // re-fed a window).
+        if (CodeDocument* od = diff_->originalDoc; od->existingParse())
+            od->existingParse()->dropViewport(this);
+    }
     diffRecomputeTimer_.stop();
-    origHighlight_.reset(); // the chrome engine borrows the ORIGINAL's
-                            // buffer: it dies with the session, before the
-                            // row space and (for a non-owning pointer door)
-                            // possibly the document itself go away
     diff_.reset(); // the row space drops back to wrap/fold: those tables
                    // were kept CURRENT the whole time (the observer seam is
                    // gated only on its DIFF half), so the v1.6.1 map
@@ -2460,24 +2790,43 @@ void CodeEditor::previousChange()
     // No wrap-around at the document top (see nextChange).
 }
 
+// The chrome's BORROW door (D4): the original document's shared parse,
+// reported only when it exists AND carries a live language (an external
+// original that never parsed inks plain — the no-clobber rule; the
+// window feed and teardown ride the paint and the session-close sites).
+HighlightEngine* CodeEditor::diffOriginalParse() const
+{
+    if (!diff_ || !diff_->originalDoc)
+        return nullptr;
+    HighlightEngine* eng = diff_->originalDoc->existingParse();
+    return eng && eng->active() ? eng : nullptr;
+}
+
+// The view's doors onto the document's shared parse (CodeEditor.hpp):
+// ensureParse's lazy creation is the document's business (CodeDocument).
+HighlightEngine* CodeEditor::parse()
+{
+    return document_->ensureParse();
+}
+
+HighlightEngine* CodeEditor::existingParse() const
+{
+    return document_->existingParse();
+}
+
 void CodeEditor::watchDiffOriginal(CodeDocument* doc)
 {
     // Idempotent (a re-watch disconnects first — the string door re-uses
     // its lazy standalone doc across doors).
     disconnect(doc, nullptr, this, nullptr);
-    // The original side of the live-update seam (PLAN §M10): its own
-    // editApplied stream (the standalone ctor installed the observer)
-    // restarts the SAME debounce the modified side rides — and feeds the
-    // chrome's highlight engine its core-shaped delta (the engine's
-    // onEdit wants the pre-op offsets the signal carries verbatim).
+    // The chrome engine FEED is gone (D4): the original document's own
+    // parse rides its buffer's core observer list directly (its owner's
+    // subscription), so the relay has nothing to forward — the deltas
+    // below only restart the debounce now.
     connect(doc, &CodeDocument::editApplied, this,
-            [this](int start, int end, const QString& inserted) {
+            [this](int, int, const QString&) {
         if (!diff_)
-            return; // pre-beginDiffMode feeds: the fresh session engine
-                    // parses the settled text, these deltas would be noise
-        if (origHighlight_)
-            origHighlight_->onEdit(
-                qmn::core::TextBuffer::EditEvent{start, end, inserted});
+            return; // pre-beginDiffMode feeds: nothing to debounce yet
         scheduleDiffRecompute();
     });
     // The destroyed() hookup for the NON-OWNING pointer door (harmless for
@@ -2921,17 +3270,19 @@ void CodeEditor::setDiffOriginalSel(const TextPosition& anchor,
 
 // The chrome text pass's FormatRanges: formatRangesForLine's protocol
 // (theme token map -> engine fallback table -> skip invalid, clamp into
-// the laid-out text, grapheme-snap both edges) on the SECOND engine over
-// the ORIGINAL buffer. The engine's line index is the same generation the
-// paintEvent refresh just produced.
+// the laid-out text, grapheme-snap both edges) on the BORROWED shared
+// parse of the ORIGINAL document (D4 — the chrome's second engine is
+// gone). The engine's line index is the same generation the paintEvent
+// refresh just produced (the paint feeds this view's borrow window into
+// the engine's viewport SET right before refreshing).
 QVector<QTextLayout::FormatRange> CodeEditor::origChromeFormatRanges(
     int line, const QString& laidOut) const
 {
     QVector<QTextLayout::FormatRange> out;
-    if (!origHighlight_ || !origHighlight_->active() || !diff_
-        || !diff_->originalDoc)
+    HighlightEngine* eng = diffOriginalParse();
+    if (!eng || !diff_ || !diff_->originalDoc)
         return out;
-    const std::vector<int>& ls = origHighlight_->lineStarts();
+    const std::vector<int>& ls = eng->lineStarts();
     if (line < 0 || size_t(line) >= ls.size())
         return out;
     const qmn::core::TextBuffer& ob = diff_->originalDoc->buffer_;
@@ -2939,7 +3290,7 @@ QVector<QTextLayout::FormatRange> CodeEditor::origChromeFormatRanges(
     const int lineEnd = size_t(line) + 1 < ls.size()
         ? ls[size_t(line) + 1] - 1 // the '\n' terminating this line
         : ob.charCount();          // last line: no terminator past it
-    const auto& hs = origHighlight_->spans();
+    const auto& hs = eng->spans();
     auto it = std::upper_bound(hs.begin(), hs.end(), lineStart,
                                [](int v, const HighlightEngine::Span& s) { return v < s.end; });
     const int laidOut2 = laidOut.size(); // the budget-clipped layout text
@@ -3169,8 +3520,9 @@ void CodeEditor::drawDiffChromeUnder(QPainter& p) const
             }
         }
         // (4) the text: syntax-highlighted EXACTLY like the modified side
-        // (the second engine over the ORIGINAL buffer; M10's live-check
-        // follow-up) — but only as TOKEN colors: the inline word-level
+        // (the ORIGINAL document's own shared parse, borrowed through the
+        // viewport SET — D4; M10's live-check follow-up) — but only as
+        // TOKEN colors: the inline word-level
         // diff coloring stays M10b's. The draw's pos is the layout
         // TOP-LEFT, not a baseline anchor — the engine adds line.y() +
         // line.ascent() itself (the v1 text-loop discovery, comment at its
@@ -3197,7 +3549,7 @@ void CodeEditor::drawDiffChromeUnder(QPainter& p) const
                 : f.origTextRight;
             p.setClipRect(QRect(f.origTextLeft, yTop, clipR - f.origTextLeft, lh));
             p.setPen(theme_->ink(Role::GutterDigits));
-            const auto fmts = origHighlight_ && origHighlight_->active()
+            const auto fmts = diffOriginalParse()
                                   ? origChromeFormatRanges(r.originalLine,
                                                            ol.text)
                                   : QVector<QTextLayout::FormatRange>{};
@@ -3407,15 +3759,27 @@ void CodeEditor::beginDiffMode(const QString& language)
     diffRecomputeTimer_.stop(); // the feeds just done must not double-
                                 // compute: the FIRST compute is synchronous
     setLanguage(language); // ONE language for the whole diff view (PLAN
-                           // §M10; "" = plain, unknown id = plain)
-    // The ORIGINAL side gets its OWN engine instance: same grammar, same
-    // protocol (attach -> setLanguage rebuilds its line index from the
-    // already-fed text; the editApplied fan keeps it current; paint feeds
-    // its viewport window). A fresh instance per session: no tree carried
-    // over from a previous original document.
-    origHighlight_ = std::make_unique<HighlightEngine>();
-    origHighlight_->attach(&diff_->originalDoc->buffer_);
-    origHighlight_->setLanguage(language);
+                           // §M10; "" = plain, unknown id = plain). D4:
+                           // this IS the modified document's parse now —
+                           // the door drives the shared engine.
+    // The ORIGINAL side is a BORROW, not an engine (D4): its ink rides
+    // the parse that document owns. The string door's standalone doc is
+    // OURS (the widget parents it): the door above only spoke the
+    // MODIFIED doc, so the session's language goes to the original's
+    // parse here too — same language both halves (the M10 one-language
+    // rule survives per-document). A CALLER-SUPPLIED original belongs
+    // to its consumer: NO write, ever (the no-clobber rule) — its ink
+    // follows its document's own parse, plain when that parse was never
+    // created or never got a language. The paint feeds the borrowed
+    // engine its window through the viewport-SET door; the chrome's
+    // OWN engine instance and the editApplied feed relay are deleted
+    // with this comment (the doc's own list subscription replaced them).
+    if (diff_->originalDoc == diffStandaloneOriginal_) {
+        if (HighlightEngine* op = diff_->originalDoc->ensureParse();
+                op->language() != language.trimmed().toLower())
+            op->setLanguage(language); // re-session on a reused standalone:
+                                       // usually already the same id
+    }
     recomputeDiff();
     setVScroll(0); // entering diff mode always starts at the document top
     updateScrollBarRange();
@@ -3814,7 +4178,10 @@ bool CodeEditor::indentFoldsActive() const
     // a working fold grammar (js/json/python) the scan goes silent:
     // leading whitespace alone must not fake python-style nesting there
     // (owner-reported M13 regression — see grammarFoldsFollowBracketsNotIndent).
-    return highlight_->language().isEmpty() || !highlight_->hasFoldQuery();
+    // A document with NO parse (D4 lazy engine) is grammar-less like an
+    // empty language: the scan is the only fold source.
+    HighlightEngine* eng = existingParse();
+    return !eng || eng->language().isEmpty() || !eng->hasFoldQuery();
 }
 
 int CodeEditor::indentOfModelLine(int line) const
@@ -3945,16 +4312,21 @@ int CodeEditor::foldEndForLine(int line)
     // fold query at an explicit user action may pay one O(tree) walk —
     // paint never comes through here). One start line can carry several
     // captures (python: decorated_definition vs function_definition): the
-    // TIGHTEST end is the fold the user means at that very line.
-    const auto& ff = highlight_->foldsFull();
+    // TIGHTEST end is the fold the user means at that very line. D4: a
+    // document that never got a parse IS grammar-less — the no-engine read
+    // is the no-captures read, the indent fallback below stays reachable
+    // (the lazy engine must never shortcut the M13 fallback rule).
     int best = -1;
-    for (size_t i = 0; i < ff.size(); ++i) {
-        if (ff[i].startLine < line)
-            continue;
-        if (ff[i].startLine > line)
-            break;
-        if (ff[i].endLine > line && (best < 0 || ff[i].endLine < best))
-            best = ff[i].endLine;
+    if (HighlightEngine* eng = existingParse()) {
+        const auto& ff = eng->foldsFull();
+        for (size_t i = 0; i < ff.size(); ++i) {
+            if (ff[i].startLine < line)
+                continue;
+            if (ff[i].startLine > line)
+                break;
+            if (ff[i].endLine > line && (best < 0 || ff[i].endLine < best))
+                best = ff[i].endLine;
+        }
     }
     if (best > line)
         return std::min(best, buffer_.lineCount() - 1);
@@ -4011,7 +4383,13 @@ void CodeEditor::recomputeFoldables(int firstModel, int lastModel)
         return; // installed (the one-provider knot by construction)
     }
     const bool useIndent = indentFoldsActive(); // grammar modes: engine ONLY
-    const auto& ef = highlight_->folds(); // (start asc, end desc)
+    // A null parse (D4 lazy engine) reads as the empty grammar list —
+    // NOTE the static: a ternary arm that is a temporary would die at the
+    // statement's end and leave `ef` dangling (the reference-bind does
+    // not extend it through a conditional expression).
+    static const std::vector<HighlightEngine::FoldRange> kNoFolds;
+    HighlightEngine* eng = existingParse(); // no parse == no grammar folds
+    const auto& ef = eng ? eng->folds() : kNoFolds; // (start asc, end desc)
     size_t i = 0;
     while (i < ef.size() && ef[i].startLine < firstModel)
         ++i;
@@ -5108,7 +5486,11 @@ bool CodeEditor::innermostFoldAt(int row, FoldState* out)
     // table is whole-document (the exactness door escalates a viewport-
     // clamped parse to a full tree — see foldsFull()), so enclosing folds
     // starting above the window are visible to the walk too.
-    const auto& ff = highlight_->foldsFull();
+    HighlightEngine* eng = existingParse();
+    if (!eng)
+        return false; // no parse: no grammar folds here (foldLine at the
+                      // door above already fell through to the fallbacks)
+    const auto& ff = eng->foldsFull();
     for (int i = int(ff.size()) - 1; i >= 0; --i) {
         const int s = ff[size_t(i)].startLine;
         if (s >= row)
@@ -5191,9 +5573,12 @@ void CodeEditor::collapseAll()
     // collapsed inner start is hidden when its turn comes — foldLine's
     // hidden-start rule then skips it, so nesting folds for free.
     QVector<FoldState> all;
-    for (const auto& fr : highlight_->foldsFull())
-        if (fr.endLine > fr.startLine)
-            all.push_back(FoldState{fr.startLine, fr.endLine});
+    if (HighlightEngine* eng = existingParse())
+        for (const auto& fr : eng->foldsFull())
+            if (fr.endLine > fr.startLine)
+                all.push_back(FoldState{fr.startLine, fr.endLine});
+    // (no parse: no engine folds — the indent pass below, if the mode is
+    // grammar-less, is the only source; D4 lazy engine)
     const int docLines = buffer_.lineCount();
     if (indentFoldsActive()) { // grammar fold mode: engine folds are the whole
         for (int L = 0; L + 1 < docLines; ++L) { // story — no indent pseudo-
@@ -5523,6 +5908,10 @@ void CodeEditor::blockIndent()
     for (int line : lines)
         edits.append(makeIndentEdit(buffer_, line, tabStopWidth_));
 
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark pre = captureEditMark();
     applyBlockEdits(edits);
     reconcileUndoMarks(pre);
@@ -5545,6 +5934,10 @@ void CodeEditor::blockOutdent()
     if (edits.isEmpty())
         return; // nothing edited: not even an empty bracket is recorded
 
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark pre = captureEditMark();
     applyBlockEdits(edits);
     reconcileUndoMarks(pre);
@@ -5563,6 +5956,10 @@ void CodeEditor::tabInsertSpaces()
     if (readOnly_) // M19 user-edit gate
         return;
     const int stop = std::max(1, tabStopWidth_);
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark pre = captureEditMark();
     const QString line = buffer_.lineText(caret_.line);
     int editStart = buffer_.offsetOf(caret_.line, caret_.col);
@@ -5673,6 +6070,10 @@ void CodeEditor::insertTextAtCaret(const QString& text, int caretTrim)
         return;   // one gate covers them (options hpp spells the contract)
     if (text.isEmpty())
         return;
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark pre = captureEditMark();
     if (!extraCarets_.isEmpty()) {
         // Multi-caret typing (D1): one bracketed group per key press, so a
@@ -5825,6 +6226,10 @@ bool CodeEditor::handleAutoClosePair(QChar ch)
             }, false, false);
             return true;
         }
+        // Car D (D3): the MutationAction scope destructs at the action end
+        // (after the reconcile/moves below: the outermost mirror point). Nested
+        // re-entry is free — same-view actions keep one origin tag.
+        MutationAction tagAction(this);
         const UndoMark pre = captureEditMark();
         applyCaretsFanOut([&](const CaretSlot& s, SlotEdit& ed) {
             const int off = buffer_.offsetOf(s.caret.line, s.caret.col);
@@ -5897,6 +6302,10 @@ void CodeEditor::backspace()
 {
     if (readOnly_) // M19 user-edit gate (covers the empty-pair rule too)
         return;
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark pre = captureEditMark(); // unbracketed: backspace runs
     if (!extraCarets_.isEmpty()) {         // coalesce into one chunk
         // Multi-caret (D1): per-slot grapheme-safe deletes, one bracketed
@@ -5975,6 +6384,10 @@ void CodeEditor::deleteForward()
 {
     if (readOnly_) // M19 user-edit gate
         return;
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark pre = captureEditMark(); // unbracketed, see backspace
     if (!extraCarets_.isEmpty()) {
         applyCaretsFanOut([this](const CaretSlot& s, SlotEdit& ed) {
@@ -6104,28 +6517,41 @@ void CodeEditor::paintEvent(QPaintEvent*)
     const double winRight = textLeft + win; // ruler chrome boundary
     const auto xw = [&](double lineSpaceX) { return textLeft + lineSpaceX - hShift; };
 
-    // M4: bring the highlight engine current here, not on the key path
-    // (the typing perf harness measures keyPressEvent logic; the reparse
-    // rides the next paint, so one key press reparses at most once).
-    // The visible window (model offsets) lets the engine's adaptive
-    // policy scope parse+query to what is on screen on big documents.
-    if (highlight_->active()) {
-        const std::vector<int>& ls = highlight_->lineStarts();
-        if (!ls.empty() && size_t(first) < ls.size()) {
-            const int vpEnd =
-                size_t(last) + 1 < ls.size() ? ls[size_t(last) + 1] : buffer_.charCount();
-            highlight_->setViewport(ls[size_t(first)], vpEnd);
+    // M4 (D4-shaped): bring the DOCUMENT's parse current here, not on the
+    // key path (the typing perf harness measures keyPressEvent logic; the
+    // reparse rides the next paint, so one key press reparses at most
+    // once per SHARED engine — with two views attached, one keystroke
+    // still reparses exactly once, the machine's tripwire). This view
+    // feeds its own window into the engine's viewport SET; the adaptive
+    // policy scopes parse+query to the UNION of the attached views'
+    // windows. The SET door makes the pre-D4 flip-flop impossible: a
+    // second view painting a different window can only GROW the union,
+    // never re-shrink the tree under the other view. D4 lazy engine: a
+    // document that never got a language has no parse and nothing to
+    // feed — the plain-ink paint the inactive pre-D4 engine produced.
+    if (HighlightEngine* eng = existingParse()) {
+        if (eng->active()) {
+            const std::vector<int>& ls = eng->lineStarts();
+            if (!ls.empty() && size_t(first) < ls.size()) {
+                const int vpEnd =
+                    size_t(last) + 1 < ls.size() ? ls[size_t(last) + 1] : buffer_.charCount();
+                eng->setViewport(this, ls[size_t(first)], vpEnd);
+            }
         }
+        eng->refreshIfNeeded();
     }
-    highlight_->refreshIfNeeded();
-    // M10 machine 3: the chrome's own engine, same cadence and same
-    // adaptive window rule — but the window is the ORIGINAL line range of
-    // the rows about to be painted (the diff rows, not the model lines
-    // first/last: those speak the MODIFIED side).
-    if (origHighlight_) {
-        if (origHighlight_->active() && diff_ && diff_->originalDoc) {
+    // M10 machine 3 (D4-shaped): the ORIGINAL side's borrow — same
+    // cadence, same adaptive window rule, but the window is the ORIGINAL
+    // line range of the rows about to be painted (the diff rows, not the
+    // model lines first/last: those speak the MODIFIED side). The feed
+    // goes into the ORIGINAL document's shared parse under this widget's
+    // key (released at session close / view death); a document with no
+    // parse gets no feed — the no-clobber rule (diffOriginalParse).
+    if (diff_ && diff_->originalDoc) {
+        if (HighlightEngine* op = diff_->originalDoc->existingParse();
+            op && op->active()) {
             const qmn::core::TextBuffer& ob = diff_->originalDoc->buffer_;
-            const std::vector<int>& ols = origHighlight_->lineStarts();
+            const std::vector<int>& ols = op->lineStarts();
             const int rowsN = diff_->result.rows.size();
             int lo = -1, hi = -1;
             for (int slot = firstSlot; slot <= lastSlot; ++slot) {
@@ -6142,10 +6568,10 @@ void CodeEditor::paintEvent(QPaintEvent*)
                 const int vpEnd = size_t(hi) + 1 < ols.size()
                                       ? ols[size_t(hi) + 1]
                                       : ob.charCount();
-                origHighlight_->setViewport(ols[size_t(lo)], vpEnd);
+                op->setViewport(this, ols[size_t(lo)], vpEnd);
             }
+            op->refreshIfNeeded();
         }
-        origHighlight_->refreshIfNeeded();
     }
     // M13: foldable starts for this paint's window, from the tree+spans
     // generation the line above just produced (same cadence, same window
@@ -6870,18 +7296,19 @@ void CodeEditor::paintOverviewRuler(QPainter& p) const
 QVector<QTextLayout::FormatRange> CodeEditor::formatRangesForLine(int line, const GeoSlot* gs) const
 {
     QVector<QTextLayout::FormatRange> out;
-    if (!highlight_->active() || !gs->valid)
+    HighlightEngine* eng = existingParse(); // the paint refreshed it (D4)
+    if (!eng || !eng->active() || !gs->valid)
         return out;
     // The engine's line index + span list are the same tree generation
     // (paintEvent calls refreshIfNeeded() before this runs).
-    const std::vector<int>& ls = highlight_->lineStarts();
+    const std::vector<int>& ls = eng->lineStarts();
     if (line < 0 || size_t(line) >= ls.size())
         return out;
     const int lineStart = ls[size_t(line)];
     const int lineEnd = size_t(line) + 1 < ls.size()
         ? ls[size_t(line) + 1] - 1 // the '\n' terminating this line
         : buffer_.charCount();     // last line: no terminator past it
-    const auto& hs = highlight_->spans();
+    const auto& hs = eng->spans();
     auto it = std::upper_bound(hs.begin(), hs.end(), lineStart,
                                [](int v, const HighlightEngine::Span& s) { return v < s.end; });
     const int laidOut = static_cast<int>(gs->text.size()); // truncation-aware
@@ -6912,18 +7339,40 @@ QVector<QTextLayout::FormatRange> CodeEditor::formatRangesForLine(int line, cons
 }
 
 // --- M4 syntax highlighting public API ----------------------------------
+// D4: language is DOCUMENT state (one buffer, one tree — the fold
+// seam's one-provider rule read one level up). The door stays a VIEW
+// door, but it drives the shared parse: setting it in ANY attached view
+// re-points the document's parse and every view's ink follows it,
+// LAST-WRITER-WINS. Each view keeps its OWN LanguageProperties lookup,
+// font and theme over the SAME spans, so the fan-out below is only the
+// language-DEPENDENT per-view state: the tab-stop re-resolve (the M23
+// override keys on the language name) and the repaint.
 
 void CodeEditor::setLanguage(const QString& language)
 {
-    highlight_->setLanguage(language);
+    parse()->setLanguage(language); // forces the document's parse into
+                                    // existence: naming a language IS
+                                    // having a parse
     refreshTabStopWidth(); // M23: the language layer rides ABOVE the
                            // template (silent no-op with no override set)
+    for (CodeEditor* other : document_->views_)
+        if (other != this) {
+            other->refreshTabStopWidth(); // re-resolve against the NEW
+                                          // shared language (own overrides
+                                          // survive: the lookup is per-
+                                          // view by design)
+            other->update(); // the ink follows: a bystander's repaint
+        }
     update(); // colors appear on the next paint (parse+query deferred there)
 }
 
 QString CodeEditor::language() const
 {
-    return highlight_->language();
+    // The DOCUMENT's parse language (D4): two views of one document can
+    // never disagree about what buffer they are looking at. No parse =
+    // no language (the lazy engine: an engine-less document is plain).
+    HighlightEngine* eng = existingParse();
+    return eng ? eng->language() : QString();
 }
 
 QStringList CodeEditor::availableLanguages()
@@ -6980,8 +7429,14 @@ QVector<CodeEditor::HighlightSpan> CodeEditor::highlightSpans(int startOffset, i
     // Exactness contract: the returned spans cover the requested window
     // even when paint-driven refreshes only parsed the viewport (M4
     // adaptive policy) - spansFor may pay a synchronous re-query or, in
-    // the rare programmatic whole-document dump, one full parse.
-    const auto& hs = highlight_->spansFor(startOffset, endOffset);
+    // the rare programmatic whole-document dump, one full parse. D4: a
+    // document with no parse is grammar-less — the same empty answer the
+    // inactive pre-D4 engine gave, without materializing one (the
+    // no-clobber rule reads sideways at the public door too).
+    HighlightEngine* eng = existingParse();
+    if (!eng)
+        return out;
+    const auto& hs = eng->spansFor(startOffset, endOffset);
     for (const auto& s : hs) {
         if (s.end <= startOffset)
             continue;
@@ -7186,7 +7641,9 @@ void CodeEditor::setTabStopWidth(int columns)
 void CodeEditor::refreshTabStopWidth()
 {
     int eff = tabStopWidthOption_;
-    if (const LanguageProperties* p = languageProps_.value(highlight_->language()))
+    // D4: the shared parse's language (empty when the document never got
+    // a parse — the per-view props map is untouched either way).
+    if (const LanguageProperties* p = languageProps_.value(language()))
         if (p->hasTabStopWidth())
             eff = p->tabStopWidth(); // clamped >= 1 at its own door
     if (eff == tabStopWidth_)
@@ -7922,6 +8379,10 @@ bool CodeEditor::replaceRange(const MatchRange& m, const QString& replacement)
 {
     if (readOnly_) // M19: find/replace ACTIONS are edits; finding itself
         return false; // (findMatches/findAll) stays fully alive
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark pre = captureEditMark();
     buffer_.beginEditGroup(); // bracketed: its own undo step, never coalesced
     const int start = buffer_.offsetOf(m.startLine, m.startCol);
@@ -7986,6 +8447,10 @@ int CodeEditor::replaceAll(const QString& replacement)
         return 0;
     const MatchRange first = matches_.front(); // its line/col survive: the
                                                // walk below runs bottom-up
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark pre = captureEditMark();
     buffer_.beginEditGroup(); // ONE undo group for the whole batch (D1 DoD)
     for (int i = n - 1; i >= 0; --i) {
@@ -8520,6 +8985,10 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
             }
             if (!extraCarets_.isEmpty()) {
                 // Multi-caret word delete (D1): bracketed group, one step.
+                // Car D (D3): the MutationAction scope destructs at the action end
+                // (after the reconcile/moves below: the outermost mirror point). Nested
+                // re-entry is free — same-view actions keep one origin tag.
+                MutationAction tagAction(this);
                 const UndoMark pre = captureEditMark();
                 applyCaretsFanOut([this](const CaretSlot& s, SlotEdit& ed) {
                     if (s.hasSelection) { // selections win, as with Delete
@@ -8546,6 +9015,10 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
                 finish();
                 return;
             }
+            // Car D (D3): the MutationAction scope destructs at the action end
+            // (after the reconcile/moves below: the outermost mirror point). Nested
+            // re-entry is free — same-view actions keep one origin tag.
+            MutationAction tagAction(this);
             const UndoMark pre = captureEditMark(); // unbracketed word delete
             if (deleteSelection()) { // selection takes precedence, as with Delete
                 reconcileUndoMarks(pre);
@@ -8609,6 +9082,10 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         // its own line.
         const bool autoHere = autoIndent_ && !(allMods & Qt::AltModifier);
         if (!extraCarets_.isEmpty()) {
+            // Car D (D3): the MutationAction scope destructs at the action end
+            // (after the reconcile/moves below: the outermost mirror point). Nested
+            // re-entry is free — same-view actions keep one origin tag.
+            MutationAction tagAction(this);
             const UndoMark pre = captureEditMark();
             applyCaretsFanOut([this, autoHere](const CaretSlot& s, SlotEdit& ed) {
                 if (s.hasSelection) {
@@ -9660,6 +10137,10 @@ void CodeEditor::startSelectionDrag()
     // X11/Wayland-only; its caret landing rides applyBlockEdits' proven
     // remap for p == an edit start.)
     if (result == Qt::MoveAction && !dndDropHandled_) {
+        // Car D (D3): the MutationAction scope destructs at the action end
+        // (after the reconcile/moves below: the outermost mirror point). Nested
+        // re-entry is free — same-view actions keep one origin tag.
+        MutationAction tagAction(this);
         const UndoMark pre = captureEditMark();
         extraCarets_.clear();
         const auto srcLc = buffer_.lineColAt(srcStart);
@@ -9698,6 +10179,10 @@ void CodeEditor::insertAtDrop(const QString& text, int dropOff)
     const auto insLc = buffer_.lineColAt(dropOff);
     caret_ = anchor_ = clampPos(TextPosition{insLc.line, insLc.col});
     hasSelection_ = false;
+    // Car D (D3): the MutationAction scope destructs at the action end
+    // (after the reconcile/moves below: the outermost mirror point). Nested
+    // re-entry is free — same-view actions keep one origin tag.
+    MutationAction tagAction(this);
     const UndoMark pre = captureEditMark();
     applyBlockEdits(QVector<SlotEdit>{SlotEdit{dropOff, dropOff, text}});
     reconcileUndoMarks(pre);
@@ -9832,6 +10317,10 @@ void CodeEditor::dropEvent(QDropEvent* event)
         hasSelection_ = false;
         const SlotEdit del{srcStart, srcEnd, QString()};
         const SlotEdit ins{dropOff, dropOff, payload};
+        // Car D (D3): the MutationAction scope destructs at the action end
+        // (after the reconcile/moves below: the outermost mirror point). Nested
+        // re-entry is free — same-view actions keep one origin tag.
+        MutationAction tagAction(this);
         const UndoMark pre = captureEditMark();
         applyBlockEdits(dropOff < srcStart ? QVector<SlotEdit>{ins, del}
                                            : QVector<SlotEdit>{del, ins});
@@ -9853,6 +10342,10 @@ void CodeEditor::dropEvent(QDropEvent* event)
             // Our own Shift/Ctrl-copy drag: the source selection SURVIVES
             // the drop (VS Code), so no pre-caret override - applyBlockEdits
             // just shifts carets at/after the insertion point right.
+            // Car D (D3): the MutationAction scope destructs at the action end
+            // (after the reconcile/moves below: the outermost mirror point). Nested
+            // re-entry is free — same-view actions keep one origin tag.
+            MutationAction tagAction(this);
             const UndoMark pre = captureEditMark();
             applyBlockEdits(QVector<SlotEdit>{SlotEdit{dropOff, dropOff, text}});
             reconcileUndoMarks(pre);

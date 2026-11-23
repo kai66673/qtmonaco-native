@@ -24,6 +24,8 @@
 
 namespace qmn::view {
 class CodeEditor;
+class CodeDocument; // D5: uriForDocument's key (forward decl only — the
+                    // door never needs the type's guts here)
 } // namespace qmn::view
 
 namespace qmn::glue {
@@ -82,11 +84,34 @@ public:
     // no-op for the rest), and with popupsOnOpen (the default, the M8
     // popup-trigger demo path) the triggers arm on a hub-ACCEPTED open.
     // False: null editor/empty uri, or the uri is ALREADY registered to a
-    // DIFFERENT editor (one document per uri — the LSP didOpen-twice rule,
-    // pinned; re-opening the SAME editor+uri is an idempotent true).
+    // DIFFERENT DOCUMENT (one document per uri — the LSP didOpen-twice
+    // rule, pinned).
+    //
+    // Car D (D5) ALIAS RULE — one entry per uri, EVERY view of the
+    // registered DOCUMENT shares it:
+    //   - the SAME editor re-opening the same uri: idempotent true;
+    //   - a DIFFERENT editor whose document() IS the registered document
+    //     (an attached second view, car D's ctor): an ALIAS JOIN — the
+    //     entry's view list grows, the hub gets the same uri (its own VIEW
+    //     JOIN: no second didOpen, one edit stream), the popup triggers arm
+    //     for the new view — and documentOpened does NOT re-fire (the
+    //     DOCUMENT opened exactly once; openCount/openUris stay one entry
+    //     per uri);
+    //   - a different DOCUMENT claiming the uri: the honest false (the
+    //     squatter refusal, pinned);
+    //   - an editor whose document is ALREADY registered under ANOTHER
+    //     uri: refused — one document, one uri (the mirror half of the
+    //     rule; a second uri would open a second syncer on one document).
+    // The OWNER view answers editorForUri; the OWNER's death hands the
+    // entry over to the next surviving view, and the LAST view's death (or
+    // closeDocument of ANY view) drops the entry and closes the document.
     bool openDocument(qmn::view::CodeEditor* editor, const QString& uriOrPath,
                       const QString& languageOverride = QString());
-    void closeDocument(qmn::view::CodeEditor* editor); // hub didClose + release
+    void closeDocument(qmn::view::CodeEditor* editor); // hub didClose +
+                                                       // release of the
+                                                       // DOCUMENT — any
+                                                       // view's door
+                                                       // closes it (D5)
     bool closeUri(const QString& uri); // false: nothing registered under it
     int openCount() const { return order_.size(); }
     QStringList openUris() const { return order_; } // insertion order
@@ -107,7 +132,13 @@ signals:
 
 private:
     struct Entry {
+        // Car D (D5): the document registry, not the editor registry —
+        // `editor` is the OWNER view (views.first(), handover rule), and
+        // `views` carries EVERY live view over the one document (never a
+        // dead pointer: each view's destroyed() relay removes its entry,
+        // pointer comparison only).
         qmn::view::CodeEditor* editor = nullptr;
+        QList<qmn::view::CodeEditor*> views;
         QString languageId;
     };
 
@@ -116,6 +147,14 @@ private:
     static QString suffixForUri(const QString& uri);
     QJsonObject readConfigFile() const; // {} = no root/no file/malformed
     void dropUri(const QString& uri); // erases + emits; never touches the hub
+    void onViewDestroyed(const QString& uri,
+                         qmn::view::CodeEditor* view); // D5: remove the
+                                                       // view; owner death
+                                                       // HANDS OVER, the
+                                                       // last view's death
+                                                       // drops the entry
+    QString uriForDocument(const qmn::view::CodeDocument* document)
+        const; // D5: the uri ANY view of this document shares
 
     LspHub* hub_ = nullptr;
     QString workspaceRoot_;

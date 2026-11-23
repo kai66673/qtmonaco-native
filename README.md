@@ -31,14 +31,15 @@ The spike validates the two make-or-break risks of the plan:
   the original `col * cellWidth` grid model.
 
 Measured on a 61 MiB / 1,000,001-line document (Linux, GCC 16, `-O3`;
-re-measured at the v1 freeze 2026-11-12 on HEAD, undo log included — the
-exact document is reproducible, recipe under "Model micro-benchmark" below):
+re-measured at the 1.12.0 close 2026-11-23 on the shipping flags — the
+exact document is reproducible, recipe under "Model micro-benchmark"
+below):
 
 | Operation | Result |
 |---|---|
-| `setPlainText` (whole document) | ~5 ms after file read (~110 ms I/O + decode cold, ~2 ms cached) |
-| 20,000 random edits (insert/delete) inside the document | mean ~7 µs/op, ~30k pieces after the run |
-| first-edit worst spike | ~20 ms (cold cache; later ops are µs) |
+| `setPlainText` (whole document) | ~9 ms after file read (~110 ms I/O + decode cold, ~2 ms cached) |
+| 20,000 random edits (insert/delete) inside the document | mean ~11 µs/op, ~30k pieces after the run |
+| worst single edit | ~25 ms — always the FIRST edit of the run (measured: op #0 of 20,000): the first split of the one loaded piece re-counts newlines over its half-piece; later ops are µs |
 
 The core is under constant property-test attack: 2,000 random
 insert/delete operations with a naive `QString` reference and a full
@@ -53,7 +54,10 @@ view, horizontal scrolling with column memory, scrolling past the end,
 the whole LSP stack (protocol → client → syncer → app-side hub → popups)
 and the whole DAP stack (codec seam → dap layer → DapHub on the glue
 shelf, breakpoints/frames/value hints via the M5 decorations) all shipped
-in 1.7.0 – 1.9.1.
+in 1.7.0 – 1.9.1; cars B/C/D of Gate 3 (1.10.0 – 1.12.0) added the
+word-level inline diff wash + weighted diff rows, signatureHelp, LSP folds,
+LSP inlay hints and pull diagnostics, and any number of editor views over
+one document (shared text/undo/parse, per-view carets and popups).
 
 ## Layout & layering
 
@@ -291,9 +295,21 @@ Gate 2 closed; see PLAN.md for the car-by-car design record):
       `setFoldRanges`/`clearFoldRanges` seam is the car's only surface
       widening), pull diagnostics (declare-then-pull, one shared decoder
       with the push route, refusal falls back to push)
-- [ ] Car D — multi-observer core: two editors on one `CodeDocument`
-      (the core's single edit-observer becomes a list; document-scoped
-      highlight + LSP sync, shared undo, per-editor carets)
+- [x] Car D — multi-observer core (CLOSED, 1.12.0): ANY number of
+      `CodeEditor` views over ONE `CodeDocument` (the attach ctor
+      `CodeEditor(document, parent)` is the car's only surface widening —
+      attach at ctor only, no detach door, and the document must outlive
+      its views); the core's single edit-observer became an observer LIST
+      with the document as the one multiplexer (its mux slot re-asserted
+      LAST, so the single-view signal order stays byte-identical); ONE
+      shared tree-sitter parse per document with a per-surface viewport
+      set (two views at opposite ends parse both halves, and one keystroke
+      reparses ONCE for both); `LspHub`/`ProjectSession` went
+      document-scoped — a second view JOINS the registration (one
+      `didOpen`, one syncer, one monotone version stream whoever types),
+      fold/hint/diagnostic paints and hub dismissals fan out over the view
+      list, and the owner view's death hands the wire over instead of
+      closing it
 - [ ] Car E — wheel-2: DAP across the wheel (`qmn.DapHub` + payload
       records) + the signal-shaped answer routes; the rejected-log
       baseline re-pinned

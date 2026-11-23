@@ -105,6 +105,20 @@
                  has no type entry, so Shiboken drops the function by itself and
                  writes that to gen/mjb_rejected_functions.log. -->
             <modify-function signature="resetPerfStats()" remove="all"/>
+
+            <!-- CAR D (machine D2) added the ATTACH ctor: a second view over
+                 an existing document. Removed HERE, deliberately and
+                 explicitly - not a translation failure. Python has no honest
+                 way to hold the document: the consumer-owned CodeDocument()
+                 ctor stays removed too (see the CodeDocument entry), the only
+                 Python-reachable document is the one an editor PARENTS, and the
+                 car D lifetime contract (the document must OUTLIVE every view
+                 of it) is exactly the question a garbage-collected owner
+                 decides badly. Opening the attach ctor to Python is a
+                 lifetime-pin question for a later car, recorded in PLAN; until
+                 then the wheel simply has no second-view door, and the C++
+                 package does. -->
+            <modify-function signature="CodeEditor(qmn::view::CodeDocument*,QWidget*)" remove="all"/>
         </object-type>
 
         <!-- Owned by the editor (its ctor takes the CodeEditor*): only

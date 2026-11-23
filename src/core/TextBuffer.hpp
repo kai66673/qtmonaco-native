@@ -70,13 +70,33 @@ public:
     // for a pure insert. The stream replays the document's whole edit
     // history, so an observer can track incremental state (e.g. a
     // tree-sitter tree via ts_tree_edit) without ever re-reading the
-    // document. Single observer — the view's highlight engine.
+    // document.
+    // The observers are an ORDERED LIST (car D machine D1; before it this
+    // was a single slot the view's highlight engine sat in). Registration
+    // order IS notification order; every observer of one mutation gets the
+    // SAME const EditEvent&. Registering or removing DURING a notification
+    // takes effect from the NEXT event (each notification iterates a
+    // snapshot of the list), so an observer may remove itself legally and
+    // a re-entrant mutation from inside an observer is legal — it fires
+    // its own nested notification, which sees the up-to-date list.
+    // GUI-thread discipline like the rest of the stack: nobody mutates the
+    // list from another thread.
     struct EditEvent {
         int start = 0;
         int end = 0;
         QString inserted;
     };
+    // Installs ONE observer and REPLACES the whole list — the v1 reading,
+    // kept verbatim (an empty function installs nothing, i.e. the same
+    // "no observer" state as the old empty-std::function guard).
     void setEditObserver(std::function<void(const EditEvent&)> observer);
+    // Appends an observer at the END of the notification order and returns
+    // an OPAQUE token: monotone for the buffer's life and NEVER reused, so
+    // a stale token removes nothing. An empty function registers nothing
+    // and returns 0 (0 is never a real token).
+    int addEditObserver(std::function<void(const EditEvent&)> observer);
+    void removeEditObserver(int token); // stale/0 token: no-op
+    void clearEditObservers();
 
     // Zero-copy window for pull-model readers (the tree-sitter input
     // callback). pieceAt(offset) locates the piece containing `offset`
@@ -234,6 +254,13 @@ private:
     void applyInsert(int offset, const QString& text);
     void applyRemove(int startOffset, int endOffset);
 
+    // The ONE notification seam (D1): every mutation path funnels through
+    // it. It iterates a CACHED snapshot of the observer list, so a list
+    // nobody touches costs one shared_ptr refcount bump per mutation and
+    // never an allocation (the model bench's µs/op band is the gate); the
+    // snapshot is dropped by every list mutation.
+    void notifyEditObservers(const EditEvent& ev);
+
     void recordEdit(EditOp op); // truncates redo, coalesces when possible
     static bool tryCoalesce(UndoGroup& top, const EditOp& nu);
     static qint64 opsBytes(const std::vector<EditOp>& ops);
@@ -258,7 +285,15 @@ private:
     int freeHead_ = kNull;
     int root_ = kNull;
     quint32 rng_ = 0x9e3779b9u;
-    std::function<void(const EditEvent&)> editObserver_; // single observer (M4)
+    struct ObserverSlot {
+        int token = 0;
+        std::function<void(const EditEvent&)> fn;
+    };
+    std::vector<ObserverSlot> observers_; // ordered by registration (D1)
+    // Reused while the list is untouched: one refcount bump per mutation,
+    // no allocation. Every list mutation drops it.
+    std::shared_ptr<const std::vector<ObserverSlot>> obsSnapshot_;
+    int nextObserverToken_ = 1; // monotone for the buffer's life, never reused
 
     quint32 nextRand();
 };

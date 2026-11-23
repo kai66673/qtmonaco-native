@@ -18,6 +18,7 @@
 
 #include "glue/LspHub.hpp"
 #include "glue/ProjectSession.hpp"
+#include "view/CodeDocument.hpp" // D5 alias pins: the reparenting clause door
 #include "view/CodeEditor.hpp"
 
 class TestGlue : public QObject {
@@ -187,6 +188,128 @@ private slots:
         QCOMPARE(closed.count(), 1);
         QCOMPARE(closed.at(0).at(0).toString(), uri);
         QVERIFY(session.editorForUri(uri) == nullptr);
+    }
+
+    // --- car D machine D5: the session's ALIAS RULE (design record:
+    // PLAN's D5 section) — ONE entry per DOCUMENT, every view of it shares
+    // that entry, and the document closes through ANY view. No hub is
+    // attached in these session pins (the hub's wire-side join is tst_lsp
+    // turf); what lives here proves the REGISTRY's half: the entry count,
+    // the uri answer from any view, the mirror-half refusal, the squatter
+    // refusal unchanged, and the owner-death handover.
+    void aliasViewSharesOneEntryAndAnyViewCloses()
+    {
+        qmn::glue::ProjectSession session;
+        QSignalSpy opened(&session,
+                          &qmn::glue::ProjectSession::documentOpened);
+        QSignalSpy closed(&session,
+                          &qmn::glue::ProjectSession::documentClosed);
+
+        const QString pyPath = QStringLiteral("/work/project/sample.py");
+        qmn::view::CodeEditor owner;
+        owner.setPlainText(QStringLiteral("alpha\nbeta"));
+        QVERIFY(session.openDocument(&owner, pyPath));
+        const QString uri = session.uriForEditor(&owner);
+        QVERIFY(!uri.isEmpty());
+        QCOMPARE(opened.count(), 1);
+
+        // THE alias join: a SECOND VIEW over the owner's document (car D's
+        // attach ctor — declared AFTER the owner, so it dies first, the
+        // lifetime contract's safe order).
+        qmn::view::CodeEditor twin(owner.document());
+        QVERIFY(session.openDocument(&twin, pyPath)); // the JOIN answers true
+        QCOMPARE(session.openCount(), 1); // ONE entry — not one per view
+        QCOMPARE(session.openUris(), QStringList { uri });
+        QCOMPARE(opened.count(), 1); // the DOCUMENT opened exactly once:
+                                     // a tab strip rides documentOpened,
+                                     // not view-opened
+        QVERIFY(session.uriForEditor(&twin) == uri); // ANY view answers the
+                                                    // document's uri
+        QVERIFY(session.uriForEditor(&owner) == uri);
+        QVERIFY(session.editorForUri(pyPath) == &owner); // the OWNER answers
+        QVERIFY(session.languageForUri(uri) == QStringLiteral("python"));
+        QVERIFY(session.openDocument(&twin, pyPath)); // re-joining is the
+        QCOMPARE(session.openCount(), 1);             // idempotent true
+        QCOMPARE(opened.count(), 1);
+
+        // The mirror half of the rule: this DOCUMENT may not be registered
+        // under a SECOND uri — neither through its owner nor through the
+        // alias view (a second uri would open a second syncer, and a
+        // second didOpen, on one edit stream). And the refusal leaves the
+        // original registration EXACTLY as it was.
+        QVERIFY(!session.openDocument(&owner,
+                                      QStringLiteral("/work/project/other.py")));
+        QVERIFY(!session.openDocument(&twin,
+                                      QStringLiteral("/work/project/other.py")));
+        QCOMPARE(session.openCount(), 1);
+        QVERIFY(session.uriForEditor(&owner) == uri);
+        QVERIFY(session.uriForEditor(&twin) == uri);
+        QVERIFY(session.editorForUri(QStringLiteral("/work/project/other.py"))
+                == nullptr);
+
+        // The squatter refusal stays byte-identical (a DIFFERENT document
+        // claiming the uri): the join did not turn the entry into a first-
+        // come-serves-all latch.
+        qmn::view::CodeEditor squatter;
+        QVERIFY(!session.openDocument(&squatter, pyPath));
+        QCOMPARE(session.openCount(), 1);
+        QVERIFY(session.editorForUri(pyPath) == &owner);
+        QVERIFY(session.uriForEditor(&squatter).isEmpty());
+
+        // Closing through the ALIAS view closes the DOCUMENT (one document,
+        // one close): the entry is gone, the owner goes unregistered with
+        // it, and exactly one documentClosed rode the edge.
+        session.closeDocument(&twin);
+        QCOMPARE(session.openCount(), 0);
+        QCOMPARE(closed.count(), 1);
+        QCOMPARE(closed.at(0).at(0).toString(), uri);
+        QVERIFY(session.uriForEditor(&owner).isEmpty());
+        QVERIFY(session.uriForEditor(&twin).isEmpty());
+        QVERIFY(session.editorForUri(pyPath) == nullptr);
+        // Scope exit then kills twin, squatter, owner — every destroyed()
+        // relay finds no entry and stays a no-op (no second documentClosed).
+    }
+
+    void aliasHandoverWhenTheOwnerViewDies()
+    {
+        qmn::glue::ProjectSession session;
+        QSignalSpy closed(&session,
+                          &qmn::glue::ProjectSession::documentClosed);
+
+        auto* owner = new qmn::view::CodeEditor;
+        owner->setPlainText(QStringLiteral("gamma\n"));
+        QVERIFY(session.openDocument(owner, QStringLiteral("handover.py")));
+        const QString uri = session.uriForEditor(owner);
+        auto* twin = new qmn::view::CodeEditor(owner->document());
+        QVERIFY(session.openDocument(twin, QStringLiteral("handover.py")));
+        QCOMPARE(session.openCount(), 1);
+        QVERIFY(session.editorForUri(uri) == owner);
+
+        // The lifetime contract, exercised on its legal extension: the
+        // document is re-parented OUT of the dying owner so it survives to
+        // serve the alias view (CodeDocument.hpp's reparenting clause —
+        // without it, deleting the owner would delete the document and the
+        // whole premise of this pin).
+        owner->document()->setParent(nullptr);
+        delete owner; // the OWNER view dies, a joiner stands
+        QCOMPARE(closed.count(), 0); // the DOCUMENT did not close: this is
+        QCOMPARE(session.openCount(), 1); // a HANDOVER, not a drop
+        QVERIFY(session.editorForUri(uri) == twin); // the survivor IS the
+                                                    // new owner
+        QVERIFY(session.uriForEditor(twin) == uri);
+        QVERIFY(session.languageForUri(uri) == QStringLiteral("python"));
+
+        // Closing through the SURVIVING (handover) view closes the document.
+        session.closeDocument(twin);
+        QCOMPARE(session.openCount(), 0);
+        QCOMPARE(closed.count(), 1);
+        QCOMPARE(closed.at(0).at(0).toString(), uri);
+
+        // The LAST view's death after an orderly close is a silent no-op
+        // (the relay finds no entry — no second documentClosed).
+        delete twin;
+        QCOMPARE(session.openCount(), 0);
+        QCOMPARE(closed.count(), 1);
     }
 
     void configFileFoldsBothSidesAndReplaysOnLateAttach()

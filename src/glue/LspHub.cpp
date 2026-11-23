@@ -17,6 +17,8 @@
 #include <QUrl>
 
 #include <algorithm>
+#include <functional> // D5: paintAll's member-door fan-out (std::mem_fn)
+#include <utility>    // std::forward, same site
 
 #include "lsp/DocumentSyncer.hpp"
 #include "lsp/PositionConverter.hpp"
@@ -79,6 +81,15 @@ struct LspHub::TriggerState {
                                     // hover ask (a re-settle INSIDE the same
                                     // visible hover = no second wire ask);
                                     // the caret path and (re)arming clear it
+    qmn::view::CodeEditor* lastView = nullptr; // car D (D5): the view that
+                                    // last touched an interaction route
+                                    // (caret move, accept, mouse dwell) —
+                                    // popups SHOW there (last-writer-wins,
+                                    // the D4 language rule read into the
+                                    // popup anchor). NEVER trusted raw:
+                                    // interactionView() resolves it against
+                                    // the registration's live view list, so
+                                    // a dead joiner can never dangle here.
 };
 
 struct LspHub::HintFeed {
@@ -139,6 +150,28 @@ struct LspHub::PullDiagFeed {
 };
 
 namespace {
+
+// Car D (D5) paint fan-out: every fold/hint/diagnostic whole-set write the
+// hub performs goes to EVERY view of the registration (the state table is
+// per-uri, the PAINT is per-view — the design record's sentence read into
+// the doors). The views list never holds a dead pointer (the destroyed()
+// relay removes entries at destruction), so the loop is dereference-safe.
+template <typename... Args>
+void paintAll(const QList<qmn::view::CodeEditor*>& views,
+              void (qmn::view::CodeEditor::*door)(Args...))
+{
+    for (qmn::view::CodeEditor* v : views)
+        std::mem_fn(door)(v);
+}
+
+template <typename... Args, typename... CallArgs>
+void paintAll(const QList<qmn::view::CodeEditor*>& views,
+              void (qmn::view::CodeEditor::*door)(Args...),
+              CallArgs&&... args)
+{
+    for (qmn::view::CodeEditor* v : views)
+        std::mem_fn(door)(v, std::forward<CallArgs>(args)...);
+}
 
 // The ONE identifier predicate the trigger shares: the completion
 // classifier (an identifier unit completes Invoked) and the fallback hover
@@ -780,6 +813,18 @@ QString LspHub::resolveUri(qmn::view::CodeEditor* editor, const QString& uri)
 {
     if (!uri.isEmpty())
         return uri;
+    // Car D (D5): a document the hub ALREADY registered resolves to its OWN
+    // key. The second view of an open document carries no uri of its own (the
+    // app knocked once, with the first view), and a minted key would put a
+    // SECOND didOpen on one document — the join rule's far-side frame count is
+    // exactly what that would break. This is the hub's own copy of the
+    // session's "one document, one uri" rule, and it lands before the
+    // documentUri/mint legs, so the untitled mint never forks a document that
+    // is already open.
+    for (auto it = registrations_.constBegin();
+         it != registrations_.constEnd(); ++it)
+        if (it->editor && it->editor->document() == editor->document())
+            return it.key();
     qmn::view::CodeDocument* doc = editor->document();
     if (!doc->documentUri().isEmpty())
         return doc->documentUri();
@@ -806,12 +851,49 @@ bool LspHub::openDocument(qmn::view::CodeEditor* editor, const QString& uri,
         return false;
 
     const QString key = resolveUri(editor, uri);
-    if (registrations_.contains(key))
+    if (auto it = registrations_.find(key); it != registrations_.end()) {
+        // Car D (D5) VIEW JOIN: same uri AND the same document (the
+        // owner's document is the registered document — every view in the
+        // list shares it, so ANY view of it joins the same registration)
+        // is a JOIN, not a re-open: no didClose, no didOpen, no second
+        // syncer, no version-stream restart — the far-side frame count is
+        // the pin. Same uri, DIFFERENT document: the re-open below stands
+        // byte-identical (two documents claiming one uri is the app's bug
+        // to avoid, the session's squatter refusal mirrors it session-side).
+        if (it->editor && it->editor->document() == editor->document()) {
+            if (!it->views.contains(editor)) {
+                Registration rv = it.value(); // QMap value semantics:
+                rv.views.append(editor);      // edit a copy, write back
+                registrations_.insert(key, rv);
+                connectViewTaps(key, rv.syncer, editor);
+                // The join is an open EDGE for the three feeds (the joined
+                // view gets folds/hints/pull marks without waiting for the
+                // next edit) — edges the feed tables own, NOT the wire's
+                // document lifecycle: armFoldFeed's authorityEdge=true
+                // clears a standing refusal for the (re-)opened view, the
+                // way a fresh open does.
+                armFoldFeed(key, true);
+                armHintFeed(key);
+                armPullDiagFeed(key, true);
+                // publishDiagnostics has no ask to re-send, so the join is
+                // NOT an edge that catches a new view up on its own: the
+                // registration keeps the LAST report and replays it here
+                // (D5). The three arms above only (re-)start timers, so the
+                // replay neither races them nor gets cleared by them.
+                if (rv.hasPublished)
+                    editor->setDiagnostics(rv.published);
+            }
+            return true; // idempotent: a view that already carries the
+                         // document needs nothing, not even a re-arm
+        }
         releaseRegistration(key); // re-open = didClose then didOpen (the
                                   // server pins that order)
+    }
 
     Registration reg;
     reg.editor = editor;
+    reg.views.append(editor); // the owner IS views.first() (the handover
+                               // rule's invariant)
     reg.specName = entry->spec.name;
     reg.syncer = new qmn::lsp::DocumentSyncer(entry->client, this);
     reg.syncer->setDebounceMs(debounceMs_);
@@ -823,49 +905,41 @@ bool LspHub::openDocument(qmn::view::CodeEditor* editor, const QString& uri,
     // mutation, PRE-OP offsets, undo/redo included. The context is the
     // syncer itself: the captured raw pointer can never fire after it dies
     // (a captured Registration would dangle across releaseRegistration).
+    // D5 NOTE: this tap is DOCUMENT-scoped (editApplied rides the one
+    // CodeDocument, which fires once per mutation whoever typed) — two
+    // views typing one document stay ONE didChange stream, in order, with
+    // no version-stream restart (the tst_lsp join pin reads the far-side
+    // mirror).
     qmn::view::CodeDocument* doc = editor->document();
     connect(doc, &qmn::view::CodeDocument::editApplied, reg.syncer,
             [syncer = reg.syncer](int start, int end, const QString& inserted) {
                 syncer->applyDelta(start, end, inserted);
             });
-    // The editor dying releases the wiring (the document dies with it). The
-    // false says what the fold teardown must know: by the time destroyed()
-    // fires the CodeEditor part is already gone, so the view-side fold clear
-    // is skipped (it would be pointless — the fold store died with the
-    // widget — and knocking a dead object is UB).
-    connect(editor, &QObject::destroyed, this, [this, key] {
-        releaseRegistration(key, /*editorAlive=*/false);
-    });
+    // The per-view taps (caret / accept / mouse) + the dying-view relay:
+    // connected for the OWNER here, for every JOINER in the join branch
+    // (D5).
+    connectViewTaps(key, reg.syncer, editor);
     // M8 machine 7: the live re-push of the view's stored workspace
     // configuration (qtmonaco's `update_workspace_configuration`). Context is
     // the SYNCER: it dies with this registration, so a re-open (release +
     // re-register the same editor) can never double-send on one change.
+    // D5: the configuration BUFFER is per-view (the view is the buffer):
+    // the OWNER view speaks, a joined view never re-pushes its own copy
+    // (recorded; the session/demo arm the door through the owner).
     connect(editor, &qmn::view::CodeEditor::workspaceConfigurationChanged,
             reg.syncer, [this, key] { pushWorkspaceConfiguration(key); });
-    // The popup-trigger taps (M8 close-train): connected for EVERY
+    // The popup-trigger EDIT tap (M8 close-train): connected for EVERY
     // registration, cheap, and inert until setPopupTriggers says otherwise —
     // the slots re-look-up the per-key state and honor its `on` bit. The
     // context is again the syncer: a re-open (release + re-register the same
-    // editor) can never double-fire on one signal.
+    // editor) can never double-fire on one signal. D5: DOCUMENT-scoped like
+    // the feed — the typing VIEW is not a parameter of this signal, and the
+    // popups find it through TriggerState::lastView (the typing view's own
+    // cursorMoved tap lands right after this editApplied, before the
+    // debounce fires).
     connect(doc, &qmn::view::CodeDocument::editApplied, reg.syncer,
             [this, key](int start, int end, const QString& inserted) {
                 onTriggerEdit(key, start, end, inserted);
-            });
-    connect(editor, &qmn::view::CodeEditor::cursorMoved, reg.syncer,
-            [this, key](qmn::view::TextPosition pos) {
-                onTriggerCaretMoved(key, pos);
-            });
-    connect(editor, &qmn::view::CodeEditor::completionAccepted, reg.syncer,
-            [this, key](int /*index*/,
-                        const qmn::view::CodeEditor::CompletionItem& item) {
-                onTriggerAccept(key, item); // the ACCEPT route (post-1.8.0
-                                            // sliver): the hub does the insert
-            });
-    connect(editor, &qmn::view::CodeEditor::mouseHovered, reg.syncer,
-            [this, key](qmn::view::TextPosition pos) {
-                onTriggerMouseHover(key, pos); // the MOUSE-hover route
-                                               // (post-1.8.0 sliver): the
-                                               // view dwelled, the hub asks
             });
     // The fold-feed tap (car C, C3): connected for EVERY registration like
     // the trigger taps, and inert until the foldingRange gate says this
@@ -923,11 +997,78 @@ bool LspHub::openDocument(qmn::view::CodeEditor* editor, const QString& uri,
 void LspHub::closeDocument(qmn::view::CodeEditor* editor)
 {
     for (auto it = registrations_.begin(); it != registrations_.end(); ++it) {
-        if (it->editor == editor) {
+        // D5: ANY view of a registered document closes the DOCUMENT
+        // (one document, one close — didClose + release of the whole
+        // registration, every view's paints cleared).
+        if (it->views.contains(editor)) {
             releaseRegistration(it.key());
             return;
         }
     }
+}
+
+// The per-view taps for ONE view of a registration (D5): the caret /
+// completion-accept / mouse-hover routes are VIEW signals — connected for
+// the owner at open and for every joiner at join. Each lambda carries its
+// origin view (the popup/insert target) and the SYNCER as context object:
+// a registration release drops every tap at once, and a joining view that
+// dies first disconnects its own taps by sender death — a captured raw
+// pointer can never fire after its view is gone. The destroyed() relay is
+// bookkeeping-only: the pointer is compared, never dereferenced (the
+// CodeEditor part is already gone when destroyed fires; the old shape's
+// editorAlive flag lives on through onViewDestroyed into
+// releaseRegistration).
+void LspHub::connectViewTaps(const QString& uri,
+                             qmn::lsp::DocumentSyncer* context,
+                             qmn::view::CodeEditor* view)
+{
+    connect(view, &qmn::view::CodeEditor::cursorMoved, context,
+            [this, uri, view](qmn::view::TextPosition pos) {
+                onTriggerCaretMoved(uri, pos, view);
+            });
+    connect(view, &qmn::view::CodeEditor::completionAccepted, context,
+            [this, uri, view](int /*index*/,
+                              const qmn::view::CodeEditor::CompletionItem& item) {
+                onTriggerAccept(uri, item, view); // the ACCEPT route
+                                                  // (post-1.8.0 sliver): the
+                                                  // hub does the insert
+            });
+    connect(view, &qmn::view::CodeEditor::mouseHovered, context,
+            [this, uri, view](qmn::view::TextPosition pos) {
+                onTriggerMouseHover(uri, pos, view); // the MOUSE-hover route
+            });
+    connect(view, &QObject::destroyed, this, [this, uri, view] {
+        onViewDestroyed(uri, view);
+    });
+}
+
+// The dying-view bookkeeping (D5). The LAST view's death releases the
+// registration (didClose, and the editorAlive=false teardown shape the old
+// single-view relay used: the dying view's paints died with its widget, so
+// the view-side clears are skipped). An OWNER death with survivors HANDS
+// OVER: views.first() becomes the new owner — the syncer, the version
+// stream and the feeds all STAND (no re-didOpen; the far-side pin proves
+// the stream never broke), the trigger anchor moves with the owner. A
+// JOINED view's death is a plain removal: its paint died with its widget,
+// nothing needs clearing and nothing on the wire changes.
+void LspHub::onViewDestroyed(const QString& uri, qmn::view::CodeEditor* view)
+{
+    auto it = registrations_.find(uri);
+    if (it == registrations_.end())
+        return; // closeDocument (or a hub close) released it first
+    Registration rv = it.value();
+    rv.views.removeAll(view); // pointer comparison only — `view` is a
+                              // half-dead QObject here
+    if (rv.views.isEmpty()) {
+        releaseRegistration(uri, /*editorAlive=*/false);
+        return;
+    }
+    if (rv.editor == view) {
+        rv.editor = rv.views.first(); // the HANDOVER
+        if (TriggerState* t = triggerFor(uri))
+            t->lastView = rv.editor; // the popup anchor moves too
+    }
+    registrations_.insert(uri, rv); // write back (QMap value semantics)
 }
 
 void LspHub::releaseRegistration(const QString& uri, bool editorAlive)
@@ -973,9 +1114,10 @@ void LspHub::releaseRegistration(const QString& uri, bool editorAlive)
     }
     if (fold && fold->pendingRequest != 0 && client)
         client->cancel(fold->pendingRequest);
-    if (fold && fold->fed && editorAlive && reg.editor) {
+    if (fold && fold->fed && editorAlive && !reg.views.isEmpty()) {
         fold->fed = false;
-        reg.editor->clearFoldRanges(); // the grammar serves again
+        paintAll(reg.views, &qmn::view::CodeEditor::clearFoldRanges);
+        // the grammar serves again — in EVERY view of the document (D5)
     }
     // Car C (C4): the hint teardown, same walk (cancel the in-flight ask,
     // and clear ONLY a set this hub wrote — D3's single-writer convention,
@@ -988,9 +1130,11 @@ void LspHub::releaseRegistration(const QString& uri, bool editorAlive)
     }
     if (hint && hint->pendingRequest != 0 && client)
         client->cancel(hint->pendingRequest);
-    if (hint && hint->fed && editorAlive && reg.editor) {
+    if (hint && hint->fed && editorAlive && !reg.views.isEmpty()) {
         hint->fed = false;
-        reg.editor->setInlayHints({}); // whole-set door: empty clears
+        paintAll(reg.views, &qmn::view::CodeEditor::setInlayHints,
+                 QVector<qmn::view::CodeEditor::InlayHint>{});
+        // whole-set door: empty clears — in every view (D5)
     }
     // Car C (C5): the pull-feed teardown, same walk. The CLEAR is narrower
     // than folds'/hints' on purpose: a close does NOT wipe push-published
@@ -1005,9 +1149,22 @@ void LspHub::releaseRegistration(const QString& uri, bool editorAlive)
     }
     if (pull && pull->pendingRequest != 0 && client)
         client->cancel(pull->pendingRequest);
-    if (pull && pull->fed && editorAlive && reg.editor) {
+    if (pull && pull->fed && editorAlive && !reg.views.isEmpty()) {
         pull->fed = false;
-        reg.editor->setDiagnostics({}); // whole-set door: empty clears
+        paintAll(reg.views, &qmn::view::CodeEditor::setDiagnostics,
+                 QVector<qmn::view::CodeEditor::Diagnostic>{});
+        // whole-set door: empty clears — in every view (D5)
+    }
+    // D5: closing a DOCUMENT dismisses the LSP popups in every LIVE view —
+    // a hover/completion popup speaks the closed document's session (the
+    // editor-destroyed path needs none: the popups died with their widget).
+    // Recorded Car-D widening of the close shape (the single-view release
+    // never touched popups; hiding on a popup-free view is a no-op).
+    if (editorAlive) {
+        for (qmn::view::CodeEditor* v : reg.views) {
+            v->hideCompletionList();
+            v->hideHover();
+        }
     }
     if (reg.syncer) {
         reg.syncer->close(); // didClose (a stopped server drops it silently,
@@ -1134,7 +1291,12 @@ qmn::lsp::DocumentSyncer* LspHub::syncerFor(
 {
     for (auto it = registrations_.constBegin(); it != registrations_.constEnd();
          ++it)
-        if (it->editor == editor)
+        if (it->views.contains(editor))
+            // D5: ANY view of the registered document resolves to the ONE
+            // syncer — a hover asked on view B rides view A's mirror (the
+            // flush-before-ask rule keeps it honest whoever typed). This
+            // one scan is also what makes every feature door, saveDocument
+            // and setPopupTriggers resolve both views.
             return it->syncer;
     return nullptr;
 }
@@ -1256,12 +1418,16 @@ void LspHub::onDiagnostics(const QString& specName, const QJsonObject& params)
         = decodeDiagnosticItems(
             params.value(QStringLiteral("diagnostics")).toArray(), text,
             encoding);
-    reg->editor->setDiagnostics(decoded); // M5's decoration door, no new
-                                          // geometry. The fed bit is NOT
-                                          // turned here: push-published
-                                          // marks are the SERVER's own
-                                          // trail — the pre-C5 stance that
-                                          // a close never wipes them stands
+    reg->published = decoded; // D5: the registration keeps the LAST report
+    reg->hasPublished = true; // (the WHOLE array, empty included: a publish
+                              // of [] is "no more problems", and a joined
+                              // view deserves that same truth)
+    paintAll(reg->views, &qmn::view::CodeEditor::setDiagnostics,
+             decoded); // M5's decoration door, no new geometry — and D5:
+                       // every view of the document paints the same marks.
+                       // The fed bit is NOT turned here: push-published
+                       // marks are the SERVER's own trail — the pre-C5
+                       // stance that a close never wipes them stands
                                           // — and only the hub's PULL
                                           // generations are its to clear.
 }
@@ -1594,6 +1760,42 @@ LspHub::TriggerState* LspHub::triggerFor(const QString& uri) const
     return it == triggers_.end() ? nullptr : it->second.get();
 }
 
+// D5: the validated interaction anchor for a registration (see the
+// triggerView door's comment in the header). With no TriggerState there is
+// no anchor, the owner speaks.
+qmn::view::CodeEditor* LspHub::interactionView(
+    const QMap<QString, Registration>::const_iterator& reg) const
+{
+    if (const TriggerState* t = triggerFor(reg.key());
+        t && t->lastView && reg->views.contains(t->lastView))
+        return t->lastView;
+    return reg->editor;
+}
+
+// D5: the view list of a registration by key (end() when the key is gone
+// — a released document's views are nobody's to hide).
+QMap<QString, LspHub::Registration>::const_iterator
+LspHub::registrationAt(const QString& key) const
+{
+    return registrations_.constFind(key);
+}
+
+// D5: every hide the hub performs closes the popup in EVERY view of the
+// document. A feed/trigger CLEAR that lands on one view only would leave
+// the other showing an orphan popup the wire can no longer update (the
+// popup-owner state is per-document, the popups are per-view — hiding both
+// keeps that story one piece).
+void LspHub::hidePopupsEverywhere(
+    const QMap<QString, Registration>::const_iterator& reg)
+{
+    if (reg == registrations_.constEnd())
+        return;
+    for (qmn::view::CodeEditor* v : reg->views) {
+        v->hideCompletionList();
+        v->hideHover();
+    }
+}
+
 void LspHub::setPopupTriggers(qmn::view::CodeEditor* editor, bool on)
 {
     if (!editor || closingDown_)
@@ -1603,9 +1805,9 @@ void LspHub::setPopupTriggers(qmn::view::CodeEditor* editor, bool on)
         return; // no OPEN hub document: there is no registration to arm
     TriggerState* t = on ? triggerEntry(syncer->uri())
                          : triggerFor(syncer->uri());
-    if (!t) { // OFF for a never-armed editor is still a dismissal, nothing more
-        editor->hideCompletionList();
-        editor->hideHover();
+    if (!t) { // OFF for a never-armed editor is still a dismissal, nothing
+              // more (D5: every view of the document is dismissed)
+        hidePopupsEverywhere(registrationAt(syncer->uri()));
         return;
     }
     if (!on) {
@@ -1626,8 +1828,8 @@ void LspHub::setPopupTriggers(qmn::view::CodeEditor* editor, bool on)
                 client->cancel(t->pendingSignature);
             t->pendingSignature = 0;
         }
-        editor->hideCompletionList();
-        editor->hideHover();
+        // D5: the dismissal reaches every view's popups (see above).
+        hidePopupsEverywhere(registrationAt(syncer->uri()));
         return;
     }
     t->on = true;
@@ -1675,12 +1877,17 @@ void LspHub::onTriggerEdit(const QString& uri, int start, int end,
 }
 
 void LspHub::onTriggerCaretMoved(const QString& uri,
-                                 const qmn::view::TextPosition& pos)
+                                 const qmn::view::TextPosition& pos,
+                                 qmn::view::CodeEditor* view)
 {
     Q_UNUSED(pos); // the caret itself is read at fire time — the LATEST one
     TriggerState* t = triggerFor(uri);
     if (!t || !t->on)
         return;
+    // D5: every view's caret arms the SHARED hover timer (one popup-owner
+    // story per document), and the view that moved becomes the interaction
+    // anchor the fire-time caret is read off and the popup shows on.
+    t->lastView = view;
     if (t->pendingTypingMove) {
         t->pendingTypingMove = false; // the edit's own move: no hover
         return;
@@ -1697,9 +1904,14 @@ void LspHub::onTriggerCaretMoved(const QString& uri,
 // the moment (the caret-path rule, mirrored) + a no-refire pin — if the
 // pointer re-settles on the SAME point while that hover is still visible,
 // the wire stays silent. Then the shared-hover composition asks AT THE
-// POINTER (the caret is never consulted here).
+// POINTER (the caret is never consulted here). D5 reading of the no-refire
+// pin: "that hover" is the DWELLING view's own popup — with one popup per
+// view, a second view dwelling at the same point owes its own popup, so
+// the pin only stops the SAME view re-settling on its own still-visible
+// hover (the recorded reading).
 void LspHub::onTriggerMouseHover(const QString& uri,
-                                 const qmn::view::TextPosition& pos)
+                                 const qmn::view::TextPosition& pos,
+                                 qmn::view::CodeEditor* view)
 {
     TriggerState* t = triggerFor(uri);
     if (!t || !t->on)
@@ -1708,7 +1920,13 @@ void LspHub::onTriggerMouseHover(const QString& uri,
     auto reg = registrations_.constFind(uri);
     if (reg == registrations_.constEnd() || !reg->editor)
         return;
-    qmn::view::CodeEditor* editor = reg->editor;
+    // D5: the dwell happened on `view` — it becomes the interaction anchor
+    // (the popup shows THERE), and the completion-owns rule reads ITS
+    // popups. The tap's context is the registration's syncer and its
+    // sender is the view, so a registration release or a joined view's
+    // death can never deliver this slot a dangling `view`.
+    t->lastView = view;
+    qmn::view::CodeEditor* editor = view;
     if (editor->completionListVisible() || t->pendingCompletion != 0
         || t->signatureVisible || t->pendingSignature != 0)
         return; // the mouse route honors BOTH popup owners (car C: the
@@ -1716,7 +1934,7 @@ void LspHub::onTriggerMouseHover(const QString& uri,
     if (pos == t->lastMouseHoverPos && editor->hoverVisible())
         return; // same point, same popup: no second ask
     t->lastMouseHoverPos = pos;
-    fireHoverAt(uri, pos);
+    fireHoverAt(uri, pos, editor);
 }
 
 // The ACCEPT route (post-1.8.0 sliver): the user accepted a shown row and
@@ -1732,7 +1950,8 @@ void LspHub::onTriggerMouseHover(const QString& uri,
 // re-completion after accept (VS Code's rule): the next qualifying typing
 // burst re-triggers on its own.
 void LspHub::onTriggerAccept(const QString& uri,
-                             const qmn::view::CodeEditor::CompletionItem& item)
+                             const qmn::view::CodeEditor::CompletionItem& item,
+                             qmn::view::CodeEditor* view)
 {
     const TriggerState* t = triggerFor(uri);
     if (!t || !t->on)
@@ -1744,7 +1963,12 @@ void LspHub::onTriggerAccept(const QString& uri,
     if (ed.newText.isEmpty() && ed.startLine == 0 && ed.startCol == 0
         && ed.endLine == 0 && ed.endCol == 0)
         return; // no payload at all: nothing to insert
-    reg->editor->applyTextEdits({ed});
+    // D5: the insert rides the ACCEPTING view's door (the tap's context is
+    // the registration's syncer and its sender is the view, so neither can
+    // deliver this slot a dead `view`) — but the insert lands on the SHARED
+    // document: every view sees it, and the one document-scoped editApplied
+    // tap feeds it to the server exactly once.
+    view->applyTextEdits({ed});
 }
 
 void LspHub::fireCompletionTrigger(const QString& uri)
@@ -1786,12 +2010,17 @@ void LspHub::fireCompletionTrigger(const QString& uri)
             return;
         triggerCharacter = QString(unit);
     }
+    // D5: the ask is composed against the INTERACTION view (the typing
+    // view's cursorMoved tap set the anchor right after the editApplied
+    // tap armed the debounce) — its caret anchors the accept payload and
+    // its popups carry the row list.
+    qmn::view::CodeEditor* anchor = interactionView(reg);
     const qmn::view::TextPosition caretAtFire
-        = reg->editor->position(); // captured for the reply: the accept
-                                   // payload's fallback anchor (the caret may
-                                   // have moved on when the reply lands)
+        = anchor->position(); // captured for the reply: the accept
+                              // payload's fallback anchor (the caret may
+                              // have moved on when the reply lands)
     const qint64 id = requestCompletion(
-        reg->editor, caretAtFire,
+        anchor, caretAtFire,
         [this, uri, caretAtFire](const qmn::protocol::RpcClient::Reply& reply) {
             if (TriggerState* s = triggerFor(uri))
                 s->pendingCompletion = 0; // THIS request is over, by whatever
@@ -1828,7 +2057,12 @@ void LspHub::fireCompletionTrigger(const QString& uri)
                 if (rows.size() >= kMaxCompletionRows)
                     break;
             }
-            reg2->editor->showCompletionList(rows); // EMPTY rows = hide
+            interactionView(reg2)->showCompletionList(rows); // EMPTY rows
+                                                             // = hide (D5:
+                                                             // the rows
+                                                             // paint on the
+                                                             // interaction
+                                                             // view)
         },
         triggerCharacter);
     t->pendingCompletion = id > 0 ? id : 0; // 0 = locally refused: nothing
@@ -1853,7 +2087,10 @@ void LspHub::fireSignatureTrigger(const QString& uri)
     auto reg = registrations_.constFind(uri);
     if (reg == registrations_.constEnd() || !reg->editor)
         return; // the document is gone
-    qmn::view::CodeEditor* editor = reg->editor;
+    // D5: the signature round belongs to the TYPING view — the anchor
+    // holds its caret, its document line text classifies the gesture, and
+    // the shared popup paints there (the hide below closes ITS popup).
+    qmn::view::CodeEditor* editor = interactionView(reg);
     const qmn::view::TextPosition caret = editor->position();
     QString before; // the unit the FIRE-TIME caret sits behind (empty when
                     // the caret starts a line or the column is out of range)
@@ -1893,7 +2130,9 @@ void LspHub::fireSignatureTrigger(const QString& uri)
             auto reg2 = registrations_.constFind(uri);
             if (reg2 == registrations_.constEnd() || !reg2->editor)
                 return; // nowhere to show
-            qmn::view::CodeEditor* ed = reg2->editor;
+            qmn::view::CodeEditor* ed = interactionView(reg2); // D5: the
+                                            // signature popup closes/shows
+                                            // on the interaction anchor
             TriggerState* s = triggerFor(uri);
             if (reply.isError)
                 return; // refusals/cancels/timeouts show NOTHING
@@ -2022,7 +2261,9 @@ void LspHub::handBackFolds(const QString& specName)
         if (fit == folds_.end() || !fit->second->fed)
             continue;
         fit->second->fed = false;
-        it->editor->clearFoldRanges();
+        paintAll(it->views, &qmn::view::CodeEditor::clearFoldRanges); // D5:
+                                                                      // every
+                                                                      // view
     }
 }
 
@@ -2089,7 +2330,9 @@ void LspHub::handBackHints(const QString& specName)
         if (hit == hints_.end() || !hit->second->fed)
             continue;
         hit->second->fed = false;
-        it->editor->setInlayHints({}); // whole-set door: empty clears
+        paintAll(it->views, &qmn::view::CodeEditor::setInlayHints,
+                 QVector<qmn::view::CodeEditor::InlayHint>{}); // D5: every
+                                                               // view
     }
 }
 
@@ -2157,7 +2400,8 @@ void LspHub::requestHintsNow(const QString& uri)
             if (hit == hints_.end() || reg2 == registrations_.constEnd()
                 || !reg2->editor || !reg2->editor->document())
                 return; // canceled with the registration: nothing to paint
-            qmn::view::CodeEditor* ed = reg2->editor;
+            // D5: no single `ed` — the paint fans out to reg2->views at the
+            // door sites (the hint reply paints every view of the document).
             if (reply.isError) {
                 // NO refused-bit for hints (the recorded asymmetry with
                 // folds): an error answer leaves the LAST full set STANDING —
@@ -2239,7 +2483,8 @@ void LspHub::requestHintsNow(const QString& uri)
             // inventing a Theme role is an ask for a later car, recorded).
             hit->second->fed = true; // THE AUTHORITY SPOKE (array or null):
                                      // the teardown clear's precondition
-            ed->setInlayHints(hints); // whole-set write, the fold door's
+            paintAll(reg2->views, &qmn::view::CodeEditor::setInlayHints,
+                     hints); // whole-set write, the fold door's
                                       // shape — the view sorts by (line,col)
             // (no cap-tell to the view: kMaxLspInlayHints already rode the
             // WIRE window — the cap cut the DECODE, so what the door gets is
@@ -2288,7 +2533,7 @@ void LspHub::requestFoldsNow(const QString& uri)
             if (fit == folds_.end() || reg2 == registrations_.constEnd()
                 || !reg2->editor)
                 return; // canceled with the registration: nothing to feed
-            qmn::view::CodeEditor* ed = reg2->editor;
+            // D5: no single `ed` — every paint fans out to reg2->views.
             if (reply.isError) {
                 // The claim FELL THROUGH (advertised, then refused/canceled/
                 // timed out): the fold source goes back to the grammar, and
@@ -2298,7 +2543,8 @@ void LspHub::requestFoldsNow(const QString& uri)
                 fit->second->refused = true;
                 if (fit->second->fed) {
                     fit->second->fed = false;
-                    ed->clearFoldRanges();
+                    paintAll(reg2->views,
+                             &qmn::view::CodeEditor::clearFoldRanges); // D5
                 }
                 return;
             }
@@ -2308,11 +2554,13 @@ void LspHub::requestFoldsNow(const QString& uri)
             // rule), so the feed is the empty vector.
             QVector<qmn::view::CodeEditor::FoldRange> ranges;
             if (reply.result.isArray()) {
-                const int lastLine = ed->document()
-                                         ? ed->document()->lineCount() - 1
+                const int lastLine = reg2->editor->document()
+                                         ? reg2->editor->document()->lineCount()
+                                               - 1
                                          : 0; // the DOCUMENT frame the range
                                               // numbers speak (lineCount is
-                                              // always >= 1)
+                                              // always >= 1; one document,
+                                              // any view's lineCount — D5)
                 for (const QJsonValue& value : reply.result.toArray()) {
                     if (!value.isObject())
                         continue; // a malformed entry is nothing to fold
@@ -2355,7 +2603,8 @@ void LspHub::requestFoldsNow(const QString& uri)
                         ranges.removeAt(i);
             }
             fit->second->fed = true;
-            ed->setFoldRanges(ranges);
+            paintAll(reg2->views, &qmn::view::CodeEditor::setFoldRanges,
+                     ranges); // D5: the fold authority paints EVERY view
         });
     feed->pendingRequest = id > 0 ? id : 0; // locally refused (the gate above
                                             // makes this nearly unreachable)
@@ -2480,8 +2729,9 @@ void LspHub::requestPullDiagsNow(const QString& uri)
                 || !reg2->editor || !reg2->editor->document())
                 return; // canceled with the registration: nothing to paint
             PullDiagFeed* feedNow = hit->second.get();
-            qmn::view::CodeEditor* ed = reg2->editor;
-            qmn::lsp::DocumentSyncer* nowSyncer = syncerFor(ed);
+            // D5: no single `ed` — the paint fans out to reg2->views; the
+            // mirror/frame decode rides the ONE syncer of this key.
+            qmn::lsp::DocumentSyncer* nowSyncer = reg2->syncer;
             if (!nowSyncer)
                 return;
             if (reply.isError) {
@@ -2507,7 +2757,10 @@ void LspHub::requestPullDiagsNow(const QString& uri)
                 feedNow->refused = true;
                 if (feedNow->fed) {
                     feedNow->fed = false;
-                    ed->setDiagnostics({}); // whole-set door: empty clears
+                    paintAll(reg2->views,
+                             &qmn::view::CodeEditor::setDiagnostics,
+                             QVector<qmn::view::CodeEditor::Diagnostic>{});
+                    // whole-set door: empty clears — every view (D5)
                 }
                 return;
             }
@@ -2541,8 +2794,10 @@ void LspHub::requestPullDiagsNow(const QString& uri)
                 = decodeDiagnosticItems(
                     report.value(QStringLiteral("items")).toArray(),
                     nowSyncer->mirrorText(), nowSyncer->encoding());
-            ed->setDiagnostics(decoded); // the SAME door the push route
-                                         // paints — one decoder, one door
+            paintAll(reg2->views, &qmn::view::CodeEditor::setDiagnostics,
+                     decoded); // the SAME door the push route
+                               // paints — one decoder, one door, and D5:
+                               // every view of the document
             feedNow->fed = true; // THE PULL GENERATION IS THE DOOR'S LAST
                                  // WRITE (the fallback/teardown clear's
                                  // precondition)
@@ -2569,7 +2824,9 @@ void LspHub::stopPullFeeds(const QString& specName)
         if (pit == pulls_.end() || !pit->second->fed)
             continue;
         pit->second->fed = false;
-        it->editor->setDiagnostics({}); // whole-set door: empty clears
+        paintAll(it->views, &qmn::view::CodeEditor::setDiagnostics,
+                 QVector<qmn::view::CodeEditor::Diagnostic>{}); // D5: every
+                                                                // view
     }
 }
 
@@ -2647,13 +2904,20 @@ void LspHub::fireHoverTrigger(const QString& uri)
         return;
     if (TriggerState* t = triggerFor(uri))
         t->lastMouseHoverPos = {-1, -1};
-    fireHoverAt(uri, reg->editor->position());
+    // D5: the caret wrapper reads the LATEST caret off the interaction
+    // anchor (the view whose caret moved last — the hover timer this fires
+    // from was armed by that view's cursorMoved tap).
+    qmn::view::CodeEditor* anchor = interactionView(reg);
+    fireHoverAt(uri, anchor->position(), anchor);
 }
 
 // The shared-hover composition core: BOTH hover routes (the caret trigger
 // and the post-1.8.0 mouse-dwell route) ride it, anchored at `at` — which
-// for the mouse route is the pointer point, NOT the caret.
-void LspHub::fireHoverAt(const QString& uri, const qmn::view::TextPosition& at)
+// for the mouse route is the pointer point, NOT the caret. D5: `showView`
+// is the validated view the popup paints on (the interaction anchor); the
+// completion-owns gate reads ITS popups.
+void LspHub::fireHoverAt(const QString& uri, const qmn::view::TextPosition& at,
+                         qmn::view::CodeEditor* showView)
 {
     TriggerState* t = triggerFor(uri);
     if (!t || !t->on)
@@ -2661,7 +2925,7 @@ void LspHub::fireHoverAt(const QString& uri, const qmn::view::TextPosition& at)
     auto reg = registrations_.constFind(uri);
     if (reg == registrations_.constEnd() || !reg->editor)
         return;
-    qmn::view::CodeEditor* editor = reg->editor;
+    qmn::view::CodeEditor* editor = showView;
     // Completion and hover NEVER share the moment: the hover is skipped
     // while completion owns the popup — in flight or visible. The
     // signatureHelp route (car C) owns the SHARED hover popup itself and
@@ -2701,7 +2965,10 @@ void LspHub::fireHoverAt(const QString& uri, const qmn::view::TextPosition& at)
             auto reg2 = registrations_.constFind(uri);
             if (reg2 == registrations_.constEnd() || !reg2->editor)
                 return;
-            qmn::view::CodeEditor* ed = reg2->editor;
+            // D5: the popup paints on the interaction anchor re-resolved at
+            // REPLY time (the anchor cannot dangle — interactionView
+            // validates it against the live view list).
+            qmn::view::CodeEditor* ed = interactionView(reg2);
             if (reply.isError)
                 return; // refusal/cancel/timeout: an OLD popup stays as-is
             QString plain;

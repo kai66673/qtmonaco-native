@@ -109,13 +109,31 @@ public:
     // Registers `editor`'s document with the hub: connects editApplied ->
     // applyDelta, opens the syncer (didOpen rides the lazy start / the
     // ready() self-heal), and lazy-starts the language's spec client.
-    // The hub unregisters automatically when the editor dies (destroyed()).
+    // The hub unregisters automatically when the LAST view of the document
+    // dies (destroyed()).
     // False = nothing registered (no server spec claims this language: the
     // honest no-op, exactly what opening a .txt file must do).
+    //
+    // Car D (D5) VIEW JOIN: when the uri is ALREADY registered and this
+    // editor's DOCUMENT is the registered document, the call is a VIEW
+    // JOIN — the registration's view list grows, the caret/popup/
+    // completion/mouse taps connect for the joining view, and the feeds
+    // re-arm (the join is an open EDGE for folds/hints/pull) — but the
+    // WIRE does not: NO second didOpen, no second syncer, no version-
+    // stream restart (the far-side frame count is the pin). Same editor
+    // joining twice stays an idempotent true. Same uri, DIFFERENT
+    // document: the re-open stands byte-identical (didClose then
+    // didOpen; two documents claiming one uri stays the app's bug).
+    // An EMPTY uri on a document the hub already registered resolves to
+    // that registration's key (the hub's own "one document, one uri" leg,
+    // ahead of the documentUri/mint legs): the second view of an open
+    // document joins, it never forks an "untitled:" second didOpen.
     bool openDocument(qmn::view::CodeEditor* editor, const QString& uri,
                       const QString& languageId,
                       const QString& serverName = QString());
-    void closeDocument(qmn::view::CodeEditor* editor); // didClose + release
+    // didClose + release of the DOCUMENT — passing ANY view of a
+    // registered document closes it (D5: one document, one close).
+    void closeDocument(qmn::view::CodeEditor* editor);
     // The app's save: flush-then-didSave, then markSaved (v1 modified door).
     // When the serving server's initialize capabilities carry
     // textDocumentSync.willSaveWaitUntil (M8 machine 6), the save takes an
@@ -427,9 +445,29 @@ private:
         qmn::lsp::LspClient* client = nullptr;
     };
     struct Registration {
+        // Car D (D5): ONE registration per DOCUMENT, carrying EVERY view
+        // over it. `views` never holds a dead pointer (each view's
+        // destroyed() relay removes its entry — bookkeeping only, the
+        // pointer is never dereferenced at that point); `editor` is the
+        // OWNER view == views.first(), the fallback anchor for the
+        // popup/trigger routes and the workspace-configuration speaker.
+        // The owner's death HANDS OVER to the next surviving view (no
+        // re-didOpen, the syncer and feeds stand); the LAST view's death
+        // releases the registration (didClose).
         qmn::view::CodeEditor* editor = nullptr;
+        QList<qmn::view::CodeEditor*> views;
         QString specName;
         qmn::lsp::DocumentSyncer* syncer = nullptr;
+        // D5: the LAST push-published report (already decoded into view
+        // marks). PULL/fold/hint authorities RE-ASK on the join edge, so a
+        // joined view catches up by itself; publishDiagnostics has no ask to
+        // re-send — this copy is what lets a SECOND view of an open document
+        // show the squiggles the first one already wears. It rides the
+        // registration (a re-open's fresh didOpen re-publishes a fresh
+        // report), and it never wipes anything on its own: the M8 stance that
+        // a close never clears published marks stays.
+        QVector<qmn::view::CodeEditor::Diagnostic> published;
+        bool hasPublished = false;
     };
 
     void buildBuiltins();
@@ -490,16 +528,23 @@ private:
     // with the registration. The editApplied/cursorMoved/completionAccepted
     // taps connect in openDocument (context = the registration's syncer, the
     // same die-with-the-registration trick the edit feed uses), so the slots
-    // below only ever see a lookup.
+    // below only ever see a lookup. D5: the VIEW-SCOPED taps (caret /
+    // completion-accept / mouse) connect for EVERY view of the registration,
+    // and each carries its origin VIEW into the slot — popups show on the
+    // view that interacted (the last-writer-wins rule, car D), hides go to
+    // every view. TriggerState::lastView tracks the interaction anchor;
+    // interactionView() resolves it against the live view list.
     struct TriggerState; // timers + bookkeeping; defined in the .cpp
     TriggerState* triggerEntry(const QString& uri); // creates + wires timers
     TriggerState* triggerFor(const QString& uri) const;
     void onTriggerEdit(const QString& uri, int start, int end,
                        const QString& inserted);
     void onTriggerCaretMoved(const QString& uri,
-                             const qmn::view::TextPosition& pos);
+                             const qmn::view::TextPosition& pos,
+                             qmn::view::CodeEditor* view);
     void onTriggerAccept(const QString& uri,
-                         const qmn::view::CodeEditor::CompletionItem& item);
+                         const qmn::view::CodeEditor::CompletionItem& item,
+                         qmn::view::CodeEditor* view);
     // The MOUSE-hover route (post-1.8.0 sliver): the view already dwelled
     // (its own kMouseHoverDwellMs chrome debounce, view-side gates: text
     // only, never over the popups/gutter/ruler/original window) and now
@@ -509,7 +554,8 @@ private:
     // rides the shared-hover composition AT THAT POINT (the caret is never
     // consulted, and the pointer never moves the caret).
     void onTriggerMouseHover(const QString& uri,
-                             const qmn::view::TextPosition& pos);
+                             const qmn::view::TextPosition& pos,
+                             qmn::view::CodeEditor* view);
     void fireCompletionTrigger(const QString& uri);
     void fireSignatureTrigger(const QString& uri); // car C (C2): the
                                                    // signatureHelp twin,
@@ -594,9 +640,46 @@ private:
                                                  // fed-bit gate)
     void fireHoverTrigger(const QString& uri); // caret wrapper: reads the
                                                // LATEST caret at fire time
+                                               // off the INTERACTION view
+                                               // (D5)
     void fireHoverAt(const QString& uri,
-                     const qmn::view::TextPosition& at); // the shared-hover
-                                                         // composition core
+                     const qmn::view::TextPosition& at,
+                     qmn::view::CodeEditor* showView); // the shared-hover
+                                                       // composition core;
+                                                       // the popup paints
+                                                       // on the validated
+                                                       // view that asked
+    // Car D (D5) view-list plumbing:
+    void connectViewTaps(const QString& uri,
+                         qmn::lsp::DocumentSyncer* context,
+                         qmn::view::CodeEditor* view); // caret/accept/
+                                                       // mouse taps + the
+                                                       // destroyed() relay,
+                                                       // for ONE view (the
+                                                       // owner at open, each
+                                                       // joiner at join);
+                                                       // the syncer is the
+                                                       // context object (the
+                                                       // die-with-the-
+                                                       // registration trick)
+    void onViewDestroyed(const QString& uri,
+                         qmn::view::CodeEditor* view); // remove the entry;
+                                                       // owner death HANDS
+                                                       // OVER, the last
+                                                       // view's death
+                                                       // releases (didClose)
+    qmn::view::CodeEditor* interactionView(
+        const QMap<QString, Registration>::const_iterator& reg)
+        const; // validated lastView, else owner: the interaction anchor
+               // every popup route shows on and reads the caret from
+    QMap<QString, Registration>::const_iterator registrationAt(
+        const QString& key) const; // D5: the view list by key (end() when
+                                   // the key is gone)
+    void hidePopupsEverywhere(
+        const QMap<QString, Registration>::const_iterator& reg); // D5:
+        // hides fan out to EVERY view — a popup clear that reached one
+        // view only would leave the other showing an orphan the wire can
+        // no longer update
     // Pump (bounded by kStopBarrierMs) until every client lands a terminal
     // state: the ONLY way the destructor can promise the servers are gone.
     void waitForStops();

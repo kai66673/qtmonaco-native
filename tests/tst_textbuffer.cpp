@@ -44,6 +44,14 @@ private slots:
     void newlineWindowsSurvivePieceSplits();
     void rulerLineReadsStayIndexedOnOnePieceDoc();
 
+    // --- the edit-observer LIST (car D, machine D1) ---------------------
+    void editObserverListFiresInOrderOneEventPerMutation();
+    void editObserverTokensAreStableAndStaleTokensInert();
+    void observerListChangesDuringNotificationApplyNextEvent();
+    void reentrantMutationInsideObserverFiresNestedEvent();
+    void setEditObserverReplacesTheObserverList();
+    void clearEditObserversSilencesTheList();
+
 private:
     static void verifyAllLines(const TextBuffer& buf, const QString& ref);
     TextBuffer* buffer = nullptr;
@@ -419,6 +427,26 @@ void TestTextBuffer::randomOpsVsReference()
     QString ref;
     buffer->setText(ref);
 
+    // D1 leg: this fixed-seed stream also drives the OBSERVER LIST, with the
+    // treap invariant checks below running after every op. The shape rule
+    // pinned here is the one the view's fold/wrap/highlight seams ride: every
+    // event speaks the PRE-op frame (an insert is end == start carrying its
+    // text, a delete is an empty inserted over a range), and there is exactly
+    // ONE event per primitive mutation for every observer.
+    int eventsA = 0, eventsB = 0;
+    bool shapesOk = true;
+    buffer->addEditObserver([&](const TextBuffer::EditEvent& ev) {
+        ++eventsA;
+        const bool deleteShape = ev.inserted.isEmpty() && ev.end > ev.start;
+        const bool insertShape = !ev.inserted.isEmpty() && ev.end == ev.start;
+        if (!(deleteShape || insertShape)) {
+            shapesOk = false;
+            qWarning() << "odd EditEvent shape at op" << eventsA << ev.start << ev.end
+                       << ev.inserted;
+        }
+    });
+    buffer->addEditObserver([&](const TextBuffer::EditEvent&) { ++eventsB; });
+
     for (int op = 0; op < 2000; ++op) {
         const int refSize = static_cast<int>(ref.size());
         std::uniform_int_distribution<int> posDist(0, std::max(0, refSize - 1));
@@ -462,6 +490,12 @@ void TestTextBuffer::randomOpsVsReference()
     }
     verifyAllLines(*buffer, ref);
     QVERIFY(buffer->debugNodeCount() > 0);
+
+    // D1: exactly one EditEvent per primitive mutation, and both observers
+    // saw every one of them.
+    QCOMPARE(eventsA, 2000);
+    QCOMPARE(eventsB, 2000);
+    QVERIFY2(shapesOk, "an EditEvent in the random stream broke the PRE-op shape rule");
 }
 
 void TestTextBuffer::textRangeVsReferenceAcrossPieces()
@@ -803,6 +837,208 @@ void TestTextBuffer::randomUndoRedoVsReference()
     QVERIFY2(undoSteps > 50, "too few undos in the random stream");
     QVERIFY2(redoSteps > 10, "too few redos in the random stream");
     QVERIFY(buffer->debugCheckInvariants());
+}
+
+// --- car D machine D1: the core's observer slot became a LIST ----------
+// Before D1 the buffer held ONE std::function slot and the whole view stack
+// sat in it, which is why a document could not have a second editor. The
+// slots below pin the LIST's contract: registration order IS notification
+// order, every observer of one mutation gets the SAME event object, tokens
+// are opaque/monotone/never-reused (so a stale token is inert), and a list
+// change made during a notification takes effect from the NEXT event — the
+// snapshot rule that makes a self-removing observer and a re-entrant edit
+// both legal. randomOpsVsReference grew the two-observer leg above.
+
+static QString shapeOf(const TextBuffer::EditEvent& ev)
+{
+    return QStringLiteral("%1:%2:%3").arg(ev.start).arg(ev.end).arg(ev.inserted);
+}
+
+void TestTextBuffer::editObserverListFiresInOrderOneEventPerMutation()
+{
+    buffer->setText(QStringLiteral("hello world\nsecond\n"));
+
+    QStringList seq; // the two tags in FIRING order
+    QStringList aShapes, bShapes;
+    const TextBuffer::EditEvent* firstSeen = nullptr;
+    bool sameObjectForBoth = false;
+    const int ta = buffer->addEditObserver([&](const TextBuffer::EditEvent& ev) {
+        seq << QLatin1String("a");
+        aShapes << shapeOf(ev);
+        firstSeen = &ev;
+    });
+    const int tb = buffer->addEditObserver([&](const TextBuffer::EditEvent& ev) {
+        seq << QLatin1String("b");
+        bShapes << shapeOf(ev);
+        sameObjectForBoth = (&ev == firstSeen); // one reference, not a per-observer copy
+    });
+    QVERIFY(ta != 0 && tb != 0 && ta != tb);
+
+    buffer->insertAtOffset(5, QStringLiteral("XX")); // insert (end == start)
+    buffer->removeRange(0, 3); // delete (empty inserted)
+    buffer->undo(); // replay through the SAME seam: undo/redo is observable
+    buffer->undo();
+    buffer->redo();
+    const int charsBeforeReplace = buffer->charCount();
+    buffer->setText(QStringLiteral("replaced")); // ONE whole-document event
+
+    QCOMPARE(aShapes.size(), 6); // insert, delete, undo, undo, redo, replace
+    QCOMPARE(bShapes, aShapes); // same payloads, same order, both observers
+    QVERIFY2(sameObjectForBoth, "observers were handed copies of the EditEvent");
+    for (int i = 0; i + 1 < seq.size(); i += 2) {
+        QVERIFY2(seq[i] == QLatin1String("a") && seq[i + 1] == QLatin1String("b"),
+                 qPrintable(QStringLiteral("notification order broke at pair %1").arg(i / 2)));
+    }
+    // The replace is ONE whole-doc event per observer (the D2 double-mutation
+    // trap in the making): one event, the whole old document eaten.
+    QCOMPARE(aShapes.last(), QStringLiteral("0:%1:replaced").arg(charsBeforeReplace));
+}
+
+void TestTextBuffer::editObserverTokensAreStableAndStaleTokensInert()
+{
+    buffer->setText(QStringLiteral("abc"));
+    int a = 0, b = 0, c = 0, d = 0;
+    const int ta = buffer->addEditObserver([&](const TextBuffer::EditEvent&) { ++a; });
+    const int tb = buffer->addEditObserver([&](const TextBuffer::EditEvent&) { ++b; });
+    const int tc = buffer->addEditObserver([&](const TextBuffer::EditEvent&) { ++c; });
+    buffer->insertAtOffset(0, QStringLiteral("1"));
+    QCOMPARE(a + b + c, 3);
+
+    buffer->removeEditObserver(tb);
+    const int td = buffer->addEditObserver([&](const TextBuffer::EditEvent&) { ++d; });
+    QVERIFY2(td > ta && td > tb && td > tc, "tokens must be monotone and never reused");
+
+    // A stale token removes nothing, and 0/-7 were never tokens: removing the
+    // middle of the list never shifts the survivors' identity.
+    buffer->removeEditObserver(tb);
+    buffer->removeEditObserver(0);
+    buffer->removeEditObserver(-7);
+    buffer->insertAtOffset(0, QStringLiteral("2"));
+    QCOMPARE(a, 2); QCOMPARE(b, 1); QCOMPARE(c, 2); QCOMPARE(d, 1);
+
+    buffer->removeEditObserver(ta);
+    buffer->removeEditObserver(tc);
+    buffer->insertAtOffset(0, QStringLiteral("3"));
+    QCOMPARE(a, 2); QCOMPARE(c, 2); QCOMPARE(d, 2);
+
+    // An empty function registers NOTHING and answers 0 — which is never a
+    // real token, so it can never remove anything either.
+    QCOMPARE(buffer->addEditObserver({}), 0);
+    buffer->insertAtOffset(0, QStringLiteral("4"));
+    QCOMPARE(d, 3);
+    buffer->removeEditObserver(0);
+    buffer->insertAtOffset(0, QStringLiteral("5"));
+    QCOMPARE(d, 4);
+}
+
+void TestTextBuffer::observerListChangesDuringNotificationApplyNextEvent()
+{
+    buffer->setText(QStringLiteral("seed"));
+    int a = 0, b = 0, late = 0, lateToken = 0;
+    int ta = 0, tb = 0;
+    ta = buffer->addEditObserver([&](const TextBuffer::EditEvent&) {
+        ++a;
+        buffer->removeEditObserver(ta); // an observer removing ITSELF is legal
+    });
+    tb = buffer->addEditObserver([&](const TextBuffer::EditEvent&) {
+        ++b;
+        if (lateToken == 0) // registering from inside a notification is legal too
+            lateToken = buffer->addEditObserver([&](const TextBuffer::EditEvent&) { ++late; });
+    });
+
+    // The pass walked the snapshot taken for THIS mutation: A still ran once
+    // despite removing itself, and the observer B registered mid-pass saw
+    // NOTHING of this event.
+    buffer->insertAtOffset(0, QStringLiteral("1"));
+    QCOMPARE(a, 1); QCOMPARE(b, 1); QCOMPARE(late, 0);
+
+    // From the NEXT event the list is current: A is gone, late is in.
+    buffer->insertAtOffset(0, QStringLiteral("2"));
+    QCOMPARE(a, 1); QCOMPARE(b, 2); QCOMPARE(late, 1);
+
+    buffer->removeEditObserver(ta); // already gone: inert
+    buffer->removeEditObserver(tb);
+    buffer->insertAtOffset(0, QStringLiteral("3"));
+    QCOMPARE(a, 1); QCOMPARE(b, 2); QCOMPARE(late, 2);
+    QVERIFY(buffer->debugCheckInvariants());
+}
+
+void TestTextBuffer::reentrantMutationInsideObserverFiresNestedEvent()
+{
+    buffer->setText(QStringLiteral("ab"));
+    QStringList seq;
+    int calls = 0;
+    buffer->addEditObserver([&](const TextBuffer::EditEvent& ev) {
+        ++calls;
+        if (calls == 1) {
+            // A mutation from INSIDE an observer is legal and fires its own
+            // nested notification, which finishes BEFORE the outer pass
+            // resumes — the frame every D3/D4 consumer rides.
+            buffer->insertAtOffset(buffer->charCount(), QStringLiteral("!"));
+            seq << QStringLiteral("outer:%1").arg(ev.start);
+        } else {
+            seq << QStringLiteral("nested:%1").arg(ev.start);
+        }
+    });
+
+    buffer->insertAtOffset(0, QStringLiteral("Z"));
+    QCOMPARE(seq, (QStringList{ QStringLiteral("nested:3"), QStringLiteral("outer:0") }));
+    QCOMPARE(buffer->text(), QStringLiteral("Zab!"));
+    QVERIFY(buffer->debugCheckInvariants());
+    QVERIFY(buffer->canUndo()); // the nested edit recorded its own group
+}
+
+void TestTextBuffer::setEditObserverReplacesTheObserverList()
+{
+    buffer->setText(QStringLiteral("seed"));
+    int list = 0, one = 0;
+    buffer->addEditObserver([&](const TextBuffer::EditEvent&) { ++list; });
+    buffer->addEditObserver([&](const TextBuffer::EditEvent&) { ++list; });
+
+    // The v1 door keeps its reading byte-identically (the two in-tree call
+    // sites and tools/bench_highlight.cpp ride it): install ONE, replacing
+    // the whole list.
+    buffer->setEditObserver([&](const TextBuffer::EditEvent&) { ++one; });
+    buffer->insertAtOffset(0, QStringLiteral("a"));
+    QCOMPARE(list, 0);
+    QCOMPARE(one, 1);
+
+    // The v1 "no observer" state: an empty function installs nothing.
+    buffer->setEditObserver({});
+    buffer->insertAtOffset(0, QStringLiteral("b"));
+    QCOMPARE(one, 1);
+
+    // And the v1 observer is simply the FIRST slot of a later list — the
+    // registration order D2's document multiplexer re-asserts itself against.
+    buffer->setEditObserver([&](const TextBuffer::EditEvent&) { ++one; });
+    buffer->addEditObserver([&](const TextBuffer::EditEvent&) { ++list; });
+    buffer->insertAtOffset(0, QStringLiteral("c"));
+    QCOMPARE(one, 2);
+    QCOMPARE(list, 1);
+}
+
+void TestTextBuffer::clearEditObserversSilencesTheList()
+{
+    buffer->setText(QStringLiteral("seed"));
+    int a = 0, b = 0;
+    const int ta = buffer->addEditObserver([&](const TextBuffer::EditEvent&) { ++a; });
+    buffer->addEditObserver([&](const TextBuffer::EditEvent&) { ++b; });
+    buffer->insertAtOffset(0, QStringLiteral("x"));
+    QCOMPARE(a + b, 2);
+
+    buffer->clearEditObservers();
+    buffer->insertAtOffset(0, QStringLiteral("y"));
+    buffer->removeRange(0, 1);
+    buffer->setText(QStringLiteral("gone"));
+    QCOMPARE(a, 1); QCOMPARE(b, 1);
+
+    // Tokens do not come back with the observer: the pre-clear token is inert
+    // forever and a fresh registration gets a fresh one.
+    buffer->removeEditObserver(ta);
+    const int tc = buffer->addEditObserver([&](const TextBuffer::EditEvent&) { ++a; });
+    QVERIFY(tc > ta);
+    buffer->insertAtOffset(0, QStringLiteral("z"));
+    QCOMPARE(a, 2); QCOMPARE(b, 1);
 }
 
 QTEST_GUILESS_MAIN(TestTextBuffer)

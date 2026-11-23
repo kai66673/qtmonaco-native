@@ -108,6 +108,15 @@ public:
     };
 
     explicit CodeEditor(QWidget* parent = nullptr);
+    // Car D (machine D2) — THE car's one public widening: attach a view to
+    // an EXISTING document (zero or more views already on it). Attach is a
+    // ctor fact: buffer_ binds to the document's buffer and this view can
+    // never switch documents (no setDocument door, by design — buffer_ is
+    // a reference member). LIFETIME: the document must outlive this view
+    // (CodeDocument.hpp contract; document()->setParent() is the legal
+    // extension). Views share text, undo history and the parse; every
+    // view keeps its own caret/selection/fold/wrap/font/popup state.
+    explicit CodeEditor(CodeDocument* document, QWidget* parent = nullptr);
     ~CodeEditor() override;
 
     void setPlainText(const QString& text);
@@ -851,24 +860,31 @@ public:
     void clearFoldRanges();
 
     // --- M10 diff view (Gate 2; semantics: PLAN GATE 2 §M10) ---------------
-    // Diff mode puts TWO documents in ONE widget (the "one editor per
-    // document" contract untouched): the editor's OWN attached document IS
-    // the modified side, so caret/undo/find/fold/textChanged/toPlainText/
-    // readOnly speak it natively; the original side is a STANDALONE
-    // (detached) CodeDocument and is never editable through any door of
-    // this widget. The pointer door requires a detached `original` and
-    // keeps it NON-OWNING (a destroyed() hookup clears diff mode); a
-    // `modified` pointer different from document() is a one-shot text feed
-    // through the editor's replace machinery. The string door feeds both
-    // (original into a lazy editor-owned child standalone doc). `language`
-    // is ONE language for the whole diff view (routes through setLanguage;
-    // "" = plain).
+    // Diff mode puts TWO documents in ONE widget: the editor's OWN attached
+    // document IS the modified side, so caret/undo/find/fold/textChanged/
+    // toPlainText/readOnly speak it natively; the original side is a
+    // STANDALONE (detached) CodeDocument and is never editable through any
+    // door of this widget. CAR D (D4/D5) note: the MODIFIED document is an
+    // ordinary document, so it may carry other views too (the attach ctor)
+    // — the DIFF STATE itself is per-VIEW state (each view of it paints
+    // its own pair; the parse is shared, car D's record), and the
+    // STANDALONE original stays exactly what M10 made it: a borrowed
+    // window into a document no view edits through. The pointer door
+    // requires a detached `original` and keeps it NON-OWNING (a destroyed()
+    // hookup clears diff mode); a `modified` pointer different from
+    // document() is a one-shot text feed through the editor's replace
+    // machinery. The string door feeds both (original into a lazy
+    // editor-owned child standalone doc). `language` is ONE language for the
+    // whole diff view (routes through setLanguage; "" = plain).
     //
     // While diff mode is active the visible* row doors below speak the
-    // ALIGNMENT ROW axis (blank cells are weight-1 pseudo-rows, a
-    // collapsed fold zeroes the rows whose MODIFIED line it hides, soft
-    // wrap is inert) — and they speak MODIFIED line numbers (the caret
-    // space; original-side geometry is the paint side's business).
+    // ALIGNMENT ROW axis (blank cells are weight-1 pseudo-rows, a collapsed
+    // fold zeroes the rows whose MODIFIED line it hides, and SOFT WRAP IS
+    // LIVE — car B's weighted axis: weight(row) = max(the MODIFIED line's
+    // slots at the h-window width, the ORIGINAL line's slots at the
+    // read-window width, 1), each side wrapping at its own window) — and
+    // they speak MODIFIED line numbers (the caret space; original-side
+    // geometry is the paint side's business).
     void setDiffDocuments(CodeDocument* original, CodeDocument* modified,
                           const QString& language);
     void setDiffDocuments(const QString& original, const QString& modified,
@@ -1015,6 +1031,15 @@ public:
     PerfStats perfStats() const { return perf_; }
     void resetPerfStats() { perf_ = {}; }
 
+    // Car D (D3) diagnostic doors: the depth of THIS view's caret-mark
+    // stacks that mirror the shared undo log (the alignment the Q_ASSERTs
+    // in the mirror guard). Tests and diagnostics read the mirror without
+    // touching the stacks themselves; the numbers must equal the buffer's
+    // undoDepth()/redoDepth() at every quiescent point for EVERY view of a
+    // shared document — including a view that has never typed a key.
+    int undoMarkDepth() const { return int(undoMarks_.size()); }
+    int redoMarkDepth() const { return int(redoMarks_.size()); }
+
 signals:
     void cursorMoved(TextPosition pos);
     void selectionChanged();
@@ -1110,6 +1135,68 @@ private:
     void applyEditMark(const UndoMark& m);        // restore caret/selection
     void breakUndoChain(); // freeze coalescing on deliberate caret motion
 
+    // --- car D machine D3: the origin tag + the foreign mirror -----------
+    // Contract: CodeDocument.hpp's "THE ORIGIN TAG" paragraph. EVERY
+    // text-mutating door wraps its body in one MutationAction (the list
+    // mirrors the captureEditMark/reconcileUndoMarks pairs exactly); the
+    // RAII nests, so an inner door of the same action is free. The tag is
+    // what lets the per-view pass keep the v1.11 self path byte-identical
+    // (tag says "me") while a view that did NOT author the mutation maps
+    // its own state through reconcileForeignEdit / the mark mirror below.
+    // A missed tag double-shifts a caret — the whole existing suite is the
+    // LOUD tripwire (design record risk (b)).
+    class MutationAction {
+    public:
+        explicit MutationAction(CodeEditor* view) : view_(view)
+        { view_->beginSelfAction(); }
+        ~MutationAction() { view_->endSelfAction(); }
+    private:
+        CodeEditor* view_;
+    };
+    void beginSelfAction(); // (cpp: CodeDocument is forward-declared here)
+    void endSelfAction();
+
+    // The foreign mirror (called by the document through the friendship
+    // below): arm stores THIS view's caret state as the pre-action frame
+    // at another view's action BEGIN — as the mark snapshot AND as the
+    // offset snapshot (mirrorFrame_) the bystander's carets ride;
+    // mirrorForeignAction DIFFS our mark stacks against the buffer at
+    // action END and aligns them — moved marks carry the arm frame
+    // (design record: the mark-alignment rule that keeps the reconcile
+    // Q_ASSERT a real guard even for a view that has never typed).
+    // reconcileForeignEdit runs INSIDE the per-view pass for every foreign
+    // event: the offset-only algebra over caret/anchor/every extra slot +
+    // selections (both mark stacks ride RAW — frame-paired with their
+    // groups, never restamped), popup dismissal, and the a11y
+    // cursor/selection events WITHOUT the cursorMoved/selectionChanged
+    // signals (the hub's ask taps ride those signals; a foreign edit must
+    // not arm them).
+    void armForeignMirror();
+    void mirrorForeignAction();
+    void reconcileForeignEdit(const qmn::core::TextBuffer::EditEvent& ev);
+    void markDepthsBookkept(); // (D3) see the .cpp: the alignment pair the
+    qint64 lastMarkUndoDepth_ = -1; // mirror's move-branch precondition;
+    qint64 lastMarkRedoDepth_ = -1; // -1 = never set (fill/trim fallback)
+    UndoMark foreignSnap_;   // the armed pre-action frame (arm-time only)
+    // (D3 fix) The same armed frame as OFFSETS — the pre-action state of
+    // every caret this view owns, captured where offsetOf is honest (at
+    // arm, before the first mutation) and mapped through each foreign
+    // event by the pure offset algebra. See the frame-trap comment in
+    // reconcileForeignEdit: positions at observer time live in the
+    // PRE-op frame while the buffer already speaks POST, and a post-op
+    // offsetOf clamps a stale line to garbage.
+    struct MirrorFrame {
+        struct Slot {
+            int caretOff = 0;
+            int anchorOff = 0;
+        };
+        int caretOff = 0;
+        int anchorOff = 0;
+        QVector<Slot> extras;
+    };
+    MirrorFrame mirrorFrame_;
+    bool foreignArmed_ = false;
+
     // One fan-out key's edit for a single caret, computed against the
     // PRE-ACTION document. Applying the edits right-to-left keeps every
     // not-yet-applied edit's offsets valid, and a slot's own final caret is
@@ -1202,6 +1289,12 @@ private:
     friend class CodeEditorOptions;
     friend class CodeEditorAccessible; // M11: the a11y bridge reads the live
                                        // model/caret/geometry state directly
+    // Car D (D2): the document's mux pass fires the doc trio and then this
+    // view's detail-free textChanged tail (the v1.11 tail of the old
+    // single-observer god-pass, kept byte-identical for one view), and
+    // detachView reaches this view's observer token through this door.
+    void notifyDocumentEditTail() { emit textChanged(); }
+    friend class CodeDocument;
 
     void insertTextAtCaret(const QString& text, int caretTrim = 0);
     // M18 auto-close pairs: claim a printable press of one ()[]{}""''``
@@ -1317,6 +1410,13 @@ private:
     // re-measure + cache wipe; this call only lands the right font on it.
     void applyCodeFont();
 
+    // Car D (D2): the shared ctor body of BOTH ctors — the only thing the
+    // two differ in is where document_ comes from (made-and-parented by
+    // the QWidget ctor, attached by the CodeDocument* ctor). Registers
+    // this view's per-view observer pass and re-asserts the document's
+    // mux slot last (the standing invariant).
+    void initCommon();
+
     // M25 (Gate 2): the TextBuffer moved into the editor-owned CodeDocument
     // (the sanctioned ownership deviation). `document_` is declared BEFORE
     // `buffer_` because member-init order follows declaration order and
@@ -1326,8 +1426,35 @@ private:
     // accessible friend paths — byte-identical.
     CodeDocument* document_;
     qmn::core::TextBuffer& buffer_;
-    // M4 highlight engine (declared right after the model it observes).
-    std::unique_ptr<HighlightEngine> highlight_;
+    // Car D (D4): the view's doors onto the DOCUMENT's shared HighlightEngine
+    // (the parse is document state — one buffer, one tree). Friend-only
+    // reads; ensureParse's lazy creation is the document's. parse() forces
+    // the engine into existence (the language door, the paint feed: a view
+    // that paints or names a language HAS a parse); existingParse() never
+    // creates (language()/indentFoldsActive() reads, and every BORROW of
+    // another document's parse — the no-clobber rule: a read must never
+    // materialize state in a document the borrower does not own). Out-of-
+    // line: CodeDocument is forward-declared here (the bodies live with
+    // the diff doors in the .cpp).
+    HighlightEngine* parse();
+    HighlightEngine* existingParse() const;
+    // The diff chrome's BORROW of the ORIGINAL document's parse: non-null
+    // only while a session is live AND that document has a parse with a
+    // live language (an external original never parsed stays plain — the
+    // no-clobber rule again). The borrow's window entry rides the engine's
+    // viewport SET under this widget's key and is released when the
+    // session ends or the view dies.
+    HighlightEngine* diffOriginalParse() const;
+    // Car D (D2): THIS view's slot on the (possibly shared) buffer's
+    // observer list — the per-view pass; registered in initCommon, removed
+    // in ~CodeEditor via CodeDocument::detachView. The document's own mux
+    // slot rides the list's last position; the v1 setEditObserver reading
+    // ("replace the whole list") is why the ctor must addEditObserver +
+    // re-assert instead of the old setEditObserver.
+    // Car D (D4): the pass no longer feeds a highlight engine — the
+    // DOCUMENT owns the parse and rides the core list directly (the
+    // parse()/existingParse() doors borrow it for reads).
+    int viewObserverToken_ = 0;
     QVector<UndoMark> undoMarks_; // aligned with buffer_ undo groups
     QVector<UndoMark> redoMarks_; // aligned with buffer_ redo groups
     qint64 lastPushSerial_ = 0;   // last seen buffer_.undoPushSerial()
@@ -1714,13 +1841,17 @@ private:
     std::unique_ptr<DiffState> diff_;
     CodeDocument* diffStandaloneOriginal_ = nullptr; // editor-owned child,
                                                      // string-door feed only
-    // The chrome read window's OWN engine instance (M10: the ORIGINAL side
-    // is syntax-highlighted exactly like the modified side — its second
-    // HighlightEngine rides the same attach/onEdit/setViewport protocol,
-    // fed through the original doc's editApplied signal). Created fresh in
-    // beginDiffMode, dropped by clearDiffDocuments; borrows the original
-    // document's buffer, so it must never outlive the diff session.
-    std::unique_ptr<HighlightEngine> origHighlight_;
+    // The chrome read window's borrow of the ORIGINAL document's SHARED
+    // parse (D4 — the chrome's OWN engine instance is deleted with this
+    // comment's replacement): the original side is syntax-inked from the
+    // parse its own document owns, fed through the engine's viewport-SET
+    // door under this widget's key by the diff paint, and released when
+    // the session ends (clearDiffDocuments) or the view dies (~CodeEditor,
+    // ~CodeEditor::detachView). A document with no parse (never painted,
+    // no language ever set, external to this widget) inks plain — the
+    // no-clobber rule: the diff view never WRITES a parse or a language
+    // into a document it does not own (design record, one-provider rule
+    // read sideways).
     QTimer diffRecomputeTimer_; // single-shot live-update debounce
     static constexpr int kDiffDebounceMs = 120;
     // Shared tail of both doors (after the texts/documents are settled):
@@ -1826,7 +1957,8 @@ private:
     // made the ORIGINAL half visibly narrower than the MODIFIED side).
     int gutterV1Width() const;
     // The chrome text pass's FormatRanges (the v1 formatRangesForLine
-    // protocol applied to origHighlight_ + the ORIGINAL buffer): token
+    // protocol applied to the ORIGINAL document's SHARED parse (D4) +
+    // the ORIGINAL buffer): token
     // colors ride ol.layout.draw's selections, whitespace and uncolored
     // runs keep the GutterDigits pen (the default), and an inactive engine
     // means the plain single-pen path.

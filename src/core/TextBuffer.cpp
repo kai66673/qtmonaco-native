@@ -317,8 +317,8 @@ void TextBuffer::setText(const QString& text)
     }
     // Whole-document replace event (one op covers the swap); skipped when
     // nothing changed, like the no-op guards on insertAtOffset/removeRange.
-    if (editObserver_ && (oldChars > 0 || !text.isEmpty()))
-        editObserver_(EditEvent{0, oldChars, text});
+    if (oldChars > 0 || !text.isEmpty())
+        notifyEditObservers(EditEvent{0, oldChars, text});
 }
 
 void TextBuffer::insertAtOffset(int offset, const QString& text)
@@ -357,10 +357,10 @@ void TextBuffer::applyInsert(int offset, const QString& text)
     const Piece p = appendToAddBuffer(text);
     const int mid = newNode(p);
     root_ = mergeTrees(mergeTrees(a, mid), b);
-    if (editObserver_) // every mutation path funnels through here (and
-        editObserver_(EditEvent{offset, offset, text}); // applyRemove below),
-}                                                  // so undo/redo replay is
-                                                   // observable too (M4)
+    // Every mutation path funnels through here (and applyRemove below), so
+    // undo/redo replay is observable too (M4).
+    notifyEditObservers(EditEvent{offset, offset, text});
+}
 
 void TextBuffer::applyRemove(int startOffset, int endOffset)
 {
@@ -374,13 +374,64 @@ void TextBuffer::applyRemove(int startOffset, int endOffset)
     splitChars(mid, startOffset, a, doomed);
     recycleTree(doomed);
     root_ = mergeTrees(a, c);
-    if (editObserver_)
-        editObserver_(EditEvent{startOffset, endOffset, QString()});
+    notifyEditObservers(EditEvent{startOffset, endOffset, QString()});
 }
 
 void TextBuffer::setEditObserver(std::function<void(const EditEvent&)> observer)
 {
-    editObserver_ = std::move(observer);
+    // The v1 door keeps its reading (D1): install ONE observer, replacing
+    // the whole list. An empty function installs nothing — the same
+    // "no observer" state the old empty-std::function guard produced.
+    clearEditObservers();
+    if (observer)
+        addEditObserver(std::move(observer));
+}
+
+int TextBuffer::addEditObserver(std::function<void(const EditEvent&)> observer)
+{
+    if (!observer)
+        return 0; // registered nothing: 0 is never a real token
+    observers_.push_back(ObserverSlot{nextObserverToken_, std::move(observer)});
+    obsSnapshot_.reset(); // the NEXT notification iterates the new list
+    return nextObserverToken_++; // never reused, so a stale token is inert
+}
+
+void TextBuffer::removeEditObserver(int token)
+{
+    if (token == 0)
+        return;
+    const auto it = std::find_if(observers_.cbegin(), observers_.cend(),
+                                 [token](const ObserverSlot& s) { return s.token == token; });
+    if (it == observers_.cend())
+        return; // stale token: removals never shift other tokens, nothing to do
+    observers_.erase(it);
+    obsSnapshot_.reset();
+}
+
+void TextBuffer::clearEditObservers()
+{
+    observers_.clear();
+    obsSnapshot_.reset();
+}
+
+void TextBuffer::notifyEditObservers(const EditEvent& ev)
+{
+    if (observers_.empty())
+        return;
+    // Snapshot semantics (pinned): a registration or removal made DURING a
+    // notification — including an observer removing itself — takes effect
+    // from the NEXT event, because this loop walks the cached snapshot, not
+    // the live list. A re-entrant mutation from inside an observer fires
+    // its own nested notification, which rebuilds the snapshot first and so
+    // sees the up-to-date list. Holding a local copy keeps this loop's view
+    // stable across that rebuild.
+    std::shared_ptr<const std::vector<ObserverSlot>> snapshot = obsSnapshot_;
+    if (!snapshot) {
+        snapshot = std::make_shared<const std::vector<ObserverSlot>>(observers_);
+        obsSnapshot_ = snapshot;
+    }
+    for (const ObserverSlot& slot : *snapshot)
+        slot.fn(ev); // the SAME const EditEvent& for every observer
 }
 
 TextBuffer::PieceView TextBuffer::pieceAt(int offset) const

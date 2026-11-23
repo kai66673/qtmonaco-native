@@ -3166,6 +3166,44 @@ This machine makes each view reconcile state it did not author.
   single-view byte-identical guard (a one-view editor's caret/marks/undo
   after every door, the tag path exercised, no mapping).
 
+**D1–D3 BUILT 2026-11-22** (host ctest 7/7; `tst_codeeditor` runs 287
+slots green + 2 pre-existing skips, i.e. the 277-slot pre-car suite + the
+10 new two-view slots — the "547-slot" figure in the record above is
+simply the wrong number): the origin tag landed as designed (23
+`MutationAction` sites — the 22 capture/reconcile pairs plus the
+`setPlainText` head), the self path
+stayed byte-identical, and D3 added **zero core change beyond D1**. TWO
+corrections to the record above, both found by the pins:
+- **The algebra paragraph's offset conversion is frame-WRONG as
+  literally written** ("resolve the TextPosition to an offset, map it,
+  re-resolve" — at observer time the buffer has ALREADY mutated, so
+  `offsetOf` speaks the POST-op frame while the bystander's positions
+  were written in the PRE-op one; a foreign whole-line delete resolved
+  the bystander's (2,2) to offset **2** and parked the caret at {0,0}).
+  The built shape: `armForeignMirror` (at `beginAction`, BEFORE the
+  action's first mutation — the one moment positions and buffer agree)
+  snapshots the bystander's caret state as a `MirrorFrame` of OFFSETS,
+  and those offsets ride the pure algebra across every event of the
+  action; positions re-resolve through `lineColAt` only in a frame that
+  is CURRENT (each event's post-op). `foreignLineDeleteLiftsBystanderCaretAbove`
+  is the frame-trap tripwire.
+- **Marks ride RAW — the "every MARK rides the SAME algebra" half is
+  dropped.** Every mark entry is FRAME-PAIRED with its group slot
+  (undoMarks_ = the frame as lived before the group applied, redoMarks_
+  = the frame as lived when the matching undo was PRESSED) and the
+  core's tape invariant lands a replay byte-BACK into that exact state,
+  so mapping a mark through a replaying event restamps it in the wrong
+  frame. Consequence for the move branch (a foreign undo pushes the
+  group onto the bystander's redo branch): the ARRIVING mark is the arm
+  snapshot (`foreignSnap_`, the frame this view lived at the press),
+  never the leaving stack entry (the bystander's stale ARM frame); both
+  directions symmetric. `bystanderRedoAfterForeignUndoRestoresFrame`
+  pins it — it FAILED against the takeLast shape, a real bug the pins
+  caught, not a pin-expectation slip. Diagnostic doors added:
+  `CodeEditor::undoMarkDepth()`/`redoMarkDepth()` (public, additive;
+  `CodeDocument::buffer()` stays private+friend-only, so tests read the
+  mirrors through these).
+
 D4 THE PARSE FOLLOWS THE DOCUMENT (view, one engine per buffer) — the
 pre-decided knot's machine. D2/D3 deliberately keep one engine PER VIEW
 (correct, 2× parse, the interim state recorded); this machine moves the
@@ -3230,6 +3268,85 @@ engine to the document and deletes the duplication.
   the grammar-registry reconcile (generation counter) still reaches the
   shared engine once, not once per view.
 
+**D4 BUILT 2026-11-23** (host ctest 7/7; `tst_codeeditor` 291 slots green
++ the 2 pre-existing skips — the 287 from D3 + 4 new shared-parse slots;
+the whole pre-D4 suite stayed the tripwire, and the two failures it
+produced were real code bugs, not pin-expectation slips, see below):
+built as designed, zero new public doors (the D2 attach ctor stays the
+car's only widening). The document owns the lazy engine
+(`CodeDocument::ensureParse` — created by the language door and NOTHING
+else; attached to its own buffer, `reassertMuxLast` right after, so the
+per-event order is [view passes in attach order, parse, mux]); the view
+reads through the friend-only `parse()`/`existingParse()` pair (out-of-
+line — CodeDocument stays forward-declared in the public header);
+`origHighlight_`, its `beginDiffMode` creation, the `watchDiffOriginal`
+`onEdit` relay and the paint's chrome-engine feed are ALL deleted — the
+document's own core subscription replaced the whole signal-fed shape.
+- **Engine doors moved to a viewport SET** (`setViewport(const void*
+  key, start, end)` + `dropViewport`): per-surface windows, the union
+  recomputed SYNCHRONOUSLY on every set/drop (the set is a handful of
+  entries — a linear scan is the honest cost); the union is a BOUNDING
+  BOX — coverage includes the gap between far-apart windows; parsing the
+  per-window ranges separately is not on this car (the design record's
+  loose "parses both halves and nothing else" phrase read exactly). A
+  window can only ever GROW the union while every surface lives, so the
+  engine's scoped parse/query window is monotone across alternating
+  multi-view paints: at most ONE re-query per union growth, never the
+  pre-D4 re-shrink flip-flop. `clearState` (language flip) deliberately
+  KEEPS windows_ — a language change re-points the parse, not the set of
+  viewing surfaces; every feed clamps into the CURRENT buffer, so a
+  stale union can never parse garbage. `detachView` releases a dying
+  view's entry; for a BORROW of a foreign document's parse (the diff
+  chrome's window into the ORIGINAL's engine) detachView cannot reach —
+  the release sites are `clearDiffDocuments` and the `~CodeEditor` diff
+  block. Oracle doors added to the engine (internal seam, NOT API):
+  `parseCount()` (the machine's counted refresh), `unionStart/End`,
+  `covStart/End`, `viewportSurfaceCount`.
+- **Language is document state, LAST-WRITER-WINS** through the unchanged
+  view door: `setLanguage` forces the document's parse and re-resolves
+  EVERY view's tab-stop override against its OWN per-view
+  LanguageProperties map (the lookup re-keys live — a bystander with no
+  entry for the new language falls back to the template, it does NOT
+  inherit the other view's override). `language()` reads
+  `existingParse` (empty = no parse = plain). No-clobber face pinned in
+  the REWRITTEN `diffOriginalChromeSyntaxHighlight` (the old pin encoded
+  the chrome's own engine — its failure was a mechanism change, the one
+  legit pin rewrite of this machine): a caller-supplied original with no
+  parse of its own inks PLAIN (and `beginDiffMode` never writes one);
+  the same document, given a parse honestly by a view of its OWN (the D2
+  attach ctor), inks the chrome through it — live edits ride the
+  document's own subscription, and `clearDiffDocuments` keeps the
+  foreign parse but drops the borrow window.
+- **Two holes the pins caught** (both lazy-engine boundary bugs — the
+  pre-D4 engine ALWAYS existed, so every "no parse yet" path is new
+  territory): (1) `foldEndForLine` must NOT shortcut a parse-less
+  document to -1 — the M13 indent fallback stays reachable (`revealAt-
+  ScrollsPerModeAndUnfoldsFolds`, a grammar-less doc, failed and pinned
+  the fix: the no-engine read is the no-GRAMMAR-captures read); (2)
+  reading must never MATERIALIZE a parse — paint feeds and refreshes an
+  EXISTING parse only, and the public `highlightSpans` door answers from
+  `existingParse` (empty spans, the pre-D4 inactive-engine answer,
+  without paying for an engine). `setLanguage` is the ONLY creator.
+  Test-shape notes that fall out: feed text BEFORE naming the language
+  (the engine's line index rides already-fed text, the M10 flow), and a
+  never-painted stack view needs its FIRST paint before a reveal (the
+  real scroller's cadence).
+- Friend plumbing: `CodeDocument` is now befriended by the test class,
+  and that names the trap — an unqualified `friend class TestCodeEditor;`
+  inside `qmn::view` declares and befriends `qmn::view::TestCodeEditor`,
+  NOT the global test class (the suite had NEVER leaned on friendship
+  before D4, so the trap had never fired); the header forward-declares
+  `::TestCodeEditor` at global scope and befriends it `::-qualified`.
+- Tripwires shipped: `sharedParseOneReparseForTwoViews` (one parse pass
+  for two grabs, byte-equal span tables, EXACTLY one counted reparse per
+  foreign keystroke across both repaints, surface count 2→1 on view
+  death), `sharedLanguageLastWriterWinsAndPropsStayPerView`,
+  `viewportUnionCoversBothViewsAndShrinksOnDetach` (1600-line python
+  > 16 Ki units; union/cov state oracles, never pixels),
+  `registryRemapReachesSharedParseOnce` (a capture-role remap reaches
+  the bystander's spans through the one engine, after only the OWNER
+  painted).
+
 D5 DOCUMENT-SCOPED LSP GLUE (glue + session + fakeserver) — the
 registration, the syncer and the feeds become document-scoped, and the
 paint fans out.
@@ -3283,6 +3400,108 @@ paint fans out.
   the `didOpen` and the feeds, a joined-view death keeps them too, and
   `saveDocument` from either view flushes the ONE syncer (the version
   pin).
+
+**D5 BUILT 2026-11-23** (host ctest 7/7; `tst_lsp` 98 slots green = the 93
+that walked in + 5 new, `tst_glue` 8 = 6 + 2 new; zero new public
+doors — the D2 attach ctor stays the car's only widening, so the bindings'
+three copies are untouched this machine; `tests/fakeserver/` needed NO
+change, the far-side oracles the pins lean on were already built):
+- **`Registration` grows `QList<CodeEditor*> views`** (owner ≡
+  `views.first()`, the handover rule's invariant) and
+  `syncerFor(editor)` scans `it->views.contains(editor)` instead of
+  comparing one pointer. That single change is what makes EVERY feature
+  door (`requestHover`/`completion`/`codeAction`/`willSave`…, `saveDocument`,
+  `setPopupTriggers`/`popupTriggersEnabled`) answer for an alias view for
+  free — they all resolve editor → document → uri → the ONE syncer.
+- **A new `resolveUri` leg the join pin forced:** an EMPTY uri on a
+  document the hub already registered resolves to that registration's KEY
+  (the scan compares `editor->document()`), BEFORE the `documentUri`/
+  `untitled:`-mint legs. Without it the second view of an untitled
+  document forked a SECOND `didOpen` under a minted key — which is exactly
+  the frame count the machine forbids, and it is the hub's own copy of the
+  session's one-document-one-uri rule.
+- **The JOIN branch** (`it->editor->document() == editor->document()`):
+  view list grows, `connectViewTaps` wires the joiner's caret/accept/mouse
+  taps + the `destroyed()` relay, and the three feeds re-arm with
+  `authorityEdge=true` — the join is an OPEN EDGE, so the new view is
+  painted folds/hints/pull marks WITHOUT any edit. Nothing touches the
+  wire, and a view that already carries the document is an idempotent true
+  (not even a re-arm). Ask counters are the single-writer proof: 2 asks
+  per feed after the join (open edge + join edge), 3 after ONE edit in
+  either view — never one ask per view.
+- **One piece of new registration state:** the LAST push-published report
+  (`published`/`hasPublished`). Folds/hints/pull catch a joiner up by
+  RE-ASKING; `publishDiagnostics` has no ask to re-send, so the join
+  replays the stored report onto the new view (the WHOLE array, empty
+  included — a publish of `[]` is "no more problems" and the joiner
+  deserves that same truth). Nothing else in the hub learned to remember.
+- **Deaths, all three shapes pinned:** the OWNER's death hands over
+  (`views.first()` becomes owner; the far-side `documentCount` stays 1 — a
+  stray `didClose` would exit 2 and the door answers -1; the SAME syncer
+  pointer and the SAME version number survive, the feeds never go mute and
+  the anchor moves); a JOINED view's death is a plain removal (wire and
+  the survivor's paints untouched); the LAST view's death releases with
+  `editorAlive=false` (didClose, count 0, `clientForUri` null). The pins
+  use the lifetime contract's legal extension (`document()->setParent(...)`
+  before `delete owner`) so nothing leaks.
+- **The popup story, told as designed:** popup-OWNER state (the `on` bit,
+  the three debounces, the pending asks, `TriggerState::lastView`) stays
+  ONE per document; popups stay PER VIEW, and the one that answers is the
+  validated interaction anchor (`interactionView` checks `lastView`
+  against the live view list, falls back to the owner). Typing keeps the
+  document-scoped edit tap (the signal never names its author) and the
+  popup still lands in the view that typed, because that view's own
+  `cursorMoved` paired with the edit set the anchor first. Two recorded
+  readings this machine had to settle: (1) a BYSTANDER's popup closing on
+  another view's keystroke is car D's VIEW rule (the foreign-mutation pass,
+  pinned in the D3 slots) — not the hub's fan-out, and the pin says so;
+  (2) the hub's OWN dismissals (`setPopupTriggers(…, false)`, a document
+  teardown with live views) close EVERY view's popups — the widened shape,
+  recorded (a single-view release never dismissed a popup it did not own;
+  leaving one showing an orphan the wire can no longer update is the worse
+  story). The mouse no-refire pin is read SAME-view-only (one popup per
+  view, so a second view dwelling at the same point owes its own), and the
+  `workspaceConfiguration` push stays OWNER-only (the buffer is per-view —
+  the owner speaks).
+- **Session alias rule built** (`Entry{editor, views, languageId}`): one
+  entry per uri; same editor + uri = idempotent true; a different editor
+  whose `document()` IS the registered document = an ALIAS JOIN (the
+  entry's `views` grows, an attached hub gets the same uri call, trigger
+  re-arms, and `documentOpened` deliberately does NOT re-fire — a tab
+  strip rides document-opened, not view-opened); a different DOCUMENT on a
+  held uri keeps the squatter refusal; a document already registered under
+  ANOTHER uri is the mirror-half refusal (one document, one uri).
+  `uriForEditor` resolves through document identity, `closeDocument(any
+  view)` is the document's close, owner death hands over, the last view's
+  death drops the entry. `DapHub::editorForSourcePath` carries the
+  recorded DAP divergence comment (a breakpoint ask resolves from either
+  alias view, the door returns the OWNER, so gutter dots paint there only
+  — DAP's decoration table has no per-uri fan-out door; alias paint is
+  car E's question).
+- Tripwires shipped: `hubViewJoinOpensOneDocumentAndStreamsEditsFromBoth
+  Views` (one `didOpen`, one syncer, version 0 through the join, edits
+  from BOTH views in ONE monotone stream, the server's own `saves` counter
+  proves the save door crosses once from either view, any-view close = one
+  `didClose` + both views unregistered + a second close is the silent
+  no-op), `hubViewJoinFoldHintAndPullPaintBothViewsAndAskOncePerEdge`,
+  `hubViewJoinPushDiagnosticsPaintBothViewsAndStayOnClose` (a published
+  report is the document's trail: both views wear it, and a close never
+  wipes it — the M8 stance widened to the view list, not changed),
+  `hubViewHandoverKeepsWireFeedsAndMarksStanding`,
+  `hubViewJoinPopupsFollowTheInteractingViewAndDisarmHidesBoth`;
+  `tst_glue`'s `aliasViewSharesOneEntryAndAnyViewCloses` and
+  `aliasHandoverWhenTheOwnerViewDies` (still NO server anywhere in that
+  binary). Two expectation slips worth the record, both MINE re-spelling
+  car C's far-side tables over a DIFFERENT fixture, the hub innocent both
+  times: the pull marks' clamped end columns ride the MIRRORED line's
+  length (line 1 is 7 units in `kFoldFixture`, 10 in `kPullFixture`), and
+  the marker-named pull items are Error 0 — only the wire-noise pair
+  carries Warning 1.
+- Run early, recorded at the machine's head (the ritual repeats it at the
+  close): the live probes are BOTH green through the surgery —
+  `tools/probe_clangd.sh` PROBE-OK, 11 steps on clangd 23.1.5, and
+  `tools/probe_dap.sh` PROBE-RITUAL-OK, both adapters agreed. The hub's
+  paint pair is the part of D5 a real server would feel, and nothing moved.
 
 D6 THE CLOSE RITUAL + the docs — the public surface is ONE ctor, so the
 wheel side stays honest with almost no code: the typesystem grows
@@ -3371,6 +3590,89 @@ alias slots; tst_lsp + the fakeserver fan-out slots; `--codegen` audit
 PROBE-OK at the head; the `CodeDocument.hpp` header contract, AGENTS,
 README and CHANGELOG records written; the car closes at 1.12.0 and car
 E (wheel-2) is the open car next.
+
+**D6 BUILT + CAR D CLOSED 2026-11-23** — the docs/wheel half, then the
+ritual. What the car's last machine actually was:
+- **The doc audit came FIRST and it shrank D6's list**: the four
+  `CodeDocument.hpp`/`CodeEditor.hpp` sentences the design record named
+  ("owns the single core observer slot", "one buffer, one observer slot",
+  the attached-vs-standalone v1 clause, the diff-mode restatement) were
+  ALREADY rewritten at D2, when the attach ctor and the OUTLIVE contract
+  moved into the headers. Two real catches survived the audit:
+  `CodeEditor.hpp`'s diff block still said "(the one editor per document
+  contract untouched)" — car D REPLACED that rule, so the block now says
+  the modified document is an ordinary document that may carry other
+  views, while the DIFF STATE stays per-view and the standalone original
+  stays the borrowed window M10 made it — and the same block claimed
+  **soft wrap is inert inside diff mode**, contradicting the `DiffState`
+  doc in the `.cpp` (the knob is LIVE, each side wraps at its own window).
+  The stale claim was car B's slip, not car D's; both sentences now carry
+  the weighted formula. AGENTS/README/CHANGELOG got the car: AGENTS's
+  current-state line + data-model conventions carry the two new contract
+  bullets (ONE document MANY views + the lifetime rule; DOCUMENT-scoped
+  glue with the JOIN/HANDOVER rules and the three recorded divergences),
+  and README's perf row was RE-MEASURED, not re-asserted (its ~5 ms
+  `setText` / ~7 µs rows were the v1-freeze readings; this runner prints
+  ~9 ms / ~11 µs/op — the same shape car 0 recorded).
+- **The wheel half, one line of surface**: the typesystem grows
+  `remove="all"` for the attach ctor — an honest absence, since Python has
+  no consumer-owned document to attach (the standalone `CodeDocument()`
+  ctor stays removed) and a garbage-collected owner would decide the
+  OUTLIVE contract badly; the door stays open in C++ only. The
+  THREE-copies lists gained NOTHING (no new bound type — the D2 check
+  held). `--codegen` at the bumped head: the three model checks all report
+  OK (class model, typesystem, function modifications — the last one is
+  what proves the new `remove="all"` rule matches a REAL door instead of a
+  typo'd signature), and the rejected log's delta against the 1.11.0
+  baseline is
+  exactly 11 qmn entries, every one a PRIVATE seam whose type is
+  deliberately unbound (`HighlightEngine*` returns on `CodeDocument::
+  existingParse`/`ensureParse` and `CodeEditor::parse`/`existingParse`/
+  `diffOriginalParse`, `const TextBuffer::EditEvent&` params on
+  `emitEditTrio` and `reconcileForeignEdit`, and four `LspHub` internals
+  that speak `QMap<…>::const_iterator` or `qmn::lsp::DocumentSyncer*`),
+  and one RENAME (`CodeDocument::noteEdit` → `emitEditTrio`, which is why
+  the log shows one entry GONE). The previously-dropped PUBLIC glue
+  surface is byte-identical between the two logs (the AGENTS inventory of
+  `std::function`- and `qmn::lsp`-typed doors), and the four NEW
+  `qmn::glue` entries are all PRIVATE `LspHub` helpers — a private seam
+  dropping is not a Python-visible change, which is why the THREE-copies
+  lists stayed untouched.
+- **The wheel-honesty probe** (a container against the REPAIRED 1.12.0
+  wheel, repo off `sys.path`) pinned the absence at the wheel, not just in
+  the XML: `CodeEditor(document)` is a `TypeError` naming only
+  `(parent=None)`, `CodeDocument()` is a `NotImplementedError`
+  ("cannot be instantiated"), and the door set is otherwise byte-intact —
+  both `setDiffDocuments` overloads, the fold/decoration/grammar doors,
+  `LspHub`/`ProjectSession`/`ServerSpec`, the `Monaco` shim, one
+  `libQt6Core` and one `libQt6Network` in `/proc/self/maps`.
+- **The bench A/B, with two traps worth their own lines**: a first attempt
+  built both cores by hand and read 55 µs/op for HEAD AND for the car — hand
+  flags without `-DQT_NO_DEBUG` (and `-fPIC` without
+  `-mno-direct-extern-access`) are a DIFFERENT BUILD, not a regression, and
+  the same wrong include path can pair one tree's header with another's TU
+  and segfault the bench. Built like the release (both archives from the
+  CMake Release recipe, the same bench TU, four interleaved runs): the
+  pre-car-D core mean **11.0 µs/op**, the car D core mean **10.9 µs/op**,
+  `nodes=29973` on both — the LIST costs nothing. And the absolute number
+  is not a baseline: the same v1.11.0 source read 7.2 µs/op in an earlier
+  hand-invoked run of this session, which is why README's row now carries
+  the day it was measured instead of a bare number.
+- **The ritual, all green at the head**: the two package literals
+  1.11.0 → 1.12.0 (`QMN_GLUE_VERSION` stays 1.0.0 — the shelf widened
+  additively), the container `--wheel` rebuilt/repaired/smoke-green/
+  parity-green (28 `text_changed` announcements), pydemo's fourth literal
+  re-pointed and its headless run green, the C++ packaging smoke (install
+  + `examples/consumer`: both smoke binaries build against the installed
+  1.12.0 package), ctest 7/7 in three rounds (99-101 s each), and the
+  live probes re-run at the head: `tools/probe_clangd.sh` PROBE-OK, 11
+  steps on clangd 23.1.5, and `tools/probe_dap.sh` PROBE-RITUAL-OK, both
+  adapters agreed.
+- **Car D CLOSED at 1.12.0.** Car E (wheel-2) is the open car, and it
+  inherits one named question from this one: DAP's breakpoint paint lands
+  on the OWNER view only (`DapHub::editorForSourcePath`), because DAP's
+  decoration feed has no per-uri fan-out door — alias paint is E's to
+  answer, and E is also where the 16 glue drops start shrinking.
 
 ### Car E — wheel-2 (DAP across + the answer routes)
 

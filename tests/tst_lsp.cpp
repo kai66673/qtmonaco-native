@@ -6250,6 +6250,548 @@ private slots:
                                            // keeps it untouched
     }
 
+    // --- car D machine D5: the DOCUMENT-scoped glue (design record: PLAN's
+    // D5 section). TWO VIEWS over ONE document join ONE registration, and
+    // every verdict here is read on the SERVER side of the wire: the
+    // fakeserver exits 2 on a second didOpen while the uri is still open, and
+    // on a didClose for a document it never saw open, so the documentCount
+    // door is the far-side oracle for "the wire saw this document exactly
+    // once, whoever knocked".
+
+    void hubViewJoinOpensOneDocumentAndStreamsEditsFromBothViews()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000); // explicit flush() below owns the versions
+
+        const QString uri = QStringLiteral("file:///join-1.py");
+        qmn::view::CodeEditor owner;
+        owner.setLanguage(QStringLiteral("python"));
+        owner.setPlainText(QStringLiteral("one\ntwo\nthree"));
+        QVERIFY(h.hub.openDocument(&owner, uri, QStringLiteral("python")));
+        QCOMPARE(h.spawnCount, 1);
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        auto* syncer = h.hub.syncerFor(&owner);
+        QVERIFY(syncer);
+        QCOMPARE(serverDocumentCount(client), 1); // the ONE didOpen
+
+        auto modelOk = [&](const QString& text, qint64 version) {
+            const QJsonObject verdict = assertSyncModel(client, uri, text,
+                                                        version);
+            QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                     qPrintable(modelDump(verdict)));
+        };
+        auto verdict = [&] { // the bare door: version + saves + open-ness
+            return askServer(client, QStringLiteral("test/assertModel"),
+                             QJsonObject{{QStringLiteral("uri"), uri}});
+        };
+        modelOk(QStringLiteral("one\ntwo\nthree"), 0);
+
+        // THE join: a SECOND VIEW over the same document (car D's attach
+        // ctor). Declared after the owner, so it dies first — the lifetime
+        // contract's safe order.
+        qmn::view::CodeEditor twin(owner.document());
+        QVERIFY(h.hub.openDocument(&twin, uri, QStringLiteral("python")));
+        QCOMPARE(h.spawnCount, 1);                // no new server...
+        QCOMPARE(serverDocumentCount(client), 1); // ...and NO second
+                                                  // didOpen: a re-open here
+                                                  // would kill the process
+                                                  // and the door answers -1
+        QVERIFY(h.hub.syncerFor(&twin) == syncer); // ONE syncer serves the
+        QVERIFY(h.hub.syncerFor(&owner) == syncer); // two views
+        QCOMPARE(syncer->version(), qint64(0));  // no version-stream restart
+        QVERIFY(h.hub.clientForUri(uri) == client);
+        // The join is idempotent, and the uri may be resolved from the
+        // DOCUMENT (resolveUri's documentUri leg — the second view never
+        // carries the uri itself).
+        QVERIFY(h.hub.openDocument(&twin, QString(),
+                                   QStringLiteral("python")));
+        QCOMPARE(serverDocumentCount(client), 1);
+        // NOTE: what the hub does with a SECOND document claiming a live uri
+        // (didClose + didOpen re-open) is the M4 shape, pinned byte-identical
+        // in hubCarriesManyDocumentsOnOneServer — the join did not touch it.
+        // The session's own squatter refusal is tst_glue's turf.
+
+        // ONE ordered didChange stream, whoever typed: the owner first...
+        owner.insertTextAt({0, 0}, QStringLiteral("Q"));
+        syncer->flush();
+        QCOMPARE(syncer->version(), qint64(1));
+        // ...then the ALIAS view, SAME counter, no restart.
+        twin.insertTextAt({2, 0}, QStringLiteral("Z"));
+        syncer->flush();
+        QCOMPARE(syncer->version(), qint64(2));
+        modelOk(QStringLiteral("Qone\ntwo\nZthree"), 2);
+        QCOMPARE(owner.toPlainText(), twin.toPlainText()); // one text, two views
+
+        // The save door resolves through EITHER view, and the server's own
+        // save counter is the far-side proof it really crossed once.
+        const int savesBefore = verdict().value(QStringLiteral("saves")).toInt();
+        h.hub.saveDocument(&twin);
+        QCOMPARE(verdict().value(QStringLiteral("saves")).toInt(),
+                 savesBefore + 1);
+        h.hub.saveDocument(&owner);
+        QCOMPARE(verdict().value(QStringLiteral("saves")).toInt(),
+                 savesBefore + 2);
+
+        // ANY view closes the DOCUMENT: one didClose, the whole registration
+        // released (both views go unregistered, the server holds nothing).
+        h.hub.closeDocument(&twin);
+        QCOMPARE(serverDocumentCount(client), 0);
+        QVERIFY(h.hub.syncerFor(&twin) == nullptr);
+        QVERIFY(h.hub.syncerFor(&owner) == nullptr);
+        h.hub.closeDocument(&owner); // the second close is the silent no-op
+        QCOMPARE(serverDocumentCount(client), 0);
+    }
+
+    // ONE ASK SERVES BOTH VIEWS, and the joined view is painted WITHOUT an
+    // edit: the fold, hint and pull-diagnostic feeds are per-DOCUMENT tables
+    // (one writer each) and their paints fan out over the view list. The ask
+    // counters are the single-writer proof — an edit edge through EITHER view
+    // produces exactly one ask per feed, never one per view.
+    void hubViewJoinFoldHintAndPullPaintBothViewsAndAskOncePerEdge()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("foldingrange"),
+                                 QStringLiteral("inlayhint"),
+                                 QStringLiteral("pull"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("allsrv"), {QStringLiteral("javascript")});
+        h.hub.setDebounceMs(5000); // only the feeds' own timers put bytes out
+        const QString uri = QStringLiteral("file:///join-2.js");
+
+        qmn::view::CodeEditor owner;
+        owner.setLanguage(QStringLiteral("javascript"));
+        owner.setPlainText(kFoldFixture);
+        QVERIFY(h.hub.openDocument(&owner, uri, QStringLiteral("javascript")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("allsrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        owner.show();
+
+        // The three authorities over kFoldFixture, decoded (car C's tables,
+        // re-spelled for THIS fixture: 9 lines, the last "tail b" 6 cols, and
+        // gamma IS on line 3 here — the hint fixture hides it).
+        const QStringList foldsExpected
+            = {QStringLiteral("0:1"), QStringLiteral("1:6"),
+               QStringLiteral("2:8"), QStringLiteral("3:4"),
+               QStringLiteral("7:8")};
+        const QStringList hintsBefore
+            = {QStringLiteral("0:0| <h> "), QStringLiteral("0:11|PAD "),
+               QStringLiteral("1:7|RETA"), QStringLiteral("2:8|RETB"),
+               QStringLiteral("3:11|RETC"), QStringLiteral("8:6|OUT")};
+        const QStringList hintsAfter
+            = {QStringLiteral("0:0| <h> "), QStringLiteral("0:11|PAD "),
+               QStringLiteral("1:7|RETA"), QStringLiteral("2:8|RETB"),
+               QStringLiteral("3:11|RETC"), QStringLiteral("8:10|OUT")};
+        // The pull noise over THIS fixture: the inverted pair's generous end
+        // (character 10) clamps to line 1's length (7 here, 12 in C5's
+        // kPullFixture), and the {999,x} pair clamps to the MIRROR'S end — the
+        // last line's end, which the " err" edit moves.
+        const QString pullBefore
+            = QStringLiteral("0:0|0:0|0||,0:0|0:1|0|sev9|fakesrv-pull,"
+                             "1:2|1:7|1|swapped|fakesrv-pull,"
+                             "8:6|8:6|0|outdoc|fakesrv-pull");
+        const QString pullAfter
+            = QStringLiteral("0:0|0:0|0||,0:0|0:1|0|sev9|fakesrv-pull,"
+                             "1:2|1:7|1|swapped|fakesrv-pull,"
+                             "8:7|8:10|0|pull line 8|fakesrv-pull,"
+                             "8:10|8:10|0|outdoc|fakesrv-pull");
+        auto threeOk = [&](qmn::view::CodeEditor* view) {
+            return foldSet(view) == foldsExpected && hintDump(view) == hintsBefore
+                && pullDump(view) == pullBefore;
+        };
+        QVERIFY2(waitUntil([&] { return threeOk(&owner); }),
+                 qPrintable(QStringLiteral("folds [%1] hints [%2] diags [%3] | %4")
+                                .arg(foldDump(&owner), hintDumpText(&owner),
+                                     pullDump(&owner), stderrDump(stderrSpy))));
+        QVERIFY(h.hub.foldsFedFromServer(&owner));
+        QVERIFY(h.hub.hintsFedFromServer(&owner));
+        QVERIFY(h.hub.diagnosticsFedFromServer(&owner));
+
+        // The JOIN: no edit, no re-open — the join is an OPEN EDGE for the
+        // three feeds, so the new view is painted from the same answers.
+        qmn::view::CodeEditor twin(owner.document());
+        twin.show();
+        QVERIFY(h.hub.openDocument(&twin, uri, QStringLiteral("javascript")));
+        QCOMPARE(serverDocumentCount(client), 1); // the wire stayed untouched
+        QVERIFY2(waitUntil([&] { return threeOk(&twin); }),
+                 qPrintable(QStringLiteral("twin folds [%1] hints [%2] "
+                                           "diags [%3] | %4")
+                                .arg(foldDump(&twin), hintDumpText(&twin),
+                                     pullDump(&twin),
+                                     stderrDump(stderrSpy))));
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/foldingRange")),
+                 2); // didOpen edge + JOIN edge: ONE ask, not one per view
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/inlayHint")),
+                 2);
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/diagnostic")),
+                 2);
+
+        // An edit typed in the ALIAS view: ONE ask per feed moves ALL THREE
+        // paints in BOTH views (the clamp/OUT legs follow the mirror, the
+        // pull scan gains its first token).
+        twin.insertTextAt({8, 6}, QStringLiteral(" err"));
+        QVERIFY2(waitUntil([&] {
+                     return hintDump(&twin) == hintsAfter
+                         && hintDump(&owner) == hintsAfter
+                         && pullDump(&twin) == pullAfter
+                         && pullDump(&owner) == pullAfter;
+                 }),
+                 qPrintable(QStringLiteral(
+                                "owner hints [%1] diags [%2] | twin hints [%3] "
+                                "diags [%4] | %5")
+                                .arg(hintDumpText(&owner), pullDump(&owner),
+                                     hintDumpText(&twin), pullDump(&twin),
+                                     stderrDump(stderrSpy))));
+        QCOMPARE(foldSet(&twin), foldSet(&owner)); // the fold answer is
+                                                   // unchanged by this edit
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/foldingRange")),
+                 3); // one ask per edit edge, serving both views
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/inlayHint")), 3);
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/diagnostic")), 3);
+
+        // And the authority still belongs to the feed in BOTH views: the
+        // single-writer door answers for the alias view too.
+        QVERIFY(h.hub.foldsFedFromServer(&twin));
+        QVERIFY(h.hub.hintsFedFromServer(&twin));
+        QVERIFY(h.hub.diagnosticsFedFromServer(&twin));
+
+        // A close through the alias view hands the fold source back to the
+        // grammar in EVERY surviving view (the teardown fan-out).
+        h.hub.closeDocument(&twin);
+        QVERIFY2(waitUntil([&] { return owner.foldableRanges().isEmpty(); }),
+                 qPrintable(QStringLiteral("owner folds after close [%1]")
+                                .arg(foldDump(&owner))));
+        QVERIFY(hintDump(&owner).isEmpty()); // the fed sets clear too
+        QVERIFY(owner.diagnostics().isEmpty()); // a PULL set is the hub's to
+                                               // clear (unlike a push mark)
+    }
+
+    // The PUSH route paints through the same fan-out (it is not a feed: a
+    // published mark belongs to the document, so BOTH views show it) — and a
+    // close never wipes published marks in any view (the M8 stance, widened
+    // to the view list rather than changed).
+    void hubViewJoinPushDiagnosticsPaintBothViewsAndStayOnClose()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("diags")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000);
+        const QString uri = QStringLiteral("file:///join-3.py");
+
+        qmn::view::CodeEditor owner;
+        owner.setLanguage(QStringLiteral("python"));
+        owner.setPlainText(QStringLiteral("bug here\nclean\n"));
+        QVERIFY(h.hub.openDocument(&owner, uri, QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QVERIFY2(waitUntil([&] { return !owner.diagnostics().isEmpty(); }),
+                 qPrintable(QStringLiteral("diags [%1]").arg(pullDump(&owner))));
+        QVERIFY(!h.hub.diagnosticsFedFromServer(&owner)); // PUSH marks are
+                                                         // the server's trail
+        const int marks = owner.diagnostics().size();
+        QVERIFY(marks >= 1);
+
+        qmn::view::CodeEditor twin(owner.document());
+        QVERIFY(h.hub.openDocument(&twin, uri, QStringLiteral("python")));
+        QVERIFY2(waitUntil([&] {
+                     return !twin.diagnostics().isEmpty()
+                         && pullDump(&twin) == pullDump(&owner);
+                 }),
+                 qPrintable(QStringLiteral("twin [%1] owner [%2]")
+                                .arg(pullDump(&twin), pullDump(&owner))));
+
+        // Typing in the ALIAS view moves the server model, and the publish
+        // that follows paints the NEW mark set in both views (the join's
+        // document tap is what put the bytes on the wire in the first place).
+        twin.insertTextAt({1, 0}, QStringLiteral("bug\n"));
+        QVERIFY2(waitUntil([&] {
+                     return twin.diagnostics().size() == marks + 1
+                         && owner.diagnostics().size() == marks + 1
+                         && pullDump(&twin) == pullDump(&owner);
+                 }),
+                 qPrintable(QStringLiteral("twin [%1] owner [%2]")
+                                .arg(pullDump(&twin), pullDump(&owner))));
+
+        // Closing through the owner leaves the surviving view's published
+        // marks exactly where they were (the M8 stance, D5 shape).
+        h.hub.closeDocument(&owner);
+        QVERIFY(!h.hub.diagnosticsFedFromServer(&twin));
+        QVERIFY2(twin.diagnostics().size() == marks + 1,
+                 qPrintable(QStringLiteral("twin after close [%1]")
+                                .arg(pullDump(&twin))));
+    }
+
+    // DEATHS, all three shapes (design record: PLAN's D5 section): the OWNER
+    // view's death HANDS OVER (the syncer, the version stream, the feeds and
+    // the wire all stand — no re-didOpen, no didClose); a JOINED view's death
+    // is a plain removal; the LAST view's death releases the DOCUMENT
+    // (didClose, and the teardown's editorAlive=false shape).
+    void hubViewHandoverKeepsWireFeedsAndMarksStanding()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("foldingrange"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("jssrv"), {QStringLiteral("javascript")});
+        h.hub.setDebounceMs(5000); // the fold feed's timer owns the wire
+        const QString uri = QStringLiteral("file:///join-4.js");
+        const QStringList foldsExpected
+            = {QStringLiteral("0:1"), QStringLiteral("1:6"),
+               QStringLiteral("2:8"), QStringLiteral("3:4"),
+               QStringLiteral("7:8")};
+
+        auto* owner = new qmn::view::CodeEditor;
+        owner->setLanguage(QStringLiteral("javascript"));
+        owner->setPlainText(kFoldFixture);
+        QVERIFY(h.hub.openDocument(owner, uri, QStringLiteral("javascript")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("jssrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        owner->show();
+        QVERIFY2(waitUntil([&] { return foldSet(owner) == foldsExpected; }),
+                 qPrintable(QStringLiteral("folds [%1] | %2")
+                                .arg(foldDump(owner), stderrDump(stderrSpy))));
+        auto* syncer = h.hub.syncerFor(owner);
+        QVERIFY(syncer);
+        QCOMPARE(serverDocumentCount(client), 1);
+
+        auto* twin = new qmn::view::CodeEditor(owner->document());
+        twin->show();
+        QVERIFY(h.hub.openDocument(twin, uri, QStringLiteral("javascript")));
+        QVERIFY2(waitUntil([&] { return foldSet(twin) == foldsExpected; }),
+                 qPrintable(QStringLiteral("twin folds [%1] | %2")
+                                .arg(foldDump(twin), stderrDump(stderrSpy))));
+        QCOMPARE(syncer->version(), qint64(0));
+        const int foldAsks = reqCount(stderrSpy,
+                                      QStringLiteral("textDocument/foldingRange"));
+
+        // The lifetime contract on its legal extension (CodeDocument.hpp's
+        // reparenting clause): the document moves OUT of the dying owner so
+        // it can go on serving the alias view.
+        owner->document()->setParent(twin);
+        delete owner; // THE HANDOVER: an owner view dies with a joiner alive
+        QCOMPARE(serverDocumentCount(client), 1); // NO didClose, no re-open:
+                                                  // a stray close would exit 2
+                                                  // and this door answers -1
+        QVERIFY(h.hub.syncerFor(twin) == syncer); // the SAME syncer survived
+        QCOMPARE(syncer->version(), qint64(0));   // the version stream stands
+        QVERIFY(h.hub.clientForUri(uri) == client);
+        QVERIFY(h.hub.foldsFedFromServer(twin));  // the feeds never went mute
+        QVERIFY2(foldSet(twin) == foldsExpected,
+                 qPrintable(QStringLiteral("twin folds after handover [%1]")
+                                .arg(foldDump(twin))));
+
+        // And the survivor still drives the wire: its edit rides the ONE
+        // stream (the document tap was never view-scoped), and the fold feed
+        // re-asks once.
+        twin->insertTextAt({8, 6}, QStringLiteral(" err"));
+        QVERIFY2(waitUntil([&] { return syncer->version() == 1; }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] {
+                     return reqCount(stderrSpy,
+                                     QStringLiteral("textDocument/foldingRange"))
+                         == foldAsks + 1;
+                 }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(foldSet(twin) == foldsExpected, // the re-ask ANSWERED (this
+                                                 // edit adds no brace, so the
+                                                 // report is the same set)
+                 qPrintable(QStringLiteral("twin folds after the handover edit "
+                                           "[%1] | %2")
+                                .arg(foldDump(twin), stderrDump(stderrSpy))));
+        const QJsonObject verdict = assertSyncModel(client, uri,
+                                                    QStringLiteral(
+                                                        "header line\n"
+                                                        "alpha {\n"
+                                                        "  beta {\n"
+                                                        "    gamma {\n"
+                                                        "    }\n"
+                                                        "  }\n"
+                                                        "  }\n"
+                                                        "tail a\n"
+                                                        "tail b err"),
+                                                    1);
+        QVERIFY2(verdict.value(QStringLiteral("ok")).toBool(),
+                 qPrintable(modelDump(verdict)));
+
+        // A THIRD view joins the handed-over registration: still one document
+        // on the wire, and it is painted from a fresh ask (the join edge).
+        auto* third = new qmn::view::CodeEditor(twin->document());
+        third->show();
+        QVERIFY(h.hub.openDocument(third, uri, QStringLiteral("javascript")));
+        QCOMPARE(serverDocumentCount(client), 1);
+        QVERIFY2(waitUntil([&] { return foldSet(third) == foldSet(twin); }),
+                 qPrintable(QStringLiteral("third folds [%1] | %2")
+                                .arg(foldDump(third), stderrDump(stderrSpy))));
+        QVERIFY(h.hub.syncerFor(third) == syncer);
+        const int asksAfterJoin = reqCount(
+            stderrSpy, QStringLiteral("textDocument/foldingRange"));
+        QVERIFY(asksAfterJoin == foldAsks + 2); // the JOIN edge asked once
+
+        // A JOINED view's death: plain removal, nothing on the wire changes
+        // and nothing in the survivor's paints is cleared.
+        delete third;
+        QCOMPARE(serverDocumentCount(client), 1);
+        QVERIFY(h.hub.syncerFor(twin) == syncer);
+        QVERIFY2(foldSet(twin) == foldsExpected, // the joiner's death cleared
+                 qPrintable(QStringLiteral("twin folds after a joiner died "
+                                           "[%1]")
+                                .arg(foldDump(twin)))); // NOTHING in the
+                                                        // survivor's paint
+        twin->insertTextAt({0, 0}, QStringLiteral("// x\n"));
+        QVERIFY2(waitUntil([&] { return syncer->version() == 2; }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/foldingRange"))
+                     > asksAfterJoin, // the feed is still live
+                 qPrintable(stderrDump(stderrSpy)));
+
+        // The LAST view's death (it owns the document now) releases the
+        // DOCUMENT: didClose on the wire, the registration gone.
+        delete twin;
+        QCOMPARE(serverDocumentCount(client), 0);
+        QVERIFY(h.hub.clientForUri(uri) == nullptr);
+    }
+
+    // THE POPUP STORY (design record: PLAN's D5 section): the popup-owner
+    // STATE (the arm bit, the three debounces, the pending asks) is per
+    // document — one story, whoever knocked; the POPUPS are per view, and the
+    // one that answers is the view that MOVED (TriggerState::lastView, the
+    // interaction anchor). A hub-driven dismissal closes them all.
+    void hubViewJoinPopupsFollowTheInteractingViewAndDisarmHidesBoth()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features"),
+                                 QStringLiteral("hoveron"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        h.hub.setDebounceMs(5000); // the syncer's debounce stays out of the way
+        const QString uri = QStringLiteral("file:///join-5.py");
+
+        qmn::view::CodeEditor owner;
+        owner.setLanguage(QStringLiteral("python"));
+        owner.setPlainText(QStringLiteral("alpha beta\ngamma"));
+        QVERIFY(h.hub.openDocument(&owner, uri, QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        owner.show();
+
+        qmn::view::CodeEditor twin(owner.document());
+        twin.show();
+        QVERIFY(h.hub.openDocument(&twin, uri, QStringLiteral("python")));
+        QCOMPARE(serverDocumentCount(client), 1);
+
+        // The arm is ONE per-document bit: knocking with either view arms the
+        // DOCUMENT, and either view's door answers the same truth.
+        h.hub.setPopupTriggers(&owner, true);
+        QVERIFY(h.hub.popupTriggersEnabled(&owner));
+        QVERIFY(h.hub.popupTriggersEnabled(&twin));
+
+        auto hoverLabel = [](qmn::view::CodeEditor* view) {
+            QLabel* l = view->findChild<QLabel*>(QStringLiteral("qmn-hover-label"));
+            return l ? l->text() : QStringLiteral("<no label>");
+        };
+        const int hoverAsks0 = reqCount(stderrSpy,
+                                        QStringLiteral("textDocument/hover"));
+
+        // THE ANCHOR: the idle caret move happens in the ALIAS view — the ask
+        // comes from the document's one hover timer and the popup shows on the
+        // view that moved, while the owner shows nothing.
+        twin.setPosition({0, 7}); // INSIDE "beta"
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("REQ textDocument/hover")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return twin.hoverVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QCOMPARE(hoverLabel(&twin), QStringLiteral("HOVER beta off=7"));
+        QVERIFY(!owner.hoverVisible()); // the bystander was never asked to show
+        QTest::qWait(300);
+        QCOMPARE(reqCount(stderrSpy, QStringLiteral("textDocument/hover")),
+                 hoverAsks0 + 1); // one gesture, ONE ask (the shared timer)
+
+        // The OWNER moves its own caret: the anchor MOVES (the next popup
+        // belongs to the mover), and the second ask reads the anchor's caret.
+        owner.setPosition({0, 7});
+        QVERIFY2(waitUntil([&] {
+                     return reqCount(stderrSpy,
+                                     QStringLiteral("textDocument/hover"))
+                         == hoverAsks0 + 2;
+                 }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return owner.hoverVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QCOMPARE(hoverLabel(&owner), QStringLiteral("HOVER beta off=7"));
+
+        // TYPING is the document-scoped tap (the edit signal never names its
+        // author) — the popup still lands in the view that typed, because its
+        // own cursorMoved paired with the edit set the anchor first.
+        QTest::keyClick(&twin, Qt::Key_X);
+        QVERIFY2(waitUntil([&] { return twin.completionListVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY(!owner.completionListVisible()); // no second popup in the
+                                                 // bystander (and no shared
+                                                 // popup: they are per view)
+
+        // The BYSTANDER's hover from the move leg is gone — but NOT by the
+        // hub's hand: car D's view rule closes a popup whose anchor froze in
+        // a frame another view just left (CodeEditor's foreign-mutation
+        // pass, pinned in tst_codeeditor's D3 pins). Popups are per view;
+        // the hub's own dismissal is the OTHER door, and that is the door
+        // the next legs read.
+        QVERIFY(!owner.hoverVisible());
+        QVERIFY(!owner.completionListVisible());
+
+        // A fresh idle caret move in the bystander asks again (the anchor
+        // moved, so the popup follows the MOVER) and paints there, while the
+        // typing view's completion list stands untouched: TWO popups, one per
+        // view, ONE popup-owner story per document.
+        const int hoverAsks1
+            = reqCount(stderrSpy, QStringLiteral("textDocument/hover"));
+        owner.setPosition({1, 1}); // INSIDE "gamma"
+        QVERIFY2(waitUntil([&] {
+                     return reqCount(stderrSpy,
+                                     QStringLiteral("textDocument/hover"))
+                         == hoverAsks1 + 1;
+                 }), qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitUntil([&] { return owner.hoverVisible(); }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY(twin.completionListVisible()); // per-view popups, each on
+                                               // its own legs
+
+        // DISMISSAL through EITHER view closes EVERY view's popups — the
+        // recorded Car-D widening: a single-view release never dismissed a
+        // popup it did not own, a hub dismissal that only closed one view
+        // would leave an orphan the wire can no longer update.
+        h.hub.setPopupTriggers(&twin, false); // knocked with the alias view
+        QVERIFY(!twin.completionListVisible());
+        QVERIFY(!owner.hoverVisible()); // ...and the bystander's popup went
+                                        // out on the same door
+        QVERIFY(!h.hub.popupTriggersEnabled(&owner));
+        QVERIFY(!h.hub.popupTriggersEnabled(&twin));
+        const int armedReqs = stderrSpy.count();
+        QTest::keyClick(&twin, Qt::Key_Y); // and the taps went quiet for both
+        QTest::keyClick(&owner, Qt::Key_Z);
+        QTest::qWait(700);
+        QCOMPARE(stderrSpy.count(), armedReqs);
+    }
+
 };
 
 QTEST_MAIN(TstLsp) // NOT guiless any more: machine 4's hub slots drive a real

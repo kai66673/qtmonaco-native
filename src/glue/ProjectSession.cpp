@@ -2,6 +2,7 @@
 
 #include "LspHub.hpp"
 
+#include "view/CodeDocument.hpp" // D5: document()->identity for the alias rule
 #include "view/CodeEditor.hpp"
 
 #include <QDir>
@@ -171,10 +172,45 @@ bool ProjectSession::openDocument(qmn::view::CodeEditor* editor,
     const auto existing = docs_.find(uri);
     if (existing != docs_.end()) {
         // The same editor re-opened under the same uri: idempotent true.
-        // A DIFFERENT editor claiming the uri: the honest refusal (one
+        if (existing->editor == editor)
+            return true;
+        // Car D (D5) ALIAS JOIN: a DIFFERENT editor whose document IS the
+        // registered document (an attached second view, car D's ctor)
+        // shares the entry — the hub's own VIEW JOIN takes the same uri
+        // (no didClose, no second didOpen, one edit stream; LspHub.hpp's
+        // door comment carries the wire rule). documentOpened does NOT
+        // re-fire: the DOCUMENT opened exactly once, and openCount/
+        // openUris stay one entry per uri (a tab strip rides document-
+        // OPENED, not view-opened — the second window is the app's call).
+        if (existing->editor && editor->document()
+            && existing->editor->document() == editor->document()) {
+            Entry e = existing.value(); // QHash value semantics: edit the
+            e.views.append(editor);     // copy, write back
+            docs_.insert(uri, e);
+            connect(editor, &QObject::destroyed, this,
+                    [this, uri, editor] { onViewDestroyed(uri, editor); });
+            if (hub_) {
+                // The hub joins the SAME registration (its own document
+                // test); the triggers arm for the new view too — the arm
+                // is per-document state, the door resolves through the
+                // view (the hub's syncerFor widens both ways, D5).
+                if (hub_->openDocument(editor, uri, e.languageId)
+                    && popupsOnOpen_)
+                    hub_->setPopupTriggers(editor, true);
+            }
+            return true;
+        }
+        // A different DOCUMENT claiming the uri: the honest refusal (one
         // document per uri — a real server rejects the second didOpen).
-        return existing->editor == editor;
+        return false;
     }
+
+    // The ALIAS RULE's mirror half: this document is already registered
+    // under ANOTHER uri — refuse. One document, one uri: a second uri
+    // would open a second syncer (and a second didOpen) on one edit
+    // stream, and the registry would answer the same text under two keys.
+    if (editor->document() && !uriForDocument(editor->document()).isEmpty())
+        return false;
 
     const QString language
         = !languageOverride.isEmpty()
@@ -185,12 +221,19 @@ bool ProjectSession::openDocument(qmn::view::CodeEditor* editor,
     if (!language.isEmpty())
         editor->setLanguage(language);
 
-    docs_.insert(uri, Entry { editor, language });
+    Entry entry;
+    entry.editor = editor;
+    entry.views.append(editor); // the owner IS views.first() (the
+                                // handover rule's invariant)
+    entry.languageId = language;
+    docs_.insert(uri, entry);
     order_ << uri;
-    // The hub's auto-unregister precedent: an editor dying under us drops
-    // the session entry too (the hub releases its OWN side through its own
-    // destroyed() hookup — this lambda must not touch the dying editor).
-    connect(editor, &QObject::destroyed, this, [this, uri] { dropUri(uri); });
+    // The hub's auto-unregister precedent, D5 shape: EVERY view of the
+    // document gets its own relay, and the relay does pointer
+    // bookkeeping ONLY (the dying editor is never dereferenced — the
+    // hub releases its OWN side through its own destroyed() hookups).
+    connect(editor, &QObject::destroyed, this,
+            [this, uri, editor] { onViewDestroyed(uri, editor); });
 
     if (hub_) {
         // The documented no-op path: no spec claims this language, the hub
@@ -207,6 +250,10 @@ void ProjectSession::closeDocument(qmn::view::CodeEditor* editor)
 {
     if (!editor)
         return;
+    // D5: the uri resolves through DOCUMENT identity, so this door closes
+    // the DOCUMENT whichever view it is knocked with (one document, one
+    // close — the hub's own closeDocument releases the whole registration
+    // including every joined view's taps and paints).
     const QString uri = uriForEditor(editor);
     if (uri.isEmpty())
         return; // unregistered: the silent no-op
@@ -239,15 +286,52 @@ qmn::view::CodeEditor* ProjectSession::editorForUri(const QString& uri) const
     return it == docs_.end() ? nullptr : it->editor;
 }
 
-QString ProjectSession::uriForEditor(const qmn::view::CodeEditor* editor) const
+QString ProjectSession::uriForDocument(const qmn::view::CodeDocument* document)
+    const
 {
-    if (!editor)
+    if (!document)
         return {};
     for (const QString& uri : order_) {
-        if (docs_.value(uri).editor == editor)
+        const Entry& e = docs_.value(uri);
+        // D5: document IDENTITY is the registry's real key-side fact —
+        // every view of the document answers the same uri through it.
+        if (e.editor && e.editor->document() == document)
             return uri;
     }
     return {};
+}
+
+QString ProjectSession::uriForEditor(const qmn::view::CodeEditor* editor)
+    const
+{
+    if (!editor)
+        return {};
+    return uriForDocument(editor->document()); // D5: widened to document
+                                               // identity — ANY view of the
+                                               // registered document (the
+                                               // owner or a joined alias)
+                                               // answers its uri
+}
+
+// The dying-view bookkeeping (D5) — see the destroyed() hookup above: the
+// LAST view drops the entry (the hub auto-releases its own side on the
+// same edge), an OWNER death with joiners alive HANDS OVER.
+void ProjectSession::onViewDestroyed(const QString& uri,
+                                     qmn::view::CodeEditor* view)
+{
+    auto it = docs_.find(uri);
+    if (it == docs_.end())
+        return; // closeDocument dropped it first
+    Entry e = it.value();
+    e.views.removeAll(view); // the dying view is only ever COMPARED
+    if (e.views.isEmpty()) {
+        dropUri(uri);
+        return;
+    }
+    if (e.editor == view)
+        e.editor = e.views.first(); // the HANDOVER (the hub hands its own
+                                    // registration over on the same edge)
+    docs_.insert(uri, e);
 }
 
 void ProjectSession::dropUri(const QString& uri)

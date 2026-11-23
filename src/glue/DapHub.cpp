@@ -431,6 +431,13 @@ CodeEditor* DapHub::editorForSourcePath(const QString& path) const
     // editorForUri normalizes its argument exactly like openDocument
     // registered the key, and a scheme-bearing uri passes through
     // unchanged (ProjectSession::normalizeUri's own rule).
+    // CAR-D DIVERGENCE (D5, recorded): with an ALIASED document (two views
+    // of one file, the session's alias rule) the breakpoint ask resolves
+    // from EITHER view (uriForEditor answers through document identity),
+    // but this door returns the OWNER view — so the gutter dots paint
+    // there, not in every alias view. Unlike the LSP feeds, DAP's
+    // decoration table has no per-uri fan-out door to widen; the alias
+    // paint joins a later car's desk when the DAP shelf grows one.
     return session_->editorForUri(path);
 }
 

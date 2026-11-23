@@ -73,8 +73,11 @@ public:
     HighlightEngine(const HighlightEngine&) = delete;
     HighlightEngine& operator=(const HighlightEngine&) = delete;
 
-    // Borrows the view's buffer. Single-thread discipline: every callback
-    // runs while nobody mutates the buffer (parsing happens in paint).
+    // Borrows the DOCUMENT's buffer (D4: the engine is document-owned and
+    // rides the core observer list directly; the attach caller owns the
+    // subscription and must not let the engine outlive the buffer).
+    // Single-thread discipline: every callback runs while nobody mutates
+    // the buffer (parsing happens in paint).
     void attach(const qmn::core::TextBuffer* buffer);
 
     // "" or an unknown id disables highlighting (tree + query dropped,
@@ -133,15 +136,42 @@ public:
     // index current; defers the reparse until refreshIfNeeded().
     void onEdit(const qmn::core::TextBuffer::EditEvent& ev);
 
-    // The widget's visible document window [startUnit, endUnit) in model
-    // offsets; paintEvent feeds it every frame. On big documents it lets
-    // the adaptive policy scope reparse+query to what is on screen
-    // (measured, tools/bench_ts_split.cpp: full incremental reparse is
-    // ~1-3ms/keystroke for json/js but ~23ms for python at 200KB, while
+    // The VIEWPORT SET (car D machine D4): one window per viewing surface,
+    // keyed by an opaque non-dereferenced key — a paint caller passes the
+    // address of its view (or of its diff session) and releases the entry
+    // when that surface goes away. paintEvent feeds the editor's own
+    // window every frame; the diff chrome feeds the ORIGINAL document's
+    // engine the original-row window through the same door. On big
+    // documents the adaptive policy scopes reparse+query to the UNION of
+    // the set (a split view parses both halves and nothing else): one
+    // window can only ever GROW, so no parse flip-flop when two views
+    // paint alternating windows on one shared engine. Repeating the same
+    // window for a key is a no-op; an empty set means "never fed" (the
+    // pre-D4 unset state — unscoped whole-document parse+query).
+    //
+    // The per-window policy constants are unchanged (measured,
+    // tools/bench_ts_split.cpp: full incremental reparse is ~1-3ms/
+    // keystroke for json/js but ~23ms for python at 200KB, while
     // viewport-range parse + viewport-scoped query stay under ~0.7ms for
     // every pinned grammar; capture sets verified IDENTICAL vs the full
-    // tree inside the window). Repeating the same window is a no-op.
-    void setViewport(int startUnit, int endUnit);
+    // tree inside the window). NOTE the union covers the range BETWEEN
+    // two far-apart windows too: the engine parses ONE contiguous range,
+    // splitting the parse into per-window ranges is not on this car.
+    void setViewport(const void* viewKey, int startUnit, int endUnit);
+    void dropViewport(const void* viewKey); // surface died / stopped viewing
+    // Test oracle (the parse-count tripwire car D's design record names:
+    // "two views typing one keystroke -> EXACTLY ONE reparse"): counts
+    // every reparse pass actually executed (full or viewport).
+    int parseCount() const { return parseCount_; }
+    // Oracle doors for the viewport-SET pins (internal seam: these are
+    // NOT public API — HighlightEngine.hpp is not an installed header):
+    // the current union window, what the live tree actually covers, and
+    // the number of surfaces in the set.
+    int unionStart() const { return vpStart_; }
+    int unionEnd() const { return vpEnd_; }
+    int covStart() const { return covStart_; }
+    int covEnd() const { return covEnd_; }
+    int viewportSurfaceCount() const { return int(windows_.size()); }
 
     // Brings the engine current (like refreshIfNeeded) and guarantees the
     // returned spans truly cover [startUnit, endUnit): a viewport-scoped
@@ -278,6 +308,9 @@ private:
     // types). Runs exactly when rebuildSpans runs, so fold cost rides the
     // same at-most-once-per-keypress cadence and the same viewport scoping.
     void rebuildFolds(int qStart, int qEnd);
+    // Recompute the union window [vpStart_, vpEnd_) from windows_ (D4):
+    // flag-equivalent to the pre-D4 setViewport body over the union.
+    void recomputeUnion();
     // Node text as UTF-16 units via the buffer's piece view (the tree and
     // buffer are always current inside rebuildSpans).
     QString nodeText(const TSNode& node) const;
@@ -299,12 +332,23 @@ private:
     enum class Mode { Full, Viewport };
     Mode mode_ = Mode::Full; // parse strategy of the NEXT reparse
     Mode spansMode_ = Mode::Full; // query scope that produced spans_
-    bool viewportSet_ = false;
-    bool windowDirty_ = false; // viewport moved since the last refresh
-    int vpStart_ = 0, vpEnd_ = 0; // current viewport window (units)
+    // The viewport SET (D4): per-surface windows, feed order kept. The
+    // UNION [vpStart_, vpEnd_) is recomputed on every set/drop and is
+    // what the adaptive policy scopes to (single source: it is always
+    // current w.r.t. the set, and buffer text changes move no window).
+    struct ViewWindow {
+        const void* key;
+        int start;
+        int end;
+    };
+    std::vector<ViewWindow> windows_;
+    bool viewportSet_ = false; // the set is non-empty (was: one window fed)
+    bool windowDirty_ = false; // the UNION moved since the last refresh
+    int vpStart_ = 0, vpEnd_ = 0; // current union window (units)
     int covStart_ = 0, covEnd_ = 0; // tree_ covers [covStart_, covEnd_)
     int spanQStart_ = 0, spanQEnd_ = 0; // query window behind spans_
     double lastParseMs_ = 0.0;
+    int parseCount_ = 0; // test oracle: reparse passes actually run
 
     static constexpr double kParseBudgetMs = 8.0; // json 1.1 / js 3.3 vs py 23 @200KB
     static constexpr int kViewportMinUnits = 16 * 1024; // policy only pays off big

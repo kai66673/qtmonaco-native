@@ -368,12 +368,44 @@ private slots:
     // ---- M25 CodeDocument (Gate 2, car 1 first machine): the editor-owned
     // model object — ownership/attach, uri + modified doors, and the
     // editApplied pre-op-frame delta stream the LSP syncer and diff car
-    // will ride. One editor per document (v1 contract).
+    // will ride. An argument-less editor owns its own document; SHARING
+    // one document across views is the car D attach ctor (see below).
     void documentOwnedAndMirrorsThroughEditorDoors();
     void documentEditDeltasReplayToExactText();
     void documentSignalsOrderBeforeEditorTextChanged();
     void documentModifiedLifecycleIsMarkSavedBounded();
     void documentUriDoorsAndPerEditorIsolation();
+
+    // ---- car D machine D2: the multi-observer core. The attach ctor (the
+    // car's one public widening), the document's mux slot riding the LAST
+    // core-observer slot (the v1.11 bus order survives at ANY view count,
+    // one trio on the wire per mutation), the replace bracket (setText's
+    // whole-doc trio fires exactly once, AFTER every replace hook ran),
+    // and view-death detach leaving the mux order intact.
+    void attachSecondViewSharesDocumentTextAndPingFanout();
+    void attachedViewsBusIsTrioThenTailsInAttachOrder();
+    void replaceBracketFiresTrioOnceAfterTheHooks();
+    void viewDeathDetachesAndTheMuxKeepsItsPlace();
+    void standaloneDocumentAttachesViewsAndOutlivesThem();
+    // car D machine D3 (origin tags + foreign reconciliation)
+    void foreignEditMapsBystanderCaretAndSelection();
+    void foreignLineDeleteLiftsBystanderCaretAbove();
+    void foreignLineDeleteClampsBystanderSelection();
+    void foreignUndoRestoresMappedCaretInBothViews();
+    void bystanderUndoesGroupsItNeverTyped();
+    void bystanderRedoAfterForeignUndoRestoresFrame();
+    void foreignReplaceClearsBystanderMarksAndCaret();
+    void lateAttachAlignsMarksAtAttachTime();
+    void foreignEditClosesBystanderPopups();
+    void foreignEditSilentToMotionSignalsLoudToA11y();
+    // car D machine D4 (one HighlightEngine per document): the shared
+    // parse is ONE engine on the DOCUMENT — the parse-count oracle, the
+    // language last-writer-wins door, the viewport SET union, and the
+    // registry reconcile reaching the one shared engine.
+    void sharedParseOneReparseForTwoViews();
+    void sharedLanguageLastWriterWinsAndPropsStayPerView();
+    void viewportUnionCoversBothViewsAndShrinksOnDetach();
+    void registryRemapReachesSharedParseOnce();
 
     // ---- M25 soft wrap (Gate 2): the pure slot-map layer, BEFORE the paint/
     // hit/caret segment wiring. The DoD's numeric tripwires: the row doors'
@@ -9975,7 +10007,8 @@ void TestCodeEditor::documentSignalsOrderBeforeEditorTextChanged()
 
     // First mutation on a fresh document: flag transition leads, then the
     // delta, then the document ping, and ONLY THEN the editor's ping — the
-    // order the ctor's observer keeps (noteEdit before emit textChanged()).
+    // v1.11 order, now carried byte-identically by the document's mux
+    // slot (the LAST core-observer slot; D2) for any number of views.
     QTest::keyClick(editor, Qt::Key_X); // types lowercase 'x' (existing convention)
     QCOMPARE(bus, (QStringList{QStringLiteral("mod:true"), QStringLiteral("applied:0:0:x"),
                                QStringLiteral("doc"), QStringLiteral("editor")}));
@@ -10043,8 +10076,9 @@ void TestCodeEditor::documentUriDoorsAndPerEditorIsolation()
     doc->setDocumentUri(QStringLiteral("untitled:noname"));
     QCOMPARE(uriSpy.count(), 2);
 
-    // One editor per document (v1 contract): every editor owns its OWN
-    // document — no shared buffer, no cross-talk between edit streams.
+    // Every argument-less editor owns its OWN document — no shared buffer,
+    // no cross-talk between the separate documents' edit streams (sharing
+    // is the car D attach ctor's business, pinned in the tests below).
     CodeEditor second;
     QVERIFY(second.document() != doc);
     QVERIFY(second.document()->parent() == static_cast<QObject*>(&second));
@@ -10056,6 +10090,713 @@ void TestCodeEditor::documentUriDoorsAndPerEditorIsolation()
     QTest::keyClicks(&second, "x");
     QCOMPARE(firstSpy.count(), 0); // isolated observer slots
     QCOMPARE(doc->toPlainText(), QString());
+}
+
+// --- car D machine D2: the multi-observer core ---------------------------
+// Attach-ctor + document-mux pins (contract: CodeDocument/CodeEditor
+// headers). The headline trio: the v1.11 bus order survives at one view,
+// and at N views it generalifies to [per-view passes in attach order] ->
+// trio -> [textChanged tails in attach order] — ONE trio on the wire per
+// mutation no matter how many views share the document. The replace knot:
+// setText's whole-doc trio fires EXACTLY ONCE, AFTER every replace hook
+// has run (the beginReplace/endReplace bracket; zero stale-state window).
+
+void TestCodeEditor::attachSecondViewSharesDocumentTextAndPingFanout()
+{
+    using qmn::view::CodeDocument;
+    CodeEditor second(editor->document()); // THE attach door (ctor 2)
+
+    CodeDocument* doc = editor->document();
+    QVERIFY(second.document() == doc);
+    // Attach does NOT reparent: the editor-owned document keeps its owner
+    // as parent — the lifetime contract (the document outlives every view)
+    // is the consumer's, pinned by the two disposal-order tests here.
+    QVERIFY(doc->parent() == static_cast<QObject*>(editor));
+
+    QSignalSpy docSpy(doc, &CodeDocument::textChanged);
+    QSignalSpy firstSpy(editor, &CodeEditor::textChanged);
+    QSignalSpy secondSpy(&second, &CodeEditor::textChanged);
+
+    QTest::keyClicks(&second, "abc"); // the SECOND view does the typing
+    QCOMPARE(editor->toPlainText(), QStringLiteral("abc")); // shared buffer
+    QCOMPARE(doc->toPlainText(), QStringLiteral("abc"));
+    QCOMPARE(editor->lineCount(), second.lineCount());
+    // One trio on the wire per primitive mutation, and the ping fans out
+    // to EVERY view: 'abc' is three primitive inserts.
+    QCOMPARE(docSpy.count(), 3);
+    QCOMPARE(firstSpy.count(), 3);
+    QCOMPARE(secondSpy.count(), 3);
+
+    // Caret state is per-VIEW: the typing view moved by ITS OWN path; the
+    // bystander's caret rides the D3 foreign mapping (it sat AT the insert
+    // point, and a caret at an insert point stays behind the inserted text
+    // — offset 0 never moves through an insert at 0). D3's full mapping
+    // suite is the pins below this one.
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 3}),
+             "the typing view's caret did not ride its own typing");
+    QVERIFY2(editor->position() == (qmn::view::TextPosition{0, 0}),
+             "the bystander view's caret left its at-insert-point stay");
+
+    // The stack view dies at scope end — BEFORE the owner editor (the safe
+    // order; its dtor detaches from the still-alive document).
+}
+
+void TestCodeEditor::attachedViewsBusIsTrioThenTailsInAttachOrder()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    CodeEditor second(doc); // attach order: the owner view first, then this
+
+    QStringList bus;
+    QObject::connect(doc, &CodeDocument::modificationChanged,
+                     [&bus](bool m) { bus << (m ? QStringLiteral("mod:true")
+                                                : QStringLiteral("mod:false")); });
+    QObject::connect(doc, &CodeDocument::editApplied,
+                     [&bus](int s, int e, const QString& t) {
+                         bus << QStringLiteral("applied:%1:%2:%3").arg(s).arg(e).arg(t);
+                     });
+    QObject::connect(doc, &CodeDocument::textChanged, [&bus] { bus << QStringLiteral("doc"); });
+    QObject::connect(editor, &CodeEditor::textChanged, [&bus] { bus << QStringLiteral("v1"); });
+    QObject::connect(&second, &CodeEditor::textChanged, [&bus] { bus << QStringLiteral("v2"); });
+
+    // The acting view is the SECOND one — the bus is document-shaped, not
+    // actor-shaped: the bystander's tail fires too, in ATTACH order.
+    QTest::keyClick(&second, Qt::Key_X);
+    QCOMPARE(bus, (QStringList{QStringLiteral("mod:true"), QStringLiteral("applied:0:0:x"),
+                               QStringLiteral("doc"), QStringLiteral("v1"),
+                               QStringLiteral("v2")}));
+    bus.clear();
+    QTest::keyClick(&second, Qt::Key_Y); // flag already set: no transition
+    QCOMPARE(bus, (QStringList{QStringLiteral("applied:1:1:y"), QStringLiteral("doc"),
+                               QStringLiteral("v1"), QStringLiteral("v2")}));
+}
+
+void TestCodeEditor::replaceBracketFiresTrioOnceAfterTheHooks()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    CodeEditor second(doc);
+
+    editor->setPlainText(QStringLiteral("one\ntwo\nthree"));
+    editor->setPosition({2, 3}); // a caret deep in the old doc: the replace
+
+    QSignalSpy appliedSpy(doc, &CodeDocument::editApplied);
+    QSignalSpy docSpy(doc, &CodeDocument::textChanged);
+    QSignalSpy firstSpy(editor, &CodeEditor::textChanged);
+    QSignalSpy secondSpy(&second, &CodeEditor::textChanged);
+    QSignalSpy selSpy(editor, &CodeEditor::selectionChanged);
+
+    // The state the trio must NOT be able to see stale: an editApplied
+    // handler that reads the acting view observes the POST-replace world
+    // (caret reset, new lineCount) — the deferral knot, v1.11-style trio-
+    // before-selectionChanged tail preserved.
+    bool caretResetInside = false;
+    bool newShapeInside = false;
+    QObject::connect(doc, &CodeDocument::editApplied, [&](int, int, const QString&) {
+        caretResetInside = (editor->position() == (qmn::view::TextPosition{0, 0}));
+        newShapeInside = (doc->lineCount() == 2 && doc->toPlainText() == QStringLiteral("four\nfive"));
+    });
+
+    editor->setPlainText(QStringLiteral("four\nfive"));
+    QCOMPARE(appliedSpy.count(), 1); // ONE whole-document event on the wire
+    QCOMPARE(appliedSpy.at(0).at(0).toInt(), 0);
+    QCOMPARE(appliedSpy.at(0).at(2).toString(), QStringLiteral("four\nfive"));
+    QVERIFY2(caretResetInside, "the replace trio fired before the caret reset");
+    QVERIFY2(newShapeInside, "the replace trio fired before the replace completed");
+    // ...and the fan-out is once-per-view, with the tails still BEFORE
+    // selectionChanged (the v1.11 tail order across the bracket).
+    QCOMPARE(docSpy.count(), 1);
+    QCOMPARE(firstSpy.count(), 1);
+    QCOMPARE(secondSpy.count(), 1);
+    QCOMPARE(selSpy.count(), 1);
+
+    QStringList bus;
+    QObject::connect(doc, &CodeDocument::editApplied, [&bus](int, int, const QString&) {
+        bus << QStringLiteral("applied");
+    });
+    QObject::connect(doc, &CodeDocument::textChanged, [&bus] { bus << QStringLiteral("doc"); });
+    QObject::connect(editor, &CodeEditor::textChanged, [&bus] { bus << QStringLiteral("v1"); });
+    QObject::connect(&second, &CodeEditor::textChanged, [&bus] { bus << QStringLiteral("v2"); });
+    QObject::connect(editor, &CodeEditor::selectionChanged, [&bus] { bus << QStringLiteral("sel"); });
+    bus.clear();
+    doc->setPlainText(QStringLiteral("routed through the first view")); // the DOC door
+    QCOMPARE(appliedSpy.count(), 2); // routing doc->view->bracket: still ONE event
+    QCOMPARE(bus, (QStringList{QStringLiteral("applied"), QStringLiteral("doc"),
+                               QStringLiteral("v1"), QStringLiteral("v2"),
+                               QStringLiteral("sel")}));
+}
+
+void TestCodeEditor::viewDeathDetachesAndTheMuxKeepsItsPlace()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    {
+        CodeEditor second(doc);
+        QTest::keyClicks(&second, "a");
+        // second leaves BOTH the view list and the buffer's observer list
+        // right here (the dtor detaches; the document outlives the view).
+    }
+    QSignalSpy appliedSpy(doc, &CodeDocument::editApplied);
+    QSignalSpy firstSpy(editor, &CodeEditor::textChanged);
+    QSignalSpy docSpy(doc, &CodeDocument::textChanged);
+    QVERIFY(appliedSpy.isValid() && firstSpy.isValid() && docSpy.isValid());
+
+    QTest::keyClicks(editor, "b"); // no zombie tail: exactly one each
+    QCOMPARE(appliedSpy.count(), 1);
+    QCOMPARE(firstSpy.count(), 1);
+    QCOMPARE(docSpy.count(), 1);
+    // Per-VIEW carets: the bystander's caret sat at 0 through the dead
+    // view's typing, so "b" lands BEFORE the "a" the departed view typed.
+    QCOMPARE(doc->toPlainText(), QStringLiteral("ba"));
+
+    // And the list is re-attachable: a FRESH view re-asserts the mux last,
+    // the old view's pass still runs first (order rides the bus test).
+    CodeEditor third(doc);
+    QStringList bus;
+    QObject::connect(doc, &CodeDocument::textChanged, [&bus] { bus << QStringLiteral("doc"); });
+    QObject::connect(editor, &CodeEditor::textChanged, [&bus] { bus << QStringLiteral("v1"); });
+    QObject::connect(&third, &CodeEditor::textChanged, [&bus] { bus << QStringLiteral("v3"); });
+    QTest::keyClicks(editor, "c");
+    QCOMPARE(bus, (QStringList{QStringLiteral("doc"), QStringLiteral("v1"),
+                               QStringLiteral("v3")}));
+}
+
+void TestCodeEditor::standaloneDocumentAttachesViewsAndOutlivesThem()
+{
+    using qmn::view::CodeDocument;
+    // The LIFETIME CONTRACT, pinned as the safe order: the document (here
+    // consumer-owned, the standalone ctor) outlives EVERY attached view.
+    // Declaration order makes it so: doc dies LAST (reverse-order scope
+    // exit), the two parentless views first — their dtors detach from the
+    // still-alive document and buffer.
+    QScopedPointer<CodeDocument> doc(new CodeDocument());
+    CodeEditor a(doc.get());
+    CodeEditor b(doc.get());
+
+    QTest::keyClicks(&a, "hey");
+    QCOMPARE(b.toPlainText(), QStringLiteral("hey")); // both views, one text
+    QCOMPARE(doc->toPlainText(), QStringLiteral("hey"));
+
+    // The document door with views attached routes through the FIRST
+    // view's replace machinery (brackets and all): still one text, both
+    // views consistent.
+    doc->setPlainText(QStringLiteral("shared"));
+    QCOMPARE(a.toPlainText(), QStringLiteral("shared"));
+    QCOMPARE(b.toPlainText(), QStringLiteral("shared"));
+    doc->setDocumentUri(QStringLiteral("untitled:twoview"));
+    QCOMPARE(a.document()->documentUri(), QStringLiteral("untitled:twoview"));
+
+    // Scope exit order: b, a, then the scoped doc — the contract-safe way.
+}
+
+// --- car D machine D3 (origin tags + foreign reconciliation) ---------------
+// The pins below lean on the D3 diagnostic doors (undoMarkDepth()/
+// redoMarkDepth()): every view's caret-mark mirror must equal the shared
+// buffer's (undoDepth, redoDepth) at every QUIESCENT point — including a
+// view that never typed a key. The whole pre-D3 suite (547 slots) is the
+// byte-identical self-path tripwire: a MISSED origin tag double-shifts a
+// caret or skews a mirror here, LOUD.
+
+void TestCodeEditor::foreignEditMapsBystanderCaretAndSelection()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    editor->setPlainText(QStringLiteral("hello world")); // 11 units, 0..10
+    CodeEditor second(doc);
+    second.setPosition({0, 6});  // the ACTOR types INSIDE the word (before
+    editor->setPosition({0, 11}); // the 'w'; the bystander sits at the 'd' end)
+
+    QSignalSpy cursorSpy(editor, &CodeEditor::cursorMoved);
+    QSignalSpy selSpy(editor, &CodeEditor::selectionChanged);
+    QTest::keyClick(&second, Qt::Key_X); // actor = the SECOND view; the
+                                         // OWNER bystanders (both ways tested)
+    QCOMPARE(editor->toPlainText(), QStringLiteral("hello xworld"));
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 7}),
+             "the acting view did not ride its own typing");
+    QVERIFY2(editor->position() == (qmn::view::TextPosition{0, 12}),
+             "the bystander caret did not ride the foreign insert algebra");
+    // SILENT to the view's own motion signals (the hub's ask taps ride
+    // those; the user of THIS view moved nothing).
+    QCOMPARE(cursorSpy.count(), 0);
+    QCOMPARE(selSpy.count(), 0);
+
+    // A selection straddling the insert point survives: the end strictly
+    // RIGHT of the insert shifts, the end left of it stays. (The raw
+    // selection doors are private machinery — the a11y text-interface
+    // setSelection channel is this file's programmatic-selection door,
+    // cf. the M11 pins.)
+    auto* ti = QAccessible::queryAccessibleInterface(editor)->textInterface();
+    QVERIFY(ti);
+    ti->setSelection(0, 3, 8); // offsets on the OWNER (the bystander here)
+    QVERIFY(editor->hasSelection());
+    QTest::keyClick(&second, Qt::Key_Q); // actor caret was at {0,6}
+    QCOMPARE(editor->toPlainText(), QStringLiteral("hello xqworld"));
+    QVERIFY(editor->hasSelection()); // the selection SURVIVES the foreign
+                                     // insert (only an eaten one collapses)
+    int a = -9, b = -9;
+    ti->selection(0, &a, &b);
+    QCOMPARE(a, 3); // left of the insert: stayed
+    QCOMPARE(b, 9); // right of it: rode the +1
+}
+
+void TestCodeEditor::foreignLineDeleteLiftsBystanderCaretAbove()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    editor->setPlainText(QStringLiteral("alpha\nbeta\ngamma"));
+    CodeEditor second(doc);
+    editor->setPosition({2, 2}); // actor on the LAST line
+    second.setPosition({2, 2});  // bystander deep on the same line
+
+    editor->deleteLineAt(0); // ACTOR removes line 0 WHOLE ("alpha\n", the
+                             // span [0,6)): the bystander's (2,2) = offset
+                             // 13 rides the algebra to 7 and RE-RESOLVES
+                             // through lineColAt in the POST-op frame —
+                             // never a stale line number lazily forgiven
+                             // by the selection math
+    QCOMPARE(editor->toPlainText(), QStringLiteral("beta\ngamma"));
+    QVERIFY2(second.position() == (qmn::view::TextPosition{1, 2}),
+             "the bystander caret did not ride a foreign whole-line delete");
+    QVERIFY2(editor->position() == (qmn::view::TextPosition{0, 0}),
+             "the acting view's caret did not land on its own delete path");
+}
+
+void TestCodeEditor::foreignLineDeleteClampsBystanderSelection()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    editor->setPlainText(QStringLiteral("alpha\nbeta\ngamma"));
+    CodeEditor second(doc);
+    editor->setPosition({0, 0});
+    auto* ti = QAccessible::queryAccessibleInterface(&second)->textInterface();
+    QVERIFY(ti);
+    ti->setSelection(0, 7, 9); // INSIDE line 1 ("beta" spans offsets 6..9)
+    QVERIFY(second.hasSelection());
+
+    editor->deleteLineAt(1); // the ACTOR eats the bystander's WHOLE line
+                             // span [6,11): both ends clamp to the start
+                             // and the selection COLLAPSES (never lingers
+                             // as a phantom span)
+    QCOMPARE(editor->toPlainText(), QStringLiteral("alpha\ngamma"));
+    QVERIFY(!second.hasSelection());
+    QVERIFY2(second.position() == (qmn::view::TextPosition{1, 0}),
+             "the annihilated selection did not collapse to the clamp point");
+    int a = -9, b = -9;
+    ti->selection(0, &a, &b);
+    QCOMPARE(a, -1); // the AT agrees: no selection survives the foreign
+    QCOMPARE(b, -1); // line delete (its count dropped with it)
+}
+
+void TestCodeEditor::foreignUndoRestoresMappedCaretInBothViews()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    CodeEditor second(doc);
+    QTest::keyClicks(editor, "hello"); // group 1, actor = owner
+    second.setPosition({0, 5});
+    QTest::keyClicks(editor, " worlxd"); // group 2 (caret break froze the chain)
+    editor->setPosition({0, 12}); // park the ACTOR's caret at the end: the
+                                  // undo restores it from its own mark
+    QCOMPARE(doc->toPlainText(), QStringLiteral("hello worlxd"));
+
+    second.undo(); // the BYSTANDER undoes a group it watched being typed:
+                   // the self undo door on a shared stack — its SYNTHESIZED
+                   // mark supplies the frame, the replay maps the caret
+    QCOMPARE(doc->toPlainText(), QStringLiteral("hello"));
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 5}),
+             "the bystander undo did not restore from its synthesized (arm-time) mark");
+    QCOMPARE(second.redoMarkDepth(), 1); // the mark MOVED across: it carries
+                                         // the mapped press-time frame {0,12}
+    QVERIFY2(editor->position() == (qmn::view::TextPosition{0, 5}),
+             "the other view's caret did not map through the foreign replay");
+}
+
+void TestCodeEditor::bystanderUndoesGroupsItNeverTyped()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    CodeEditor second(doc); // THE view that never types a single key
+    QTest::keyClicks(editor, "hello"); // group 1
+    second.setPosition({0, 5}); // caret BREAK (no group): coalescing fence
+    QTest::keyClicks(editor, " world"); // group 2
+    QCOMPARE(doc->toPlainText(), QStringLiteral("hello world"));
+    QCOMPARE(second.undoMarkDepth(), 2); // the mirror SYNTHESIZED both marks
+    QCOMPARE(editor->undoMarkDepth(), 2); // the ACTOR's v1-truth mirror
+                                         // agrees, slot for slot
+
+    second.undo(); // " world" goes: the mark is the ARM frame of group 2
+    QCOMPARE(doc->toPlainText(), QStringLiteral("hello"));
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 5}),
+             "the synthesized mark restored the wrong frame (arm-time)");
+    QCOMPARE(second.undoMarkDepth(), 1);
+    QCOMPARE(second.redoMarkDepth(), 1);
+
+    second.undo(); // "hello" goes: mark = group 1's arm frame, the
+                   // attach-time (0,0)
+    QCOMPARE(doc->toPlainText(), QString());
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 0}),
+             "the attach-frame mark did not pair with the first group");
+    QCOMPARE(second.undoMarkDepth(), 0);
+    QCOMPARE(second.redoMarkDepth(), 2);
+    QCOMPARE(editor->redoMarkDepth(), 2); // the ACTOR's v1-truth mirror
+    // agrees: the Q_ASSERT pair in the mirror is a REAL guard even for the
+    // view that never typed a key
+}
+
+void TestCodeEditor::bystanderRedoAfterForeignUndoRestoresFrame()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    CodeEditor second(doc); // never types
+    QTest::keyClicks(editor, "hello"); // group 1
+    second.setPosition({0, 5}); // BREAK for group 2 (and the bystander stays put)
+    QTest::keyClicks(editor, " world"); // group 2
+    QCOMPARE(doc->toPlainText(), QStringLiteral("hello world"));
+
+    editor->undo(); // the ACTOR undoes group 2 (its own marks ride)
+    editor->undo(); // ...and group 1: both groups now live on the REDO branch
+    QCOMPARE(doc->toPlainText(), QString());
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 0}),
+             "the bystander caret did not map through two foreign replays");
+    QCOMPARE(second.redoMarkDepth(), 2); // the mark MOVE-branch: each moved
+                                         // mark is the frame this view LIVED
+                                         // when the foreign undo was pressed
+                                         // (its arm snapshot), never a frame
+                                         // re-synthesized after the replay
+    QCOMPARE(second.undoMarkDepth(), 0);
+
+    second.redo(); // a foreign REDO branch consumed by the never-typed view:
+    QCOMPARE(doc->toPlainText(), QStringLiteral("hello")); // its mark rode
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 5}), // back exactly
+             "the moved redo mark restored the wrong frame");
+    QCOMPARE(second.undoMarkDepth(), 1);
+    QCOMPARE(second.redoMarkDepth(), 1);
+
+    second.redo();
+    QCOMPARE(doc->toPlainText(), QStringLiteral("hello world"));
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 5}),
+             "the second redo mark (the frame LIVED at group 2's foreign "
+             "undo press — the bystander sat at {0,5} then, NOT the actor's "
+             "end-of-group frame) restored the wrong frame");
+    QCOMPARE(second.redoMarkDepth(), 0);
+    QCOMPARE(second.undoMarkDepth(), 2);
+
+    editor->undo(); // the ACTOR undoes again across a frame the
+    QCOMPARE(doc->toPlainText(), QStringLiteral("hello")); // bystander now
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 5}), // holds RAW:
+             "a foreign replay did not map the bystander's caret back"); // marks
+    editor->redo(); // ride the frame PAIRING, never a restamp (the core's
+    QCOMPARE(doc->toPlainText(), QStringLiteral("hello world")); // tape lands
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 5}), // the text back
+             "the re-replay moved a bystander caret that was AT the "
+             "re-insert point: the at-insert-point stay rule keeps it at {0,5}"); // INTO them
+}
+
+void TestCodeEditor::foreignReplaceClearsBystanderMarksAndCaret()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    CodeEditor second(doc);
+    QTest::keyClicks(editor, "hello"); // a group exists for BOTH mirrors
+    second.setPosition({0, 2});
+
+    editor->setPlainText(QStringLiteral("xy")); // the ACTOR's replace door:
+    // the whole-doc event maps the bystander's caret to the ORIGIN (an
+    // offset inside the eaten range clamps to the start), and the mirror's
+    // COLLAPSE branch (setText clears the history, the serial rides on)
+    // drops its mark stacks with the buffer's.
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 0}),
+             "the bystander caret survived a foreign document replace");
+    QCOMPARE(second.undoMarkDepth(), 0);
+    QCOMPARE(second.redoMarkDepth(), 0);
+    second.undo(); // honest refusal: there is NOTHING to undo (no stale
+                   // mark pretending the old history still exists)
+    QCOMPARE(editor->toPlainText(), QStringLiteral("xy"));
+}
+
+void TestCodeEditor::lateAttachAlignsMarksAtAttachTime()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    QTest::keyClicks(editor, "hey"); // ONE group before the attach
+    CodeEditor second(doc); // attaches with history already in the buffer
+    QCOMPARE(second.undoMarkDepth(), 1); // ALIGNED AT ATTACH, not only at
+                                         // the first foreign action's diff
+    second.setPosition({0, 3}); // the bystander's own caret move: a shared-
+                                 // buffer SIDE EFFECT freezes the actor's
+                                 // coalescing chain (the chain lives on the
+                                 // buffer — a documented car-D coupling)
+    QTest::keyClicks(editor, "!"); // fresh group (the chain was frozen above)
+    QCOMPARE(editor->undoMarkDepth(), 2); // v1 truth on the ACTOR's mirror;
+    // car D's invariant: every view of a shared doc carries the SAME depth
+    QCOMPARE(second.undoMarkDepth(), 2); // the mirror grew ONE mark: the
+                                         // ARM frame of this action ({0,3})
+    QCOMPARE(editor->toPlainText(), QStringLiteral("hey!"));
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 3}),
+             "the bystander caret sat AT the foreign insert point and must "
+             "stay behind the inserted '!' (the at-insert-point stay rule)");
+
+    second.undo(); // the ARM-frame mark pairs with this group exactly
+    QCOMPARE(doc->toPlainText(), QStringLiteral("hey"));
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 3}),
+             "the arm-frame mark restored the wrong frame");
+    second.undo(); // and the ATTACH-frame mark pairs with the pre-attach
+    QCOMPARE(doc->toPlainText(), QString()); // group (a never-typed view
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 0}), // undoes it too)
+             "the attach-frame mark restored the wrong frame");
+}
+
+void TestCodeEditor::foreignEditClosesBystanderPopups()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    CodeEditor second(doc);
+    second.show(); // the popup visibility gates read isVisible() (this
+                   // file's popup-test pattern, offscreen-safe)
+    second.showCompletionList({qmn::view::CodeEditor::CompletionItem{
+        QStringLiteral("beta"), QStringLiteral("beta()"), qmn::view::CodeEditor::TextEdit{}}});
+    second.showHover(qmn::view::CodeEditor::HoverRange{0, 0, 0, 2},
+                     QStringLiteral("h"));
+    QVERIFY(second.completionListVisible());
+    QVERIFY(second.hoverVisible());
+
+    QTest::keyClicks(editor, "z"); // a FOREIGN keystroke three feet away:
+    // an open popup in a shared document whose text just moved under it is
+    // a stale anchor, not a partial truth — the view dismisses it (the ask
+    // itself rides the user's OWN next gesture, per the no-arm rule).
+    QVERIFY(!second.completionListVisible());
+    QVERIFY(!second.hoverVisible());
+}
+
+// The Qt6 a11y OBSERVATION door: QAccessible::installUpdateHandler installs
+// a global function pointer that every updateAccessibility() call reaches
+// while the bus is active; events are filtered by ev->object() so each
+// view's events count apart. (File-scope statics because a capture-less
+// lambda — the only callable the door takes — cannot carry counters.)
+static QObject* s_foreignA11yWatch = nullptr;
+static int s_foreignA11yCaret = 0, s_foreignA11ySel = 0, s_foreignA11yIns = 0;
+static void foreignA11yProbe(QAccessibleEvent* ev)
+{
+    if (ev->object() != s_foreignA11yWatch)
+        return;
+    switch (ev->type()) {
+    case QAccessible::TextCaretMoved:
+        ++s_foreignA11yCaret;
+        break;
+    case QAccessible::TextSelectionChanged:
+        ++s_foreignA11ySel;
+        break;
+    case QAccessible::TextInserted:
+        ++s_foreignA11yIns;
+        break;
+    default:
+        break;
+    }
+}
+
+void TestCodeEditor::foreignEditSilentToMotionSignalsLoudToA11y()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    editor->setPlainText(QStringLiteral("hello")); // 5 units
+    CodeEditor second(doc);
+    second.setPosition({0, 5}); // a bystander caret at the END, typing nothing
+    editor->setPosition({0, 0});
+
+    QSignalSpy cursorSpy(&second, &CodeEditor::cursorMoved);
+    QSignalSpy selSpy(&second, &CodeEditor::selectionChanged);
+
+    QAccessible::UpdateHandler prevHandler =
+        QAccessible::installUpdateHandler(foreignA11yProbe);
+    const bool wasActive = QAccessible::isActive();
+    QAccessible::setActive(true); // the isActive() gate reaches the FOREIGN
+    QVERIFY(QAccessible::isActive()); // a11y leg too (D3 fires through the
+    s_foreignA11yWatch = &second;    // same bus as the v1.11 self half)
+    s_foreignA11yCaret = s_foreignA11ySel = s_foreignA11yIns = 0;
+
+    QTest::keyClick(editor, Qt::Key_X); // ACTOR = the owner view types at 0
+
+    // LOUD: the bystander's OWN interface sees the whole edit — one text
+    // event from its per-view bus pass, and exactly one cursor + one
+    // selection event from D3's foreign mapping (a broken mapping drops
+    // them: 0, LOUD).
+    QCOMPARE(s_foreignA11yIns, 1);
+    QCOMPARE(s_foreignA11yCaret, 1);
+    QCOMPARE(s_foreignA11ySel, 1);
+    QVERIFY2(second.position() == (qmn::view::TextPosition{0, 6}),
+             "the bystander caret did not ride the foreign append");
+    // SILENT: the bystander's own motion signals stay unemitted (a screen
+    // reader follows the text; the hub's hover/popup ask taps must NOT arm
+    // on a foreign edit, and the user of THIS view moved nothing).
+    QCOMPARE(cursorSpy.count(), 0);
+    QCOMPARE(selSpy.count(), 0);
+
+    s_foreignA11yWatch = nullptr;
+    QAccessible::installUpdateHandler(prevHandler); // never leak global
+    QAccessible::setActive(wasActive);              // a11y state
+}
+
+// --- car D machine D4: ONE HighlightEngine per document -------------------
+// The parse is document state (one buffer, one tree). The oracle is the
+// engine's counted refresh (parseCount) plus the viewport-SET doors —
+// all state reads, never pixels. Contract: CodeDocument/HighlightEngine
+// headers.
+
+void TestCodeEditor::sharedParseOneReparseForTwoViews()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    editor->setPlainText(QStringLiteral("{\"k\": 1}\n{\"k\": 2}"));
+    QVERIFY(!doc->existingParse()); // the lazy rule: TEXT alone never parses
+    editor->setLanguage(QStringLiteral("json")); // naming a language IS a parse
+    HighlightEngine* eng = doc->existingParse();
+    QVERIFY(eng);
+
+    {
+        CodeEditor second(editor->document());
+        editor->grab();  // both views feed their window into the SET...
+        second.grab();   // ...ONE shared engine pays exactly ONE parse pass
+        QCOMPARE(eng->parseCount(), 1);
+        QCOMPARE(eng->viewportSurfaceCount(), 2);
+
+        // One buffer, one tree: the two views' exact-span tables are the
+        // SAME table (byte-equal, the design record's tripwire).
+        const auto a = allSpans(editor);
+        QVERIFY(!a.isEmpty());
+        QCOMPARE(a, allSpans(&second));
+
+        // The keystroke tripwire: "two views typing one keystroke ->
+        // EXACTLY ONE reparse". The typing view's OWN paint reparses
+        // once; the bystander's next paint finds the engine fresh and
+        // pays nothing. (Small doc: under kViewportMinUnits the policy
+        // stays unscoped/Full, so the count is deterministic.)
+        const int c0 = eng->parseCount();
+        QTest::keyClicks(&second, "7"); // the BYSTANDER view types
+        QCOMPARE(eng->parseCount(), c0); // typing alone parses NOTHING
+        editor->grab();                  // the paint-driven refresh...
+        QCOMPARE(eng->parseCount(), c0 + 1);
+        second.grab();                   // ...happened exactly once
+        QCOMPARE(eng->parseCount(), c0 + 1);
+        QCOMPARE(allSpans(editor), allSpans(&second)); // still byte-equal
+    }
+    // View death releases its window from the SET (detachView's D4 leg;
+    // the engine itself stays — the parse is document state).
+    QCOMPARE(eng->viewportSurfaceCount(), 1);
+}
+
+void TestCodeEditor::sharedLanguageLastWriterWinsAndPropsStayPerView()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    CodeEditor second(editor->document());
+    editor->setPlainText(QStringLiteral("def f():\n    return 1\n"));
+
+    // The language door stays a VIEW door but writes DOCUMENT state: a
+    // name spoken on one view reports identically through the other.
+    second.setLanguage(QStringLiteral("python"));
+    QVERIFY(doc->existingParse()); // the bystander's door born the parse
+    QCOMPARE(editor->language(), QStringLiteral("python"));
+    QCOMPARE(second.language(), QStringLiteral("python"));
+    // LAST-WRITER-WINS: the other view's name re-points the ONE parse.
+    editor->setLanguage(QStringLiteral("json"));
+    QCOMPARE(doc->existingParse()->language(), QStringLiteral("json"));
+    QCOMPARE(editor->language(), QStringLiteral("json"));
+    QCOMPARE(second.language(), QStringLiteral("json"));
+
+    // Per-VIEW state stays per-view: the M23 override map is per-editor,
+    // and the language fan-out re-resolves EVERY view's effective stop
+    // against its OWN entry — never copies one view's override.
+    editor->languageProperties(QStringLiteral("json"))->setTabStopWidth(11);
+    editor->languageProperties(QStringLiteral("python"))->setTabStopWidth(9);
+    second.languageProperties(QStringLiteral("json"))->setTabStopWidth(3);
+    QCOMPARE(editor->tabStopWidth(), 11);
+    QCOMPARE(second.tabStopWidth(), 3);
+    // The shared language flips: each view re-keys LIVE against its own
+    // map (A's python entry answers for A; B has no python entry, so B
+    // falls back to the template — its json override does NOT ride over).
+    second.setLanguage(QStringLiteral("python"));
+    QCOMPARE(editor->tabStopWidth(), 9);
+    QVERIFY2(second.tabStopWidth() != 3,
+             "a bystander's json override rode a python language");
+    editor->setLanguage(QStringLiteral("json")); // and back, both sides
+    QCOMPARE(editor->tabStopWidth(), 11);
+    QCOMPARE(second.tabStopWidth(), 3);
+}
+
+void TestCodeEditor::viewportUnionCoversBothViewsAndShrinksOnDetach()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    QStringList lines;
+    for (int i = 0; i < 1600; ++i) // "def f0000():" = 12 units + its \n =
+        lines << QStringLiteral("def f%1():").arg(i, 4, 10, QLatin1Char('0'));
+    editor->setPlainText(lines.join(QLatin1Char('\n'))); // 13/line, 20799
+    editor->setLanguage(QStringLiteral("python"));       // units total, > the
+    HighlightEngine* eng = doc->existingParse();         // kViewportMinUnits
+    QVERIFY(eng);                                       // gate (text FIRST:
+                                                        // the line index rides
+                                                        // already-fed text)
+    editor->grab(); // A paints the TOP: its window is a few dozen lines
+    QVERIFY2(eng->unionEnd() < 4000, "A's window alone is not a viewport");
+
+    {
+        CodeEditor second(editor->document());
+        second.grab(); // FIRST paint builds this view's own row table and
+                       // feeds a window ~A's (the real scroller's cadence:
+                       // reveal BETWEEN paints)
+        second.revealAt({1550, 0}, CodeEditor::RevealMode::NearTop);
+        second.grab(); // ...and the scrolled paint feeds the far end
+
+        // The SET carries two surfaces; the union is the BOUNDING BOX:
+        // coverage INCLUDES the gap between far-apart windows (the
+        // engine parses ONE contiguous range — the design record's
+        // union-policy note read into the pin).
+        QCOMPARE(eng->viewportSurfaceCount(), 2);
+        const int bStart = 1550 * 13; // B's top line, exact units
+        QCOMPARE(eng->unionStart(), 0);
+        QVERIFY2(eng->unionEnd() > bStart, "the union did not reach view B");
+        // The live tree really reaches BOTH halves of the union (this
+        // fast grammar stays in Full mode at this size, so its coverage
+        // spans the whole document — the oracle is coverage, never a
+        // pixel, per the design record).
+        QVERIFY2(eng->covStart() <= eng->unionStart(), "the tree left the union");
+        QVERIFY2(eng->covEnd() >= eng->unionEnd(), "the tree left the union");
+        QVERIFY2(eng->covEnd() > bStart, "the far half never parsed");
+    }
+    // Detach releases the entry: dropViewport's union recompute is
+    // SYNCHRONOUS (no paint needed) — the dead view's window can never
+    // keep the union (and a repainted A re-scopes the tree downward).
+    QCOMPARE(eng->viewportSurfaceCount(), 1);
+    QVERIFY2(eng->unionEnd() < 4000, "the dead view's window stayed in the SET");
+}
+
+void TestCodeEditor::registryRemapReachesSharedParseOnce()
+{
+    using qmn::view::CodeDocument;
+    CodeDocument* doc = editor->document();
+    CodeEditor second(editor->document());
+    editor->setPlainText(QStringLiteral("{\"k\": 1}"));
+    editor->setLanguage(QStringLiteral("json"));
+    editor->grab();
+    second.grab();
+    QVERIFY(doc->existingParse());
+    QCOMPARE(countKind(allSpans(editor), TK::Number), 1); // the literal 1
+
+    QVERIFY(CodeEditor::setCaptureRole(QStringLiteral("json"),
+                                       QStringLiteral("number"), TK::Keyword));
+    // ONE paint — and only the OWNER view pays it. The registry
+    // generation counter makes the SHARED engine reconcile once; the
+    // bystander never owns an engine to reconcile per-view (pre-D4 this
+    // was once-per-view work; the one-parse car made it once, full stop).
+    editor->grab();
+    QCOMPARE(countKind(allSpans(editor), TK::Number), 0);
+    QCOMPARE(countKind(allSpans(editor), TK::Keyword), 1);
+    // The bystander reads the SAME remapped spans (same engine).
+    QCOMPARE(allSpans(&second), allSpans(editor));
+
+    CodeEditor::clearCaptureRole(QStringLiteral("json"),
+                                 QStringLiteral("number")); // registry hygiene
+    QCOMPARE(countKind(allSpans(editor), TK::Number), 1);
 }
 
 // --- M25 soft wrap fixtures (the pure slot-map layer tests) -----------------
@@ -11585,15 +12326,23 @@ void TestCodeEditor::diffOriginalChromeSyntaxHighlight()
     th->setTokenColor(CodeEditor::TokenKind::Keyword, kwInk);
     th->setTokenColor(CodeEditor::TokenKind::String, strInk);
 
-    // The ORIGINAL rides an EXTERNAL standalone doc: its CodeDocument
-    // doors stay open, so the live editApplied -> chrome-engine fan is
-    // exercised below, not just the entering feed.
+    // The ORIGINAL rides an EXTERNAL standalone doc (the non-owning
+    // pointer door). D4: the chrome has NO engine of its own — its ink
+    // rides the parse the ORIGINAL document owns. Two faces of the same
+    // rule are pinned here: the NO-CLOBBER face (a caller-supplied
+    // document with no parse of its own inks PLAIN: the diff widget
+    // never writes a language into a document it does not own) and the
+    // BORROW face (give that document a parse the honest way — a view
+    // of its own naming the language — and the chrome inks through it,
+    // live-edited from that document's own doors).
     qmn::view::CodeDocument doc;
     doc.setPlainText(QStringLiteral("def f():\n    return \"hi\""));
     editor->setPlainText(QStringLiteral("def f():\n    return \"ho\""));
     editor->setDiffDocuments(&doc, editor->document(), QStringLiteral("python"));
     QVERIFY(editor->isDiffMode());
-    editor->grab(); // the paint pays the first (full) parse of both engines
+    editor->grab();
+    QVERIFY2(!doc.existingParse(),
+             "beginDiffMode wrote a parse into a document it does not own");
     const M3Frame f = m3frame(editor);
     const int lh = editor->lineHeight();
     const int yR0 = editor->padding();
@@ -11608,24 +12357,56 @@ void TestCodeEditor::diffOriginalChromeSyntaxHighlight()
                     return true;
         return false;
     };
+    auto inkInRow = [&](int yTop, const QColor& ink) {
+        // Bounded to the CHROME read window [f.textL, f.textR]: the same
+        // row band carries the MODIFIED side too, and its ink is live —
+        // scanning the full row would find it (the pin speaks the
+        // ORIGINAL side only).
+        const QImage img = editor->grab().toImage();
+        for (int y = yTop; y < yTop + lh; ++y)
+            for (int xx = f.textL - 4; xx <= f.textR; ++xx)
+                if (xx >= 0 && xx < img.width() && y < img.height()
+                    && img.pixelColor(xx, y) == ink)
+                    return true;
+        return false;
+    };
 
-    // The chrome read window speaks the SAME token roles as the modified
-    // side: `def` (row 0, cols 0..2) rides Keyword inks...
+    // NO-CLOBBER face: the ORIGINAL rows paint plain (the MODIFIED side
+    // keeps its ink — the session's language went to the document the
+    // diff view DOES own).
+    QVERIFY2(!inkInRow(yR0, kwInk),
+             "an unparsed external ORIGINAL was inked by a borrowed language");
+
+    // BORROW face: a view of the external document's own (the D2 attach
+    // ctor) names the language — THAT is what creates the document's
+    // parse. The chrome borrows it from then on: `def` (row 0, cols
+    // 0..2) rides Keyword...
+    CodeEditor borrowed(&doc);
+    borrowed.setLanguage(QStringLiteral("python"));
+    QVERIFY(doc.existingParse());
     QVERIFY2(inkNear(f.textL + 6, yR0, kwInk),
              "no Keyword ink on the ORIGINAL's def in the read window");
-    // ...and the literal (row 1's `return "hi"`, cols 11..14) rides String.
+    // ...and the literal (row 1's `return "hi"`, cols 11..14) rides
+    // String.
     QVERIFY2(inkNear(f.textL + int(12.5 * editor->cellWidth()), yR1, strInk),
              "no String ink on the ORIGINAL's literal in the read window");
 
     // The live seam: edit the ORIGINAL through its OWN document door —
-    // the fan feeds the chrome engine's onEdit, the debounce recomputes
-    // the rows, and the NEXT paint re-colors the NEW text (an engine left
-    // stale would keep painting the OLD text's roles: the `if` cell would
-    // carry plain ink, not Keyword).
+    // the document's parse rides the buffer's core observer list
+    // DIRECTLY (D4: the editApplied -> chrome-engine onEdit relay is
+    // gone; only the debounce signal leg remains), the debounce
+    // recomputes the rows, and the NEXT paint re-colors the NEW text
+    // (a parse left stale would keep painting the OLD text's roles: the
+    // `if` cell would carry plain ink, not Keyword).
     doc.setPlainText(QStringLiteral("if x == 1:\n    pass"));
     QTest::qWait(300); // the 120 ms diff debounce fires the recompute
     QVERIFY2(inkNear(f.textL + 3, yR0, kwInk),
              "chrome highlight not refreshed after an ORIGINAL edit");
+
+    // Session close releases the chrome's BORROW window from the foreign
+    // parse (the parse itself belongs to the document and stays).
+    editor->clearDiffDocuments();
+    QVERIFY(doc.existingParse());
 
     th->clearTokenColor(CodeEditor::TokenKind::Keyword);
     th->clearTokenColor(CodeEditor::TokenKind::String);
