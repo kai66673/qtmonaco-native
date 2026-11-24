@@ -1680,6 +1680,302 @@ private slots:
         QTRY_COMPARE_WITH_TIMEOUT(spawns.exitCodeOf(0), 0, 5000);
     }
 
+    // ================================================== car E machine E1:
+    // the DAP feed FAN-OUT over the session's view list (design record:
+    // PLAN's E1 paragraph). Two slots, both over an ALIASED document
+    // (ProjectSession's alias rule: owner + joined view, ONE entry) and
+    // both over the FakePeer — the near-side command counters are the
+    // oracle for the edit-conn/burst leg, and the scripted stop chain
+    // gives the CARET legs their second stop and their mid-stop view
+    // death (dapfake cannot re-stop on command). The far-side dapfake
+    // floors (its disconnect arm exiting 2 below two setBreakpoints)
+    // stay where they are: the machine-D3 slots keep riding them.
+
+    void dapHubAliasViewsFanOutDotsDiagsAndCollapseTheEditBurst()
+    {
+        ProjectSession project;
+        CodeEditor owner; // attach order: the FIRST view IS the owner
+        const QString path = QStringLiteral("/dapfake/project/prog.cpp");
+        QVERIFY(project.openDocument(&owner, path));
+        CodeEditor joined(owner.document()); // car D's attach ctor: a SECOND
+                                             // live view of the ONE document
+        QVERIFY(project.openDocument(&joined, path)); // THE ALIAS JOIN
+        QCOMPARE(project.openCount(), 1); // one entry, not two (the D5 rule)
+        QCOMPARE(project.uriForEditor(&joined), project.uriForEditor(&owner));
+        owner.setPlainText(QStringLiteral("line one\nline two\nline three\n"
+                                          "line four\nline five\nline six\n"
+                                          "line seven\nline eight\nline nine\n"
+                                          "line ten\nline eleven\nline twelve\n"));
+
+        FakePeer peer; // (the TcpTransport stand-in, no process spawned)
+        QVERIFY(peer.listen());
+        DapHub hub;
+        hub.setTransportFactory([&peer](const QString&, const QStringList&,
+                                        QObject* parent) -> Transport* {
+            return new TcpTransport(QStringLiteral("127.0.0.1"),
+                                    peer.port(), parent);
+        });
+        hub.attachProject(&project);
+        QSignalSpy evSpy(&hub, &DapHub::dapEvent); // the raw-event relay pin
+
+        // ONE DESIRED store per uri, asked through the OWNER (wire lines 3, 5):
+        QVERIFY(hub.setBreakpoints(&owner, {2, 4}));
+        // E1: the JOINED view resolves the SAME store — feature doors
+        // resolve through ANY view (uriForEditor rides document identity):
+        QCOMPARE(hub.requestedBreakpoints(&joined), (QVector<int>{2, 4}));
+
+        QVERIFY(hub.startDebugging(QStringLiteral("unused-over-tcp"), {},
+                                   QJsonObject{{QStringLiteral("program"),
+                                               QStringLiteral("/bin/true")}},
+                                   QStringLiteral("tstpeer")));
+        QTRY_VERIFY_WITH_TIMEOUT(peer.haveClient(), 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("initialize")), 1, 3000);
+        peer.send(parsed(R"({"type":"response","seq":1,"request_seq":1,"success":true,"command":"initialize","body":{}})"));
+
+        // The Ready leg (launch 2, then the stored push 3):
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("launch")), 1, 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("setBreakpoints")), 1, 3000);
+
+        // ONE push, MIXED answers: wire 3 UNVERIFIED (message), wire 5
+        // verified in place — the store, not the views, decides the rows:
+        peer.send(parsed(R"({"type":"response","request_seq":3,"success":true,"command":"setBreakpoints","body":{"breakpoints":[)"
+                         R"({"verified":false,"message":"cannot bind here","id":11},)"
+                         R"({"verified":true,"line":5,"id":12}]}})"));
+
+        // THE FAN-OUT (the car-D alias divergence dies HERE): the verified
+        // dot AND the dap Warning row land in EVERY live view's gutter and
+        // margin — the joiner's paint is no longer owner-only:
+        auto dapDiag = [](const CodeEditor& ed, int line, const QString& needle) {
+            for (const CodeEditor::Diagnostic& d : ed.diagnostics())
+                if (d.startLine == line && d.source == QLatin1String("dap")
+                    && d.severity == CodeEditor::Severity::Warning
+                    && d.message.contains(needle))
+                    return true;
+            return false;
+        };
+        QTRY_VERIFY_WITH_TIMEOUT(
+            owner.breakpointLines() == (QVector<int>{4})
+                && joined.breakpointLines() == (QVector<int>{4}), 5000);
+        QTRY_VERIFY_WITH_TIMEOUT(
+            dapDiag(owner, 2, QStringLiteral("cannot bind here"))
+                && dapDiag(joined, 2, QStringLiteral("cannot bind here")), 5000);
+        QCOMPARE(owner.diagnostics().size(), 1); // per-view tables, ONE dap
+        QCOMPARE(joined.diagnostics().size(), 1); // row each — no doubling
+
+        // THE BURST LEG: two back-to-back edits — one typed in EACH view
+        // (the editConn is per-uri and stays EXACTLY ONE: wiring it per
+        // view is the trap this leg exists around) — must still arrive as
+        // exactly ONE completed resend: the setup push + the one resend is
+        // the record's TWO. The dapfake disconnect arm (main.cpp:441-444)
+        // is the far-side FLOOR for the same count in the process slots;
+        // here the near-side counter pins the CEILING — no third call from
+        // a doubled connection, no per-edit spam past the debounce.
+        owner.setPlainText(owner.toPlainText() + QStringLiteral("// typed here\n"));
+        joined.setPlainText(joined.toPlainText() + QStringLiteral("// and here\n"));
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("setBreakpoints")), 2, 5000);
+        QTest::qWait(700); // past kBreakpointResendMs (400): the burst is
+                           // OVER and it collapsed — nothing further travels
+        QCOMPARE(peer.commandCount(QStringLiteral("setBreakpoints")), 2);
+
+        // The second push answers ALL-verified: the Warning rows go and the
+        // dots SETTLE ON BOTH VIEWS (the move is one store, two gutters):
+        peer.send(parsed(R"({"type":"response","request_seq":4,"success":true,"command":"setBreakpoints","body":{"breakpoints":[)"
+                         R"({"verified":true,"line":3,"id":21},)"
+                         R"({"verified":true,"line":5,"id":22}]}})"));
+        QTRY_VERIFY_WITH_TIMEOUT(
+            owner.breakpointLines() == (QVector<int>{2, 4})
+                && joined.breakpointLines() == (QVector<int>{2, 4})
+                && owner.diagnostics().isEmpty()
+                && joined.diagnostics().isEmpty(), 5000);
+
+        // The RESOLUTION-ORDER pin (session-first, not store-first): a
+        // THIRD view opens AFTER the last feed — the store never saw it
+        // (it never asked) — and the NEXT feed (here: a `breakpoint`
+        // EVENT flipping wire-5's id 22 back to unverified, a feed that
+        // costs no push of its own) paints it TOO. A store-first
+        // resolution would leave this gutter blind.
+        CodeEditor late(owner.document());
+        QVERIFY(project.openDocument(&late, path)); // a THIRD live view,
+        QCOMPARE(project.openCount(), 1);           // one entry still
+        peer.send(parsed(R"({"type":"event","event":"breakpoint","body":{"reason":"changed","breakpoint":)"
+                         R"({"id":22,"verified":false,"line":5,"message":"late join check"}}})"));
+        QTRY_VERIFY_WITH_TIMEOUT(
+            owner.breakpointLines() == (QVector<int>{2})
+                && joined.breakpointLines() == (QVector<int>{2})
+                && late.breakpointLines() == (QVector<int>{2}), 5000);
+        QVERIFY(dapDiag(late, 4, QStringLiteral("late join check")));
+        QVERIFY(dapDiag(owner, 4, QStringLiteral("late join check")));
+        QVERIFY(dapDiag(joined, 4, QStringLiteral("late join check")));
+        QCOMPARE(evSpy.count(), 1); // the raw event ALSO rode the relay
+        QCOMPARE(evSpy.last().at(0).toString(), QStringLiteral("breakpoint"));
+
+        // The teardown honesty: the disconnect barrier (seq 5) answered,
+        // the client closes the pipe.
+        hub.stopDebugging();
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("disconnect")), 1, 3000);
+        peer.send(parsed(R"({"type":"response","request_seq":5,"success":true,"command":"disconnect"})"));
+        QTRY_VERIFY_WITH_TIMEOUT(peer.clientGone(), 5000);
+    }
+
+    void dapHubStoppedFeedFansOutOverAliasViewsAndCaretsStayOwnerOnly()
+    {
+        // The band + value hints fan out over EVERY live view, the CARET
+        // rides the OWNER only, and the handover rule decides whose caret
+        // the NEXT stop moves (all three sentences are E1's, pinned here).
+        ProjectSession project;
+        auto* owner = new CodeEditor; // heap: this slot KILLS the owner
+                                      // view mid-stop (the handover leg)
+        const QString path = QStringLiteral("/dapfake/project/main.cpp");
+        QVERIFY(project.openDocument(owner, path));
+        auto* joined = new CodeEditor(owner->document());
+        QVERIFY(project.openDocument(joined, path)); // the ALIAS JOIN
+        QCOMPARE(project.openCount(), 1);
+        owner->setPlainText(QStringLiteral("top line\n"
+                                           "    int y = 8\n"
+                                           "    return x + y\n"
+                                           "bottom line\n"));
+        // The CARETS, planted apart — exactly one of them may move:
+        owner->setPosition({0, 0});
+        joined->setPosition({3, 4});
+
+        FakePeer peer;
+        QVERIFY(peer.listen());
+        DapHub hub;
+        hub.setTransportFactory([&peer](const QString&, const QStringList&,
+                                        QObject* parent) -> Transport* {
+            return new TcpTransport(QStringLiteral("127.0.0.1"),
+                                    peer.port(), parent);
+        });
+        hub.attachProject(&project);
+        QSignalSpy unresolvedSpy(&hub, &DapHub::sourceUnresolved);
+        QSignalSpy closedSpy(&project,
+                             &ProjectSession::documentClosed);
+
+        QVERIFY(hub.startDebugging(QStringLiteral("unused-over-tcp"), {},
+                                   QJsonObject{{QStringLiteral("program"),
+                                               QStringLiteral("/bin/true")}},
+                                   QStringLiteral("tstpeer")));
+        QTRY_VERIFY_WITH_TIMEOUT(peer.haveClient(), 3000);
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("initialize")), 1, 3000);
+        peer.send(parsed(R"({"type":"response","seq":1,"request_seq":1,"success":true,"command":"initialize","body":{}})"));
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("launch")), 1, 3000);
+
+        // The SCRIPTED stop chain (seqs: stackTrace 3, scopes 4,
+        // variables 5). The frame at (3, 6) 1-based -> model (2, 5), the
+        // same shape the machine-D3 steps slot pins far-side:
+        peer.send(parsed(R"({"type":"event","event":"stopped","body":{"reason":"step","threadId":7}})"));
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("stackTrace")), 1, 5000);
+        peer.send(parsed(R"({"type":"response","request_seq":3,"success":true,"command":"stackTrace","body":{"stackFrames":[)"
+                         R"({"id":1,"name":"stopped-fn","line":3,"column":6,)"
+                         R"("source":{"path":"/dapfake/project/main.cpp"}}]}})"));
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("scopes")), 1, 5000);
+        peer.send(parsed(R"({"type":"response","request_seq":4,"success":true,"command":"scopes","body":{"scopes":[)"
+                         R"({"name":"Locals","variablesReference":21,"expensive":false}]}})"));
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("variables")), 1, 5000);
+        peer.send(parsed(R"({"type":"response","request_seq":5,"success":true,"command":"variables","body":{"variables":[)"
+                         R"({"name":"x","value":"42"},{"name":"y","value":"13"},)"
+                         R"({"name":"zzUnused","value":"paints nothing"}]}})"));
+
+        // THE FAN-OUT: the band and the hints land on EVERY live view —
+        // SAME hint list, SAME positions (the document is shared, so the
+        // text scan ran ONCE and its answer fed both tables):
+        QTRY_VERIFY_WITH_TIMEOUT(
+            owner->highlightedLinesStart() == 2
+                && joined->highlightedLinesStart() == 2, 5000);
+        QCOMPARE(owner->highlightedLinesEnd(), 2);
+        QCOMPARE(joined->highlightedLinesEnd(), 2);
+        QTRY_COMPARE_WITH_TIMEOUT(owner->inlayHints().size(), 2, 5000);
+        QCOMPARE(joined->inlayHints().size(), 2);
+        const QVector<CodeEditor::InlayHint> hints = joined->inlayHints();
+        QCOMPARE(hints.at(0).line, 2);
+        QCOMPARE(hints.at(0).col, 12); // one past "x" — the identical
+        QCOMPARE(hints.at(0).text, QStringLiteral(" = 42")); // byte-pin on
+        QCOMPARE(hints.at(1).col, 16); // one past "y"               the joiner
+        QCOMPARE(hints.at(1).text, QStringLiteral(" = 13"));
+
+        // THE CARET IS OWNER-ONLY (the recorded rule — a stop must not
+        // yank the caret of a view the user is typing in):
+        QCOMPARE(owner->position().line, 2); // frame (3, 6) -> model (2, 5)
+        QCOMPARE(owner->position().col, 5);
+        QCOMPARE(joined->position().line, 3); // the JOINER's caret stays
+        QCOMPARE(joined->position().col, 4);  // exactly where its user left it
+        QCOMPARE(unresolvedSpy.count(), 0);
+
+        // HANDOVER: the OWNER view dies mid-stop, on the lifetime
+        // contract's legal extension (the document is re-parented OUT of
+        // the dying owner first — the tst_glue handover pin's shape):
+        CodeDocument* doc = owner->document();
+        doc->setParent(nullptr);
+        delete owner;
+        QCOMPARE(closedSpy.count(), 0); // a HANDOVER, not a drop
+        QCOMPARE(project.openCount(), 1);
+        QVERIFY(project.editorForUri(path) == joined); // the survivor IS the
+                                                       // new owner now
+        // The SURVIVOR's feed survives the death (the band + hints were
+        // painted while BOTH views were live; the dead view is simply
+        // skipped by every later fan-out):
+        QCOMPARE(joined->highlightedLinesStart(), 2);
+        QCOMPARE(joined->inlayHints().size(), 2);
+
+        // The SECOND stop (seqs: stackTrace 6, scopes 7, variables 8) —
+        // after the handover the SESSION's answer puts the survivor
+        // first, so the CARET rides the survivor now:
+        peer.send(parsed(R"({"type":"event","event":"stopped","body":{"reason":"step","threadId":7}})"));
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("stackTrace")), 2, 5000);
+        peer.send(parsed(R"({"type":"response","request_seq":6,"success":true,"command":"stackTrace","body":{"stackFrames":[)"
+                         R"({"id":2,"name":"deeper-fn","line":4,"column":1,)"
+                         R"("source":{"path":"/dapfake/project/main.cpp"}}]}})"));
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("scopes")), 2, 5000);
+        peer.send(parsed(R"({"type":"response","request_seq":7,"success":true,"command":"scopes","body":{"scopes":[)"
+                         R"({"name":"Locals","variablesReference":22,"expensive":false}]}})"));
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("variables")), 2, 5000);
+        peer.send(parsed(R"({"type":"response","request_seq":8,"success":true,"command":"variables","body":{"variables":[)"
+                         R"({"name":"bottom","value":"B1"}]}})"));
+        QTRY_COMPARE_WITH_TIMEOUT(joined->highlightedLinesStart(), 3, 5000);
+        QCOMPARE(joined->highlightedLinesEnd(), 3); // band moved (4, 1) -> model (3, 0)
+        QCOMPARE(joined->position().line, 3);       // the SURVIVOR owns the
+        QCOMPARE(joined->position().col, 0);        // caret after the handover
+        QTRY_COMPARE_WITH_TIMEOUT(joined->inlayHints().size(), 1, 5000); // the
+        // old stop's hints are REPLACED by this stop's scan (one document,
+        // one scan, the same list on every view):
+        QCOMPARE(joined->inlayHints().at(0).line, 3);
+        QCOMPARE(joined->inlayHints().at(0).col, 6); // one past "bottom"
+        QCOMPARE(joined->inlayHints().at(0).text, QStringLiteral(" = B1"));
+
+        // `continued` clears the LIST: the survivor's band + hints go (the
+        // dead owner pointer in the list is skipped, not touched):
+        peer.send(parsed(R"({"type":"event","event":"continued","body":{}})"));
+        QTRY_COMPARE_WITH_TIMEOUT(joined->highlightedLinesStart(), -1, 5000);
+        QVERIFY(joined->inlayHints().isEmpty()); // SAME call chain
+
+        // The LAST live view's death drops the entry (documentClosed) and
+        // the frame-resolution store runs DRY: the next stop resolves to
+        // zero views, paints NOTHING anywhere, touches no disk, and the
+        // app gets its sourceUnresolved relay (seqs: stackTrace 9):
+        delete joined;
+        QCOMPARE(project.openCount(), 0);
+        QCOMPARE(closedSpy.count(), 1);
+        peer.send(parsed(R"({"type":"event","event":"stopped","body":{"reason":"step","threadId":7}})"));
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("stackTrace")), 3, 5000);
+        peer.send(parsed(R"({"type":"response","request_seq":9,"success":true,"command":"stackTrace","body":{"stackFrames":[)"
+                         R"({"id":3,"name":"late-fn","line":2,"column":1,)"
+                         R"("source":{"path":"/dapfake/project/main.cpp"}}]}})"));
+        QTRY_COMPARE_WITH_TIMEOUT(unresolvedSpy.count(), 1, 5000);
+        QCOMPARE(peer.commandCount(QStringLiteral("scopes")), 2); // the
+        // unresolved chain never continues (no frame to feed) — and no
+        // view exists to paint: the emit IS the honest answer.
+
+        // Teardown: the disconnect barrier (seq 10 — nothing else consumed
+        // the counter after the unresolved chain, pinned near-side):
+        hub.stopDebugging();
+        QTRY_COMPARE_WITH_TIMEOUT(peer.commandCount(QStringLiteral("disconnect")), 1, 3000);
+        QCOMPARE(peer.messages.last().value(QStringLiteral("seq")).toInt(), 10);
+        peer.send(parsed(R"({"type":"response","request_seq":10,"success":true,"command":"disconnect"})"));
+        QTRY_VERIFY_WITH_TIMEOUT(peer.clientGone(), 5000);
+        delete doc; // the document outlived every view of it (the contract);
+                    // now the test lets it go (its own last reference)
+    }
+
     void dapHubTerminateWithoutCapabilityFallsBackToStop()
     {
         // basic mode's caps carry NO supportsTerminateRequest: the door
@@ -1770,7 +2066,15 @@ private slots:
         // cleared, and the DESIRED breakpoint truth survives the death —
         // the next session's ready() re-pushes it (the recorded shape):
         QTRY_COMPARE_WITH_TIMEOUT(endedSpy.count(), 1, 30000);
-        QVERIFY(!endedSpy.at(0).at(0).toString().isEmpty());
+        // Car E machine E2 replaced the old `!isEmpty()` (a vacuous pass:
+        // the bare "transport closed: " prefix satisfied it while the tail
+        // was EMPTY, the capture-order defect). The string is now pinned
+        // whole: the `_exit(7)` rides ProcessTransport::onFinished's
+        // ServerDied emit, whose name the DapClient switch used to miss
+        // ("Unknown"), and the session HAD opened, so it is the closed arm.
+        QCOMPARE(endedSpy.at(0).at(0).toString(),
+                 QStringLiteral("transport closed: ServerDied: process exited "
+                                "with code 7"));
         QVERIFY(!hub.isDebugging());
         QVERIFY(!hub.isReady());
         QVERIFY(ed.breakpointLines().isEmpty());
@@ -1780,6 +2084,200 @@ private slots:
         QCOMPARE(hub.request(QStringLiteral("next"),
                              QJsonValue(QJsonValue::Undefined)), qint64(-1));
         QTRY_COMPARE_WITH_TIMEOUT(spawns.exitCodeOf(0), 7, 5000);
+    }
+
+    void dapHubSpawnRefusalReasonCarriesTheTransportIssue()
+    {
+        // Car E machine E2 caught this shape FROM THE WHEEL SMOKE: a program
+        // that cannot even spawn used to end in a bare
+        // "transport never opened: " — the client's transportError capture
+        // sat BELOW the RpcClient construction, and RpcClient's ctor slot
+        // (onTransportError -> markGone -> transportGone -> onGone) runs
+        // NESTED INSIDE that emission, at that signal's slot order, so the
+        // reason was built from a still-empty lastTransportIssue_. The fix
+        // moved the capture to the FIRST slot; this slot is the ctest oracle
+        // for it. NO adapter is involved: execve refuses, nothing spawns, so
+        // the no-adapter-spawn discipline stands.
+        DapHub hub;
+        QSignalSpy startedSpy(&hub, &DapHub::sessionStarted);
+        QSignalSpy endedSpy(&hub, &DapHub::sessionEnded);
+        QSignalSpy stderrSpy(&hub, &DapHub::adapterStderr);
+
+        QVERIFY(hub.startDebugging(QStringLiteral("qmn-no-such-adapter-xyz")));
+        QVERIFY(hub.isDebugging()); // Starting: the spawn verdict is not in
+        QVERIFY(!hub.isReady());    // no handshake, no capabilities
+        QVERIFY(hub.adapterCapabilities().isEmpty());
+
+        QTRY_COMPARE_WITH_TIMEOUT(endedSpy.count(), 1, 5000);
+        QCOMPARE(startedSpy.count(), 0); // never Ready, so never "started"
+        const QString reason = endedSpy.at(0).at(0).toString();
+        // Our OWN vocabulary prefix (errorKindName) is the stable part; the
+        // Qt errorString behind it is version-dependent, so only its
+        // PRESENCE is pinned — that presence is exactly what was missing.
+        const QString prefix =
+            QStringLiteral("transport never opened: StartFailed: ");
+        QVERIFY2(reason.startsWith(prefix), qPrintable(reason));
+        QVERIFY2(reason.size() > prefix.size(),
+                 qPrintable(QStringLiteral("empty tail: %1").arg(reason)));
+        QCOMPARE(stderrSpy.count(), 0); // nothing ran, so nothing to say
+
+        QVERIFY(!hub.isDebugging());
+        QVERIFY(!hub.isReady());
+        QCOMPARE(hub.request(QStringLiteral("next"),
+                             QJsonValue(QJsonValue::Undefined)), qint64(-1));
+        hub.stopDebugging(); // legal no-op once the episode is over
+
+        // Car E machine E3: the ANSWER doors read false with no wire at all
+        // (no local failure frame is invented for a reverse answer — the
+        // honest absence is the whole answer), and an id the hub never
+        // relayed is refused the same way. E4's smoke pins the same shape
+        // end-to-end through qmn.DapHub.
+        QVERIFY(!hub.answerRequest(QStringLiteral("id-never-relayed"),
+                                   QJsonObject{{QStringLiteral("ok"), true}}));
+        QVERIFY(!hub.answerRequest(QStringLiteral("id-never-relayed"),
+                                   QJsonValue(QJsonValue::Undefined)));
+        QVERIFY(!hub.answerRequestError(QStringLiteral("id-never-relayed"), 0,
+                                        QStringLiteral("msg")));
+    }
+
+    // ================================================== car E machine E3:
+    // THE ANSWER DOORS over a live dapfake wire (PLAN's E3 paragraph): the
+    // reverse battery tst_dap's D2 slot drives at the CLIENT layer, driven
+    // here at the SHELF layer — dapfake validates each answer shape itself
+    // (request_seq match + envelope audit; any lie exits 2), so the far
+    // side is the oracle for what travelled, and the doors' bools are the
+    // near-side oracle for what the hub refused. The D2 slot stays
+    // byte-identical: this machine adds the shelf route, it does not
+    // replace the client route.
+
+    void dapHubAnswerDoorWinsTheReverseRaceAndTheShelfStands()
+    {
+        ProjectSession project;
+        CodeEditor ed;
+        QVERIFY(project.openDocument(
+            &ed, QStringLiteral("/dapfake/project/reverse.cpp")));
+        ed.setPlainText(QStringLiteral("alpha\nbeta\n"));
+
+        HubSpawns spawns; // BEFORE the hub (the dtor-pump lifetime rule)
+        DapHub hub;
+        spawns.install(hub);
+        hub.attachProject(&project);
+        QSignalSpy startedSpy(&hub, &DapHub::sessionStarted);
+
+        QVector<QJsonObject> relayed;
+        bool firstWon = false;
+        bool secondRefused = false;
+        QObject::connect(&hub, &DapHub::dapRequest,
+                         [&](const QJsonObject& request) {
+                             relayed.append(request);
+                             const QString command
+                                 = request.value(QStringLiteral("command"))
+                                       .toString();
+                             if (command != QLatin1String("startDebugging"))
+                                 return; // runInTerminal stays UNANSWERED:
+                                         // the client layer's honest
+                                         // "not handled" default must win
+                                         // that leg, and dapfake audits it
+                             // The SHELF door, keyed by the relayed frame's
+                             // own seq (the id rule, out of the request):
+                             // answer DURING the signal to outrank the
+                             // default, then answer AGAIN and read false.
+                             firstWon = hub.answerRequest(
+                                 request.value(QStringLiteral("seq")),
+                                 QJsonObject{{QStringLiteral("ok"), true}});
+                             secondRefused = !hub.answerRequest(
+                                 request.value(QStringLiteral("seq")),
+                                 QJsonObject{{QStringLiteral("ok"), false}});
+                         });
+
+        QVERIFY(hub.startDebugging(QString::fromLatin1(QMN_TEST_DAP_SERVER),
+                                   {QStringLiteral("reverse")}, QJsonObject{},
+                                   QStringLiteral("dapfake")));
+        QTRY_COMPARE_WITH_TIMEOUT(startedSpy.count(), 1, 30000);
+        // Exactly the two relayed commands (progressStart is answered from
+        // the client's STATIC shelf and must never reach the hub's relay —
+        // the D2 pin, now proven one layer up too):
+        QTRY_COMPARE_WITH_TIMEOUT(relayed.size(), 2, 5000);
+        QCOMPARE(relayed.at(0).value(QStringLiteral("command")).toString(),
+                 QStringLiteral("runInTerminal"));
+        QCOMPARE(relayed.at(1).value(QStringLiteral("command")).toString(),
+                 QStringLiteral("startDebugging"));
+        QVERIFY2(firstWon, "the shelf door's answer lost to the client-layer "
+                           "default — the door never reached the open id");
+        QVERIFY2(secondRefused, "the shelf door answered a SECOND time for "
+                                "one id — erase-once is not reachable "
+                                "through the shelf");
+        QCOMPARE(relayed.size(), 2); // the shelf answer still never rode the
+                                     // relay on the way back either
+
+        hub.stopDebugging();
+        // The whole battery validated far-side (a lie would have exited 2
+        // and a hung battery 3): exit 0 is dapfake saying "that is exactly
+        // the answer set I was promised".
+        QTRY_COMPARE_WITH_TIMEOUT(spawns.exitCodeOf(0), 0, 10000);
+    }
+
+    void dapHubErrorDoorTravelsWholeErrorTable()
+    {
+        // The SAME reverse battery, the startDebugging leg answered through
+        // answerRequestError: dapfake audits the ENVELOPE — the
+        // discriminator error.id 9001 (nothing else on this wire can invent
+        // it, so the far side knows WHICH door answered: the client-layer
+        // default would have said error{id:0, format:"not handled:
+        // startDebugging"}), the door's message in error.format, and the
+        // OBJECT data merged into the error table (appId=="daphub-door",
+        // DapCodec::buildErrorResponse's merge, DapCodec.cpp).
+        ProjectSession project;
+        CodeEditor ed;
+        QVERIFY(project.openDocument(
+            &ed, QStringLiteral("/dapfake/project/reverse-err.cpp")));
+        ed.setPlainText(QStringLiteral("alpha\nbeta\n"));
+
+        HubSpawns spawns;
+        DapHub hub;
+        spawns.install(hub);
+        hub.attachProject(&project);
+        QSignalSpy startedSpy(&hub, &DapHub::sessionStarted);
+
+        QVector<QJsonObject> relayed;
+        bool errorAnswered = false;
+        bool staleRefused = false;
+        QObject::connect(&hub, &DapHub::dapRequest,
+                         [&](const QJsonObject& request) {
+                             relayed.append(request);
+                             if (request.value(QStringLiteral("command"))
+                                         .toString()
+                                 != QLatin1String("startDebugging"))
+                                 return; // runInTerminal -> the default, again
+                             errorAnswered = hub.answerRequestError(
+                                 request.value(QStringLiteral("seq")), 9001,
+                                 QStringLiteral("hub-answer-refused"),
+                                 QJsonObject{{QStringLiteral("appId"),
+                                              QStringLiteral("daphub-door")}});
+                             // The id is CLOSED by that answer: a later
+                             // success-shaped call reads false and writes
+                             // NOTHING (the far side cannot see the
+                             // refusal — nothing travels; its audit still
+                             // matches because the error envelope above is
+                             // the one it validated).
+                             staleRefused = !hub.answerRequest(
+                                 request.value(QStringLiteral("seq")),
+                                 QJsonObject{{QStringLiteral("ok"), true}});
+                         });
+
+        QVERIFY(hub.startDebugging(QString::fromLatin1(QMN_TEST_DAP_SERVER),
+                                   {QStringLiteral("reverse")}, QJsonObject{},
+                                   QStringLiteral("dapfake")));
+        QTRY_COMPARE_WITH_TIMEOUT(startedSpy.count(), 1, 30000);
+        QTRY_COMPARE_WITH_TIMEOUT(relayed.size(), 2, 5000);
+        QVERIFY2(errorAnswered, "the error door never reached the open id");
+        QVERIFY2(staleRefused, "a second answer after the error envelope "
+                               "went out — erase-once once again");
+        QVERIFY(hub.isDebugging()); // an in-envelope failure is not a death:
+                                    // the session stands (dapfake stayed up)
+
+        hub.stopDebugging();
+        QTRY_COMPARE_WITH_TIMEOUT(spawns.exitCodeOf(0), 0, 10000);
     }
 };
 

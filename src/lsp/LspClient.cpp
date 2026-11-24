@@ -104,6 +104,23 @@ void LspClient::beginSession()
 
     session_ = new Session;
     session_->transport = factory_(this);
+    // Keep the last issue for the FAILED reason string. CONNECT ORDER IS THE
+    // MECHANISM: RpcClient's own ctor connects transportError -> its
+    // onTransportError, whose markGone() emits transportGone SYNCHRONOUSLY,
+    // so onGone() runs NESTED INSIDE the transportError emission at that
+    // signal's slot order. Below the RpcClient construction the capture is
+    // the SECOND slot and onGone() reads a stale/empty lastTransportIssue_ -
+    // the shape car E machine E2's smoke leg caught on the DAP twin
+    // ("transport never opened: " with an EMPTY tail), and the DAP fix and
+    // this one are the same 3-line move. Above it, the capture is the FIRST
+    // slot: a synchronous StartFailed (and every later issue) is captured
+    // before anyone can build a reason from it.
+    connect(session_->transport, &Transport::transportError, this,
+            [this](Transport::ErrorKind kind, const QString& text) {
+                lastTransportIssue_ =
+                    QStringLiteral("%1: %2")
+                        .arg(errorKindName(kind), text);
+            });
     session_->rpc = new RpcClient(session_->transport, this);
     registerPolicyHandlers(session_->rpc);
 
@@ -111,15 +128,6 @@ void LspClient::beginSession()
             &LspClient::onOpened);
     connect(session_->transport, &Transport::stderrLine, this,
             &LspClient::serverStderr); // the separate STDERR channel
-    // Keep the last issue for the FAILED reason string. Connected BEFORE
-    // transport->start(): the StartFailed error fires synchronously inside
-    // start() and must already be captured.
-    connect(session_->transport, &Transport::transportError, this,
-            [this](Transport::ErrorKind kind, const QString& text) {
-                lastTransportIssue_ =
-                    QStringLiteral("%1: %2")
-                        .arg(errorKindName(kind), text);
-            });
     connect(session_->rpc, &RpcClient::transportGone, this,
             &LspClient::onGone);
 
@@ -512,15 +520,17 @@ void LspClient::respondApplyEdit(const QJsonValue& id, bool applied)
         id, QJsonObject{{QStringLiteral("applied"), applied}});
 }
 
-void LspClient::respondShowMessageRequest(const QJsonValue& id,
+bool LspClient::respondShowMessageRequest(const QJsonValue& id,
                                           const QJsonValue& actionItem)
 {
     if (!session_)
-        return;
+        return false;
     // An empty/Null item = dismissed (the spec's own reading). The answer only
     // travels while the id is still open: after this layer's Null default the
     // respond() below is refused, which is the documented "first answer wins".
-    session_->rpc->respond(
+    // The bool is that refusal made visible (E3): the shelf's answer door
+    // forwards it, so an app can learn its answer LOST the race.
+    return session_->rpc->respond(
         id, actionItem.isNull() || actionItem.isUndefined()
                 ? QJsonValue(QJsonValue::Null)
                 : actionItem);

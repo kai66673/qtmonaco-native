@@ -5,6 +5,7 @@ smoke_wheel.py runs against an installed wheel and needs nothing.
 """
 
 import os
+import time
 
 os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 
@@ -218,13 +219,158 @@ def run_checks() -> int:
     session.closeDocument(other)  # unregistered now: the silent no-op
     assert closed_uris == ["file:///tmp/g3-smoke/unclaimed.py"], closed_uris
 
-    # The hub relays cross as ordinary PySide signals (the answer route
-    # clientForSpec()->respond... is C++-only - documented).
+    # The hub relays cross as ordinary PySide signals, and since car E
+    # machine E3 (crossing proven by E4's codegen run) the ANSWER route
+    # crosses as a plain-typed door too — answerShowMessageRequest is what
+    # the relay hands out (spec, id, params) answers back. The C++ route
+    # clientForSpec()->respond... stays a dropped by-type-absence door
+    # behind the shelf. With no wire at all the door answers False: an
+    # unknown spec, and — the lazy-start half, pinned in C++ by tst_lsp's
+    # showMessageRequestAnswerDoorRefusalsHaveNoSideEffects (the Python side
+    # cannot see clientForSpec, it is dropped) — a REGISTERED-but-never-
+    # started spec (g3server above has no document, so its server never
+    # started): the answer door is the registry's READ side, it never spawns.
     assert hasattr(hub, "serverShowMessage") and hasattr(hub, "applyEditRefused")
+    assert hasattr(hub, "answerShowMessageRequest")
+    assert hub.answerShowMessageRequest("nope", 1, {}) is False
+    assert hub.answerShowMessageRequest("g3server", 1,
+                                        {"title": "x"}) is False
+
+    # --- car E machine E2: the DAP shelf crosses (qmn.DapHub) --------------
+    # The SAME NO-SERVER discipline as the tst_glue rule, kept whole: no
+    # adapter ever RUNS here (the container has no gdb/lldb-dap). The legs
+    # below are the no-session shape plus one spawn attempt that execve
+    # REFUSES - a death, never a session.
+    qt_before = {line.split()[-1] for line in
+                 open(f"/proc/{os.getpid()}/maps") if "/libQt6" in line.split()[-1]}
+    daphub = qmn.DapHub()
+    daphub.attachProject(session)  # the direction: the hub attaches the project
+    assert daphub.project() is session  # the non-owning QPointer crosses back
+    assert daphub.isDebugging() is False and daphub.isReady() is False
+    assert daphub.adapterCapabilities() == {}  # the empty QJsonObject dict
+
+    # Honest absence (the E2 drop set, exactly the log's two public doors:
+    # the std::function seam + the unbound qmn::dap::DapClient*): ABSENT,
+    # never no-ops - like the LspHub loop above.
+    for missing in ("setTransportFactory", "client"):
+        assert not hasattr(daphub, missing), f"dropped door crossed: {missing}"
+
+    # The nine signals exist and connect.
+    for signal in ("sessionStarted", "sessionEnded", "launchRejected",
+                   "debugStopped", "debugContinued", "sourceUnresolved",
+                   "dapEvent", "dapRequest", "adapterStderr"):
+        assert hasattr(daphub, signal), f"signal missing: {signal}"
+
+    # Car E machine E4: the answer doors E3 added CROSS (the codegen log
+    # shows no rejection line for them - the load-bearing direction of the
+    # drop audit flipped for this car) and answer honestly with no wire at
+    # all: an id that was never relayed is refused by RpcClient's
+    # openIncoming_ table and NO local failure frame is invented for a
+    # reverse answer (the ctest twin is tst_dap's
+    # dapHubRefusesEverythingWithoutAnAdapter leg). The plain 3-arity call
+    # is the DEFAULTED-tail arity probe E4 owes E3's record - codegen
+    # wrapping the door is not the same as wrapping its default - and the
+    # 4-arity call crosses the dict that would merge into the DAP error
+    # table (DapCodec::buildErrorResponse; only the far side can see the
+    # merge, pinned in tst_dap's dapHubErrorDoorTravelsWholeErrorTable).
+    assert hasattr(daphub, "answerRequest")
+    assert hasattr(daphub, "answerRequestError")
+    assert daphub.answerRequest(4242, {"ok": True}) is False
+    assert daphub.answerRequestError(4242, 0, "msg") is False
+    assert daphub.answerRequestError(4242, 9001, "msg",
+                                     {"appId": "smoke"}) is False
+
+    # Identity rule first, no session needed: a document with NO uri answers
+    # False (resolveEditorUri takes the DOCUMENT's uri first, DapHub.cpp).
+    dapview = qmn.CodeEditor()
+    assert daphub.setBreakpoints(dapview, [2, 4]) is False
+    # The CodeDocument door (walked above at the untitled: uri) now carries a
+    # path uri: True, and the two container crossings this leg exists for -
+    # QVector<int> read-back as the SAME list (the M5 gutter-door precedent
+    # re-pinned) and QMap<int,int> as a dict (the genuinely NEW shape,
+    # EMPTY here - entries only exist after an ANSWERED setBreakpoints, and
+    # no session stands, so the empty dict is the honest answer, pinned).
+    dapview.document().setDocumentUri("/tmp/e2-smoke/main.cpp")
+    assert daphub.setBreakpoints(dapview, [2, 4]) is True
+    assert daphub.requestedBreakpoints(dapview) == [2, 4]
+    assert daphub.breakpointMap(dapview) == {}
+
+    # E1's fan-out door crosses the wheel too: QList<CodeEditor*> OUT. The
+    # codegen log says it WRAPPED (absent from the rejected list), but a
+    # wrapped door whose RETURN-element conversion never runs is still
+    # unproven, so the leg CALLS it. The ONE-element shape is the honest
+    # answer here and worth saying plainly: a two-view JOIN needs the attach
+    # ctor CodeEditor(CodeDocument*, QWidget*), which stays remove="all" for
+    # Python (car D's recorded lifetime-pin question), so Python cannot build
+    # a joined pair until a later car opens that door.
+    # The session leg uses an UNCLAIMED suffix: this session has the G3 LspHub
+    # attached and .cpp is a clangd-claimed language, so a .cpp open here would
+    # lazy-start a server the container does not have (the G3 NO-SPAWN rule).
+    assert session.openDocument(dapview, "/tmp/e2-smoke/fan.py") is True
+    fan = session.editorsForUri("file:///tmp/e2-smoke/fan.py")
+    assert isinstance(fan, list), type(fan)
+    assert len(fan) == 1 and fan[0] is dapview, fan
+    # Path form normalizes to the SAME key (the G3 path-door precedent), and
+    # the list identity crossing is the pin: the same Python object.
+    joined = session.editorsForUri("/tmp/e2-smoke/fan.py")
+    assert [e is dapview for e in joined], joined
+    assert session.editorsForUri("file:///tmp/e2-smoke/never-opened.py") == []
+    session.closeDocument(dapview)
+    assert session.editorsForUri("file:///tmp/e2-smoke/fan.py") == []
+
+    # The one honest spawn: a program that cannot exist. startDebugging
+    # answers True (the transport start is not yet a verdict); the
+    # FailedToStart verdict then travels transportError -> (RpcClient)
+    # markGone -> transportGone -> DapClient::onGone -> Failed -> the hub's
+    # sessionEnded, and the reason string is the wheel-visible product of the
+    # capture-order fix this machine made in src/dap and src/lsp: OUR prefix
+    # ("StartFailed:" from errorKindName) plus a real Qt tail. Qt's
+    # errorString does NOT name the program (the container run said
+    # "Child process set up failed: execve: No such file or directory"), so
+    # the program name is NOT part of this pin - the NON-EMPTY TAIL is what
+    # used to be empty, and tst_dap's
+    # dapHubSpawnRefusalReasonCarriesTheTransportIssue is the ctest twin.
+    ends = []
+    daphub.sessionEnded.connect(ends.append)
+    assert daphub.startDebugging("qmn-no-such-adapter-xyz") is True
+    assert daphub.isDebugging() is True  # Starting, until the spawn verdict
+    # Bounded pump (4 s, never a hang) on STDLIB sleep: importing
+    # PySide6.QtTest here would load a Qt module the leg then measures as a
+    # delta and silently blur the one-Qt proof below.
+    for _ in range(40):
+        app.processEvents()
+        if ends:
+            break
+        time.sleep(0.1)
+    # Our OWN prefix is the stable half (the Qt errorString behind it is
+    # version-dependent); the tail's PRESENCE is the whole point.
+    prefix = "transport never opened: StartFailed: "
+    assert ends and ends[0].startswith(prefix), ends
+    assert len(ends[0]) > len(prefix), f"empty tail: {ends}"
+    assert daphub.isDebugging() is False and daphub.isReady() is False
+    assert daphub.adapterCapabilities() == {}
+    daphub.stopDebugging()  # legal no-op with no session standing
+
+    # The DEAD-session half of the answer doors (E4, on E2's corpse): the
+    # hub's client_ is not reset at session end (it is only REPLACED by the
+    # next startDebugging, DapHub.cpp), so the hub's `!client_` filter does
+    # NOT fire here — the refusal comes from the client's `!session_` guard
+    # one layer down, and the wheel reads it as the same honest False.
+    assert daphub.answerRequest(4242, {"ok": True}) is False
+    assert daphub.answerRequestError(4242, 0, "msg") is False
 
     network = loaded_libs("libQt6Network.so")
     print(f"QtNetwork:  {sorted(network)}")
     assert len(network) == 1, f"more than one QtNetwork in the process: {sorted(network)}"
+    # The E2 one-Qt proof grows: the DAP shelf may add NO new Qt module (it
+    # rides the Core/Network/Gui/Widgets the view+shelf already need) and no
+    # SECOND copy of anything already loaded - a real before/after diff over
+    # /proc/self/maps around the whole DAP leg above (an auditwheel exclude
+    # that moved would show up HERE as a grafted lib).
+    qt_after = {line.split()[-1] for line in
+                open(f"/proc/{os.getpid()}/maps") if "/libQt6" in line.split()[-1]}
+    print(f"Qt delta:   {sorted(set(qt_after) - set(qt_before))}")
+    assert qt_after == qt_before, (sorted(set(qt_after) ^ set(qt_before)))
 
     app.processEvents()
     print("OK: qmn binding smoke test passed")

@@ -91,6 +91,14 @@ int main(int argc, char** argv)
     CHECK(session.editorForUri(QStringLiteral("/work/anything.py")) == &editor);
     CHECK(session.closeUri(QStringLiteral("/work/anything.py")));
     CHECK(session.openCount() == 0);
+    // Car E machine E3's answer door rides the SAME export boundary, and
+    // reading it is the lazy-start half proven at the INSTALLED shelf: the
+    // spec is registered but was never started, so the door (a clientForSpec
+    // read, NEVER a spawn) answers false and the hub STAYS spawn-free —
+    // the same pin tst_lsp drives with a live client.
+    CHECK(!hub.answerShowMessageRequest(QStringLiteral("clangd"),
+                                        QJsonValue(1),
+                                        QJsonObject()));
     CHECK(hub.clientForSpec(QStringLiteral("clangd")) == nullptr); // never started
 
     // The shelf's THIRD member (D3/D4): the DapHub doors
@@ -114,6 +122,11 @@ int main(int argc, char** argv)
     CHECK(!dap.terminateDebugging());
     CHECK(dap.request(QStringLiteral("ping"),
                       QJsonValue(QJsonValue::Undefined)) == -1);
+    // The two E3 answer doors, same session-less honesty across the
+    // installed export (no wire, nothing relayed, so every id is refused):
+    CHECK(!dap.answerRequest(QJsonValue(1), QJsonValue(true)));
+    CHECK(!dap.answerRequestError(QJsonValue(1), 9001,
+                                  QStringLiteral("hub consumer smoke")));
     dap.configurationDone(); // honest no-ops on a session-less hub:
     dap.stopDebugging();     // the doors exist and answer
     // The transport-factory seam compiles across the boundary (C++-only,

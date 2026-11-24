@@ -28,8 +28,13 @@
 //     recorded;
 //   - the STOPPED feed: stopped → v1 SINGLE-THREAD (the last threadId; a
 //     threads UI is a recorded deferred sliver) → stackTrace → top frame →
-//     setPosition + setHighlightedLines on the resolved editor, cleared
-//     on `continued`; then `variables` of the FIRST top-frame scope,
+//     setHighlightedLines on EVERY live view of the frame's document
+//     (car E machine E1: the feed fans out over the session's view list,
+//     `ProjectSession::editorsForUri`), while the CARET (setPosition)
+//     rides the OWNER view ONLY — caret/selection is per-view state and a
+//     stop must not yank the caret of a view the user is typing in; after
+//     a handover the next view owns the caret. The feed clears on
+//     `continued`; then `variables` of the FIRST top-frame scope,
 //     matched as WORDS on the stopped line, `= value` painted at the
 //     word-end col via setInlayHints — the M5 door finally carries the
 //     DAP meaning its name was minted with;
@@ -45,14 +50,17 @@
 // pumps that barrier bounded (the M8 machine-4 lesson, paid twice).
 //
 // The setTransportFactory seam mirrors LspHub's (C++-only, honest
-// absence); every ANSWER route is a SIGNAL and every payload is a plain
-// Qt type — the D4 note's Shiboken-shaped discipline, so the wheel
-// follow-on is a three-copies growth, not a surgery.
+// absence); every ANSWER route is a SIGNAL plus a plain-typed answer door
+// (car E machine E3 added answerRequest/answerRequestError, so the wheel
+// crosses the WHOLE round trip — signal out, answer back — without a
+// std::function or an unbound type in sight) and every payload is a plain
+// Qt type — the D4 note's Shiboken-shaped discipline, kept.
 
 #include <QHash>
 #include <QJsonArray>
 #include <QJsonObject>
 #include <QJsonValue>
+#include <QList>
 #include <QMap>
 #include <QPointer>
 #include <QString>
@@ -150,6 +158,33 @@ public:
     qint64 request(const QString& command, const QJsonValue& arguments);
     qmn::dap::DapClient* client() const { return client_.get(); }
 
+    // Car E machine E3 — THE answer doors for a relayed reverse request
+    // (dapRequest carries the adapter's whole REQUEST frame; the id to
+    // answer with is that frame's own `seq` member, straight out of it).
+    // The plain-typed face of the D4 note's Shiboken-shaped promise: the
+    // wheel answers an adapter without ever touching the unbound DapClient
+    // (client() stays the C++ route, and it forwards to the same two
+    // client doors). ONE session at a time, so — unlike LSP's spec-named
+    // door — there is no server to pick wrong: the answer can only travel
+    // on the one wire that asked. First-answer-wins rides down to
+    // RpcClient (openIncoming_ is registered before the relay runs and
+    // erase-once refuses the second), so the hub adds no re-answer
+    // bookkeeping; the bool says whether THIS call was the answer that
+    // went out: false = no session (nothing relayed this hub), dead
+    // session, or the id already answered (the client's honest "not
+    // handled: <command>" default or an earlier answer won). Answer from
+    // inside the dapRequest signal to outrank the default.
+    bool answerRequest(const QJsonValue& id, const QJsonValue& body);
+    // The in-envelope failure shape (success:false + the DAP error table):
+    // code lands in error.id, message in error.format, and an OBJECT data
+    // merges its members into the table (DapCodec::buildErrorResponse —
+    // non-object data has no legal spelling on this wire and is dropped).
+    // Defaulted data mirrors DapClient::respondError.
+    bool answerRequestError(const QJsonValue& id, int code,
+                            const QString& message,
+                            const QJsonValue& data
+                            = QJsonValue(QJsonValue::Undefined));
+
     // --- breakpoints (the app owns the truth) ------------------------------
     // Stores per uri, sends setBreakpoints when Ready, re-feeds the
     // decorations from the reply (and from `breakpoint` EVENTS through the
@@ -180,8 +215,9 @@ signals:
     // (the hub never reads disk, never silently opens anything).
     void sourceUnresolved(const QJsonObject& source, const QJsonObject& frame);
     // The client relays, carried up (events incl. terminated/output;
-    // reverse requests answered through client()->respond DURING the
-    // signal; stderr stays its own channel — the PLAN-pinned split):
+    // reverse requests answered through answerRequest/answerRequestError
+    // (or C++'s client()->respond) DURING the signal — first answer to an
+    // id wins; stderr stays its own channel — the PLAN-pinned split):
     void dapEvent(const QString& name, const QJsonValue& body);
     void dapRequest(const QJsonObject& request);
     void adapterStderr(const QString& line);
@@ -196,16 +232,34 @@ private:
     };
 
     struct BoundSource { // per normalized uri
-        QPointer<qmn::view::CodeEditor> editor; // re-resolvable via the session
+        // car E machine E1: the live views of this document, OWNER FIRST
+        // (the session's attach order; a joined view joins the list). The
+        // decoration fan-out (dots + dap diagnostics) paints on EVERY
+        // entry; dead pointers are skipped and pruned. DAP has no wire
+        // stake in the list — the session, not the hub, owns the
+        // document's identity — so this is bookkeeping, not a join seam
+        // like the LSP hub's registration.
+        QList<QPointer<qmn::view::CodeEditor>> views;
         QVector<BrEntry> entries;               // desired order (index-paired with replies)
         QTimer* resend = nullptr;               // kBreakpointResendMs debounce, hub-parented
         QMetaObject::Connection editConn;       // onto the document's textChanged
     };
 
     // resolved through the session's uri map ONLY (exact string, then
-    // ProjectSession's own bare-path normalization inside editorForUri);
-    // empty path = unresolved. NEVER disk I/O.
-    qmn::view::CodeEditor* editorForSourcePath(const QString& path) const;
+    // ProjectSession's own bare-path normalization inside editorsForUri);
+    // empty list = unresolved. NEVER disk I/O. E1: EVERY live view,
+    // owner first — the DAP feeds fan out over this list (the car-D
+    // alias-paint divergence dies here).
+    QList<qmn::view::CodeEditor*> editorsForSourcePath(const QString& path) const;
+    // E1: the shared live-view refresh for the uri-keyed stores — the
+    // SESSION answers first (attach order, owner first: a view that JOINED
+    // after the last feed still gets the paint), and with no session (or a
+    // document the session never registered — a bare documentUri() works
+    // too) the store minus dead pointers is the fallback. Prunes the store
+    // either way and records the session's answer so the fallback has
+    // something to stand on after a session_ death.
+    QList<qmn::view::CodeEditor*> liveViews(BoundSource& bound,
+                                            const QString& uri) const;
     QString uriForEditor(const qmn::view::CodeEditor* editor) const;
     static QString localPathForUri(const QString& uri); // file:// -> path, else verbatim
 
@@ -226,9 +280,11 @@ private:
     void handleStopped(const QJsonObject& body);       // the stackTrace leg
     void handleStackTrace(quint64 gen,
                           const qmn::protocol::RpcClient::Reply& reply);
-    void handleScopes(qmn::view::CodeEditor* editor, int line, quint64 gen,
+    void handleScopes(const QList<QPointer<qmn::view::CodeEditor>>& views,
+                      int line, quint64 gen,
                       const qmn::protocol::RpcClient::Reply& reply);
-    void handleVariables(qmn::view::CodeEditor* editor, int line, quint64 gen,
+    void handleVariables(const QList<QPointer<qmn::view::CodeEditor>>& views,
+                         int line, quint64 gen,
                          const qmn::protocol::RpcClient::Reply& reply);
     void clearStopFeed();                              // band + hints
     void clearAllFeeds();                              // + dots + dap diags
@@ -270,9 +326,11 @@ private:
 
     // the stopped feed (v1 single-thread):
     int lastThreadId_ = 0;
-    QPointer<qmn::view::CodeEditor> stopEditor_; // where the band + hints
-                                                 // landed (same editor: one
-                                                 // resolved frame feeds both)
+    // E1: the band + hints landed on EVERY view in this list (hint math
+    // computed once); the caret rode views.first() — the live list is
+    // re-resolved through the session, dead QPointers are skipped, and a
+    // mid-stop view death leaves the survivors fed (handover).
+    QList<QPointer<qmn::view::CodeEditor>> stopViews_;
     bool closingDown_ = false;
 };
 

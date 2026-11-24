@@ -54,10 +54,12 @@ view, horizontal scrolling with column memory, scrolling past the end,
 the whole LSP stack (protocol → client → syncer → app-side hub → popups)
 and the whole DAP stack (codec seam → dap layer → DapHub on the glue
 shelf, breakpoints/frames/value hints via the M5 decorations) all shipped
-in 1.7.0 – 1.9.1; cars B/C/D of Gate 3 (1.10.0 – 1.12.0) added the
+in 1.7.0 – 1.9.1; cars B/C/D/E of Gate 3 (1.10.0 – 1.13.0) added the
 word-level inline diff wash + weighted diff rows, signatureHelp, LSP folds,
-LSP inlay hints and pull diagnostics, and any number of editor views over
-one document (shared text/undo/parse, per-view carets and popups).
+LSP inlay hints and pull diagnostics, any number of editor views over
+one document (shared text/undo/parse, per-view carets and popups), and
+`qmn.DapHub` + the plain-typed answer doors across the Python wheel with
+DAP decorations fanning out to every view of a document.
 
 ## Layout & layering
 
@@ -310,9 +312,22 @@ Gate 2 closed; see PLAN.md for the car-by-car design record):
       fold/hint/diagnostic paints and hub dismissals fan out over the view
       list, and the owner view's death hands the wire over instead of
       closing it
-- [ ] Car E — wheel-2: DAP across the wheel (`qmn.DapHub` + payload
-      records) + the signal-shaped answer routes; the rejected-log
-      baseline re-pinned
+- [x] Car E — wheel-2 (CLOSED, 1.13.0): DAP crosses the wheel —
+      `qmn.DapHub` joins the Python shelf (no new record types: the hub's
+      two structs are PRIVATE, so only one entry per copy of the
+      three-copies lists grew) + the signal+plain-typed ANSWER routes
+      cross as three doors (`LspHub::answerShowMessageRequest` — resolved
+      through the READ side, an answer door never spawns a server — and
+      `DapHub::answerRequest`/`answerRequestError`), while the 17
+      `LspHub` feature doors stay honest C++-only absences; the DAP
+      alias-paint divergence car D named is CLOSED —
+      `ProjectSession::editorsForUri` fans dots, dap diagnostics, the
+      stopped band and the value hints out to EVERY live view of the
+      document (the caret stays owner-only), and the live DAP ritual ran
+      through the wheel on both lldb-dap and gdb `-i=dap`; the
+      rejected-log audit was re-pinned FROM the archived logs — the "16
+      drops" baseline was a set name, never a line count (the real set:
+      34 `LspHub` + 1 `ProjectSession` + 9 `DapHub` lines)
 - [ ] Car S1 — `qmn-demo` grows into the live showcase: diff door,
       grammar door, DAP controls, `--tour` (a scripted pin table that
       exits nonzero on the first failed pin; live ritual, never CI)

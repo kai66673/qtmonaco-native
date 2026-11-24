@@ -2205,8 +2205,10 @@ void featureDidSave(const QString& uri, ModelDoc& d)
         return;
     }
     if (d.text.contains(QLatin1String("MSGREQ"))) {
-        // window/showMessageRequest: the tst answers the FIRST variant
-        // through the hub relay; the other variant stays silent and the
+        // window/showMessageRequest: the tst answers the FIRST variant from
+        // inside the hub relay (through the client door or, since car E
+        // machine E3, the hub's answerShowMessageRequest door); the other
+        // variant stays silent (or only its id gets REFUSED probes) and the
         // client layer's own Null default must answer for it.
         const bool first = d.text.contains(QLatin1String("MSGREQ-FIRST"));
         QJsonArray actions;

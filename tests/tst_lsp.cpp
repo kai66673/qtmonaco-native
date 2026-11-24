@@ -1508,6 +1508,18 @@ private slots:
         h.client->start(TestHarness::initParams());
         QTRY_COMPARE_WITH_TIMEOUT(failedSpy.count(), 1, 3000);
         QCOMPARE(h.client->state(), qmn::lsp::LspClient::State::Failed);
+        // Car E machine E2 pinned the tail, and it is the SAME defect the
+        // DAP twin had (the transportError capture sat below the RpcClient
+        // construction, so onGone built the reason from an empty
+        // lastTransportIssue_). Nothing in this binary inspected the reason
+        // before, which is why the empty tail survived. The Qt errorString
+        // after OUR prefix is version-dependent, so its PRESENCE is the pin.
+        const QString reason = failedSpy.at(0).at(0).toString();
+        const QString prefix =
+            QStringLiteral("transport never opened: StartFailed: ");
+        QVERIFY2(reason.startsWith(prefix), qPrintable(reason));
+        QVERIFY2(reason.size() > prefix.size(),
+                 qPrintable(QStringLiteral("empty tail: %1").arg(reason)));
         QCOMPARE(readySpy.count(), 0);
         QTest::qWait(qmn::lsp::LspClient::kRestartBackoffMs * 3);
         QCOMPARE(h.spawnCount, 1); // the factory was asked exactly once
@@ -3765,6 +3777,11 @@ private slots:
     // button), and the answer that arrives FIRST is the one the server gets.
     // An app that never answers still gets the client layer's spec-legal Null
     // default — both halves are judged by the fakeserver itself.
+    // Car E machine E3 grew this slot with the SHELF-DOOR shape (the same
+    // race answered through hub.answerShowMessageRequest, whose bool is the
+    // first-answer-wins policy made observable) — the raw
+    // clientForSpec()->respond form below stays the C++ route the door
+    // forwards to, so both shapes ride the same far-side markers.
     void showMessageRequestFirstAnswerWinsAndNullDefaultFollows()
     {
         { // the app answers inside the relay: the picked item wins
@@ -3854,6 +3871,135 @@ private slots:
             // error, and the default's answer closed the id.
             QVERIFY(client->isReady());
         }
+        { // CAR E MACHINE E3 — the app answers through the SHELF DOOR, and
+          // the door answers twice: the first call won the race against the
+          // client's Null default, the second reads FALSE (the very refusal
+          // RpcClient's erase-once makes — "double answers are never sent" —
+          // now visible to the caller). The far side's witness is the same
+          // MSGREQ-OK marker: the answer it ACCEPTED was the picked item
+          // (an overwritten or double answer could not read that way).
+            HubHarness h(QStringList{QStringLiteral("sync"),
+                                     QStringLiteral("utf-16"),
+                                     QStringLiteral("features")});
+            h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+            qmn::view::CodeEditor editor;
+            editor.setPlainText(QStringLiteral("MSGREQ-FIRST beta"));
+            QVERIFY(h.hub.openDocument(
+                &editor, QStringLiteral("file:///m5-msgreq-door.py"),
+                QStringLiteral("python")));
+            QVERIFY(waitReady(h.hub.clientForSpec(QStringLiteral("pysrv"))));
+
+            int relayed = 0;
+            bool firstWon = false;
+            bool secondRefused = false;
+            QObject::connect(
+                &h.hub, &qmn::glue::LspHub::serverShowMessageRequest,
+                [&](const QString& spec, const QJsonValue& id,
+                    const QJsonValue& params) {
+                    ++relayed;
+                    const QJsonArray actions
+                        = params.toObject()
+                              .value(QStringLiteral("actions"))
+                              .toArray();
+                    QJsonObject picked;
+                    QJsonObject loser;
+                    for (const QJsonValue& action : actions) {
+                        const QString title = action.toObject()
+                                                  .value(QStringLiteral("title"))
+                                                  .toString();
+                        if (title == QLatin1String("FIRST"))
+                            picked = action.toObject();
+                        else if (title == QLatin1String("SECOND"))
+                            loser = action.toObject();
+                    }
+                    QVERIFY(!picked.isEmpty() && !loser.isEmpty());
+                    firstWon = h.hub.answerShowMessageRequest(spec, id, picked);
+                    // The SAME id, answered again inside the same relay: the
+                    // loser item must never reach the wire.
+                    secondRefused
+                        = !h.hub.answerShowMessageRequest(spec, id, loser);
+                });
+
+            auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+            QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+            h.hub.saveDocument(&editor);
+
+            QVERIFY2(waitUntil([&] { return relayed > 0; }),
+                     qPrintable(stderrDump(stderrSpy)));
+            QVERIFY2(waitMarker(stderrSpy, QStringLiteral("MSGREQ-OK")),
+                     qPrintable(stderrDump(stderrSpy)));
+            QVERIFY(!sawMarker(stderrSpy, QStringLiteral("MSGREQ-NULL-OK")));
+            QVERIFY2(firstWon,
+                     "the shelf door's first answer lost to the Null default");
+            QVERIFY2(secondRefused,
+                     "the shelf door answered a SECOND time — the erase-once "
+                     "guard is not reachable through the shelf");
+            QVERIFY(client->isReady());
+        }
+    }
+
+    // The answer door's REFUSALS, pinned next to the wins (car E machine
+    // E3): answering a spec that was never started, or an id that is not
+    // open on this hub, must read false WITHOUT side effects — the fakeserver
+    // proof is that the refusals broke nothing on the session's own wire
+    // (the request the app left unclaimed still gets the spec-legal Null
+    // default and the session stands).
+    void showMessageRequestAnswerDoorRefusalsHaveNoSideEffects()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("features")});
+        h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+        qmn::view::CodeEditor editor;
+        editor.setPlainText(QStringLiteral("MSGREQ-NULL gamma"));
+        QVERIFY(h.hub.openDocument(
+            &editor, QStringLiteral("file:///m5-msgrefuse.py"),
+            QStringLiteral("python")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("pysrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+
+        // Before the relay even lands: a door call keyed to a spec that was
+        // NEVER STARTED must not spawn anything and must read false. The
+        // lazy-start pin holds: no client appeared for the phantom spec.
+        QVERIFY(!h.hub.answerShowMessageRequest(
+            QStringLiteral("nosrv"), QStringLiteral("id-1"), QJsonObject()));
+        QCOMPARE(h.hub.clientForSpec(QStringLiteral("nosrv")), nullptr);
+
+        int relayed = 0;
+        bool probeRefused = false;
+        bool unknownSpecRefused = false;
+        QObject::connect(
+            &h.hub, &qmn::glue::LspHub::serverShowMessageRequest,
+            [&](const QString& spec, const QJsonValue&, const QJsonValue&) {
+                ++relayed;
+                // An id that is not open on this wire: false, and the REAL
+                // id stays open — the probe must not burn the request.
+                probeRefused = !h.hub.answerShowMessageRequest(
+                    spec, QStringLiteral("bogus-id-99"),
+                    QJsonObject{{QStringLiteral("title"),
+                                 QStringLiteral("FIRST")}});
+                // The phantom spec again, mid-relay: still false, and the
+                // real spec's request survives for the default.
+                unknownSpecRefused = !h.hub.answerShowMessageRequest(
+                    QStringLiteral("nosrv"),
+                    QStringLiteral("whatever-id"), QJsonObject());
+                // This app STILL answers nothing (the block keeps the
+                // Null-default oracle intact).
+            });
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+        h.hub.saveDocument(&editor);
+
+        QVERIFY2(waitUntil([&] { return relayed == 1; }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(waitMarker(stderrSpy, QStringLiteral("MSGREQ-NULL-OK")),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(probeRefused, "an unknown id was ANSWERED (a write out of "
+                               "thin air) — openIncoming_ guard broken");
+        QVERIFY2(unknownSpecRefused,
+                 "a phantom spec reached a live client — the door resolved "
+                 "to the wrong server");
+        QVERIFY(client->isReady()); // the refusals cost the session nothing
     }
 
     // --- M8 machine 6: the willSaveWaitUntil save detour (PLAN) -----------

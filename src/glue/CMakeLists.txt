@@ -31,9 +31,12 @@ target_compile_definitions(qmn_glue PRIVATE
 
 # ---- the shelf's own package surface (its own semver) ---------------------
 # Third version literal in the repo (AGENTS: the two package literals ride
-# the close ritual; this one bumps ONLY when the shelf itself breaks). It
-# opens at 1.0.0: the hub existed since M8 but only NOW becomes public.
-set(QMN_GLUE_VERSION 1.0.0)
+# the close ritual; this one bumps when the SHELF breaks, MAJOR on an API
+# break). It opened at 1.0.0: the hub existed since M8 but only NOW became
+# public. Since car G3 the shelf crosses the Python wheel, so a shelf break
+# is wheel-visible too — and additive shelf growth (car E's answer doors,
+# plain-typed and wrapping) is a MINOR bump: 1.1.0.
+set(QMN_GLUE_VERSION 1.1.0)
 
 set_target_properties(qmn_glue PROPERTIES EXPORT_NAME glue)
 install(TARGETS qmn_glue EXPORT qmnGlueTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})

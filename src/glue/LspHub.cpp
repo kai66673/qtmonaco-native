@@ -721,7 +721,7 @@ void LspHub::registerClient(const QString& specName, SpecClient& entry)
             });
     // window/showMessageRequest: the hub only RELAYS — it never picks an
     // action. The relay lands before LspClient's Null default, so an app
-    // that answers clientForSpec(spec)->respondShowMessageRequest from
+    // that answers answerShowMessageRequest(spec, id, item) from
     // inside this signal wins the choice (the first answer to an id is the
     // one that travels).
     connect(client, &qmn::lsp::LspClient::serverShowMessageRequest, this,
@@ -797,6 +797,19 @@ qmn::lsp::LspClient* LspHub::clientForSpec(const QString& specName) const
 {
     auto it = clients_.constFind(specName.toLower());
     return it == clients_.constEnd() ? nullptr : it->client;
+}
+
+bool LspHub::answerShowMessageRequest(const QString& specName,
+                                      const QJsonValue& id,
+                                      const QJsonValue& actionItem)
+{
+    // The READ side of the lazy-start registry (deliberately not
+    // specEntry — see the header: answering must never spawn; and a FAILED
+    // entry's client has no live session, so its respond answers false).
+    qmn::lsp::LspClient* client = clientForSpec(specName);
+    if (!client)
+        return false; // no such spec (or never started): the honest false
+    return client->respondShowMessageRequest(id, actionItem);
 }
 
 void LspHub::restartServer(const QString& specName)

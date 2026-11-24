@@ -312,6 +312,26 @@ qint64 DapHub::request(const QString& command, const QJsonValue& arguments)
     return client_->request(command, arguments, nullptr);
 }
 
+// ---------------------------------------------------------- answer doors (E3)
+
+bool DapHub::answerRequest(const QJsonValue& id, const QJsonValue& body)
+{
+    // NO state gate here, deliberately (the request door above has one):
+    // an ANSWER is judged by RpcClient's openIncoming_ table, not by the
+    // lifecycle — a session that died between the relay and the answer
+    // must read false, and inventing a kErrNotRunning-shaped frame for a
+    // reverse answer would be a wire lie. The client doors are the whole
+    // mechanism; the hub forwards.
+    return client_ && client_->respond(id, body);
+}
+
+bool DapHub::answerRequestError(const QJsonValue& id, int code,
+                                const QString& message,
+                                const QJsonValue& data)
+{
+    return client_ && client_->respondError(id, code, message, data);
+}
+
 // ------------------------------------------------------------- breakpoints
 
 QString DapHub::localPathForUri(const QString& uri)
@@ -361,10 +381,20 @@ bool DapHub::setBreakpoints(CodeEditor* editor, const QVector<int>& modelLines)
         return false; // a breakpoint needs an identity (no uri = no source)
 
     BoundSource* bound = boundForUri(normalized);
-    bound->editor = editor;
-    // Re-anchor the debounce onto THIS editor's document (the connection
-    // dies with an old document on its own; rewiring on an editor swap is
-    // the same honesty as the LspHub's re-registration).
+    // E1: the ASKING view joins the store (a joined view is a legitimate
+    // asker — the uri resolves through document identity either way). The
+    // session's attach order stays the authority for fan-out while a
+    // session is attached (liveViews answers from it); this append is the
+    // no-session half of the record.
+    if (!bound->views.contains(editor))
+        bound->views.append(editor);
+    // Re-anchor the debounce onto THIS editor's document EXACTLY ONCE PER
+    // URI (the connection dies with an old document on its own; rewiring
+    // on an editor swap is the same honesty as the LspHub's
+    // re-registration). E1 note: with views of ONE shared document the
+    // door asks can come from any of them — a second connect would DOUBLE
+    // the setBreakpoints resends, so the connect stays single and
+    // uri-keyed (the tst_dap debounce-burst pin is the oracle).
     if (bound->editConn)
         disconnect(bound->editConn);
     CodeDocument* doc = editor->document();
@@ -423,22 +453,33 @@ QMap<int, int> DapHub::breakpointMap(const CodeEditor* editor) const
     return map;
 }
 
-CodeEditor* DapHub::editorForSourcePath(const QString& path) const
+QList<CodeEditor*> DapHub::editorsForSourcePath(const QString& path) const
 {
     if (!session_ || path.isEmpty())
-        return nullptr;
+        return {};
     // ONE lookup covers "exact, then bare-path normalization both sides":
-    // editorForUri normalizes its argument exactly like openDocument
+    // editorsForUri normalizes its argument exactly like openDocument
     // registered the key, and a scheme-bearing uri passes through
-    // unchanged (ProjectSession::normalizeUri's own rule).
-    // CAR-D DIVERGENCE (D5, recorded): with an ALIASED document (two views
-    // of one file, the session's alias rule) the breakpoint ask resolves
-    // from EITHER view (uriForEditor answers through document identity),
-    // but this door returns the OWNER view — so the gutter dots paint
-    // there, not in every alias view. Unlike the LSP feeds, DAP's
-    // decoration table has no per-uri fan-out door to widen; the alias
-    // paint joins a later car's desk when the DAP shelf grows one.
-    return session_->editorForUri(path);
+    // unchanged (ProjectSession::normalizeUri's own rule). E1: the answer
+    // is EVERY live view, owner first — the car-D alias-paint divergence
+    // (dots on the OWNER only) closed here; every feed below fans out over
+    // this list and the caret door is the single documented exception.
+    return session_->editorsForUri(path);
+}
+
+QList<CodeEditor*> DapHub::liveViews(BoundSource& bound, const QString& uri) const
+{
+    QList<CodeEditor*> fromSession = editorsForSourcePath(localPathForUri(uri));
+    if (fromSession.isEmpty()) {
+        for (const QPointer<CodeEditor>& view : bound.views) {
+            if (view && view->document())
+                fromSession.append(view.data());
+        }
+    }
+    bound.views.clear();
+    for (CodeEditor* view : fromSession)
+        bound.views.append(view);
+    return fromSession;
 }
 
 void DapHub::sendSetBreakpoints(const QString& uri)
@@ -449,11 +490,9 @@ void DapHub::sendSetBreakpoints(const QString& uri)
     if (!bound)
         return;
 
-    CodeEditor* editor = bound->editor.data();
-    if (!editor)
-        editor = editorForSourcePath(localPathForUri(uri));
-    if (editor)
-        bound->editor = editor;
+    liveViews(*bound, uri); // refresh the view store (bookkeeping only —
+                            // the PAYLOAD speaks from the uri: source.path
+                            // never needs a view)
 
     const QString path = localPathForUri(uri);
     QJsonObject source;
@@ -554,12 +593,9 @@ void DapHub::feedDecorations(const QString& uri)
     BoundSource* bound = findBound(uri);
     if (!bound)
         return;
-    CodeEditor* editor = bound->editor.data();
-    if (!editor)
-        editor = editorForSourcePath(localPathForUri(uri));
-    if (!editor)
-        return; // the store stays current; the feed follows the editor
-    bound->editor = editor;
+    const QList<CodeEditor*> views = liveViews(*bound, uri);
+    if (views.isEmpty())
+        return; // the store stays current; the feed follows the editors
 
     QVector<int> verifiedLines;
     QVector<CodeEditor::Diagnostic> dapDiags;
@@ -584,19 +620,28 @@ void DapHub::feedDecorations(const QString& uri)
         }
     }
     std::sort(verifiedLines.begin(), verifiedLines.end());
-    editor->setBreakpointLines(verifiedLines); // M5 door (1), no new view API
 
-    // The diagnostic merge: dap REPLACES ONLY its own rows (source "dap")
-    // and never stomps another producer's (clangd's list on the same tab
-    // is LspHub's full-replace feed — the two producers coexist here).
-    QVector<CodeEditor::Diagnostic> merged;
-    const QVector<CodeEditor::Diagnostic> current = editor->diagnostics();
-    merged.reserve(current.size() + dapDiags.size());
-    for (const CodeEditor::Diagnostic& diag : current)
-        if (diag.source != QLatin1String("dap"))
-            merged.append(diag);
-    merged.append(dapDiags);
-    editor->setDiagnostics(merged); // M5 door (3)
+    // E1 fan-out: ONE computation, painted on EVERY live view (the car-D
+    // alias divergence — dots on the OWNER only — dies here). The
+    // diagnostic merge reads EACH view's own table: another producer may
+    // have painted one view and not the other, and per-view honesty is
+    // the point of a per-view decoration table.
+    for (CodeEditor* editor : views) {
+        editor->setBreakpointLines(verifiedLines); // M5 door (1)
+
+        // The diagnostic merge: dap REPLACES ONLY its own rows (source
+        // "dap") and never stomps another producer's (clangd's list on
+        // the same tab is LspHub's full-replace feed — the two producers
+        // coexist here).
+        QVector<CodeEditor::Diagnostic> merged;
+        const QVector<CodeEditor::Diagnostic> current = editor->diagnostics();
+        merged.reserve(current.size() + dapDiags.size());
+        for (const CodeEditor::Diagnostic& diag : current)
+            if (diag.source != QLatin1String("dap"))
+                merged.append(diag);
+        merged.append(dapDiags);
+        editor->setDiagnostics(merged); // M5 door (3)
+    }
 }
 
 void DapHub::handleBreakpointEvent(const QJsonValue& body)
@@ -679,8 +724,12 @@ void DapHub::handleStackTrace(quint64 gen, const Reply& reply)
             source = QJsonObject{{QStringLiteral("path"), path}};
     }
 
-    CodeEditor* editor = editorForSourcePath(path);
-    if (!editor || !editor->document()) {
+    const QList<CodeEditor*> views = editorsForSourcePath(path);
+    // Shared-document identity (car D): every view in the list prints the
+    // SAME document, so the first live one stands for the text scan and
+    // the clamps below are computed once for all.
+    CodeDocument* doc = views.isEmpty() ? nullptr : views.first()->document();
+    if (!doc) {
         emit sourceUnresolved(source, top); // the app's call to open an
                                             // editor + openDocument() it
         return;
@@ -690,7 +739,6 @@ void DapHub::handleStackTrace(quint64 gen, const Reply& reply)
     // RECORDED limitation: DAP columns are adapter-unit-dependent, we
     // declared UTF-16 units and trust the declaration; the tripwire pins
     // the boundary on an ASCII line.
-    CodeDocument* doc = editor->document();
     int line = top.value(QStringLiteral("line")).toInt() - 1;
     line = std::clamp(line, 0, doc->lineCount() - 1);
     int col = top.value(QStringLiteral("column")).isDouble()
@@ -698,11 +746,21 @@ void DapHub::handleStackTrace(quint64 gen, const Reply& reply)
         : 0;
     col = std::clamp(col, 0, static_cast<int>(doc->lineText(line).size()));
 
-    editor->setPosition({line, col});   // the public set_cursor caret door
-                                        // (selection-clearing by design), no
-                                        // new view API
-    editor->setHighlightedLines(line, line); // the exec-pointer band
-    stopEditor_ = editor;
+    // E1 fan-out: the band lands on EVERY live view; the CARET rides the
+    // OWNER (views.first(), the session's attach order) ONLY — caret and
+    // selection are per-view state, and a stop must not yank the caret of
+    // a view the user is typing in (the recorded owner-only rule, pinned
+    // by its own two-view leg). After an owner-death handover the
+    // session's next answer puts a survivor first, so the NEXT stop owns
+    // the survivor's caret.
+    views.first()->setPosition({line, col}); // the public set_cursor caret
+                                             // door (selection-clearing by
+                                             // design), no new view API
+    for (CodeEditor* view : views)
+        view->setHighlightedLines(line, line); // the exec-pointer band
+    stopViews_.clear();
+    for (CodeEditor* view : views)
+        stopViews_.append(view);
 
     // The StackFrame's identity field is `id` (the REQUEST argument is the
     // one spelled frameId — reading "frameId" off the frame would silently
@@ -711,15 +769,19 @@ void DapHub::handleStackTrace(quint64 gen, const Reply& reply)
     if (frameId == 0)
         return; // no frameId = no scopes leg (spec-required; an adapter that
                 // omits it honestly gets no value hints, never a wrong one)
+    // The chain carries the SNAPSHOT of QPointers (copyable through the
+    // lambda): the async legs may land after a view death, and the
+    // survivors of this snapshot keep the feed (the handover rule).
+    const QList<QPointer<CodeEditor>> stopViews = stopViews_;
     client_->request(QStringLiteral("scopes"),
                      QJsonObject{{QStringLiteral("frameId"), frameId}},
-                     [this, editor, line, gen](const Reply& reply) {
-                         handleScopes(editor, line, gen, reply);
+                     [this, stopViews, line, gen](const Reply& reply) {
+                         handleScopes(stopViews, line, gen, reply);
                      });
 }
 
-void DapHub::handleScopes(CodeEditor* editor, int line, quint64 gen,
-                          const Reply& reply)
+void DapHub::handleScopes(const QList<QPointer<CodeEditor>>& views, int line,
+                          quint64 gen, const Reply& reply)
 {
     if (gen != stopGen_ || closingDown_ || reply.isError)
         return;
@@ -736,20 +798,31 @@ void DapHub::handleScopes(CodeEditor* editor, int line, quint64 gen,
         return; // spec: 0 means "no variables here"
     client_->request(QStringLiteral("variables"),
                      QJsonObject{{QStringLiteral("variablesReference"), varsRef}},
-                     [this, editor, line, gen](const Reply& reply) {
-                         handleVariables(editor, line, gen, reply);
+                     [this, views, line, gen](const Reply& reply) {
+                         handleVariables(views, line, gen, reply);
                      });
 }
 
-void DapHub::handleVariables(CodeEditor* editor, int line, quint64 gen,
-                             const Reply& reply)
+void DapHub::handleVariables(const QList<QPointer<CodeEditor>>& views, int line,
+                             quint64 gen, const Reply& reply)
 {
     if (gen != stopGen_ || closingDown_ || reply.isError)
         return;
-    if (!stopEditor_ || stopEditor_.data() != editor)
+    if (stopViews_.isEmpty())
         return; // the band this chain answers for is gone (continued/death
-                // bumped the gen, but the editor guard makes it airtight)
-    CodeDocument* doc = editor->document();
+                // bumped the gen, but the stop-feed guard makes it airtight)
+    // Prune views that died during the async chain — the SURVIVORS still
+    // get the hints (a joined view's or owner's death is not the end of
+    // the stop feed).
+    QList<CodeEditor*> live;
+    CodeDocument* doc = nullptr;
+    for (const QPointer<CodeEditor>& view : views) {
+        if (!view || !view->document())
+            continue;
+        live.append(view.data());
+        if (!doc)
+            doc = view->document();
+    }
     if (!doc)
         return;
 
@@ -800,18 +873,27 @@ void DapHub::handleVariables(CodeEditor* editor, int line, quint64 gen,
                   return std::make_tuple(a.line, a.col)
                        < std::make_tuple(b.line, b.col);
               });
-    editor->setInlayHints(hints); // the M5 door finally carries the DAP
-                                  // meaning its name was minted with
+    // E1: the scan ran ONCE on the shared document; the SAME computed
+    // hint list feeds every live view (the fan-out rule — per-view text
+    // scans over one document would be redundant work, not honesty).
+    for (CodeEditor* editor : live)
+        editor->setInlayHints(hints); // the M5 door finally carries the
+                                      // DAP meaning its name was minted
+                                      // with
 }
 
 void DapHub::clearStopFeed()
 {
-    if (stopEditor_ && stopEditor_->document()) {
-        stopEditor_->clearHighlightedLines();
-        stopEditor_->setInlayHints({}); // single-writer convention (the
-                                        // LspHub hint-feed precedent)
+    // E1: the stop feed is a LIST — every live view of it loses the band
+    // and the hints (the same list that got them, minus the dead).
+    for (const QPointer<CodeEditor>& view : stopViews_) {
+        if (view && view->document()) {
+            view->clearHighlightedLines();
+            view->setInlayHints({}); // single-writer convention (the
+                                     // LspHub hint-feed precedent)
+        }
     }
-    stopEditor_ = nullptr;
+    stopViews_.clear();
 }
 
 void DapHub::clearAllFeeds()
@@ -831,19 +913,19 @@ void DapHub::clearAllFeeds()
         // failing setBreakpoints earns a dap Diagnostic (the adapter said
         // "cannot bind"), but a dead session gets to say nothing — the
         // app's gutter truth stays, the next session's re-push re-verifies.
-        CodeEditor* editor = bound->editor.data();
-        if (!editor)
-            editor = editorForSourcePath(localPathForUri(uri));
-        if (!editor)
-            continue;
-        bound->editor = editor;
-        editor->setBreakpointLines({});
-        QVector<CodeEditor::Diagnostic> kept;
-        const QVector<CodeEditor::Diagnostic> current = editor->diagnostics();
-        for (const CodeEditor::Diagnostic& diag : current)
-            if (diag.source != QLatin1String("dap"))
-                kept.append(diag);
-        editor->setDiagnostics(kept);
+        // E1 fan-out: every live view empties its own feed (dots + dap
+        // rows); a view the session lost keeps whatever it has — nothing
+        // left to clear.
+        for (CodeEditor* editor : liveViews(*bound, uri)) {
+            editor->setBreakpointLines({});
+            QVector<CodeEditor::Diagnostic> kept;
+            const QVector<CodeEditor::Diagnostic> current
+                = editor->diagnostics();
+            for (const CodeEditor::Diagnostic& diag : current)
+                if (diag.source != QLatin1String("dap"))
+                    kept.append(diag);
+            editor->setDiagnostics(kept);
+        }
     }
     sourceRefPaths_.clear();
 }

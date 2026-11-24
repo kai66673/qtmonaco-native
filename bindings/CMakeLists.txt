@@ -89,7 +89,12 @@ set(_generated
     "${_gen_dir}/qmn_glue_wrapper.cpp"
     "${_gen_dir}/qmn_glue_lsphub_wrapper.cpp"
     "${_gen_dir}/qmn_glue_lsphub_serverspec_wrapper.cpp"
-    "${_gen_dir}/qmn_glue_projectsession_wrapper.cpp")
+    "${_gen_dir}/qmn_glue_projectsession_wrapper.cpp"
+    # car E machine E2 (2026-11-24): DapHub on the shelf. PREDICTED from
+    # the pattern (DapHub adds no value-type, so exactly ONE new TU) and
+    # CONFIRMED against the E2 --codegen file list before any compiling —
+    # the same confirmation ritual that killed the 1.6.1/1.7.0 drift.
+    "${_gen_dir}/qmn_glue_daphub_wrapper.cpp")
 
 # The macro forwards -I only for the listed QT_MODULES, and Qt6::Widgets'
 # interface carries [include, include/QtWidgets]; CodeEditor.hpp itself includes
@@ -111,7 +116,8 @@ shiboken_generator_create_binding(
     # CodeEditor.hpp's includes): CodeEditorOptions.hpp, CodeDocument.hpp and
     # CodeEditorTheme.hpp are each reachable that way, but naming them keeps
     # the generated set independent of those includes. G3 adds the two glue
-    # headers; the parser also SEES lsp/LspClient.hpp transitively (the hub
+    # headers (car E's E2 adds the third, DapHub.hpp); the parser also
+    # SEES lsp/LspClient.hpp transitively (the hub
     # header includes it for the Reply typedef) - seeing an unlisted type is
     # harmless, only LISTED types are generated (the 1.6.1 lesson runs the
     # other direction: listed without a header errors).
@@ -121,6 +127,7 @@ shiboken_generator_create_binding(
                       "${PROJECT_SOURCE_DIR}/src/view/CodeEditorTheme.hpp"
                       "${PROJECT_SOURCE_DIR}/src/glue/LspHub.hpp"
                       "${PROJECT_SOURCE_DIR}/src/glue/ProjectSession.hpp"
+                      "${PROJECT_SOURCE_DIR}/src/glue/DapHub.hpp"
     GENERATED_SOURCES ${_generated}
     QT_MODULES        Widgets
     SHIBOKEN_EXTRA_OPTIONS

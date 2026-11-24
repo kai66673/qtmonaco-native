@@ -181,6 +181,17 @@
             <value-type name="ServerSpec"/>
         </object-type>
 
+        <!-- car E machine E2 (2026-11-24): the DAP shelf joins the wheel.
+             No remove rules again - setTransportFactory (the std::function
+             seam) and client() (the unbound qmn::dap::DapClient*) drop by
+             TYPE ABSENCE into the rejected log, exactly the LspHub shape;
+             the request(command, arguments) fire-and-forget door speaks
+             qint64/QJsonValue and WRAPS (unlike the LspHub's
+             std::function FeatureHandler doors). -->
+        <object-type name="DapHub">
+            <include file-name="glue/DapHub.hpp" location="global"/>
+        </object-type>
+
         <object-type name="ProjectSession">
             <include file-name="glue/ProjectSession.hpp" location="global"/>
         </object-type>

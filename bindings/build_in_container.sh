@@ -49,6 +49,7 @@ mkdir -p /tmp/gen
   /work/src/view/CodeDocument.hpp \
   /work/src/view/CodeEditorTheme.hpp \
   /work/src/glue/LspHub.hpp /work/src/glue/ProjectSession.hpp \
+  /work/src/glue/DapHub.hpp \
   /work/bindings/typesystem_qmn.xml
 echo "=== generated files ==="
 find /tmp/gen -type f | sort

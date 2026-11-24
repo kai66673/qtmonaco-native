@@ -5,7 +5,7 @@ Native code editor widget for Qt6, built from scratch on a raw `QWidget`
 QPlainTextEdit, no Chromium. Long-term hobby project; roadmap in `README.md`,
 phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
 
-## Current state (v1.12.0 — GATE 2 CLOSED 2026-11-21, GATE 3 cars 0/B/C/D CLOSED) — gates and the frozen surface
+## Current state (v1.13.0 — GATE 2 CLOSED 2026-11-21, GATE 3 cars 0/B/C/D/E CLOSED) — gates and the frozen surface
 
 - Gate 1 (editor v1) froze the public API at tag `v1.0`; Gate 1.5 (usability
   train M20–M24) closed 2026-11-12 at tag `v1.5.0`; **GATE 2 CLOSED
@@ -28,8 +28,19 @@ steps PROBE-OK on clangd 23.1.5) →
   DOCUMENT-scoped — the view JOIN (one `didOpen`, one syncer, one version
   stream whoever types), paint fan-out over the view list, and the
   owner-death HANDOVER that keeps the wire and the feeds standing)** →
-  wheel-2 (DAP across + answer routes) → S1
-  (qmn-demo grows into the showcase, NO second binary) → S2 (pydemo
+  **wheel-2 (CLOSED at 1.13.0 — `DapHub` crosses the wheel as the shelf's
+  third Python member with NO new record type, `ProjectSession::
+  editorsForUri` retires the DAP alias-paint divergence (breakpoint dots,
+  dap diagnostics, the stopped band and the value hints fan out over EVERY
+  live view; the DAP CARET stays OWNER-only and hands to the next view
+  after a handover), and the three plain-typed ANSWER doors
+  (`LspHub::answerShowMessageRequest` — resolved through `clientForSpec`,
+  an answer door NEVER spawns a server — plus `DapHub::answerRequest`/
+  `answerRequestError`) cross with ZERO codegen rejections while the 17
+  `LspHub` feature doors STAY honest C++-only absences; the live DAP wheel
+  ritual ran on lldb-dap AND gdb -i=dap, and the shelf literal made its
+  first bump 1.0.0 → 1.1.0)** → S1 (qmn-demo grows into the showcase, NO
+  second binary — THE OPEN CAR) → S2 (pydemo
   mirrors it door-for-door) → PyPI/cibuildwheel. Grapheme segmentation
   is OWNER-EXCLUDED from this gate (its own future train — the README
   not-implemented record stays). The full design record is the PLAN.md
@@ -59,10 +70,15 @@ steps PROBE-OK on clangd 23.1.5) →
   CONFIGURED from `PROJECT_VERSION`, never hand-kept. **G1 exception:** the
   glue SHELF versions itself with a third literal, `QMN_GLUE_VERSION` in
   `src/glue/CMakeLists.txt` (a plain variable, NOT a nested `project()` —
-  that would reset `PROJECT_VERSION` and poison the clientInfo contract) —
-  it bumps ONLY when the shelf itself breaks, never in the package close
-  ritual. **G3 made the shelf's semver real to Python users too** — the
-  wheel carries `qmn.LspHub`/`qmn.ProjectSession` (`qmn::glue 1.0.0`):
+  that would reset `PROJECT_VERSION` and poison the clientInfo contract).
+  The original wording "bumps ONLY when the shelf itself breaks, never in
+  the package close ritual" was PRE-crossing and is RETIRED: since G3 the
+  shelf is wheel-visible, so a shelf break is a MAJOR bump and additive
+  Python-visible growth a MINOR one — both may ride a package close, and
+  car E's close made the FIRST bump, 1.0.0 → 1.1.0 (E2's `DapHub` crossing
+  + E3's answer doors; the comment at the bump site carries the rule).
+  **G3 made the shelf's semver real to Python users too** — the wheel
+  carries `qmn.LspHub`/`qmn.ProjectSession` and since car E `qmn.DapHub`:
   shelf breakage is now a wheel-visible story, not only a C++ one.
 - **The close ritual has a WHEEL half that the 1.9.0 close forgot**: after
   bumping the two literals, REBUILD the wheel
@@ -84,8 +100,12 @@ steps PROBE-OK on clangd 23.1.5) →
   stay C++-only and need no Python type. The wrappability rule now binds
   the SHELF too: a new glue door that Python should reach speaks plain Qt
   types — `std::function` callbacks and `qmn::lsp`/`qmn::protocol` types
-  in a signature drop the door SILENTLY (the G3 audit counted 16 such
-  drops); a Python-facing answer route needs a SIGNAL, not a callback.
+  in a signature drop the door SILENTLY (the G3 audit's "16 such drops"
+  was the NAME of a set, never a line count — at 1.12.0 the rejected log
+  carried 34 `LspHub` + 1 `ProjectSession` glue lines plus 9 `DapHub`
+  lines, 17 public doors among them; PLAN's car E machine-E4 paragraph is
+  the count record); a Python-facing answer route needs a SIGNAL, not a
+  callback.
 
 ## Hard rule: layering is contractual
 
@@ -186,9 +206,15 @@ Include headers relative to `src/` (CMake adds `src/` as a PUBLIC include dir):
   ONE entry per uri and mirrors every rule (alias join, `documentOpened`
   does NOT re-fire on a join, the squatter refusal stays, the mirror-half
   refusal is a document already registered under another uri). Recorded
-  divergences: the `workspaceConfiguration` push is OWNER-only, the mouse
-  no-refire pin is SAME-view-only, and DAP's breakpoint paint lands on the
-  OWNER view only (`DapHub::editorForSourcePath`).
+  divergences: the `workspaceConfiguration` push is OWNER-only and the mouse
+  no-refire pin is SAME-view-only. The DAP alias divergence CLOSED at car E
+  machine E1: `ProjectSession::editorsForUri` (sibling of `editorForUri` —
+  EVERY live view, owner first) is the fan-out resolver, so DAP dots, dap
+  diagnostics, the stopped band and the value hints land on EVERY live view
+  (the hint math runs once per stop, the same list feeds every view), while
+  the DAP CARET (`setPosition`) stays OWNER-only — caret/selection is
+  per-view state and a stop must not yank the caret of a view the user is
+  typing in; after a handover the next view owns the caret.
 - **Highlighting engine is vendored tree-sitter** (pinned v0.27.2, ABI 15,
   in `third_party/tree-sitter/`). Fed `TSInputEncodingUTF16LE` straight from
   piece-table chunks — never transcode. A tree-sitter byte offset (and
@@ -338,6 +364,21 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
   doc, best-of-3, < 10 ms, ~100x margin) and `foldEndEscapesViewportParseClamp`
   (guards fold-vs-viewport-parse coverage). On a timing failure re-measure the
   bench before touching the budget.
+- **A composed reason string needs a whole-string pin — `!isEmpty()` on one is
+  vacuous.** Car E machine E2's WHEEL smoke caught a defect no ctest slot
+  could: both `LspClient` and `DapClient` build their FAILED reason as
+  `"<arm>: <captured transport issue>"`, and the capture slot was connected
+  BELOW the `new RpcClient(...)` line — while RpcClient's own ctor slot (its
+  `onTransportError` → `markGone` → `transportGone` → the client's `onGone`)
+  runs NESTED INSIDE that same `transportError` emission. So the capture was
+  the SECOND slot and the reason arrived as `transport never opened: ` with an
+  EMPTY tail; the existing pins (`QVERIFY(!reason.isEmpty())`) passed on the
+  bare prefix. **Connect order is the mechanism**: the capture must be the
+  FIRST slot, i.e. connected before the RpcClient exists. Pin the stable half
+  (our own `errorKindName` prefix) plus the PRESENCE of the Qt half
+  (`reason.size() > prefix.size()`), and pin one whole string where the
+  vocabulary is ours (`transport closed: ServerDied: process exited with code
+  7`). PLAN's car E machine-E2 paragraph carries the full record.
 - `tst_codeeditor.cpp` drives keyboard/mouse via `QTest`, asserts on model
   state (not pixels). It builds with `QTEST_MAIN` and needs offscreen.
 - **No vision here.** Image/screenshot input is unavailable to the agent in
@@ -392,14 +433,31 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
   copies grew glue entries): `qmn::glue::LspHub` +
   `qmn::glue::ProjectSession` — PUBLIC ctors, unlike the editor-owned view
   QObjects, the app builds and owns them — and the nested
-  `LspHub::ServerSpec` record. The shelf half Shiboken can't translate
+  `LspHub::ServerSpec` record; **since car E machine E2 the third shelf
+  member `qmn::glue::DapHub` crosses too**, and it needed NO new record type:
+  one `object-type` entry, one `HEADERS` entry, one `_generated` TU
+  (`qmn_glue_daphub_wrapper.cpp`, predicted from the pattern and CONFIRMED
+  against the codegen file list before compiling). Its new container crossings
+  are smoke-pinned, not assumed: `QVector<int>`↔`list` (the M5 precedent,
+  re-pinned on the breakpoint read-back), `QMap<int,int>`↔an empty `dict`
+  (`breakpointMap`, the genuinely new shape), `QJsonObject`↔`dict`
+  (`adapterCapabilities`) and `QList<CodeEditor*>` OUT
+  (`ProjectSession::editorsForUri`, car E1's fan-out door — always ONE element
+  in Python, because the attach ctor stays `remove="all"`). The shelf half
+  Shiboken can't translate
   drops BY TYPE ABSENCE (no remove rules): the eight `request*`/
   `resolveCompletionItem` feature doors (`FeatureHandler` = std::function)
   + `setTransportFactory`, the `syncerFor`/`clientFor*` returners
   (`qmn::lsp`/`protocol` types stay unbound — wrapping them would drag the
-  whole protocol closure in), and the four `apply*` doors (the defaulted
-  `LspClient*` tail). Those 16 must be EXACTLY what the rejected log shows
-  beyond the usual Qt/tr noise — the post-codegen audit checks it.
+  whole protocol closure in), the four `apply*` doors (the defaulted
+  `LspClient*` tail), and on DapHub its own two — `setTransportFactory`
+  (std::function) and `client()` (the unbound `qmn::dap::DapClient*`).
+  COUNT the shelf's drop set FROM the rejected log, never from this file — the
+  E2 run's DapHub block was 9 lines: six private-seam bookkeeping lines
+  (`handleScopes`, `handleStackTrace`, `handleVariables`, `liveViews`,
+  `boundForUri`, `findBound`) + the usual `tr` noise + exactly those two public
+  doors — and the post-codegen audit checks it BOTH ways: a drop the log does
+  not show has crossed by accident.
   `RpcClient::Reply` stays unbound (its only carriers were the callbacks);
   `QJsonObject`/`QJsonValue` cross as DIRECT params/members for the first
   time — smoke-pinned, never assumed. Otherwise only `PerfStats` and the
@@ -426,7 +484,10 @@ QT_QPA_PLATFORM=offscreen ./build/src/app/qmn-demo  --exit-after-ms 300 bigfile.
   second copy. Never load Qt by absolute path, never ship Qt libs beside the
   extension; the wheel smoke asserts one `libQt6Core` (and since G3 one
   `libQt6Network` — the shelf drags protocol's `TcpTransport`) in
-  `/proc/self/maps`.
+  `/proc/self/maps`, and since car E2 it also DIFFS the whole `/libQt6*` set
+  across the DAP leg — the delta must be EMPTY (and never pump events inside
+  that window with `PySide6.QtTest`: importing it loads `libQt6Test` and the
+  delta then reports the test's own import).
 - **Auditwheel exclude lists live in two places and must stay in sync:**
   `build_in_container.sh --wheel` and `[tool.cibuildwheel.linux]
   repair_command` in `pyproject.toml`. The cibuildwheel config is the *future*

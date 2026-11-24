@@ -286,6 +286,16 @@ qmn::view::CodeEditor* ProjectSession::editorForUri(const QString& uri) const
     return it == docs_.end() ? nullptr : it->editor;
 }
 
+QList<qmn::view::CodeEditor*> ProjectSession::editorsForUri(const QString& uri) const
+{
+    // E1: the sibling door for feed fan-out. The entry's views list IS the
+    // answer — owner first is its standing invariant (views.first() ==
+    // editor; onViewDestroyed's handover re-keys both together), so no
+    // re-sorting here would be honest bookkeeping anyway.
+    const auto it = docs_.find(normalizeUri(uri));
+    return it == docs_.end() ? QList<qmn::view::CodeEditor*>() : it->views;
+}
+
 QString ProjectSession::uriForDocument(const qmn::view::CodeDocument* document)
     const
 {

@@ -115,7 +115,11 @@ public:
     // serverShowMessageRequest fires BEFORE this layer's own Null default, and
     // RpcClient never sends a SECOND answer to one id — so glue that answers
     // from inside the signal wins, and glue that does not gets the default.
-    void respondShowMessageRequest(const QJsonValue& id,
+    // The bool (car E machine E3's widening, DapClient::respond's precedent)
+    // says whether THIS call was the answer that went out: false = no session,
+    // or the id was already answered (the default or an earlier answer won —
+    // the first-answer-wins policy made observable).
+    bool respondShowMessageRequest(const QJsonValue& id,
                                    const QJsonValue& actionItem);
 
 signals:

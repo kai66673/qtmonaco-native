@@ -19,6 +19,7 @@
 
 #include <QHash>
 #include <QJsonObject>
+#include <QList>
 #include <QObject>
 #include <QStringList>
 
@@ -117,6 +118,14 @@ public:
     QStringList openUris() const { return order_; } // insertion order
     QString languageForUri(const QString& uri) const; // "" = unknown uri or plain text
     qmn::view::CodeEditor* editorForUri(const QString& uri) const;
+    // Car E (E1): the SIBLING door — EVERY live view of the registered
+    // document, OWNER FIRST (views.first() IS the owner: the handover rule
+    // re-keys it), attach order. The DAP feed fan-out rides it (DapHub's
+    // alias paint); the LSP hub keeps its own view list (its JOIN primed
+    // the didOpen wire — the door shapes differ on purpose). Empty list:
+    // nothing registered under the uri. The same uri normalization as
+    // editorForUri.
+    QList<qmn::view::CodeEditor*> editorsForUri(const QString& uri) const;
     // Linear scan — a session holds tens of documents, not a piece tree.
     QString uriForEditor(const qmn::view::CodeEditor* editor) const;
 

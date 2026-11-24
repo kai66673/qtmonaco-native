@@ -23,6 +23,13 @@ static QString errorKindName(Transport::ErrorKind kind)
         return QStringLiteral("ConnectFailed");
     case Transport::ErrorKind::WriteFailed:
         return QStringLiteral("WriteFailed");
+    case Transport::ErrorKind::ServerDied:
+        // The LspClient twin already named this one; this switch silently
+        // fell through to "Unknown" (car E machine E2 read the string out of
+        // a real reason: "transport closed: Unknown: process exited with
+        // code 7"). A dead adapter is the MOST common tail there is, so the
+        // name the user sees has to be true.
+        return QStringLiteral("ServerDied");
     case Transport::ErrorKind::Io:
         return QStringLiteral("Io");
     }
@@ -105,6 +112,21 @@ void DapClient::beginSession()
 
     session_ = new Session;
     session_->transport = factory_(this);
+    // Keep the last issue for the FAILED reason. CONNECT ORDER IS THE
+    // MECHANISM: RpcClient's own ctor connects transportError -> its
+    // onTransportError, whose markGone() emits transportGone SYNCHRONOUSLY,
+    // so onGone() runs NESTED INSIDE the transportError emission at that
+    // signal's slot order. Sitting BELOW the RpcClient construction (which
+    // is where this connect lived until car E machine E2's smoke leg caught
+    // it) made the capture the SECOND slot: onGone() read a stale/empty
+    // lastTransportIssue_ and every ProcessTransport StartFailed built
+    // "transport never opened: " with an EMPTY tail. Above the RpcClient it
+    // is the FIRST slot and the tail is real.
+    connect(session_->transport, &Transport::transportError, this,
+            [this](Transport::ErrorKind kind, const QString& text) {
+                lastTransportIssue_ =
+                    QStringLiteral("%1: %2").arg(errorKindName(kind), text);
+            });
     session_->rpc = new RpcClient(session_->transport, &codec_, this);
     registerPolicyHandlers(session_->rpc);
 
@@ -112,13 +134,6 @@ void DapClient::beginSession()
             &DapClient::onOpened);
     connect(session_->transport, &Transport::stderrLine, this,
             &DapClient::serverStderr); // the separate STDERR channel
-    // Keep the last issue for the FAILED reason (connected BEFORE start():
-    // a synchronous StartFailed must already be captured).
-    connect(session_->transport, &Transport::transportError, this,
-            [this](Transport::ErrorKind kind, const QString& text) {
-                lastTransportIssue_ =
-                    QStringLiteral("%1: %2").arg(errorKindName(kind), text);
-            });
     connect(session_->rpc, &RpcClient::transportGone, this,
             &DapClient::onGone);
 

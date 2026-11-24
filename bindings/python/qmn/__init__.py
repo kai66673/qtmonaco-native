@@ -33,10 +33,17 @@ Deliberate, documented divergences (PLAN.md "Decided divergences"):
   ``update_workspace_configuration``. qtmonaco's other LSP hooks existed only
   to drive ITS built-in Chromium client and have no counterpart here. The
   native LSP client and hub are C++ glue — since G3 the hub and the document
-  session DO ship in the wheel (``qmn.LspHub`` / ``qmn.ProjectSession``), but
+  session DO ship in the wheel (``qmn.LspHub`` / ``qmn.ProjectSession``), and
+  since car E's E2 the DAP hub ships beside them (``qmn.DapHub``), but
   as plain objects the app builds and owns, never as ``Monaco`` methods
   (parity stays parity); the view's popup doors (``showCompletionList`` /
   ``showHover``) remain bound for apps that own a client of their own.
+  ``qmn.DapHub``'s honest absences are ``setTransportFactory`` (the
+  ``TransportFactory`` seam) and ``client()`` (its ``qmn::dap::DapClient*``
+  type stays unbound, the same drop-by-type-absence shape as ``LspHub``'s
+  ``syncerFor``): ``hasattr`` probes show they are ABSENT, never no-ops —
+  driving a live session from Python rides ``startDebugging`` /
+  ``request`` / the signals.
   ``set_lsp_header`` / ``get_lsp_header`` stay absent ON PURPOSE: qtmonaco's
   "header" is text prepended to the document ON THE WIRE ONLY, while every
   native LSP path (diagnostics, hover, completion, rename, formatting,
@@ -74,9 +81,12 @@ CodeDocument = _ext.qmn.view.CodeDocument  # M25 (editor-owned, like the theme)
 TextPosition = _ext.qmn.view.TextPosition
 # G3: the glue shelf (qmn::glue). The hub/session are PLAIN objects the app
 # builds and owns - deliberately NOT Monaco methods (parity stays parity);
-# LspHub.ServerSpec rides as a nested attribute of LspHub.
+# LspHub.ServerSpec rides as a nested attribute of LspHub. Since car E's E2
+# the DAP hub rides too: qmn.DapHub (its setTransportFactory/client doors
+# are honest absences - they drop by type absence, see the PLAN E2 record).
 LspHub = _ext.qmn.glue.LspHub
 ProjectSession = _ext.qmn.glue.ProjectSession
+DapHub = _ext.qmn.glue.DapHub
 
 
 class Monaco(CodeEditor):
@@ -406,5 +416,5 @@ class Monaco(CodeEditor):
         )
 
 
-__all__ = ["CodeEditor", "CodeEditorTheme", "CodeDocument", "LspHub",
-           "Monaco", "ProjectSession", "TextPosition"]
+__all__ = ["CodeEditor", "CodeEditorTheme", "CodeDocument", "DapHub",
+           "LspHub", "Monaco", "ProjectSession", "TextPosition"]

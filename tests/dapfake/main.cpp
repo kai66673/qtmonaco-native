@@ -36,15 +36,26 @@
 //            runInTerminal REQUEST — the client's answer must be
 //            success:false with error.format naming "not handled" and
 //            error.id 0 (the honest default this test never overrides);
-//            then a startDebugging REQUEST the TEST answers success:true
-//            body{ok:true} through the respond door (glue's first turn);
+//            then a startDebugging REQUEST the TEST answers while the
+//            signal is live, in EITHER of two shapes (car E machine E3
+//            grew the arm): success:true body{ok:true} through the
+//            client-layer respond door (the D2 slot), or the in-envelope
+//            failure error{id:9001, format carrying "hub-answer-refused",
+//            plus the merged data member appId=="daphub-door"} through the
+//            DapHub's answerRequestError door (9001 is the discriminator:
+//            nothing else on this wire can invent it, so the shape proves
+//            which door answered, and the error TABLE is audited — code,
+//            format, the object-data merge);
 //            then a progressStart REQUEST — the DapClient's STATIC shelf
 //            must answer success:true body{} (a shelf answer never reaches
 //            the reverse relay; the tst side pins the relay saw exactly TWO
 //            commands, and HERE the {} answer shape is validated).
 //            Every answer is validated HERE (request_seq match + shape);
 //            any lie exits 2 with a stderr explanation, all matched ->
-//            waits for the disconnect, exit 0.
+//            waits for the disconnect, exit 0 — and a disconnect that
+//            arrives while the battery is still short of its last leg
+//            exits 2 too (car E machine E3's completion audit: an early
+//            client exit must not skip the answer checks).
 //   cancelreq handshake, then a `cancel` REQUEST for requestId 424242
 //            (nothing to cancel: the answer must be success:false naming
 //            "cannot be cancelled") — then waits for the client's "slow"
@@ -293,8 +304,41 @@ void checkAnswer(const QJsonObject& message)
                         QJsonObject{{QStringLiteral("name"),
                                      QStringLiteral("child")}});
         } else if (g_reverseStep == 1) {
-            // startDebugging: the TEST's glue answered through the respond
-            // door while the signal was live.
+            // startDebugging: the TEST's glue answered while the signal was
+            // live, and car E machine E3 made TWO answer shapes legal here,
+            // keyed by the error id (the discriminator: only the E3 hub
+            // door can put 9001 on this wire — the client layer's honest
+            // default answers error.id 0, and the shelf never sees this
+            // request, so a 9001 here is unambiguous):
+            if (error.value(QStringLiteral("id")).toInt() == 9001) {
+                // The hub's answerRequestError door: the in-envelope
+                // failure, and the envelope shape is what this leg audits
+                // (DapCodec::buildErrorResponse: code -> error.id, message
+                // -> error.format, an OBJECT data MERGES into the table).
+                if (success)
+                    fail(QStringLiteral("startDebugging carried error.id "
+                                        "9001 with success:true (a torn "
+                                        "envelope)"));
+                const QString format = error.value(QStringLiteral("format"))
+                                           .toString();
+                if (!format.contains(QLatin1String("hub-answer-refused")))
+                    fail(QStringLiteral("9001 answer's format says \"%1\", "
+                                        "expected the door's message")
+                             .arg(format));
+                if (error.value(QStringLiteral("appId")).toString()
+                        != QLatin1String("daphub-door"))
+                    fail(QStringLiteral("9001 answer lost the object data "
+                                        "(error table: %1)")
+                             .arg(QString::fromUtf8(QJsonDocument(error)
+                                                        .toJson(
+                                                            QJsonDocument::Compact))));
+                g_reverseStep = 2;
+                sendRequest(QStringLiteral("progressStart"),
+                            QJsonObject{{QStringLiteral("title"),
+                                         QStringLiteral("dapfake-progress")}});
+                return;
+            }
+            // ...the D2 slot's shape, unchanged: success:true body{ok:true}.
             if (!success)
                 fail(QStringLiteral("startDebugging answer was not success:true: %1")
                          .arg(error.value(QStringLiteral("format")).toString()));
@@ -442,6 +486,14 @@ void handle(const QJsonObject& message)
             fail(QStringLiteral("disconnect after %1 setBreakpoints call(s): "
                                 "the edit-resend never arrived")
                      .arg(g_setBpCount));
+        if (g_mode == QLatin1String("reverse") && g_reverseStep < 2)
+            // Car E machine E3: an early client exit must not silently skip
+            // the battery's later legs (the whole point of the mode is the
+            // answer audit — a battery that never reached its last leg was
+            // never audited).
+            fail(QStringLiteral("disconnect with the reverse battery at step "
+                                "%1: an answer leg was never validated")
+                     .arg(g_reverseStep));
         respondOk(message, QJsonValue(QJsonValue::Undefined));
         _exit(0); // every mode ends its contract here (dead already _exited)
     }

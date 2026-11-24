@@ -3477,7 +3477,10 @@ change, the far-side oracles the pins lean on were already built):
   recorded DAP divergence comment (a breakpoint ask resolves from either
   alias view, the door returns the OWNER, so gutter dots paint there only
   — DAP's decoration table has no per-uri fan-out door; alias paint is
-  car E's question).
+  car E's question). SUPERSEDED at car E machine E1 (2026-11-24): that
+  sentence records the 1.12.0 ship, the comment is RETIRED and the alias
+  paint closed — see the E1 record below and the door is now
+  `editorsForSourcePath` + `ProjectSession::editorsForUri`.
 - Tripwires shipped: `hubViewJoinOpensOneDocumentAndStreamsEditsFromBoth
   Views` (one `didOpen`, one syncer, version 0 through the join, edits
   from BOTH views in ONE monotone stream, the server's own `saves` counter
@@ -3672,11 +3675,18 @@ ritual. What the car's last machine actually was:
   inherits one named question from this one: DAP's breakpoint paint lands
   on the OWNER view only (`DapHub::editorForSourcePath`), because DAP's
   decoration feed has no per-uri fan-out door — alias paint is E's to
-  answer, and E is also where the 16 glue drops start shrinking.
+  answer, and E is also where the glue drop inventory finally gets read
+  against the logs: the "16 glue drops" the G3 audit named was the NAME of
+  a set, never a line count — the rejected log actually carried 35 glue
+  lines at 1.12.0 (34 `LspHub` + 1 `ProjectSession`, 17 of them public
+  doors) plus 9 on `DapHub`; E4's paragraph is the count record.
 
 ### Car E — wheel-2 (DAP across + the answer routes)
 
-The G3 audit's 16 silent drops shrink, and DAP joins the shelf crossing:
+The audit set the G3 audit named — its "16" was a SET NAME, never a line
+count: read against the archived logs the real figure was 35 glue lines at
+1.12.0, 9 more on `DapHub` (E4's paragraph is the count record) — and DAP
+joins the shelf crossing:
 `DapHub` (its doors were shiboken-shaped from day one for exactly this)
 + the nested plain-Qt payload records + the `showMessageRequest`-style
 ANSWER ROUTES the audit left on the C++ side — the route MUST speak a
@@ -3684,10 +3694,690 @@ SIGNAL plus a plain-typed answer door (the recorded Shiboken fact:
 Python cannot emit a C++ signal, and `std::function` params drop
 silently). The three-copies rule (typesystem / bindings CMake / the
 codegen-CLI list) grows AGAIN, the `--codegen` rejected-log audit is
-mandatory (the 1.6.1 and 1.7.0 drift traps), and the 16-drop baseline
-in AGENTS is REWRITTEN to whatever the new honest drop set is — EXACTLY
-what the log shows, no silent change. `setTransportFactory` and friends
+mandatory (the 1.6.1 and 1.7.0 drift traps), and the "16-drop baseline"
+wording in AGENTS is REWRITTEN to whatever the honest drop set is —
+EXACTLY what the log shows, no silent change. `setTransportFactory` and friends
 stay C++-only honest absences. Wheel smoke grows the one-Qt proof.
+
+#### Car E design record (written at the car start, 2026-11-24)
+
+FIVE machines, each green before the next opens. Version rhythm: the car closes
+at **1.13.0** (additive minor) and the SHELF bumps its own literal 1.0.0 →
+**1.1.0** — the G3 wheel record named that bump for exactly this shape
+("signal-relay feature doors added to the SHELF (additive, shelf semver minor
+1.1.0)"), and since G3 the shelf's semver is Python-visible, so semver proper
+applies: additive growth = MINOR. The `src/glue/CMakeLists.txt:33-36` wording
+("bumps ONLY when the shelf itself breaks") is pre-crossing and E5 rewrites it.
+Machine letters restart at E1. **Name collision, recorded:** PLAN already owns
+an `E1`/`E2`/`E3` trio at :271-325 (the Gate-1.5 M7/M9/M13 sections), and
+top-risks #3's "Treat E1→E2 as one mapping core" means THOSE; every E-number
+below means "car E machine N".
+
+Code facts the design rides (read 2026-11-24, all verified in code): `DapHub`'s
+doors really are Shiboken-shaped already — D4's claim ("every ANSWER route is a
+SIGNAL and every payload is a plain Qt type", DapHub.hpp:48-49) reads TRUE
+against the public surface: the ctor plus FIFTEEN doors (:98-164 —
+`setTransportFactory`, `attachProject`, `project`, `startDebugging(QString,
+QStringList, QJsonObject, QString)`, `stopDebugging`, `terminateDebugging`,
+`isDebugging`, `isReady`, `adapterCapabilities`, `configurationDone`,
+`request(QString, QJsonValue)`, `client`, `setBreakpoints(CodeEditor*,
+QVector<int>)`, `requestedBreakpoints`, `breakpointMap`→`QMap<int,int>`) —
+THIRTEEN of the fifteen cross, plus the ctor (the LspHub precedent: a PUBLIC
+`DapHub(QObject* parent = nullptr)`, the app builds and owns it); only two
+cannot: `setTransportFactory` (`std::function`) and `client()`
+(`qmn::dap::DapClient*`, the `syncerFor` drop-by-type-absence precedent). The
+nine signals (:167-187) all carry plain Qt payloads:
+`QString`/`int`/`QJsonObject`/`QJsonValue`. On the container question the wheel
+has one precedent and one blank: `QVector<int>` ALREADY crosses (the M5 gutter
+doors `setBreakpointLines`/`breakpointLines`, CodeEditor.hpp:385-386 — neither
+appears in the rejected log, so they wrapped since M5); `QMap<int,int>` has NO
+precedent anywhere in the bound set (no bound header carries a map), and
+neither does a container of QObject pointers, so the codegen run decides THOSE
+two shapes, not this record. The wheel carries ZERO DAP type today (grep `dap`
+over `bindings/`: nothing in the typesystem, the CMake `HEADERS`/`_generated`
+lists, the `--codegen` CLI, the smoke or the shim), and `_qmn` already absorbs
+the DAP layer — `target_link_libraries(_qmn PRIVATE qmn_glue)`
+(bindings/CMakeLists.txt:140) over `qmn_glue`'s PUBLIC `qmn_dap` link
+(src/glue/CMakeLists.txt:21); `DapHub.hpp` is already an INSTALLED glue header
+(:40) and the shelf's first source entry (:12). `ApplyReport`
+(LspHub.hpp:387-392) is plain Qt (`bool`/`int`/`int`/`QStringList`) with NO
+value-type entry, and the applier family carries a defaulted
+`qmn::lsp::LspClient*` tail (:393-414); the serving-client guard is ONE line —
+`if (servingClient && client != servingClient)` (LspHub.cpp:3068) — so a null
+tail means the gate is OFF, not on. The answer routes each own half a route:
+`serverShowMessageRequest`'s comment names its way back ("the app answers
+through clientForSpec(spec)->respondShowMessageRequest(id, item)") and
+tst_lsp's `showMessageRequestFirstAnswerWinsAndNullDefaultFollows` (:3768)
+takes it at :3808, with the fakeserver's `MSGREQ-OK`/`MSGREQ-NULL-OK` markers
+(:3821/:3851) as far-side oracle; on the DAP side `dapRequest` relays the whole
+request and the answer doors are `DapClient::respond(id, body)` /
+`respondError(id, code, message, data)` (DapClient.hpp:133-134 — plain Qt AND
+already `bool`, while the two LSP client doors are `void` — the asymmetry E3's
+one widening below the shelf settles), which tst_dap's
+`dapReverseRelayHonestDefaultAndGlueFirstTurn` (:1270) rides at :1286 while
+dapfake's `reverse` mode self-audits that answer (success:true + `body.ok`,
+main.cpp:292-308 — any lie exits 2). The generic-signal precedent is PLAN's own
+car-4 ruling: ONE generic `dapEvent` and ONE generic `dapRequest` because
+"per-event signals would scale binding cost with the spec". The nine
+`FeatureHandler` doors' ONLY in-tree users are tst_lsp
+(:2920/:2964/:3013/:3444) and `tools/probe_clangd.cpp`
+(:185/:206/:247/:292/:407) — ZERO call sites in `src/app` (VERIFIED by grep),
+so S2's mirror needs no feature path, and this car adds none without the
+showcase losing anything. The bequeathed alias-paint question is one comment
+(DapHub.cpp:434-440: "this door returns the OWNER view — so the gutter dots
+paint there, not in every alias view. Unlike the LSP feeds, DAP's decoration
+table has no per-uri fan-out door to widen"), while
+`ProjectSession::Entry::views` already carries "EVERY live view over the one
+document" (ProjectSession.hpp:134-141) and the only public door is the
+OWNER-only `editorForUri` (:119). DapHub's paint sites are six:
+`setBreakpointLines` (:587), `setDiagnostics` (:599), `setPosition` (:701),
+`setHighlightedLines` (:704), `setInlayHints` (:803) and the teardown pair
+(:810-811), with `stopEditor_` the single band owner (:705/:749/:809) and
+`clearAllFeeds` re-resolving per uri (:836-846).
+
+Stub reconciliation (the pre-existing car-E stub named things the code
+refuses, and the record says so rather than quietly dropping them):
+(a) it USED to open "The G3 audit's 16 silent drops shrink" and promise
+the "16-drop baseline in AGENTS is REWRITTEN" — the stub is rewritten in
+place at E5's close commit (it never reached git history), because that
+baseline was never a line budget (the real counts, read from the archived
+logs: 26 glue lines at 1.10.0, 31 at 1.11.0, 35 at 1.12.0, of which 17 are
+public doors), so the rewrite is FIGURE-honest and the genuine shrink is
+`DapHub` crossing with 2 public drops on the run that ships (its block is
+9 log lines: those 2 + 6 private-seam bookkeeping + `tr`), NOT a bulk
+bridging of the LspHub family (E4 names what stays);
+(b) its "the nested plain-Qt payload records" — `DapHub` has NO public nested
+record: both its structs (`BrEntry` :190, `BoundSource` :198) sit under
+`private:` (:189), so the binding grows ZERO value-types (unlike the LspHub's
+`ServerSpec`) and the three-copies growth is one `object-type` + one header +
+one `_generated` TU name. The stub's other promises ride verbatim: the answer
+routes get a SIGNAL plus a plain-typed door (the SIGNAL halves exist already —
+E3 adds only the doors), the three copies grow again and the `--codegen` audit
+is mandatory, `setTransportFactory` stays an honest C++-only absence, and the
+smoke's one-Qt proof re-pins (`_smoke_checks.py:142` Core, :225 Network — the
+helper dedups on the mapped PATH, so "one" means one on-disk file, already the
+truth since G3, nothing to fix there).
+
+E1 THE DAP FEEDS FAN OUT OVER THE VIEW LIST (glue + one additive ProjectSession
+door; pure C++ — the wheel does not move yet) — the bequeathed question
+ANSWERED, not deferred, and placed FIRST on purpose: binding `DapHub` (E2)
+freezes what Python sees, so the alias behavior must be right BEFORE the door
+list crosses. `ProjectSession` grows `QList<qmn::view::CodeEditor*>
+editorsForUri(const QString& uri) const` — the sibling of `editorForUri`: EVERY
+live view, OWNER first, attach order, car D's handover already re-keys it; the
+door is additive and stays C++-only by intent (its container-of-QObject-pointer
+either wraps or lands in E2's re-pinned log — the log decides, the record
+follows). `DapHub`'s `BoundSource::editor` becomes `views` (a
+`QList<QPointer<CodeEditor>>` LAST-KNOWN list, re-resolved through the session
+whenever the session answers — the same "nothing is cached from the map" rule
+as today), and `stopEditor_` becomes the list it always meant to be
+(`stopViews_`). Pinned semantics:
+- The band (`setHighlightedLines`), the value hints (`setInlayHints`), the
+  gutter dots (`setBreakpointLines`) and the dap diagnostics (`setDiagnostics`)
+  land on EVERY live view of the document. The hint MATH runs ONCE per stop
+  (the word scan rides document text, not view state) and the SAME hint list
+  feeds every view — N feeds, not N scans.
+- The CARET door (`setPosition`, DapHub.cpp:701) rides the OWNER view ONLY,
+  recorded as a divergence with its reason: caret/selection is per-view state
+  and a stop must not yank the caret of a view the user is typing in; the owner
+  is where the debug action came from, and after a handover the next view owns
+  the caret.
+- The single-writer teardown rule (`setInlayHints({})`, :811) is unchanged, run
+  per view. `handleScopes`/`handleVariables` take the list (private seams; they
+  drop from the log as private noise, not as a Python-visible change).
+- `BoundSource::editConn` stays exactly ONE connection per uri onto the
+  DOCUMENT's `textChanged` (document-scoped since car D): a second view's
+  `setBreakpoints` re-anchors it onto the same document (same identity, still
+  one connection) and NEVER doubles it — a doubled connection would double-send
+  `setBreakpoints`, and dapfake's `breakpoints` mode exits 2 on wire drift, so
+  the far side is the oracle.
+Tripwires (tst_dap, `QTEST_MAIN` over REAL editors, the D3 shape): two views of
+one document opened under one uri (the alias join is car D's rule, walked in
+tst_glue/tst_dap already) — dots AND dap diagnostics read back through BOTH
+editors' decoration doors after an answered `setBreakpoints` (no pixels, state
+only); a stopped feed lands band + hints on both views and the caret on the
+owner only; a JOINED view dying mid-stop keeps the survivor's feed intact
+(handover), the LAST view's death clears the store; the debounce resend burst
+still arrives as EXACTLY TWO completed `setBreakpoints` calls (the setup push +
+the one resend): dapfake's `disconnect` arm is the FLOOR — it exits 2 unless at
+least two arrived, so it proves the resend landed (main.cpp:441-444) — while a
+doubled connection showing up as THREE is a NEAR-side count, and the machine
+pins that floor and that ceiling honestly on each side. One MORE leg the
+design did not name but the resolution order needs: a THIRD view joins AFTER
+the last feed (the store never saw it) and the NEXT feed — a `breakpoint`
+EVENT, which costs no push of its own — paints it too; that is the
+session-answers-first half of `liveViews` pinned as behavior, not as plumbing
+(the store-list fallback would leave that gutter blind). CARET correction,
+made by the machine that rides it (E1's re-read, not the car-start record's
+first claim): the single-view caret pin DOES already exist —
+`dapHubStoppedFeedPaintsStackAndValueHints` reads `ed.position()` (line 2 /
+col 5 of the stopped frame) at tst_dap.cpp:1605-1606; my car-start grep
+looked for "cursor" and the pin spells it `position()`, so the "no pin
+today" sentence was FALSE. What E1 actually ADDS is the two-view OWNER-ONLY
+pin (the stop moves the OWNER's caret and leaves the joined view's caret
+exactly where its user left it) plus the handover pin (after the owner dies,
+the SURVIVOR's caret rides the next stop). The `editorForSourcePath` CAR-D
+DIVERGENCE comment is RETIRED by this machine (a machine owns its own
+comments) and AGENTS's divergence bullet gets rewritten in the same commit
+(recorded divergences die in the machine that kills them; the car-D CHANGELOG
+and close-record sentences stay — they recorded what shipped at 1.12.0).
+
+E2 `DAPHUB` CROSSES THE WHEEL (the three-copies rule grows — and one
+`src/dap`/`src/lsp` capture-order defect that the new smoke leg CAUGHT and
+this machine KILLED, paragraph "FOUND AND KILLED" below, so "bindings" is not
+the whole of it) —
+the typesystem's `<namespace-type name="glue">` grows `<object-type
+name="DapHub">` + its `<include file-name="glue/DapHub.hpp">`;
+`bindings/CMakeLists.txt` grows `HEADERS` (after the two glue headers,
+:122-123) and `_generated` (after the four glue TU names, :89-92) with the
+PREDICTED `qmn_glue_daphub_wrapper.cpp` — PREDICTED from the pattern (the
+namespace TU `qmn_glue_wrapper.cpp` already exists, and DapHub adds no
+value-type, so exactly ONE new TU), CONFIRMED against a `--codegen` file list
+BEFORE any compiling — the script ALREADY prints that list (`find /tmp/gen
+-type f | sort`, build_in_container.sh:54), so the ritual costs one read, not
+new machinery (the 1.6.1 "specified but not defined" configure error and the
+1.7.0 "clean configure, no build, `undefined symbol: init_qmn_glue_…` at
+import" trap are both killed by that confirmation, and the G3 comment at CMake
+:83-88 is the record of it); `build_in_container.sh --codegen`'s
+hand-reproduced header list (:48-51, the glue pair on :51) grows the same
+header. The shim grows `DapHub = _ext.qmn.glue.DapHub` + an `__all__` entry + a
+paragraph in the docstring that lists the honest absences (it is where the G3
+"plain objects the app builds and owns" text lives). No new record type, no new
+Qt module, no link change (the absorption already rides the shelf).
+Pin-the-reality knots, decided by the RUN, never assumed: (a) the two container
+crossings — `QVector<int>`↔`list` is PRECEDENTED (the M5 gutter doors, see the
+code facts) so it is a RE-PIN that the DapHub breakpoints read back as the same
+list, while `QMap<int,int>`↔`dict` is the genuinely new shape, expected to ride
+PySide 6.12's generic container conversion; if the log rejects either, the fix
+is a typesystem `container-type` / `convert-to-python-object` entry on the
+DapHub type, NOT a door change. RUN FACT (the 1.12.0-era `--codegen` run for
+this machine, and the smoke that exercises them): NEITHER was rejected —
+`QVector<int>` reads back as the same `list` and `breakpointMap` answers the
+empty `dict`, and NO container entry was needed; (b) whether `editorsForUri`
+wraps or drops — RUN FACT: it WRAPS (the door never appears in the rejected
+list, so `QList<CodeEditor*>` and its `CodeEditor*` elements cross), and the
+smoke CALLS it, because a wrapped door whose return-element conversion never
+runs is still unproven. The honest Python shape is a ONE-element list, and the
+reason is worth saying in the same breath as car D's rule: a two-view JOIN
+needs the attach ctor `CodeEditor(CodeDocument*, QWidget*)`, which stays
+`remove="all"` (car D's lifetime-pin question), so Python cannot build a
+joined pair until a later car opens that door; (c) `client()` and
+`setTransportFactory` must be ABSENT (drop-by-type-absence, the G3 convention:
+NO `remove` rules, so the log stays a live oracle of drift) — RUN FACT: exactly
+those two public doors are in the log, and the smoke's `hasattr` loop asserts
+them absent; (d) the new DapHub PRIVATE seams land in the log as private noise
+— they are not Python-visible changes and the count separates them from the
+public set: the DapHub block of the log is NINE lines, six of them private
+bookkeeping (`handleScopes`, `handleStackTrace`, `handleVariables`,
+`liveViews`, `boundForUri`, `findBound`) plus `tr` noise, and only the two
+public doors above are crossings-that-never-happened. The TU-name prediction is
+CONFIRMED the same run: `qmn_glue_daphub_wrapper.cpp`/`.h` in the file list,
+exactly ONE new TU. Order
+honesty, said plainly: at THIS machine the answer doors (E3) do not exist yet,
+so E2's log is the shelf's shape WITHOUT them; E4's run is the one that carries
+the doors across and the one whose numbers E5 accounts, and nothing shipped is
+affected because the wheel THAT SHIPS is built at E5 — while E2's own DoD still
+demands the repaired-wheel smoke+parity proof, so an INTERIM 1.12.0-version
+wheel is built here too (named in the DoD paragraph below; E5's close replaces
+it). Smoke
+(the shared `_smoke_checks.py` leg, BOTH drivers — no adapter ever RUNS: the
+container has no lldb-dap/gdb, the tst_glue NO-SERVER discipline rides, and the
+one spawn the leg makes is REFUSED at execve, so it is a death, never a
+session;
+build `qmn.DapHub()`; `setBreakpoints` on a Python editor whose document has NO
+uri answers `False` (the identity rule — `resolveEditorUri` takes the
+DOCUMENT's uri first, so no session is even needed, DapHub.cpp:323-335 with the
+door at :357); after `editor.document().setDocumentUri(...)` (the CodeDocument
+door, CodeDocument.hpp:167 — the smoke already walks this exact door at
+_smoke_checks.py:105) it answers `True`, `requestedBreakpoints` reads back the
+SAME list (the `QVector<int>` pin) and `breakpointMap` reads back a dict (empty
+before any answered reply — the `QMap<int,int>` empty case, pinned not
+assumed); `attachProject` + `project()` round-trip the Python `ProjectSession`
+(the non-owning QPointer crosses back, the hub/session precedent); all nine
+signals exist as PySide attributes and connect; `startDebugging` against a
+nonexistent program answers `True` (an async spawn is not yet a verdict) and
+the REFUSAL then lands as `sessionEnded("transport never opened: StartFailed:
+<Qt errorString>")` — pinned as OUR prefix plus a NON-EMPTY Qt tail (the Qt
+text is version-dependent and does not name the program), with
+`sessionStarted` never firing and `isDebugging()` back to `False`;
+`stopDebugging`/`isDebugging`/
+`isReady`/`adapterCapabilities` all answer honestly with no session (`{}`
+before the handshake); and `client`/`setTransportFactory` do NOT exist
+(`hasattr` probes — the G3 honest-absence loop grows), and the fan-out door
+`editorsForUri` is CALLED (its `QList<CodeEditor*>` crossing, one element, the
+reason it cannot be more named above). The one-Qt proof grows:
+DAP must add NO second `libQt6Core` and no NEW module (the `.so` already needs
+QtNetwork through protocol) — if `/proc/self/maps` shows anything else, an
+auditwheel exclude moved. RUN FACT: the leg measures a REAL before/after diff
+of the `/libQt6*` lines across the whole DAP block, and the delta is `[]` on
+both drivers (build tree and repaired wheel). Test-authoring trap the leg hit
+first, worth recording because it blurs the very thing it measures: pumping the
+spawn verdict with `PySide6.QtTest` loads `libQt6Test.so.6` INSIDE the
+measured window, and the delta then reports the test's own import — the pump
+uses stdlib `time.sleep`.
+
+FOUND AND KILLED at this machine (why the heading no longer says "bindings
+only"): the new spawn-FAILURE leg refused to pass, and the refusal was a real
+defect, not a bad pin. `Transport::transportError`'s FIRST slot is RpcClient's
+own `onTransportError` (connected in its ctor), whose `markGone()` emits
+`transportGone` SYNCHRONOUSLY — so `onGone()` runs NESTED INSIDE that
+`transportError` emission, at THAT signal's slot order. Both clients connected
+their `lastTransportIssue_` capture BELOW the `new RpcClient(...)` line, so the
+capture was the SECOND slot and every ProcessTransport StartFailed built its
+reason from an EMPTY `lastTransportIssue_`: `transport never opened: ` with a
+bare tail. The comment at both sites claimed the opposite ("Connected BEFORE
+transport->start(): the StartFailed error fires synchronously inside start()
+and must already be captured") — true about `start()`, useless about SLOT
+order, and the DAP path is not even synchronous there: `start()` returned true
+and the verdict arrived later as `QProcess::errorOccurred`. Why no test ever
+saw it: the only existing pins on these strings asserted NON-EMPTY (`tst_dap`'s
+crash slot: `QVERIFY(!reason.isEmpty())` — the bare prefix satisfies that) or
+asserted state and spawn count and never read the string at all (`tst_lsp`'s
+bad-program slot). It started to matter the moment E2 made the reason
+PYTHON-visible as `qmn.DapHub.sessionEnded`. E2 killed it: the same 3-line move
+in `src/dap/DapClient.cpp` and `src/lsp/LspClient.cpp` (the capture connect
+goes ABOVE the `new RpcClient` construction; both layers are C++-only, no wire
+change, no public door touched), plus the missing `ServerDied` case in
+`DapClient::errorKindName` — the LspClient twin already named it, the DAP
+switch fell through to `Unknown`, and the most common adapter death of all
+read `transport closed: Unknown: process exited with code 7`. Both clients were
+fixed together on purpose: leaving the LSP twin broken would have made two
+libraries behave differently under one identical comment. Pins, owned by this
+machine: `tst_dap` gains
+`dapHubSpawnRefusalReasonCarriesTheTransportIssue` (NO adapter involved —
+execve refuses, nothing spawns, the no-spawn rule stands — prefix pin,
+non-empty-tail pin, never-Ready-so-never-`sessionStarted`, no stderr, and the
+post-death doors answer honestly), `tst_dap`'s crash slot trades its vacuous
+`!isEmpty()` for the exact string `transport closed: ServerDied: process exited
+with code 7`, `tst_lsp`'s `lspBadProgramPathFailsWithNoRestartLoop` grows the
+same prefix + tail pins, and the wheel smoke pins the same shape end-to-end
+through `qmn.DapHub`. Both halves of the pin are deliberate: the
+`errorKindName` prefix is OUR stable vocabulary, the Qt errorString behind it is
+not.
+DoD: `--codegen` clean + its file list confirms every
+`_generated` name; build-tree smoke AND repaired-wheel smoke + qtmonaco parity
+green; the rejected log captured as an INTERIM baseline — E4's run, which wraps
+the E3 doors too, is the log E5 accounts against, and the delta between the two
+is named by E4's run (it also answers `answerRequestError`'s defaulted tail).
+MET at this machine (2026-11-25 runs): the two drivers and the parity test are
+green in both shapes (build tree, and the repaired wheel installed into a
+scratch prefix with the repo off `sys.path`); the interim codegen log is
+`/tmp/opencode/codegen_e2.log` (scratch, not in the repo). One thing this
+machine did that the close ritual must not forget: proving the repaired-wheel
+half meant BUILDING a wheel here, so `dist/` now holds
+`qmn_native-1.12.0-cp310-abi3-linux_x86_64.whl` and `dist/repaired/` the
+repaired `…-manylinux_2_34_x86_64.whl` — both still at the PRE-bump 1.12.0
+version, and both are interim artifacts the E5 close replaces (the 1.9.0 drift
+lesson is exactly this: a stale wheel in `dist/repaired/` plus a pydemo path-dep
+that spells a gone version). Because that rebuild REPLACED the 1.12.0 wheel
+pydemo's path-dep points at, `pydemo`'s headless run was re-greened here too
+(`uv run --offline main.py --exit-after-ms 400`, exit 0) after refreshing the
+gitignored `pydemo/uv.lock` — uv stores the wheel's hash, so a rebuilt wheel at
+the same path makes a stale lock FAIL to install, not merely warn.
+
+E3 THE ANSWER ROUTES GET THEIR PLAIN-TYPED DOORS (glue + tst_lsp/tst_dap legs;
+pure C++ — the far side is the oracle) — this is the half the G3 record left
+written-but-unbridged — "the route MUST speak a SIGNAL plus a plain-typed
+answer door" (the car-E stub, :3682-3684) and the G3 record's half of the same
+story: "its ANSWER route (`clientForSpec()->respond...`) does not: the
+LspClient default answers for Python apps; documented, not bridged"
+(:1655-1656). Decided here, from the code: - **The client-layer doors are
+ALREADY plain Qt, but they are VOID** — `respondApplyEdit(QJsonValue id, bool
+applied)` (LspClient.hpp:112) and `respondShowMessageRequest(QJsonValue id,
+QJsonValue actionItem)` (:118-119) both `return;` early on a dead session and
+otherwise throw away `session_->rpc->respond(...)`'s bool;
+`DapClient::respond`/`respondError` (DapClient.hpp:133-134) ALREADY return
+bool. So a SHELF door that speaks the truth needs exactly ONE widening below
+the shelf: `respondShowMessageRequest` grows `bool` (`return
+session_->rpc->respond(...)`; the null-session early return becomes `return
+false`). That is an `src/lsp/` internal, NOT the frozen view/glue surface — the
+layer is C++-only and never wrapped — and it is source-compatible for every
+existing caller, which all discard the value (`LspHub.cpp:3210`'s applier,
+tst_lsp:1574/:3808; VERIFIED: no `&LspClient::respond*` connect-by-pointer
+anywhere). `respondApplyEdit` stays `void`: its only caller is the hub's own
+applier, which self-answers, and E3 adds no applyEdit twin. What the shelf adds
+is THREE doors, no new record type: `bool
+LspHub::answerShowMessageRequest(const QString& specName, const QJsonValue& id,
+const QJsonValue& actionItem)`, and on `DapHub` `bool answerRequest(const
+QJsonValue& id, const QJsonValue& body)` plus `bool answerRequestError(const
+QJsonValue& id, int code, const QString& message, const QJsonValue& data =
+{})`. Every parameter is the same type family the G3 run already shipped across
+(`QString`/`QJsonValue`/`int`/`bool`). - **The LSP door is spec-named, not
+uri-named** — and that is a wire fact, not a taste: `window/showMessageRequest`
+is a SERVER→client request, so only the wire that asked can carry the answer,
+and the hub's relay signal already hands out the spec name
+(`serverShowMessageRequest(specName, id, params)`, LspHub.hpp:456 as it
+reads after this machine). The
+door consumes exactly what the signal emits, resolves through `specEntry`
+(LspHub.hpp:474 — CORRECTED at the run: the door resolves through the
+lazy-start pin's READ side, `clientForSpec`, the relay's own way back, and
+`specEntry` was deliberately NOT used: it CREATES and lazy-STARTS a spec it
+only wants to reply to, and an answer door that can spawn a server is its own
+bug class. The FAILED-entry case stays honest either way — a failed client
+has no `session_` (LspClient.cpp:175 nulls it at teardown), and both respond
+doors guard on `!session_`, so the door answers false) and forwards to that
+client's respond door. A uri-keyed
+variant would be a door that can answer the WRONG server. - **`applyEdit` gets
+NO twin — recorded decision with its reason.** The shelf's applier answers that
+request itself, always: `LspHub.cpp:3210` (`client->respondApplyEdit(id,
+report.applied) // the truth, either way`), and `RpcClient`'s erase-once guard
+(`openIncoming_.erase` inside `respond`/`respondError`, RpcClient.cpp:204-221)
+makes a SECOND answer to one id physically impossible. A Python door that can
+never win is worse than an honest absence, and the report the hub hands its C++
+caller instead (`ApplyReport`, LspHub.hpp:387-392) stays a type the wheel never
+carries — E4's drop accounting pins why. `respondApplyEdit` keeps its `void`
+signature: the widening lands only where a bool route actually exists. -
+**First-answer-wins now binds the SHELF route too, and no new policy is
+minted** (AGENTS's ask answered in the open): the client-layer half is settled
+— `dapReverseRelayHonestDefaultAndGlueFirstTurn` (tst_dap:1270, answers at
+:1286) on the DAP side,
+`showMessageRequestFirstAnswerWinsAndNullDefaultFollows` (tst_lsp:3768, answers
+at :3808) on the LSP side — and the mechanism already enforces it one layer
+down: `openIncoming_` registration happens BEFORE the handler runs
+(RpcClient.cpp:401/:425/:432) and erase-once refuses the second. The hub doors
+inherit it; the shelf adds no re-answer bookkeeping. - **The DAP id is the
+request's `seq`** — `dapRequest(QJsonObject)` relays the whole request frame,
+and the answer doors take the `seq` value out of it. A stale id never reaches
+the codec: `RpcClient::respond` looks the id up in `openIncoming_` first and
+answers false on an unknown or already-answered one, and only the surviving
+frame goes to `DapCodec::buildResponse` (the codec's `baseResponse` re-read
+reads that same registered frame, it is not a second lookup). Tripwires,
+far-side first: tst_lsp grows the hub-door version of the two
+`showMessageRequest` legs it already owns (:3768 onward — the
+`MSGREQ-OK`/`MSGREQ-NULL-OK` markers stay the oracle, picked out of the
+server's own `actions` array) PLUS a second-answer leg that pins the widened
+bool near-side (`True` on the first answer, `False` on the second — the very
+refusal `RpcClient::respond` already makes, whose comment reads
+"unknown/already-answered: double answers are never sent") while its far side
+sees exactly ONE answer frame; tst_dap grows a DapHub-driven reverse leg that
+reuses dapfake's `reverse` mode UNCHANGED (its self-audit already validates
+request_seq match, `success:true` and `body.ok`, and exits 2 on a lie,
+main.cpp:292-308; `runInTerminal` keeps the shelf's honest default and
+`progressStart` stays the client-layer static shelf — a hub leg must not
+disturb either) plus an `answerRequestError` leg, whose envelope shape is
+dapfake-audited through `DapCodec::buildErrorResponse` (DapCodec.cpp:66-86: the
+whole error TABLE merges into `error`, so `code`→`error.id` and
+`message`→`error.format`). No new dapfake mode is planned — if the run finds
+one is needed, the close record says so rather than pretending.
+MET at this machine (2026-11-25 runs): the three doors landed exactly as
+specified, no new record type, and the ONE widening below the shelf is the
+`void`→`bool` on `LspClient::respondShowMessageRequest` (declaration now
+LspClient.hpp:122, the comment block above it carrying the reason for the
+widening). Two things the run DECIDED beyond the stub, both from the code:
+- **The `specEntry` sentence above is corrected in place** (the lazy-start
+  trap — the door resolves through `clientForSpec`, the read side). A test
+  pins the consequence: `showMessageRequestAnswerDoorRefusalsHaveNoSideEffects`
+  calls the door with a NEVER-STARTED spec name and `clientForSpec` still
+  reads `nullptr` for that name immediately afterwards — an answer door that
+  spawns is caught red-handed, not just commented away (the same phantom
+  call repeats mid-relay and still refuses).
+- **No new dapfake mode was added, but the `reverse` mode's arms GREW — that
+  is the sentence this paragraph owed the reader.** The stub said the tst_dap
+  legs reuse the mode "UNCHANGED"; the run found step 1 (`startDebugging`)
+  could not witness BOTH answer shapes, because the D2 slot's
+  success:true/body.ok and the client layer's honest
+  `error{id:0, format:"not handled: …"}` default were the only two spellings
+  the arm knew, and an app-answered ERROR from the hub door would have read
+  exactly like the default's refusal. The fix is a DISCRIMINATOR, not a mode:
+  only the shelf door can put `error.id == 9001` on this wire (the client
+  default invents `id:0` and the static shelf never sees this request), so
+  the step-1 arm now accepts either shape and audits the error TABLE when it
+  sees 9001 — the door's message in `error.format` and the OBJECT-data merge
+  (`appId:"daphub-door"`, `DapCodec::buildErrorResponse`, DapCodec.cpp:66-86,
+  read at this run) landing as members of the `error` table itself. The 9001
+  branch sits FIRST and the original success:true/body.ok checks follow it
+  verbatim (the tst-side D2 slot itself is untouched and stays green). A
+  second dapfake growth came with it: `disconnect` in `reverse`
+  mode now EXITS 2 if the battery never reached step 2 (main.cpp:489-496) —
+  an early client exit silently skipping the answer legs would have made the
+  mode's whole purpose vacuous.
+
+Tripwires shipped (far side first, all read out of the code after the run):
+tst_lsp's `showMessageRequestFirstAnswerWinsAndNullDefaultFollows` (now
+:3785) grew the shelf-door block — answering INSIDE the relay through
+`hub.answerShowMessageRequest`, pinning the widened bool near-side (`True`
+first answer, `False` second) while the far side still sees exactly one
+accepted answer (`MSGREQ-OK`, and no `MSGREQ-NULL-OK`), so the second frame
+provably never travelled — and the new slot
+`showMessageRequestAnswerDoorRefusalsHaveNoSideEffects` (:3947) pins the
+refusal half: an unknown id answers false WITHOUT burning the real request (the Null default still answers it,
+`MSGREQ-NULL-OK` arrives, the session stands). tst_dap's no-session sweep
+(`dapHubRefusesEverythingWithoutAnAdapter`) grew both DAP answer doors
+reading `false` with no wire at all — no local failure frame is invented —
+and two new slots drive the reverse battery at the SHELF layer:
+`dapHubAnswerDoorWinsTheReverseRaceAndTheShelfStands` (id = the relayed
+frame's own `seq`; first answer wins, second refused; `runInTerminal` stays
+the client-layer default's leg, `progressStart` stays the static shelf and
+never reaches the relay — the D2 pin, proven one layer up; dapfake's exit 0
+is the far-side "that is exactly the answer set I promised") and
+`dapHubErrorDoorTravelsWholeErrorTable` (the 9001 leg: dapfake validates the
+envelope end-to-end; the post-error success-shaped re-answer reads false and
+writes nothing; and an in-envelope failure is NOT a death — `isDebugging()`
+stands). One more shape decision lives in the code, not above it: the DAP
+answer doors carry NO lifecycle state gate (unlike the forward `request`
+door) — an answer is judged by `openIncoming_`, and inventing a
+`kErrNotRunning`-shaped frame for a reverse answer would be a wire lie; the
+`!client_` guard is the only near-side filter. The fakeserver's MSGREQ arm
+comment was updated to say the answer may ride either door (markers
+byte-identical — the far side cannot tell the doors apart, which is the
+point). `answerRequestError`'s defaulted tail waits for E4's codegen log, as
+the paragraph above promised. Runs: full ctest 7/7 green (lsp 73.52 s, dap
+18.92 s, total 101.83 s), both new tst_dap slots green standalone, both
+showMessageRequest slots green standalone.
+
+E4 THE ANSWER ROUTES CROSS, AND THE LIVE DAP WHEEL LEG IS RUN (bindings + the
+drop-inventory accounting + the manual live ritual) — the doors E3 added are
+public and plain-typed, so the codegen run MUST wrap them: the load-bearing
+direction of the audit flips here. A NEW public plain-typed door that shows up
+in `mjb_rejected_functions.log` is a REAL regression, and that check is the
+only automatic tripwire this car gets on the wrappability rule. The smoke grows
+a shape leg for the routes (no adapter is ever spawned in the container —
+lldb-dap/gdb are not there and the tst_glue NO-SERVER discipline rides):
+`hasattr` probes prove the three new doors and the nine `DapHub` signals exist;
+`hub.answerRequest(4242, {"ok": True})` on a hub with no session answers
+`False`, and `hub.answerShowMessageRequest("nope", 1, {})` answers `False`
+(both doors return false on an unknown id/spec — the honest near-side answer
+with no wire at all). The G3 smoke leg's own comment ("The hub relays cross as
+ordinary PySide signals (the answer route `clientForSpec()->respond...` is
+C++-only - documented)", `_smoke_checks.py:224-226`) is exactly the sentence E4
+turns into a real probe, and it gets rewritten in the same machine (a machine
+owns its own comments). The WIRE truth of the routes lives in C++ (far-side
+markers), the same split G3 shipped for the shelf — the record says it, it is
+not implied. **And because the whole point of the car is "DAP across the
+wheel", the manual live ritual is part of this machine, not a nice-to-have**: a
+scratch Python script (NOT CI, NOT the smoke) driving `qmn.DapHub` against the
+REAL adapters `tools/probe_dap.sh` uses (log:52-53 — `lldb-dap` FIRST, then
+`gdb -i=dap`), pinning `sessionStarted` → `setBreakpoints` → answered reply →
+`debugStopped` → `stopDebugging`, read out of the live wire. The recorded
+numbers belong to the close record, and a leg that cannot run is written as
+"did not run", never as a pass. Drop-inventory accounting (the DoD the AGENTS
+rewrite rides, every figure read out of the archived logs, not derived): the
+1.12.0 run's rejected log carries **35 glue-wide drop lines, not 16** — 34 on
+`LspHub` (17 public doors + one `tr` line + 16 more lines that are private
+seams and their rejections: the struct-carrier noise
+`SpecClient`/`TriggerState`/`FoldFeed`/`HintFeed`/ `PullDiagFeed`, the
+`QMap::const_iterator` returns of
+`registrationAt`/`interactionView`/`hidePopupsEverywhere`, `connectViewTaps`,
+`featureGate`, `pullModeClient`, `wireDocumentPosition`, `wirePosition`) and 1
+on `ProjectSession` (`tr`). The count GREW with the shelf, machine by machine:
+the 1.10.0 log has 26 (25 + 1) and the 1.11.0 log 31 (30 + 1), and at 1.10.0
+only EIGHT public doors carried `FeatureHandler` — car C's
+`requestSignatureHelp` is the ninth. No baseline ever counted the private
+lines, and AGENTS's sentence named the halves wrong. The two `tr` lines
+(log:281-282) are NOT hub signals: they are the static `tr()` every Q_OBJECT
+class carries, rejected by the generator's own bundled system rule — the log
+prints that rule verbatim (`matches class "^.*$" and "^tr$"`), and no `tr` rule
+exists anywhere in `bindings/*.xml` (VERIFIED) — so they are counted separately
+from the 17, never as a lost door. The VERIFIED public 17, by name:
+`setTransportFactory`, `syncerFor`, `clientForUri`, `clientForSpec`, the eight
+`request*` doors
+(`Hover`/`Definition`/`References`/`Completion`/`SignatureHelp`/
+`CodeActions`/`Formatting`/`Rename`), `resolveCompletionItem`, and the four
+`ApplyReport`-returning appliers (`applyWorkspaceEdit`, `applyCodeAction`,
+`applyReplyEdit`, `applyTextEditList`). So the AGENTS sentence is wrong twice
+over: the callback family is NINE doors (eight `request*` +
+`resolveCompletionItem`, all carrying `FeatureHandler`), and the appliers do
+NOT drop on "the defaulted `LspClient*` tail" — all five apply lines (the four
+public ones plus the private `applyDecoded`, log:759-763) report the SAME
+reason: `unmatched return type 'qmn::glue::LspHub::ApplyReport': Cannot find
+type entry`. One typesystem `value-type` entry would carry all five, which is
+exactly why adding it is a DECISION, not an oversight to fix on the way:
+`ApplyReport` stays unbound this car, because the wheel has no door that
+returns it to Python in any shape the wheel needs — the applier runs HUB-side
+on a server-primed `workspace/applyEdit` and reports refusals through the
+`applyEditRefused` signal instead (LspHub.cpp:3210 answers with the truth). The
+nine feature doors and the applier family stay C++-only honest absences, in the
+same voice as the `set_lsp_header` line: zero call sites anywhere in `src/app`
+(VERIFIED by grep — the only users are tst_lsp at :2920/:2964/:3013/:3444 and
+`tools/probe_clangd.cpp` at :185/:206/:247/:292/:407), and the wheel's user
+gets completion/hover/signature-help popups from the HUB's own taps, never from
+an app-driven feature door. G3's other deferred half stays deferred for the
+same reason: no generic feature door is added, so `RpcClient::Reply` never gets
+a door to carry it and never becomes a `value-type` (PLAN:1652-1654). What
+genuinely shrinks is the shelf's crossing cost, and the number the record
+carries instead of the 16-sentence it replaces: `DapHub` crosses with **exactly
+2 drops** (`setTransportFactory`, `client()`) plus the generic `tr` line: the
+run that ships is E4's, and by then the answer doors already exist as
+plain-typed members, so nothing in the wheel depends on the E2-then-E3 order
+(the wheel THAT SHIPS is built once, at E5 — E2 built an interim 1.12.0-version
+wheel to prove its own repaired-wheel DoD, and E5's close build replaces it, the
+same drift class the 1.9.0 audit named). That is the sentence AGENTS should own,
+and
+the new log must show it. One new signature shape that run must also answer:
+`answerRequestError`'s defaulted tail (`const QJsonValue& data = {}`, mirroring
+`DapClient::respondError`, DapClient.hpp:134-135) — the log decides whether a
+Python-visible overload exists; if it reports the tail, the fix is an explicit
+two-arity pair on the SHELF door (still plain-typed, still one class), never a
+`remove` rule.
+
+The stale figure's other homes, and what E5 did with each: the number 16
+lived in PLAN at car B's close record, car C's pinned-expectation paragraph,
+car C's CLOSED append record, car D's close paragraph (forward-looking half),
+the car-E stub's opening lines, and the Gate-3 risk-2 line — and in AGENTS.
+Read against the logs, "16 drops" was never a line budget — it was the NAME
+of a set, and the car-B and car-C audits were SET-DIFFS ("that baseline plus
+exactly `requestSignatureHelp`, nothing else"), which is exactly why they read
+as true while the line count grew 26 → 31 → 35 underneath them. So the three
+HISTORICAL shipped records keep their words (they recorded set-diffs
+honestly, and rewriting a shipped close record is its own dishonesty) while
+the FORWARD-LOOKING sentences — car D's close paragraph, the car-E stub
+opening, the risk-2 line — were rewritten IN PLACE at E5's close commit (none
+of those three had ever reached git history), plus AGENTS, all pointing here
+for the figures.
+MET at this machine (2026-11-25 runs): the flipped audit ran BOTH ways and
+held. The `--codegen` run (exit 0, log `/tmp/opencode/codegen_e4.log`,
+scratch) shows **no rejection line for any of E3's three doors** — they all
+crossed as ordinary wrapped members — and the glue-class drop set is
+BYTE-IDENTICAL to the 1.12.0 baseline: a diff of the two logs' `qmn::glue::`
+lines is EMPTY (34 `LspHub` + 1 `ProjectSession` + 9 `DapHub`, the DapHub
+block still its six private-seam bookkeeping lines + `tr` + `setTransportFactory`
++ `client()`). No new `_generated` TU (the glue file list is unchanged) and no
+three-copies edit, m7's precedent holding: plain-Qt-typed doors on an
+ALREADY-bound class. The defaulted-tail question this paragraph posed got its
+answer from the SMOKE, not the log: the log never mentioned the door, and the
+plain 3-arity `answerRequestError(4242, 0, "msg")` call works from Python —
+Shiboken carried the default itself, so the pre-authorized "explicit
+two-arity pair" fix was NOT triggered and no shelf overload exists. Smoke legs
+shipped (in `_smoke_checks.py`, growing E2's sections in place): the G3 relay
+sentence rewritten to the crossed-answer-route truth plus
+`answerShowMessageRequest` False on an unknown spec AND on a
+registered-but-never-started spec (the lazy-start read-side half is pinned in
+C++ by tst_lsp's `showMessageRequestAnswerDoorRefusalsHaveNoSideEffects`; the
+Python side cannot see `clientForSpec`, dropped — the smoke pins SHAPE, never
+wire); the no-wire `answerRequest`/`answerRequestError` False legs; and a
+DEAD-session leg on E2's spawn-refusal corpse — the hub does NOT reset
+`client_` at session end (only the next `startDebugging` replaces it,
+DapHub.cpp:123), so that leg's False provably comes from the client's
+`!session_` guard one layer down, read through the wheel. Container runs:
+full pipeline EXIT=0 (build-tree smoke + qtmonaco parity green, Qt delta
+`[]`), `--wheel` EXIT=0 (the interim 1.12.0 wheel REBUILT with the doors and
+the grown smoke, repaired, then smoke + parity against the repaired wheel
+with the repo off `sys.path`, Qt delta `[]`; `dist/repaired/` again holds an
+interim wheel E5 must replace — the recorded drift class, and pydemo's venv
+had to re-hash `uv.lock` for the third time for exactly that reason).
+THE LIVE DAP WHEEL LEG RAN, both adapters, host-side through the pydemo venv
+(no new install — PySide6 + the wheel path-dep were already there), scratch
+script `/tmp/opencode/dap_wheel_ritual.py` (logs `e4_ritual_lldb.log`,
+`e4_ritual_gdb.log`): PLAN's five anchors on the live wire, lldb-dap FIRST —
+Ready with **28 caps fields**, `setBreakpoints [4]` answered with
+`breakpointMap {4: 4}` and the verified dot at model line 4, `debugStopped
+(thread 2751115, "breakpoint")`, the hub's caret feed agreeing at line 4,
+`stopDebugging` riding `sessionEnded("terminated")` — and gdb -i=dap SECOND:
+**26 caps fields**, `{4: 4}`, thread 1, `"breakpoint"`, caret 4,
+`sessionEnded("stopped")`. WHEEL-DAP-RITUAL-OK, exit 0, twice. Two honest
+printings the record keeps: NEITHER live adapter relayed a single reverse
+request that session (`dapRequest` fired zero times both runs — the answer
+doors' LIVE exercise therefore did not happen; their far-side audit stays
+dapfake's, in C++, and the wheel-side legs pin only the refusal shapes — the
+pinned five anchors never asked for a reverse leg and none was faked), and
+the first lldb-dap attempt died in the SCRATCH script's own slot bug
+(`sessionStarted` takes NO args; `list.append` crashed as a swallowed PySide
+slot exception) — no repo code involved, the fixed script is what both OK
+runs used. The ctest half of this machine is the E3 run's (no C++ changed
+after the 7/7 run: 101.83 s); E4 touched only the smoke file and this record.
+
+E5 THE CLOSE RITUAL (both wheels + the shelf literal + the record half) — the
+full car-D close list, plus the half the 1.9.0 close forgot: bump BOTH package
+literals to **1.13.0** (`CMakeLists.txt` + `pyproject.toml`) in one commit,
+bump `QMN_GLUE_VERSION` to **1.1.0** and rewrite its comment (the "bumps ONLY
+when the shelf itself breaks" wording is pre-crossing: since G3 a shelf break
+is wheel-visible, so additive growth is a minor bump); `ninja -C build` +
+`ctest` **7/7**; the packaging smoke (`cmake --install` + `examples/consumer` —
+its glue TU grows the DapHub door read so the INSTALLED shelf is proven, the G1
+rule); rebuild the wheel in the container (`--codegen` clean + the confirmed
+file list, build-tree smoke, `auditwheel repair`, repaired-wheel smoke +
+qtmonaco parity with the repo off `sys.path`); bump the pydemo path-dep to the
+new wheel and run the headless green pydemo (`QT_QPA_PLATFORM=offscreen uv run
+main.py --exit-after-ms …`) — that run is what catches a resolver drift, and
+pydemo grows NO new door this car (the `--lsp`/`--dap` mirror doors are S2's);
+re-run the live probes whose ground this car touched: `tools/probe_dap.sh`
+against BOTH adapters (the ritual car 4 made mandatory, and E1 changed the
+breakpoint paint it pins), and
+`tools/probe_clangd.sh` as a REGRESSION guard only — its steps exercise none
+of the new answer door, so the fakeserver markers stay that door's only wire
+proof and the close record says so; the clangd step count gets re-read from
+the run, not restated from AGENTS. Then update README/CHANGELOG/AGENTS (the
+drop baseline, the alias-paint divergence being retired, the "one document,
+many views" DAP bullet; the bench-hygiene paragraph rides unchanged) AND the
+car-E-facing 16-figures PLAN itself carries forward — car D's close
+paragraph, this car's own stub opening and the Gate-3 risk-2 line get
+rewritten in the same commit, E4's paragraph being the record of the
+real counts;
+annotated tag `v1.13.0`, push main + tag — fresh ask before each out-of-tree
+step.
+MET at this machine (2026-11-25 close): the full ritual ran green. ctest 7/7
+at the BUMPED head (101.70 s; `lsp` 73.46, `dap` 18.94). The packaging smoke
+grew as this paragraph promised — `glue_smoke.cpp` now READS the three E3
+answer doors through the INSTALLED shelf, and the LspHub leg re-asserts
+`clientForSpec("clangd") == nullptr` right after the answer-door call (the
+installed shelf's answer door does not spawn clangd either): both consumer
+binaries green, no server and no adapter spawned. The container trio:
+`--codegen` exit 0 (the drop set again 34 `LspHub` + 1 `ProjectSession` + 9
+`DapHub`, ZERO rejection lines for the three doors, and the wrapper-TU file
+list byte-identical to E4's run), the no-flag full pipeline exit 0 (build-tree
+smoke + qtmonaco parity, Qt delta `[]`), and `--wheel` exit 0 — the shipping
+wheel is `qmn_native-1.13.0-cp310-abi3-manylinux_2_34_x86_64.whl`,
+rebuilt/repaired/smoke-green/parity-green with the repo off `sys.path`.
+pydemo's fourth literal re-pointed to the 1.13.0 wheel, its lock re-resolved
+(the wheel-hash trap bit AGAIN at exactly this bump — refresh the lock after
+any rebuild), headless run exit 0, and pydemo grew NO new door this car (the
+`--lsp`/`--dap` mirror doors are S2's). Live probes re-run at the head:
+`tools/probe_dap.sh` PROBE-RITUAL-OK, 7 steps both adapters agreed (lldb-dap
+**28** caps fields, gdb **26** — the same cap counts E4's wheel ritual
+printed, C++ and Python reading the same adapters), and `tools/probe_clangd.sh`
+PROBE-OK, **11 steps** on clangd 23.1.5, re-read from the run not restated —
+and NONE of clangd's eleven steps exercises the answer door, exactly as this
+paragraph predicted, so the fakeserver's `MSGREQ`/`MSGREQ-NULL-OK` markers
+stay that door's only live-wire proof. E4's live-wheel legs ran against the
+INTERIM wheel (1.12.0-spelled, carrying all of car E's code); the shipping
+1.13.0 wheel carries the same crossing surface and the close trio above is
+what proves it. `QMN_GLUE_VERSION` rode 1.0.0 → 1.1.0 with its comment
+rewritten at the bump site (the first shelf bump ever — car D's close kept
+1.0.0 deliberately). **CAR E CLOSED at 1.13.0**, as ONE commit (owner's call:
+this car's design record never reached git history, so the record, the
+machine run records, the code and the close ride a single commit — car D's
+two-commit shape not repeated) plus the annotated tag. Car S1 (qmn-demo grows
+into the live showcase) is the open car next.
 
 ### Car S1 — qmn-demo grows into the live showcase
 
@@ -3737,9 +4427,14 @@ painting stay "by design" where they are written.
    core; the frozen-surface rule keeps them additive; the perf fix
    rides a timing slot whose FAILURE MODE IS A VACUOUS PASS (the
    recorded style), never a false red on CI.
-2. **The rejected-log drift** — car E changes what Python sees; the G3
-   audit baseline (16 drops) must be RE-PINNED, not eyeballed (both
-   1.6.1 and 1.7.0 codegen traps were silent drift).
+2. **The rejected-log drift** — car E changes what Python sees; the audit's
+   drop SET must be RE-PINNED from the log, not eyeballed (both the 1.6.1
+   and 1.7.0 codegen traps were silent drift). RETIRED at car E machine E4:
+   reading the archived logs showed the "16 drops" baseline was a SET NAME,
+   never a line budget — the honest counts (34 `LspHub` + 1 `ProjectSession`
+   at 1.12.0, 9 more on `DapHub`) live in E4's paragraph, and E4/E5 both
+   diffed the drop SET against the archived baseline instead of trusting
+   any number.
 3. **Showcase drift vs the mirror rule** — S1 and S2 must stay
    door-for-door; the tour pin list is SHARED between them (one table,
    two drivers), and that table is the drift tripwire.

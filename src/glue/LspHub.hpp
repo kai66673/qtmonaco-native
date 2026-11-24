@@ -157,6 +157,26 @@ public:
     // Manual lifecycle door for ONE spec (resets the auto-restart budget
     // inside the client; the documents self-heal through ready()).
     void restartServer(const QString& specName);
+
+    // Car E machine E3 — THE app's answer door for a relayed
+    // window/showMessageRequest (the plain-typed half of the G3 record's
+    // "documented, not bridged" answer route: the relay signal already
+    // hands out spec+id+params, this door consumes exactly that emission,
+    // so no Python subclassing and no std::function is needed to pick the
+    // button). SPEC-named, not uri-named: showMessageRequest is a
+    // SERVER→client request, so only the wire that asked can carry the
+    // answer — a uri-keyed variant could answer the WRONG server. Resolves
+    // through the lazy-start pin's read side (clientForSpec, like the
+    // relay's own way back): an answer door that lazy-spawns a server it
+    // is only replying to would be its own bug class. True = THIS call was
+    // the answer that went out; false = spec unknown, session not alive,
+    // or the id was already answered (the client's Null default or an
+    // earlier answer won — first-answer-wins, now observable through the
+    // shelf). An app that never calls it gets the spec-legal Null default,
+    // exactly as before this door existed.
+    bool answerShowMessageRequest(const QString& specName,
+                                  const QJsonValue& id,
+                                  const QJsonValue& actionItem);
     void setDebounceMs(int ms); // applied to syncers created from now on...
     int debounceMs() const { return debounceMs_; }
 
@@ -425,8 +445,10 @@ signals:
     // surfaces this and offers restartServer.
     void serverFailed(const QString& spec, const QString& reason);
     // window/showMessageRequest RELAY (machine 5): the hub never picks an
-    // action itself — the app answers through
-    // clientForSpec(spec)->respondShowMessageRequest(id, item). The relay
+    // action itself — the app answers through answerShowMessageRequest(spec,
+    // id, item) (car E machine E3's door; the C++ route
+    // clientForSpec(spec)->respondShowMessageRequest is what it forwards to).
+    // The relay
     // lands BEFORE LspClient's Null default and RpcClient refuses a second
     // answer, so an app that answers inside this relay (a modal dialog
     // answered on the spot) wins the choice; a later, non-modal answer
