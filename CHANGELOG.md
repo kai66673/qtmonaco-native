@@ -3,6 +3,124 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.14.0] — 2026-11-26 — GATE 3 car S1 CLOSED — the demo grows into the live showcase IN PLACE: the diff trio + F7 chords, the grammar door, typed DAP controls, and the `--tour` pin table
+
+### Added
+- **The diff door** (machine S1-1): `MainWindow::openDiffPair(a, b)`
+  opens the trio — original | modified | side-by-side diff, FOCUS on
+  the diff tab — and the pair of nav chords lands on the view: F7 /
+  Shift+F7 walk hunks in diff mode through the existing
+  `CodeEditor::nextChange`/`previousChange` doors (strict-edge, NO wrap
+  at either edge — the same semantics M10 pinned at the door level, now
+  pinned through the key; Ctrl/Alt masked out, an honest no-op outside
+  diff mode). CLI `--diff A B` rides a raw-argv PRE-SCAN (Qt6
+  `QCommandLineParser` value options never collect two tokens —
+  measured on 6.12), and a mis-shaped pair fails loud on stderr + exit
+  1. A failed read of either side opens NOTHING (no half-pair).
+- **The grammar door** (machine S1-2): demo doors `loadGrammarLibrary`
+  + `setLanguageForSuffix` rebind a suffix to a compiled parser
+  library at run time (the runtime-extensible registry, 1.8.0 sliver),
+  and CLI `--grammar` (+ `--grammar-id/-symbol/-lang/-query/-suffix`,
+  zipped by occurrence — one value per flag per occurrence) drives it
+  headless. A bogus library REFUSES loud (exact status-bar refusal,
+  registry unmoved), and the stem-derived symbol default
+  (`tree_sitter_<libname>`) failing is ALSO loud (exit 1) — a silent
+  companion drop flips the positive leg on its own.
+- **The typed DAP control doors** (machine S1-3): `DapHub` grows four
+  plain-typed bool doors — `continueDebugging()` / `stepOver()` /
+  `stepIn()` / `stepOut()` — the answer-door precedent's siblings: the
+  wheel drives a session WITHOUT ever touching the unbound `DapClient`
+  (the raw `request()` route stays C++-only). Shared gate `threadControl`:
+  Ready AND the LAST `debugStopped` named a thread (control requests
+  are per-thread — the single-thread v1 shape), and the thread memory
+  RETIRES on a `continued` event or any session end, so pressing before
+  the first stop or after a continue returns false without touching the
+  wire; the wire shape stays byte-unchanged (fire-and-forget through
+  `request()`, the client still never sends event frames). Demo doors
+  `debugStep`/`debugContinue`/`debugStop` + CLI `--debug-*`: the ride
+  QUEUES through a 300 ms beat (the session is event-paced — flags
+  WITHOUT `--dap` print a refusal to stderr and exit 1).
+  `tests/dapfake` grew the `steps2` mode: one hit on line 3 of a six-
+  line doc, threadId 7, and the walk next → stepOut → next-pause →
+  next-past-EOF → continue-with-a-live-terminate-arm, with `x = 42` +
+  decoy variables as the far-side witnesses.
+- **`qmn-demo --tour`** (machine S1-4): the scripted SHOWCASE TOUR — a
+  14-row pin table (`PASS/SKIP/FAIL n: leg — detail`) over a FROZEN
+  built-in corpus (`tour.py` 5 lines + the diff pair + `demo.c`),
+  exiting NONZERO at the FIRST failed pin, prints skips AS skips, and
+  exits 0 otherwise. Legs: corpus/boot/model (edit + undo byte-
+  identical), the golden 15-span python highlight table (exact), the
+  diff trio + F7 walk (exact hop table), the grammar door's before/
+  load/refusal faces (spans EQUAL the golden table), a settings
+  round-trip through the UNCHANGED 15-knob surface (baseline restored),
+  clangd and the live lldb-dap/gdb legs PRESENCE-shaped (exactness
+  stays owned by `probe_clangd.sh`/`probe_dap.sh`), and the dapfake
+  leg's BYTE-EXACT status sequence (including the refusals and the
+  disarm), band/caret/dots `{2,6}` verbatim past EOF and the first-
+  wins hint ` = 42`. Fixture resolution = build-tree guess relative to
+  the executable + `QMN_TOUR_*` env + ≤3 positional tail paths; a
+  NAMED-but-missing fixture/adapter is LOUD (stderr + exit 1) while an
+  empty discovery SKIPS honestly — `QMN_TOUR_NO_LIVE_DAP=1` prints the
+  honest "scoped off" reason, never "not found on PATH" on a host that
+  HAS the binary. The tour is a LIVE ritual, NEVER a ctest entry, and
+  `Qt6::Test` never links into `qmn_demo_app` (waits ride the tour's
+  own spin helper; keys ride raw `QKeyEvent`s).
+
+### Fixed
+- **A PRE-EXISTING tst_lsp flake, caught during S1 verification**
+  (test-only; no shipping code touched):
+  `hubViewHandoverKeepsWireFeedsAndMarksStanding`'s last liveness leg
+  sampled the `foldingRange` request count the instant the syncer's
+  version bump landed — but the fold feed re-arms at 300 ms while the
+  syncer flushes at 400 ms, giving the fakeserver's stderr echo only
+  ~100 ms of event-loop windows to arrive. Measured 6/30 isolated
+  failures at v1.13.0 AND at the pre-fix head (throwaway baseline
+  worktree — the flake PREDATES S1). The pin now WAITS for the
+  far-side witness (this slot's own idiom two legs up): 0/30
+  isolated after, and the `-j7 --repeat until-fail:3` full-suite
+  stress — the load that surfaced it — came up 7/7 three times.
+
+### Tests & ritual
+- `tst_codeeditor` 293→294 (the chord slot), `tst_dap` 42→43 (the
+  typed-door wire gate), `tst_demo` 14→23 (two slots per door + the
+  tour's two). ctest 7/7 green on the shipping run plus the stress
+  passes above.
+- The tour faces, all MEASURED: offline CLI face 14 rows / 11 PASS +
+  3 SKIP / exit 0; the LIVE host face (clangd 23.1.5 + lldb-dap +
+  gdb) rows 1–11 PASS — clangd claimed `demo.c` and answered 3
+  diagnostics after `bad(` — and row 12 FAILs with the adapter's own
+  face (`пуск отклонён` = ENOEXEC: the auto-start launches `tour.py`
+  ITSELF, no shebang, no exec bit; owner-accepted — exact live DAP
+  pins stay `probe_dap.sh`'s), exit 1; the named-bogus-fixture face
+  FAILs at row 7, the named-missing-adapter face exits 1 BEFORE any
+  printed row (both pinned as tripwires by
+  `tourCliDoorFailsLoudOnBadTailAndMissingNamedAdapter`). `tst_demo`'s
+  `tourTableRunsGreenMinusTheServerLegs` (LAST slot — the process-wide
+  grammar registry means the before-face needs `pyext` absent) pins
+  the 14 frozen row prefixes, the golden table, the diff hop detail,
+  the dapfake witnesses, the forced-off SKIP reasons and the teardown
+  (`EQUAL the golden table`, `baseline restored`, `tab count 0`).
+- The WHEEL half of the close (the 1.9.0 lesson): wheel 1.14.0 rebuilt
+  + repaired (`manylinux_2_34`) + smoke + qtmonaco parity green in the
+  container; the `--codegen` audit diffed the glue drop-SET against
+  the archived 1.13.0 log — 44 glue lines, SET diff EMPTY, and the
+  four new hub doors ABSENT from the log (they crossed; no drop the
+  log does not show crossed by accident); the doors' PRESENCE on the
+  shipped wheel probed Python-side, not assumed; pydemo's wheel-version
+  path-dep re-pointed (the fourth literal) and the headless pydemo run
+  green (`QT_QPA_PLATFORM=offscreen uv run main.py --exit-after-ms
+  400`, exit 0).
+
+### Meta
+- Package literals 1.13.0 → **1.14.0** (`CMakeLists.txt` +
+  `pyproject.toml`); shelf `QMN_GLUE_VERSION` 1.1.0 → **1.2.0** — the
+  second shelf bump, MINOR: S1-3's four doors are additive, Python-
+  visible growth riding the ALREADY-bound hub class (m7's precedent:
+  no new record type, the three-copies lists untouched).
+- Showcase rule held: NO second binary — S2 (pydemo) re-declares the
+  frozen corpus + golden-table literals as Python literals and the two
+  printed tables get diffed leg-for-leg at S2's close.
+
 ## [1.13.0] — 2026-11-25 — GATE 3 car E (wheel-2) CLOSED — DapHub across the wheel, the DAP alias fan-out, and the three answer doors
 
 ### Added

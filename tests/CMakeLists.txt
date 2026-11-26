@@ -133,6 +133,14 @@ target_link_libraries(tst_demo PRIVATE qmn_demo_app Qt6::Test)
 # needs the adapter PATH.
 add_dependencies(tst_demo dapfake)
 target_compile_definitions(tst_demo PRIVATE
-    QMN_TEST_DAP_SERVER=\"$<TARGET_FILE:dapfake>\")
+    QMN_TEST_DAP_SERVER=\"$<TARGET_FILE:dapfake>\"
+    QMN_TEST_DEMO_BIN=\"$<TARGET_FILE:qmn-demo>\"
+    QMN_TEST_PY_GRAMMAR=\"$<TARGET_FILE:qmn_pygrammar>\"
+    QMN_TEST_FAKE_GRAMMAR=\"$<TARGET_FILE:qmn_fakegrammar>\"
+    QMN_TEST_PY_QUERY=\"${CMAKE_CURRENT_SOURCE_DIR}/../third_party/tree-sitter/grammars/python/queries/highlights.scm\")
+# The S1-2 grammar door drives the SAME fixture libraries tst_codeeditor
+# loads at run time (the tst_codeeditor precedent above): paths as defines,
+# the targets as build dependencies.
+add_dependencies(tst_demo qmn_fakegrammar qmn_pygrammar)
 add_test(NAME demo COMMAND tst_demo)
 set_tests_properties(demo PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

@@ -454,6 +454,7 @@ private slots:
     void diffEditBurstRecomputesOnceAndKeepsCaretSlot();
     void diffOriginalEditsAlsoTriggerRecompute();
     void diffNavigationStrictEdgeNoWrap();
+    void diffNavChordsWalkHunksInDiffAndNoOpInPlainMode();
     void diffChromeGeometryAndGutterOffStaysV1();
     void diffFoldZoneShiftAndChromeClickRouting();
     void diffOriginalColumnGestures();
@@ -11783,6 +11784,49 @@ void TestCodeEditor::diffNavigationStrictEdgeNoWrap()
     QCOMPARE(editor->position().line, 1); // strict edge back to the first hunk
     editor->previousChange();
     QCOMPARE(editor->position().line, 1); // before the first hunk: NO wrap
+}
+
+void TestCodeEditor::diffNavChordsWalkHunksInDiffAndNoOpInPlainMode()
+{
+    // S1-1: the KEY SIDE of the pair (the door semantics stay M10's test
+    // above). The corpus is the tour's frozen diff pair (PLAN S1-4 leg 4):
+    // two replace-hunks at MODIFIED lines 1 and 3, one line apart, so the
+    // strict-edge rule gets no slack — from inside hunk 1 `next` must land
+    // on hunk 2, and `previous` must mirror.
+    const QString original = QStringLiteral("alpha\none\nbeta\ntwo\ngamma");
+    const QString modified = QStringLiteral("alpha\nONE\nbeta\nTWO\ngamma");
+    editor->setDiffDocuments(original, modified, QString());
+    QVERIFY(editor->isDiffMode());
+    editor->setPosition({0, 0});
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 0}));
+
+    QTest::keyClick(editor, Qt::Key_F7);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0})); // hunk 1
+    QTest::keyClick(editor, Qt::Key_F7);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{3, 0})); // hunk 2 (strict edge)
+    QTest::keyClick(editor, Qt::Key_F7);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{3, 0})); // bottom: no wrap
+    QTest::keyClick(editor, Qt::Key_F7, Qt::ShiftModifier);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0})); // mirrored
+    QTest::keyClick(editor, Qt::Key_F7, Qt::ShiftModifier);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0})); // top: no wrap
+
+    // The unclaimed-chrome half: Ctrl+F7 / Alt+F7 stay free (the fold-
+    // chord masking policy) and must not even move the caret.
+    QTest::keyClick(editor, Qt::Key_F7, Qt::ControlModifier);
+    QTest::keyClick(editor, Qt::Key_F7, Qt::AltModifier);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 0}));
+
+    // Out of diff mode the chord is an HONEST no-op (the doors are diff-
+    // gated, CodeEditor.cpp:2752/2773) — never a hunk axis over a plain
+    // document, and never swallowed text either.
+    editor->clearDiffDocuments();
+    QVERIFY(!editor->isDiffMode());
+    editor->setPosition({2, 2});
+    QTest::keyClick(editor, Qt::Key_F7);
+    QTest::keyClick(editor, Qt::Key_F7, Qt::ShiftModifier);
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{2, 2}));
+    QCOMPARE(editor->toPlainText(), modified); // nothing typed, nothing fed
 }
 
 // --- M10 machine 3 helpers ------------------------------------------------

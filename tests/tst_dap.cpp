@@ -2279,6 +2279,127 @@ private slots:
         hub.stopDebugging();
         QTRY_COMPARE_WITH_TIMEOUT(spawns.exitCodeOf(0), 0, 10000);
     }
+
+    void dapHubTypedControlDoorsGateStepAndRetireThroughTheWire()
+    {
+        // Machine S1-3: the four plain-typed control doors on the shelf.
+        // steps2 mode is the far-side oracle for the WIRE part — its step
+        // arms AUDIT arguments.threadId==7 and fail-exit on a mismatch (the
+        // hub's doors must speak the last debugStopped's thread), and its
+        // stackTrace answers the argv[5] frame line only AFTER a step
+        // landed (so the band/caret/hint move below IS the step's answer
+        // travelling). The gates are pinned HERE, where the client cannot
+        // audit itself: false before Ready, false Ready-but-never-stopped
+        // (the stopped event only ever follows our own configurationDone,
+        // so that window is deterministic, not raced), false again once
+        // `continued` retires the thread memory.
+        ProjectSession project;
+        CodeEditor ed;
+        const QString path = QStringLiteral("/dapfake/project/ctrl.cpp");
+        QVERIFY(project.openDocument(&ed, path));
+        ed.setPlainText(QStringLiteral("top line\n"
+                                       "    int y = 8\n"
+                                       "    return x + y\n"
+                                       "x revisited\n"
+                                       "last line\n"));
+
+        HubSpawns spawns;
+        DapHub hub;
+        spawns.install(hub);
+        hub.attachProject(&project);
+        QSignalSpy startedSpy(&hub, &DapHub::sessionStarted);
+        QSignalSpy endedSpy(&hub, &DapHub::sessionEnded);
+        QSignalSpy stoppedSpy(&hub, &DapHub::debugStopped);
+        QSignalSpy continuedSpy(&hub, &DapHub::debugContinued);
+
+        QVERIFY(hub.startDebugging(QString::fromLatin1(QMN_TEST_DAP_SERVER),
+                                   {QStringLiteral("steps2"), path,
+                                    QStringLiteral("3"), QStringLiteral("6"),
+                                    QStringLiteral("4")},
+                                   QJsonObject{{QStringLiteral("name"),
+                                               QStringLiteral("tst")}},
+                                   QStringLiteral("dapfake")));
+
+        // Starting: the wire is not Ready — every door refuses.
+        QVERIFY(hub.isDebugging() && !hub.isReady());
+        QVERIFY(!hub.continueDebugging());
+        QVERIFY(!hub.stepOver());
+        QVERIFY(!hub.stepIn());
+        QVERIFY(!hub.stepOut());
+
+        QTRY_COMPARE_WITH_TIMEOUT(startedSpy.count(), 1, 30000);
+        QVERIFY(hub.isReady());
+
+        // Ready but NEVER stopped: the stopped event only ever rides our
+        // configurationDone answer, and that word has not been said —
+        // there is no thread to control yet, and the doors say so without
+        // touching the wire (a stray request would land in dapfake's
+        // unexpected-command arm and exit 2: the far side guards too).
+        QVERIFY(!hub.continueDebugging());
+        QVERIFY(!hub.stepOver());
+        QVERIFY(!hub.stepIn());
+        QVERIFY(!hub.stepOut());
+
+        hub.configurationDone();
+        QTRY_COMPARE_WITH_TIMEOUT(stoppedSpy.count(), 1, 5000);
+        QCOMPARE(stoppedSpy.at(0).at(0).toInt(), 7);
+        QCOMPARE(stoppedSpy.at(0).at(1).toString(), QStringLiteral("breakpoint"));
+        QTRY_COMPARE_WITH_TIMEOUT(ed.highlightedLinesStart(), 2, 5000);
+        QCOMPARE(ed.position().line, 2); // frame (3, 6) -> model (2, 5)
+        QCOMPARE(ed.position().col, 5);
+        QTRY_COMPARE_WITH_TIMEOUT(ed.inlayHints().size(), 2, 5000);
+
+        // The step doors, in the tour's shape: stepOver first (the everyday
+        // Step button = DAP `next`) — the SECOND stopped (reason "step")
+        // carries the SAME thread 7, and the stackTrace now answers the
+        // argv[5] line 4: the band, the caret AND the hints move, and the
+        // hint set becomes the ONE x on the new frame line (y is off it;
+        // the dup and the off-line names stay unpainted as D3 pinned).
+        QVERIFY(hub.stepOver());
+        QTRY_COMPARE_WITH_TIMEOUT(stoppedSpy.count(), 2, 5000);
+        QCOMPARE(stoppedSpy.at(1).at(0).toInt(), 7);
+        QCOMPARE(stoppedSpy.at(1).at(1).toString(), QStringLiteral("step"));
+        QTRY_COMPARE_WITH_TIMEOUT(ed.highlightedLinesStart(), 3, 5000);
+        QCOMPARE(ed.position().line, 3); // frame (4, 6) -> model (3, 5)
+        QCOMPARE(ed.position().col, 5);
+        QTRY_COMPARE_WITH_TIMEOUT(ed.inlayHints().size(), 1, 5000);
+        QCOMPARE(ed.inlayHints().at(0).line, 3);
+        QCOMPARE(ed.inlayHints().at(0).col, 1); // one past the x at col 0
+        QCOMPARE(ed.inlayHints().at(0).text, QStringLiteral(" = 42"));
+
+        // stepIn/stepOut from a stopped thread answer ok + fire their own
+        // `stopped` (steps2 audits threadId 7 for EVERY step arm — a door
+        // that forgot the threadId would die at the exit code).
+        QVERIFY(hub.stepIn());
+        QTRY_COMPARE_WITH_TIMEOUT(stoppedSpy.count(), 3, 5000);
+        QCOMPARE(stoppedSpy.at(2).at(1).toString(), QStringLiteral("step"));
+        QVERIFY(hub.stepOut());
+        QTRY_COMPARE_WITH_TIMEOUT(stoppedSpy.count(), 4, 5000);
+        QCOMPARE(stoppedSpy.at(3).at(1).toString(), QStringLiteral("step"));
+
+        // continueDebugging: the threadId audit again, then the `continued`
+        // EVENT — the feeds clear AND the thread memory retires, so the
+        // step doors refuse again until the NEXT stop (the gate is event
+        // truth, not a guess).
+        QVERIFY(hub.continueDebugging());
+        QTRY_COMPARE_WITH_TIMEOUT(continuedSpy.count(), 1, 5000);
+        QTRY_COMPARE_WITH_TIMEOUT(ed.highlightedLinesStart(), -1, 5000);
+        QVERIFY(ed.inlayHints().isEmpty());
+        QVERIFY(!hub.stepOver());
+        QVERIFY(!hub.stepIn());
+        QVERIFY(!hub.stepOut());
+        QVERIFY(!hub.continueDebugging()); // running, not stopped: no id
+
+        // terminate leads (the caps say true in steps2) and dapfake's
+        // terminate-before-disconnect arm makes the exit code the far-side
+        // receipt of exactly that order.
+        QVERIFY(hub.terminateDebugging());
+        QTRY_COMPARE_WITH_TIMEOUT(endedSpy.count(), 1, 5000);
+        QCOMPARE(endedSpy.at(0).at(0).toString(), QStringLiteral("stopped"));
+        QVERIFY(!hub.isDebugging());
+        QVERIFY(!hub.stepOver()); // dead session: the gate never resurrects
+        QTRY_COMPARE_WITH_TIMEOUT(spawns.exitCodeOf(0), 0, 5000);
+    }
 };
 
 QTEST_MAIN(TstDap) // machine D3 dragged real CodeEditors in, exactly as

@@ -114,6 +114,17 @@ Highlighting demos, one per grammar (`.py`/`.json`/`.js`/`.c`/`.cpp` suffixes
 pick the grammar automatically — `.h`-family headers go cpp; `--language
 python|json|javascript|c|cpp` overrides): see `examples/README.md`.
 
+The showcase doors (car S1): `qmn-demo --diff A B` opens the trio (original |
+modified | side-by-side diff, focus on the diff tab; F7/Shift+F7 walk hunks in
+diff mode), `--grammar <lib.so>` (+ `--grammar-id/-symbol/-lang/-query/
+-suffix`, zipped by occurrence) loads a compiled grammar library and rebinds a
+suffix at run time, `--dap` + `--debug-step/--debug-continue/--debug-stop`
+ride a queued DAP control walk (the flags without `--dap` fail loud), and
+`--tour` runs the 14-row scripted pin table over a frozen built-in corpus
+(exits nonzero at the first failed pin; a LIVE ritual, never a ctest entry —
+`tst_demo` pins the table itself with the server legs forced off). `--lsp`
+and `--dap` stay the off-by-default doors they were.
+
 ### Python demo (pydemo/)
 
 `pydemo/` is a `uv` project mirroring `qmn-demo` door-for-door in Python on
@@ -328,11 +339,30 @@ Gate 2 closed; see PLAN.md for the car-by-car design record):
       rejected-log audit was re-pinned FROM the archived logs — the "16
       drops" baseline was a set name, never a line count (the real set:
       34 `LspHub` + 1 `ProjectSession` + 9 `DapHub` lines)
-- [ ] Car S1 — `qmn-demo` grows into the live showcase: diff door,
-      grammar door, DAP controls, `--tour` (a scripted pin table that
-      exits nonzero on the first failed pin; live ritual, never CI)
+- [x] Car S1 — showcase (CLOSED, 1.14.0): `qmn-demo` grows into the live
+      showcase IN PLACE — no second binary, the 15-knob settings surface
+      and the `--lsp`/`--dap` door shapes ride unchanged; four doors:
+      `--diff A B` opens the trio (original | modified | side-by-side
+      diff, focus on the diff tab) and F7/Shift+F7 walk hunks in diff
+      mode (strict-edge, NO wrap at either edge; honest no-op in plain
+      tabs), `--grammar` (+ companions, zipped by occurrence) loads a
+      compiled grammar library and rebinds a suffix — a bogus library
+      refuses loud; `debugStep`/`debugContinue`/`debugStop` demo doors
+      over four NEW plain-typed `DapHub` control doors
+      (`continueDebugging`/`stepOver`/`stepIn`/`stepOut` — Ready +
+      stopped-thread gate, the thread memory retires on `continued`, so
+      the wheel drives a session without ever touching the unbound
+      `DapClient`), with a `--debug-*` queued CLI ride; and `--tour`
+      runs the 14-row scripted pin table over a FROZEN built-in corpus
+      (golden 15-span highlight table, exact DAP status walk against
+      dapfake's `steps2` mode, presence-shaped clangd/live-adapter
+      legs), printing `PASS/SKIP/FAIL n: leg — detail` and exiting
+      nonzero at the FIRST failed pin — a LIVE ritual, never a ctest
+      entry, while `tst_demo` pins the TABLE itself with the server
+      legs forced off; the shelf bumped 1.1.0 → 1.2.0 (S1-3's four
+      doors are Python-visible additive growth)
 - [ ] Car S2 — pydemo mirrors the showcase door-for-door (same flags,
-      same tour legs — needs car E first)
+      same tour legs — needs car E first); THE OPEN CAR
 - [ ] Car Py — the PyPI half: the cibuildwheel Qt bootstrap + publish
       job, DoD a test.pypi.org wheel smoke
 

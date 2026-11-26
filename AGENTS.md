@@ -5,7 +5,7 @@ Native code editor widget for Qt6, built from scratch on a raw `QWidget`
 QPlainTextEdit, no Chromium. Long-term hobby project; roadmap in `README.md`,
 phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
 
-## Current state (v1.13.0 — GATE 2 CLOSED 2026-11-21, GATE 3 cars 0/B/C/D/E CLOSED) — gates and the frozen surface
+## Current state (v1.14.0 — GATE 2 CLOSED 2026-11-21, GATE 3 cars 0/B/C/D/E/S1 CLOSED) — gates and the frozen surface
 
 - Gate 1 (editor v1) froze the public API at tag `v1.0`; Gate 1.5 (usability
   train M20–M24) closed 2026-11-12 at tag `v1.5.0`; **GATE 2 CLOSED
@@ -39,9 +39,22 @@ steps PROBE-OK on clangd 23.1.5) →
   `answerRequestError`) cross with ZERO codegen rejections while the 17
   `LspHub` feature doors STAY honest C++-only absences; the live DAP wheel
   ritual ran on lldb-dap AND gdb -i=dap, and the shelf literal made its
-  first bump 1.0.0 → 1.1.0)** → S1 (qmn-demo grows into the showcase, NO
-  second binary — THE OPEN CAR) → S2 (pydemo
-  mirrors it door-for-door) → PyPI/cibuildwheel. Grapheme segmentation
+  first bump 1.0.0 → 1.1.0)** → **car S1 CLOSED at 1.14.0 — `qmn-demo`
+  grows into the showcase IN PLACE, NO second binary: the `--diff` trio
+  (original | modified | focused diff tab) with F7/Shift+F7 hunk chords
+  (strict-edge, no wrap), the `--grammar` load/rebind door (loud refusal
+  faces), `debugStep`/`debugContinue`/`debugStop` demo doors riding four
+  NEW plain-typed `DapHub` control doors (`continueDebugging`/`stepOver`/
+  `stepIn`/`stepOut` — Ready + stopped-thread gate, the thread memory
+  retires on `continued`; wheel-side visible, the shelf's SECOND bump
+  1.1.0 → 1.2.0, MINOR additive on the already-bound class), and
+  `--tour` — the 14-row scripted pin table over a FROZEN built-in
+  corpus (golden 15-span highlight table, byte-exact dapfake status
+  walk, presence-shaped clangd/live-adapter legs; exit NONZERO at the
+  first failed pin, honest SKIP reasons; a LIVE ritual, NEVER a ctest
+  entry, while tst_demo pins the TABLE with the server legs forced
+  off)** → S2 (pydemo
+  mirrors it door-for-door — THE OPEN CAR) → PyPI/cibuildwheel. Grapheme segmentation
   is OWNER-EXCLUDED from this gate (its own future train — the README
   not-implemented record stays). The full design record is the PLAN.md
   "GATE 3" section — read it (and the "GATE 2" records it consumes)
@@ -76,7 +89,10 @@ steps PROBE-OK on clangd 23.1.5) →
   shelf is wheel-visible, so a shelf break is a MAJOR bump and additive
   Python-visible growth a MINOR one — both may ride a package close, and
   car E's close made the FIRST bump, 1.0.0 → 1.1.0 (E2's `DapHub` crossing
-  + E3's answer doors; the comment at the bump site carries the rule).
+  + E3's answer doors; the comment at the bump site carries the rule),
+  car S1's close the SECOND, 1.1.0 → 1.2.0 (the four plain-typed
+  `DapHub` control doors — additive Python-visible growth riding the
+  already-bound class, m7's precedent: NO three-copies edit).
   **G3 made the shelf's semver real to Python users too** — the wheel
   carries `qmn.LspHub`/`qmn.ProjectSession` and since car E `qmn.DapHub`:
   shelf breakage is now a wheel-visible story, not only a C++ one.
@@ -559,7 +575,7 @@ deterministically — recipe in `README.md` "Model micro-benchmark".
 - Vendored tree-sitter pins + query provenance + the json scm deviation:
   `third_party/tree-sitter/VENDORED.md`.
 - Consumer + parity target: `qtmonaco` (GitHub `bec-project/qtmonaco`; local
-  sibling `/home/kai/kaigit/qtmonaco`) — the PySide6/`QWebEngineView` editor
+  sibling `/home/kai/kaigit/PYQTP/packages/qtmonaco`) — the PySide6/`QWebEngineView` editor
   this widget replaces. Its Python API is mirrored by `qmn.Monaco`; parity is
   checked by `bindings/tests/parity_monaco.py`.
 - Highlight demo documents and measured span tallies: `examples/README.md`.

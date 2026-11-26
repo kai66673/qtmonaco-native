@@ -6802,9 +6802,21 @@ private slots:
         twin->insertTextAt({0, 0}, QStringLiteral("// x\n"));
         QVERIFY2(waitUntil([&] { return syncer->version() == 2; }),
                  qPrintable(stderrDump(stderrSpy)));
-        QVERIFY2(reqCount(stderrSpy,
-                          QStringLiteral("textDocument/foldingRange"))
-                     > asksAfterJoin, // the feed is still live
+        // THE FEED IS STILL LIVE — pinned by WAITING for the far-side
+        // witness (this slot's own idiom two legs up), not by sampling it
+        // the instant the version bump lands: the fold feed re-arms at
+        // 300 ms and the syncer flushes at 400 ms, so the immediate
+        // sample gave the fakeserver's stderr REQ echo only ~100 ms of
+        // event-loop windows to arrive in the spy — on a starved host
+        // (parallel ctest) that hop loses, and the pin flaked ~20% of
+        // ISOLATED runs (6/30 measured at v1.13.0 AND at this head: the
+        // flake predates S1). A dead feed still fails — the ask simply
+        // never arrives and the 8 s wait times out.
+        QVERIFY2(waitUntil([&] {
+                     return reqCount(stderrSpy,
+                                     QStringLiteral("textDocument/foldingRange"))
+                         > asksAfterJoin;
+                 }),
                  qPrintable(stderrDump(stderrSpy)));
 
         // The LAST view's death (it owns the document now) releases the

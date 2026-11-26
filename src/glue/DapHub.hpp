@@ -158,6 +158,24 @@ public:
     qint64 request(const QString& command, const QJsonValue& arguments);
     qmn::dap::DapClient* client() const { return client_.get(); }
 
+    // Machine S1-3 — the plain-typed FACE of the control buttons, the
+    // answer-door precedent's sibling: the wheel drives a debug session
+    // through these four bools without ever touching the unbound
+    // DapClient (request() above stays the raw C++ route and shares the
+    // same state gate). True iff the request went out: Ready AND the last
+    // debugStopped named a thread (DAP control requests are per-thread —
+    // the hub rides that one thread, the single-thread v1 shape). The
+    // thread memory dies on a `continued` event, an adapter/ session end —
+    // pressing before the first stop or after a continue returns false
+    // without touching the wire. These doors ride the SAME fire-and-forget
+    // request() seam, so the wire shape stays byte-unchanged (the client
+    // still never sends event frames; the real answers are the events
+    // already relayed on dapEvent/debugStopped/debugContinued).
+    bool continueDebugging(); // DAP `continue`
+    bool stepOver();          // DAP `next` (the everyday Step button)
+    bool stepIn();            // DAP `stepIn`
+    bool stepOut();           // DAP `stepOut`
+
     // Car E machine E3 — THE answer doors for a relayed reverse request
     // (dapRequest carries the adapter's whole REQUEST frame; the id to
     // answer with is that frame's own `seq` member, straight out of it).
@@ -269,6 +287,9 @@ private:
                              QString* normalizedOut) const;
 
     void sendSetBreakpoints(const QString& uri);       // the DAP command
+    // S1-3: the shared body of the four typed control doors (Ready +
+    // stopped-thread gate, then request() with arguments.threadId).
+    bool threadControl(const QString& command);
     void settleConfigurationDone();                    // the deferred word
                                                        // when the last setup
                                                        // answer lands

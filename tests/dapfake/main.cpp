@@ -105,6 +105,20 @@
 //            `continued` EVENT. `terminate` -> ok + remembered;
 //            `disconnect` exits 2 unless terminate arrived FIRST (the
 //            terminateDebugging demand), else 0.
+//   steps2   (machine S1-3; argv[2..4] like steps, argv[5] = the step-arm
+//            frame's 1-based line, default 5)
+//            The FULL steps conversation plus the typed step doors' far
+//            side: `next`/`stepIn`/`stepOut` audit arguments.threadId==7
+//            (the hub's typed doors ride the LAST `stopped`'s thread —
+//            pinned HERE, where the client cannot audit itself), answer
+//            ok, and fire a SECOND `stopped` EVENT (reason "step",
+//            threadId 7). From then on `stackTrace` answers the argv[5]
+//            frame LINE (the caret-follow / band-move pins ride the
+//            change). In `steps` mode these three commands stay FATAL
+//            (the D3 pins byte-frozen — that is why this is a new mode).
+//            `continue` here ALSO audits threadId 7 (the typed door's
+//            argument); the terminate/disconnect arms ride unchanged and
+//            steps2 joins the terminate-before-disconnect demand.
 //   launchreject (machine D4; no extra argv)
 //            The basic handshake, then the hub's Ready-leg `launch`
 //            request gets a DAP ERROR envelope (respondFail: the real-
@@ -159,10 +173,13 @@ qint64 g_slowSeq = -1;        // cancelreq: the client's slow command's seq
 int g_cancelStep = 0;         // cancelreq: 0 bogus-id, 1 real-id
 int g_setBpCount = 0;         // breakpoints: completed setBreakpoints calls
 int g_bpIdCounter = 0;        // breakpoints: adapter-wide ids, strictly increasing
-bool g_terminateSeen = false; // steps: terminate answered before the disconnect
+bool g_terminateSeen = false; // steps/steps2: terminate answered before the disconnect
 QString g_argPath;            // breakpoints: the EXPECTED source.path; steps: the frame path
 int g_frameLine = 3;          // steps: the frame's 1-based line (argv[3])
 int g_frameCol = 6;           // steps: the frame's 1-based column (argv[4])
+int g_stepFrameLine = 5;      // steps2: the STEP-arm frame's 1-based line (argv[5])
+bool g_steppedSeen = false;   // steps2: a step command answered — stackTrace
+                              // answers the step frame line from there on
 
 [[noreturn]] void fail(const QString& what)
 {
@@ -460,7 +477,8 @@ void handle(const QJsonObject& message)
         QJsonObject caps{
             {QStringLiteral("supportsCancelRequest"), true},
             {QStringLiteral("dapfakeMode"), g_mode}};
-        if (g_mode == QLatin1String("steps")) {
+        if (g_mode == QLatin1String("steps")
+            || g_mode == QLatin1String("steps2")) {
             caps.insert(QStringLiteral("supportsConfigurationDoneRequest"), true);
             caps.insert(QStringLiteral("supportsTerminateRequest"), true);
         } else if (g_mode == QLatin1String("breakpoints")) {
@@ -479,7 +497,9 @@ void handle(const QJsonObject& message)
         return;
     }
     if (command == QLatin1String("disconnect")) {
-        if (g_mode == QLatin1String("steps") && !g_terminateSeen)
+        if ((g_mode == QLatin1String("steps")
+             || g_mode == QLatin1String("steps2"))
+            && !g_terminateSeen)
             fail(QStringLiteral("disconnect arrived before terminate (the "
                                 "TEST promised terminateDebugging)"));
         if (g_mode == QLatin1String("breakpoints") && g_setBpCount < 2)
@@ -508,7 +528,8 @@ void handle(const QJsonObject& message)
     }
     if (command == QLatin1String("launch")
         && g_mode != QLatin1String("breakpoints")
-        && g_mode != QLatin1String("steps")) {
+        && g_mode != QLatin1String("steps")
+        && g_mode != QLatin1String("steps2")) {
         // Machine D3's hub ALWAYS fires `launch` once the session is Ready
         // (its spec-fill of request/noDebug is audited strictly in the two
         // D3 modes); the older D2 modes stay conversational and just answer
@@ -579,9 +600,11 @@ void handle(const QJsonObject& message)
             return;
         }
     } else if (g_mode == QLatin1String("breakpoints")
-               || g_mode == QLatin1String("steps")) {
-        // The machine-D3 hub battery. Both modes audit the hub's own
-        // spec-fill of the launch arguments first:
+               || g_mode == QLatin1String("steps")
+               || g_mode == QLatin1String("steps2")) {
+        // The machine-D3 hub battery (+ the S1-3 steps2 extension). Both
+        // steps modes audit the hub's own spec-fill of the launch
+        // arguments first:
         if (command == QLatin1String("launch")) {
             const QJsonObject args
                 = message.value(QStringLiteral("arguments")).toObject();
@@ -667,7 +690,30 @@ void handle(const QJsonObject& message)
                 }
                 return;
             }
-        } else { // steps
+        } else { // steps / steps2
+            if (g_mode == QLatin1String("steps2")
+                && command == QLatin1String("setBreakpoints")) {
+                // S1-3: the DEMO walk stores its breakpoint pair before
+                // startDebugging (the hub's legal store-BEFORE-ready order),
+                // so the Ready push lands here. steps2 answers ALL VERIFIED
+                // at the same line — the dots are a witness, the step ride
+                // is the point (`steps` mode keeps this arm FATAL: its D3
+                // pins never push a breakpoint and stay byte-frozen).
+                const QJsonObject args
+                    = message.value(QStringLiteral("arguments")).toObject();
+                QJsonArray returned;
+                for (const QJsonValue& value
+                     : args.value(QStringLiteral("breakpoints")).toArray()) {
+                    returned.append(QJsonObject{
+                        {QStringLiteral("id"), ++g_bpIdCounter},
+                        {QStringLiteral("verified"), true},
+                        {QStringLiteral("line"),
+                         value.toObject().value(QStringLiteral("line")).toInt()}});
+                }
+                respondOk(message,
+                          QJsonObject{{QStringLiteral("breakpoints"), returned}});
+                return;
+            }
             if (command == QLatin1String("configurationDone")) {
                 respondOk(message, QJsonValue(QJsonValue::Undefined));
                 sendEvent(QStringLiteral("stopped"),
@@ -692,6 +738,10 @@ void handle(const QJsonObject& message)
                 QString path = g_argPath;
                 if (path == QLatin1String("BOGUS"))
                     path = QStringLiteral("/dapfake/definitely-not-open.cpp");
+                const int answeredLine
+                    = (g_mode == QLatin1String("steps2") && g_steppedSeen)
+                          ? g_stepFrameLine // the STEP-arm frame: the band
+                          : g_frameLine;    // moves and the caret follows
                 const QJsonObject frame{
                     {QStringLiteral("id"), 1},
                     {QStringLiteral("name"), QStringLiteral("dapfake-top")},
@@ -699,7 +749,7 @@ void handle(const QJsonObject& message)
                      QJsonObject{{QStringLiteral("name"),
                                   QStringLiteral("main.cpp")},
                                  {QStringLiteral("path"), path}}},
-                    {QStringLiteral("line"), g_frameLine},
+                    {QStringLiteral("line"), answeredLine},
                     {QStringLiteral("column"), g_frameCol}};
                 respondOk(message,
                           QJsonObject{{QStringLiteral("stackFrames"),
@@ -773,7 +823,44 @@ void handle(const QJsonObject& message)
                                                        0}}}}});
                 return;
             }
+            // The typed step doors (S1-3) — steps2 ONLY. In `steps` mode
+            // these commands fall through to the unexpected-command arm
+            // below (exit 2): the machine-D3 pins stay byte-frozen, which
+            // is the whole reason steps2 exists as a separate mode.
+            if (g_mode == QLatin1String("steps2")
+                && (command == QLatin1String("next")
+                    || command == QLatin1String("stepIn")
+                    || command == QLatin1String("stepOut"))) {
+                const QJsonObject args
+                    = message.value(QStringLiteral("arguments")).toObject();
+                if (args.value(QStringLiteral("threadId")).toInt() != 7)
+                    fail(QStringLiteral(
+                             "%1 asked threadId %2, the last stopped event "
+                             "said 7 (the typed door rides the stopped thread)")
+                             .arg(command)
+                             .arg(args.value(QStringLiteral("threadId")).toInt()));
+                respondOk(message, QJsonObject{});
+                g_steppedSeen = true;
+                sendEvent(QStringLiteral("stopped"),
+                          QJsonObject{{QStringLiteral("reason"),
+                                       QStringLiteral("step")},
+                                      {QStringLiteral("threadId"), 7},
+                                      {QStringLiteral("allThreadsStopped"),
+                                       true}});
+                return;
+            }
             if (command == QLatin1String("continue")) {
+                if (g_mode == QLatin1String("steps2")) {
+                    // The typed continueDebugging()'s threadId argument,
+                    // audited far-side like the step doors'.
+                    const QJsonObject args
+                        = message.value(QStringLiteral("arguments")).toObject();
+                    if (args.value(QStringLiteral("threadId")).toInt() != 7)
+                        fail(QStringLiteral(
+                                 "continue asked threadId %1, the last stopped "
+                                 "event said 7").arg(args.value(
+                                 QStringLiteral("threadId")).toInt()));
+                }
                 respondOk(message, QJsonObject{{QStringLiteral("allThreadsContinued"),
                                                 true}});
                 sendEvent(QStringLiteral("continued"),
@@ -831,7 +918,8 @@ int main(int argc, char** argv)
         && g_mode != QLatin1String("cancelreq")
         && g_mode != QLatin1String("launchreject")
         && g_mode != QLatin1String("breakpoints")
-        && g_mode != QLatin1String("steps"))
+        && g_mode != QLatin1String("steps")
+        && g_mode != QLatin1String("steps2"))
         fail(QStringLiteral("unknown mode \"%1\"").arg(g_mode));
     if (args.size() > 2)
         g_argPath = args.at(2);
@@ -839,6 +927,8 @@ int main(int argc, char** argv)
         g_frameLine = args.at(3).toInt();
     if (args.size() > 4)
         g_frameCol = args.at(4).toInt();
+    if (args.size() > 5) // steps2: the STEP-arm frame's line (argv[5])
+        g_stepFrameLine = args.at(5).toInt();
 
     if (g_mode == QLatin1String("basic")) {
         // The STDERR channel marker fires BEFORE the handshake completes:

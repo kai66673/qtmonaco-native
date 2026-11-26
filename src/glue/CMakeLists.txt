@@ -35,8 +35,10 @@ target_compile_definitions(qmn_glue PRIVATE
 # break). It opened at 1.0.0: the hub existed since M8 but only NOW became
 # public. Since car G3 the shelf crosses the Python wheel, so a shelf break
 # is wheel-visible too — and additive shelf growth (car E's answer doors,
-# plain-typed and wrapping) is a MINOR bump: 1.1.0.
-set(QMN_GLUE_VERSION 1.1.0)
+# and car S1-3's four plain-typed DapHub control doors — step/continue/
+# stop/setBreakpoint ride the ALREADY-bound hub class, Python sees them
+# with no new record type) is a MINOR bump: 1.2.0.
+set(QMN_GLUE_VERSION 1.2.0)
 
 set_target_properties(qmn_glue PROPERTIES EXPORT_NAME glue)
 install(TARGETS qmn_glue EXPORT qmnGlueTargets ARCHIVE DESTINATION ${CMAKE_INSTALL_LIBDIR})

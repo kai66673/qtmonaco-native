@@ -196,6 +196,11 @@ bool DapHub::startDebugging(const QString& adapterProgram,
                     handleStopped(body.toObject());
                 } else if (name == QLatin1String("continued")) {
                     ++stopGen_;
+                    // S1-3: the thread is RUNNING again — the typed control
+                    // doors' "known stopped thread" memory dies here (no
+                    // reader of lastThreadId_ survives a continue today, so
+                    // no D3 pin moves).
+                    lastThreadId_ = 0;
                     clearStopFeed();
                     emit debugContinued();
                 } else if (name == QLatin1String("breakpoint")) {
@@ -213,6 +218,10 @@ bool DapHub::startDebugging(const QString& adapterProgram,
                     // or another startDebugging — v1 records this split).
                     ++stopGen_;
                     clearAllFeeds();
+                    lastThreadId_ = 0; // S1-3: the debug session is over —
+                                       // the typed doors must not step a
+                                       // thread the adapter already retired
+                                       // (the pipe may still be Ready).
                     emit sessionEnded(QStringLiteral("terminated"));
                 }
             });
@@ -311,6 +320,27 @@ qint64 DapHub::request(const QString& command, const QJsonValue& arguments)
                    // kErrNotRunning anyway, but the door says so directly)
     return client_->request(command, arguments, nullptr);
 }
+
+// ------------------------------------------------- the typed control face (S1-3)
+
+bool DapHub::threadControl(const QString& command)
+{
+    // The two-part gate, in this order on purpose: Ready first (the wire
+    // must be standing), then the stopped-thread memory — a control
+    // request without a threadId names no thread to control, and DAP's
+    // control commands all REQUIRE arguments.threadId. Riding request()
+    // keeps the wire byte-identical to the raw passthrough.
+    if (!isReady() || lastThreadId_ == 0)
+        return false;
+    return request(command, QJsonObject{{QStringLiteral("threadId"),
+                                         lastThreadId_}})
+        >= 0; // request() already gated Ready; the id only fails as -1
+}
+
+bool DapHub::continueDebugging() { return threadControl(QStringLiteral("continue")); }
+bool DapHub::stepOver()          { return threadControl(QStringLiteral("next")); }
+bool DapHub::stepIn()            { return threadControl(QStringLiteral("stepIn")); }
+bool DapHub::stepOut()           { return threadControl(QStringLiteral("stepOut")); }
 
 // ---------------------------------------------------------- answer doors (E3)
 

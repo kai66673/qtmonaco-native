@@ -12,9 +12,11 @@
 #include <QFileInfo>
 #include <QLabel>
 #include <QMenuBar>
+#include <QRegularExpression>
 #include <QStatusBar>
 #include <QTabBar>
 #include <QTabWidget>
+#include <QTimer>
 
 #include <memory>
 
@@ -67,6 +69,8 @@ MainWindow::MainWindow(QWidget* parent)
     auto* fileMenu = menuBar()->addMenu(QStringLiteral("&Файл"));
     fileMenu->addAction(QStringLiteral("&Открыть\u2026"), QKeySequence::Open,
                         this, &MainWindow::chooseFiles);
+    fileMenu->addAction(QStringLiteral("&Загрузить грамматику\u2026"),
+                        this, &MainWindow::chooseGrammarLibrary); // S1-2 mouse route
     fileMenu->addSeparator();
     fileMenu->addAction(QStringLiteral("&Закрыть вкладку"), QKeySequence::Close,
                         this, [this] { closeTabAt(tabs_->currentIndex()); });
@@ -137,6 +141,7 @@ void MainWindow::setDapAdapter(const QString& adapterProgram,
         dapProgram_.clear();
         dapAdapter_.clear();
         dapAdapterArgs_.clear();
+        debugRide_.clear();
         statusBar()->showMessage(QStringLiteral("DAP: адаптер остановлен"));
         return;
     }
@@ -144,6 +149,7 @@ void MainWindow::setDapAdapter(const QString& adapterProgram,
         dapHub_->stopDebugging();
         dapHub_.reset();
         dapStarted_ = false;
+        debugRide_.clear();
     }
     dapAdapter_ = adapterProgram;
     dapAdapterArgs_ = adapterArgs;
@@ -169,14 +175,19 @@ void MainWindow::setDapAdapter(const QString& adapterProgram,
             [this](const QString& reason) {
                 statusBar()->showMessage(QStringLiteral("DAP: сессия завершена (%1)")
                                              .arg(reason));
+                debugRide_.clear(); // an undrained ride dies with its
+                                    // session: presses must not hop onto
+                                    // a fresh one uninvited
             });
     connect(dapHub_.get(), &qmn::glue::DapHub::debugStopped, this,
             [this](int threadId, const QString& reason) {
                 statusBar()->showMessage(QStringLiteral("DAP: пауза в потоке %1 (%2)")
                                              .arg(threadId).arg(reason));
+                maybeFireDebugRide(QStringLiteral("stopped")); // S1-3 CLI ride
             });
     connect(dapHub_.get(), &qmn::glue::DapHub::debugContinued, this, [this] {
         statusBar()->showMessage(QStringLiteral("DAP: продолжено"));
+        maybeFireDebugRide(QStringLiteral("continued")); // S1-3 CLI ride
     });
     connect(dapHub_.get(), &qmn::glue::DapHub::sourceUnresolved, this,
             [this](const QJsonObject& source, const QJsonObject&) {
@@ -198,6 +209,101 @@ void MainWindow::setDapAdapter(const QString& adapterProgram,
     }
 }
 
+// --------------------------------------------------- the S1-3 control doors
+
+bool MainWindow::debugContinue()
+{
+    if (!dapHub_) {
+        statusBar()->showMessage(
+            QStringLiteral("DAP: продолжение отклонено: адаптер не вооружён"));
+        return false;
+    }
+    if (!dapHub_->continueDebugging()) {
+        statusBar()->showMessage(
+            QStringLiteral("DAP: продолжение отклонено: нет паузы в готовой сессии"));
+        return false;
+    }
+    return true; // the true face lands on debugContinued ("DAP: продолжено")
+}
+
+bool MainWindow::debugStep()
+{
+    if (!dapHub_) {
+        statusBar()->showMessage(
+            QStringLiteral("DAP: шаг отклонён: адаптер не вооружён"));
+        return false;
+    }
+    if (!dapHub_->stepOver()) {
+        statusBar()->showMessage(
+            QStringLiteral("DAP: шаг отклонён: нет паузы в готовой сессии"));
+        return false;
+    }
+    return true; // the true face lands on the NEXT debugStopped (reason step)
+}
+
+bool MainWindow::debugStop()
+{
+    if (!dapHub_ || !dapHub_->isDebugging()) {
+        statusBar()->showMessage(
+            QStringLiteral("DAP: остановка отклонена: нет активной сессии"));
+        return false;
+    }
+    // terminate FIRST where the caps allow (the terminate-before-disconnect
+    // demand, pinned on dapfake's steps arms and on both live adapters);
+    // the hub's door pumps the disconnect barrier itself when the caps
+    // refuse — and the session ENDS either way, the sessionEnded string
+    // ("DAP: сессия завершена (%1)") being the real report. So the false
+    // here would lie about a refusal that never happened: the door's own
+    // refusal is only the no-session gate above.
+    dapHub_->terminateDebugging();
+    return true;
+}
+
+void MainWindow::queueDebugRide(const QStringList& actions)
+{
+    // The CLI face of the control doors (--debug-step / --debug-continue /
+    // --debug-stop): a door CALLED AT STARTUP always refuses (the session
+    // has not even started), so the flags instead QUEUE presses into the
+    // session's own event stream — the tour's exact walk, driven by the
+    // hub's signals instead of a spin loop: pause → step → pause →
+    // continue → continued → stop. Each queued action consumes the next
+    // event it accepts (step/continue: a stopped; stop: the continued
+    // when a continue rides before it, else the stop itself). An empty
+    // list just clears the queue (the disarming face).
+    debugRide_ = actions;
+}
+
+void MainWindow::maybeFireDebugRide(const QString& eventName)
+{
+    if (debugRide_.isEmpty())
+        return;
+    const QString action = debugRide_.first();
+    const bool accepted = (action == QLatin1String("step")
+                           || action == QLatin1String("continue"))
+        ? eventName == QLatin1String("stopped")
+        : eventName == QLatin1String("stopped")
+              || eventName == QLatin1String("continued"); // "stop"
+    if (!accepted)
+        return;
+    debugRide_.removeFirst();
+    // The press rides a 300 ms BEAT, not the signal itself: firing the
+    // next door inside the emission would flash each status string for
+    // one round trip only — unreadable for the human at the CLI, and
+    // unobservable for a test's QTRY (the ride slot's first shape pinned
+    // exactly that: every message flickered by). The beat makes the walk
+    // readable, decouples the doors from the hub's emission re-entrance,
+    // and a session that dies mid-beat just meets an honest refusal from
+    // the door when the timer lands.
+    QTimer::singleShot(300, this, [this, action] {
+        if (action == QLatin1String("step"))
+            debugStep();
+        else if (action == QLatin1String("continue"))
+            debugContinue();
+        else
+            debugStop();
+    });
+}
+
 bool MainWindow::openPath(const QString& path)
 {
     QString error;
@@ -214,6 +320,152 @@ bool MainWindow::openPath(const QString& path)
     return true;
 }
 
+bool MainWindow::openDiffPair(const QString& pathA, const QString& pathB)
+{
+    // Read BOTH sides first (the openPath route's reader, so failures read
+    // identically): a failed read is the same non-modal status-bar message
+    // and NOTHING opens — no half-pair.
+    QString error;
+    const QString textA = readTextFile(pathA, &error);
+    if (!error.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("Не удалось открыть \u00ab%1\u00bb: %2")
+                                     .arg(pathA, error));
+        return false;
+    }
+    const QString textB = readTextFile(pathB, &error);
+    if (!error.isEmpty()) {
+        statusBar()->showMessage(QStringLiteral("Не удалось открыть \u00ab%1\u00bb: %2")
+                                     .arg(pathB, error));
+        return false;
+    }
+
+    // Three tabs, all ordinary opens (the session/registry stays the one
+    // open route — the diff face is a VIEW state, car D's record). The
+    // pointer door is illegal here: it refuses an original carrying any
+    // view (CodeEditor.cpp:2672) and every tab's document is attached;
+    // the STRING door re-feeds textB into the diff tab's own document
+    // (byte-identical, so the feed is an idempotent no-op through the
+    // replace machinery) and diffs it against a standalone textA.
+    if (!openPath(pathA) || !openPath(pathB))
+        return false; // the reads just succeeded; keep the doors honest
+    lastDir_ = QFileInfo(pathB).absolutePath();
+    // The diff tab registers through B's REAL path (never a synthetic
+    // title-path: the session's uri map stays clean — a fake uri would
+    // pollute the registry and any armed hub's resolution). The session's
+    // one-uri-one-document refusal lands the duplicate-tab leg of
+    // addEditorTab (the grammar rebind there is the demo's call), and the
+    // tab's TITLE reads like a diff; its document is its own (no attach
+    // ctor — the third tab is a plain editor in diff VIEW state).
+    addEditorTab(pathB, textB);
+    tabs_->setTabText(tabs_->count() - 1,
+                      QStringLiteral("%1 \u21c4 %2").arg(QFileInfo(pathB).fileName(),
+                                                          QFileInfo(pathA).fileName()));
+    CodeEditor* diffTab = currentEditor();
+    Q_ASSERT(diffTab);
+    const QString language =
+        session_->languageForSuffix(QFileInfo(pathB).suffix());
+    diffTab->setDiffDocuments(textA, textB, language);
+    Q_ASSERT(diffTab->isDiffMode());
+    tabs_->setCurrentIndex(tabs_->count() - 1); // FOCUS ON THE DIFF TAB
+    return true;
+}
+
+bool MainWindow::loadGrammarLibrary(const QString& path, const QString& id,
+                                    const QString& language,
+                                    const QString& symbolName,
+                                    const QString& queryPath)
+{
+    // S1-2 (the --grammar door). THREE failure faces, each false + an
+    // exact status-bar message, each changing NOTHING:
+    //   the LIBRARY face (load/symbol failure — address 0),
+    //   the QUERY face (an explicitly named .scm that won't read),
+    //   the VALIDATION face (registerGrammar's own scratch-parser check:
+    //   the zeroed bogus fixture LOADS with a non-zero address yet the
+    //   view's door refuses it — the table is untouched).
+    const qintptr address = CodeEditor::loadGrammar(path, symbolName);
+    if (address == 0) {
+        statusBar()->showMessage(QStringLiteral(
+            "Не удалось загрузить библиотеку грамматики \u00ab%1\u00bb").arg(path));
+        return false;
+    }
+    QString grammar; // the registered id, normalized for the table lookups
+    QString target;  // the language whose tabs re-assert
+    if (id.trimmed().isEmpty()) {
+        // The stem face: MIRROR the loader's own derivation exactly (the
+        // view's loadGrammar trims "lib", turns non-alphanumerics into '_'
+        // and resolves tree_sitter_<base> — tst_codeeditor pinned
+        // libbogus.so -> tree_sitter_bogus), so the id always names the
+        // symbol the loader actually resolved (libfoo-bar.so: id "foo_bar"
+        // rides symbol tree_sitter_foo_bar, not "foo-bar").
+        QString stem = QFileInfo(path).completeBaseName(); // "libpygrammar.so" -> "libpygrammar"
+        if (stem.startsWith(QStringLiteral("lib")))
+            stem.remove(0, 3);
+        stem.replace(QRegularExpression(QStringLiteral("[^A-Za-z0-9]")),
+                     QStringLiteral("_"));
+        grammar = stem.toLower();
+    } else {
+        grammar = id.trimmed().toLower();
+    }
+    target = language.trimmed().isEmpty() ? grammar : language.trimmed().toLower();
+    if (grammar.isEmpty() || target.isEmpty()) {
+        // The library loaded but no id is derivable (a bare ".so"): the
+        // caller must name one. Honest refusal, registry untouched.
+        statusBar()->showMessage(QStringLiteral(
+            "Библиотека \u00ab%1\u00bb загружена, но id грамматики не задан").arg(path));
+        return false;
+    }
+
+    QString query; // EMPTY = parse-only, by the view's contract
+    if (!queryPath.isEmpty()) {
+        QString error;
+        query = readTextFile(queryPath, &error);
+        if (!error.isEmpty()) {
+            statusBar()->showMessage(QStringLiteral("Не удалось открыть \u00ab%1\u00bb: %2")
+                                         .arg(queryPath, error));
+            return false;
+        }
+    }
+
+    // NO foldNodeNames through the door (the record: fold chords on custom
+    // grammars are no consumer today — a custom grammar stays bracket-
+    // fold-only, the M13 indent fallback rides an empty fold query).
+    if (!CodeEditor::registerGrammar(grammar, address, query, {})) {
+        statusBar()->showMessage(QStringLiteral(
+            "Библиотека \u00ab%1\u00bb отклонена: не подходящая грамматика").arg(path));
+        return false;
+    }
+
+    // Tabs already speaking the target flip LIVE on the registration
+    // itself: every engine reconciles against the registry generation on
+    // its next pass (HighlightEngine::reconcileRegistry — the tst_codeeditor
+    // live-UPSERT leg's mechanism). The re-assert below is therefore a
+    // REPAINT NUDGE + the вкладок count for the status line, NOT the
+    // rebind step; and tabs that TRIED an unknown id before this load stay
+    // plain (the engine drops unknown ids at its own door — language() is
+    // empty, nothing here can resurrect them; setLanguageForSuffix or a
+    // fresh setLanguage is the route).
+    int rebound = 0;
+    for (int i = 0; i < editorCount(); ++i) {
+        CodeEditor* ed = editorAt(i);
+        if (ed && ed->language() == target) {
+            ed->setLanguage(target);
+            ++rebound;
+        }
+    }
+    statusBar()->showMessage(QStringLiteral("Грамматика \u00ab%1\u00bb загружена "
+                                            "(язык \u00ab%2\u00bb, вкладок: %3)")
+                                 .arg(grammar, target).arg(rebound));
+    return true;
+}
+
+void MainWindow::setLanguageForSuffix(const QString& suffix, const QString& languageId)
+{
+    // The one forwarding door onto the session's table (G2: the table is
+    // the session's; this is the demo's route). The session normalizes
+    // dots/case; an EMPTY id removes the mapping.
+    session_->setLanguageOverride(suffix, languageId);
+}
+
 void MainWindow::chooseFiles()
 {
     const QStringList paths = QFileDialog::getOpenFileNames(
@@ -221,6 +473,22 @@ void MainWindow::chooseFiles()
         QStringLiteral("Все файлы (*)"));
     for (const QString& path : paths)
         openPath(path);
+}
+
+void MainWindow::chooseGrammarLibrary()
+{
+    // S1-2 mouse route (the record): ONE library, door DEFAULTS — stem id,
+    // derived symbol, parse-only query. The full door (id/language/symbol/
+    // query) is the CLI/test path; a real user wanting a query names the
+    // flags there. exec() is fine HERE: no test ever drives this slot (the
+    // no-modal rule keeps tst_demo on the programmatic doors).
+    const QString path = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Загрузить грамматику"), lastDir_,
+        QStringLiteral("Библиотеки грамматик (*.so *.dylib *.dll);;Все файлы (*)"));
+    if (!path.isEmpty()) {
+        loadGrammarLibrary(path);
+        lastDir_ = QFileInfo(path).absolutePath();
+    }
 }
 
 void MainWindow::editSettings()

@@ -8877,6 +8877,24 @@ void CodeEditor::keyPressEvent(QKeyEvent* event)
         return;
     }
 
+    // S1-1 (GATE 3 car S1): the diff-change navigation pair — Monaco's
+    // F7 / Shift+F7 (the CHANGELOG's "F7/F8" spoke the pair's Monaco-world
+    // naming; Shift+F7 is what previousChange rides, verified against the
+    // qtmonaco consumer, which carries no chords of its own). Claimed with
+    // Ctrl/Alt masked OUT (the fold-chord policy): Ctrl+F7/Alt+F7 stay
+    // unclaimed chrome. The doors themselves are DIFF-GATED exactly as M10
+    // shipped them (nextChange/previousChange return early without diff
+    // state), so the chord is an honest no-op outside diff mode — pinned
+    // by diffNavChordsWalkHunksInDiffAndNoOpInPlainMode.
+    if (key == Qt::Key_F7 && !ctrl) {
+        if (shift)
+            previousChange();
+        else
+            nextChange();
+        finish();
+        return;
+    }
+
     // M17 font-zoom chords, VS Code's table: Ctrl+= (Ctrl++ arrives as
     // Key_Plus with Shift on, and the keypad spells the SAME key with
     // Qt::KeypadModifier — Qt has no separate KpPlus/KpMinus/Kp0 constants,

@@ -4391,6 +4391,544 @@ is alive — the status bar already speaks every shelf signal), and
 spawn-free). The 15-knobs settings surface and the `--lsp`/`--dap` door
 shapes ride unchanged.
 
+**S1 DESIGN RECORD (owner-reviewed 2026-11-25; machines below are build order).**
+The exploration before the record corrected three points of the stub above —
+recorded here because they change the machines:
+
+- **F7/F8 were never chords anywhere.** `nextChange()/previousChange()` are
+  M10 DOORS; the "the F7/F8 nav the chords already carry" phrasing spoke the
+  CHANGELOG's Monaco-parity naming (the `nextChange/previousChange` pair IS
+  F7/F8 in the qtmonaco/Monaco world, and `nextChange`'s own comment says
+  so), but no key handler in the view or the app mentions F7/F8 (grep-verified
+  at 1.13.0). S1 ADDS the chord pair to the view's key-press switch (the
+  fold/zoom chord-table precedent, M13/M17) — additive, no new door. A bare
+  F7 today falls to the switch's default and is swallowed silently
+  (function keys carry no printable text, so the insert arm never sees them).
+- **The diff door's "two tabs" shape is the STRING door's shape.** The
+  pointer door refuses an original carrying ANY views (the zero-view gate,
+  `setDiffDocuments`, CodeEditor.cpp:2672) — and every demo tab's document
+  is editor-attached — so the honest demo shape (owner's call): `--diff A B`
+  opens THREE tabs — plain A, plain B, and a third DIFF tab built through
+  the string door (its own document IS the modified side, caret space =
+  modified), FOCUS ON THE DIFF TAB. Pins ride the diff tab.
+- **The DAP control route is C++-only at 1.13.0** — wheel-probed, not
+  assumed: `DapHub::request`/`client()` drop by type absence and
+  `dapfake steps` answers ONLY `continue` (+`terminate`); a `next` frame
+  exits it 2. EVERYTHING ELSE the showcase reaches already crosses the
+  wheel (live 1.13.0 wheel probe: `highlightSpans`, `setDiffDocuments`,
+  `nextChange/previousChange`, `isDiffMode`, `loadGrammar`,
+  `registerGrammar`, `grammarAddress`, `setCaptureRole`, and the whole
+  `DapHub` control face EXCEPT the request/client pair). S2's door-for-door
+  mirror therefore needs typed control doors — see S1-3.
+  (The pydemo CLI is ALREADY behind on `--lsp/--dap` — that catch-up is
+  S2's committed flag list from its stub, NOT pulled into S1.)
+
+Owner decisions (2026-11-25): typed control doors ON THE HUB (the shelf
+grows Python-visible this car); three-tab diff shape with diff-tab focus;
+tour pins EXACT on a frozen built-in corpus; dapfake grows the step arm.
+
+### Machine S1-1 — the diff door (view chord + demo door + `--diff`)
+
+- **View**: the F7 / Shift+F7 pair (Monaco's spellings; the record's F8
+  never was a real Monaco key — `previousChange` is Shift+F7. Consumer
+  check ran 2026-11-25: the qtmonaco sibling lives at
+  `/home/kai/kaigit/PYQTP/packages/qtmonaco` (AGENTS's stated path is
+  stale — a close-pass docs fix), and it carries NO keybindings of its
+  own for the pair (its F7/F8 heritage lives in the minified bundled
+  Monaco assets, unreadable here) — the chord is OURS to define, and the
+  tour pin table below freezes the exact mapping) joins the
+  key-press switch's command band (before the caret-motion section, like
+  the fold chords), plain-key match, no modifiers beyond Shift; calls
+  `nextChange()/previousChange()` unchanged. The doors stay DIFF-GATED
+  exactly as M10 shipped them (`if (!diff_) return;`, CodeEditor.cpp:2752/
+  2773 — the record's first draft claimed a mode-agnostic hunk axis and
+  the code says otherwise; the pinned M10 semantics ride untouched), and
+  the tripwire pins BOTH faces: hunks walked in diff mode AND the chord's
+  honest no-op on a plain (non-diff) editor.
+- **Demo**: `MainWindow::openDiffPair(pathA, pathB)` — `openPath` A,
+  `openPath` B, then a third tab whose editor gets
+  `setDiffDocuments(textA, textB, languageForSuffix(B))`; focus lands on
+  the diff tab; the door NEVER touches the two plain tabs' state. The
+  diff tab registers through B's REAL path (the session's one-uri
+  refusal lands the duplicate tab; the tab TITLE reads `B ⇄ A` but the
+  registry key stays honest). CLI `--diff A B` rides the door — and its
+  shape took TWO Qt6 traps at build (2026-11-25, both MEASURED with
+  standalone probes, both pinned by the process-level tripwire):
+  (1) `QCommandLineOption` has NO two-value-name ctor — the four-arg
+  braced `addOption({"diff", desc, "a", "b"})` spelling binds the 4th
+  string as the DEFAULT VALUE; `--diff A B` collected [A] with B a
+  positional and the exit stayed 0 — a SILENT dead door.
+  (2) `QCommandLineParser::process(const QStringList&)` SKIPS the list's
+  first element as argv[0] — a scan-rewritten list that forgets to
+  prepend `argv[0]` drops its own leading flag (the self-quit timer
+  vanished and the spawned demo hung). The shipped shape: a raw-argv
+  PRE-SCAN (`--diff` + exactly two non-flag tokens, else stderr + exit
+  1 — never a silent zero), the three tokens removed, `argv[0]`
+  prepended, the parser over the trimmed QStringList. pydemo's S2
+  catch-up must expect the same for its argparse-free parity shim.
+- **Tripwires** (all four shipped 2026-11-25, exact slot names):
+  `diffNavChordsWalkHunksInDiffAndNoOpInPlainMode` (tst_codeeditor —
+  the chord itself incl. the Ctrl+F7/Alt+F7 unclaimed-chrome leg and the
+  plain-editor no-op; the door semantics stay M10's pinned tests);
+  `diffDoorOpensThreeTabsAndDrivesTheNavThroughTheView` (tst_demo —
+  three tabs, diff tab current, `isDiffMode`, caret after F7 injection
+  exact on the tour corpus, the two plain tabs' text byte-identical,
+  the failed-read half-pair leg);
+  `diffCliDoorCollectsThePairAndFailsLoudOnMisShape` (tst_demo — spawns
+  the REAL qmn-demo binary, the same CI-built-spawn class as the
+  dapfake slots: pair-at-front and mid-list exit 0, zero/one-value
+  shapes exit 1 with "EXACTLY two files" on stderr; this slot CAUGHT
+  trap (2) — the pre-fix binary passed the trio leg vacuously).
+- DoD: ctest green (7/7 at the 2026-11-25 build); no public view door
+  added anywhere (the chord sits inside the existing keyPress switch).
+
+### Machine S1-2 — the grammar door (`loadGrammar` dialog + rebinding + `--grammar`)
+
+- **Demo**: `MainWindow::loadGrammarLibrary(path, id = {}, language = {},
+  symbolName = {}, queryPath = {})` — `CodeEditor::loadGrammar` (the
+  handle stays open forever; 0 = load/symbol failure → false + status) →
+  `registerGrammar(id, addr, query, {})` (the view's door VALIDATES at
+  itself: the zeroed bogus fixture loads with a non-zero address yet the
+  registration refuses it, the table changes NOTHING) → tabs already
+  speaking the target flip LIVE from the registration ALONE (every engine
+  reconciles against the registry generation inside refreshIfNeeded — the
+  tst_codeeditor live-UPSERT mechanism); the door's re-assert of
+  setLanguage(id) on those tabs is a repaint nudge + the status вкладок
+  count, NOT the rebind step. A tab that TRIED the id BEFORE the load
+  stays plain: the engine drops unknown ids at its door (language()
+  empty), reconcileRegistry early-returns on the plain state ("nothing
+  attached can care"), so only a fresh setLanguage or the suffix table
+  lights it — pinned honestly in the tripwire (вкладок: 0, then
+  setLanguage, then the span-table EQUALITY leg). Defaults: `id` = the library stem (the loader's own derivation),
+  `language` = `id`, `symbolName` = the `tree_sitter_<stem>` derivation,
+  `queryPath` = explicit .scm path (empty = parse-only, NO sidecar magic
+  — the CLI flag and the tour config name it). Fold node names stay OUT
+  of the door (no consumer today; honest deviation from the first draft's
+  "roleMap" wording — registerGrammar takes the query + fold names, not
+  a role map). Future tabs need NO wiring: the suffix table is the
+  session's (G2) — `MainWindow::setLanguageForSuffix(suffix, id)` is the
+  new one-line forwarding door onto `ProjectSession::setLanguageOverride`
+  (the CLI's `--grammar-suffix` pairs and the tripwire's future-tab leg
+  ride it). Programmatic door = the CLI/test path (the no-modal rule
+  holds); the Файл→«Загрузить грамматику…» slot is the mouse route only,
+  stem id + derived symbol + parse-only defaults.
+- **CLI shape** (corrected at build 2026-11-25 — the first draft's
+  repeatable `--grammar <file> <id> <language>` rides the S1-1 trap (1):
+  a Qt6 value option collects ONE token per occurrence and the
+  multi-value braced spelling is the silent default-value misbind):
+  `--grammar <file>` repeatable, each occurrence zipped BY INDEX with the
+  same-index values of the single-value companions `--grammar-id`,
+  `--grammar-symbol`, `--grammar-lang`, `--grammar-query <scm>` and
+  `--grammar-suffix <sfx:id>` pairs; the process-level tripwire pins the
+  zip (S1-1's spawn class). pydemo's S2 catch-up mirrors the SAME flag
+  names door-for-door.
+- **Fixtures**: the existing `qmn_pygrammar` (the vendored parser compiled
+  a second time — a DISTINCT language pointer, the live-swap proof) and
+  `qmn_fakegrammar` (the zeroed TSLanguage the door must refuse). tst_demo
+  grows the env defines `QMN_TEST_PY_GRAMMAR`/`QMN_TEST_FAKE_GRAMMAR`/
+  `QMN_TEST_PY_QUERY` (the vendored python highlights.scm path — the door
+  names query FILES, never query text) + `add_dependencies` (the
+  tst_codeeditor precedent).
+- **Tripwires** (built green 2026-11-25):
+  `grammarDoorLoadsRebindsAndRefusesTheBogusLibrary` (tst_demo) — the
+  corpus opened as `witness.py` (built-in python, the GOLDEN span table)
+  and `probe.pyext` (plain: the engine drops unknown ids, `language()`
+  empty — a pinned truth, not an assumption). The load face: status
+  `вкладок: 0` (registration reconciles only tabs ALREADY speaking the
+  id — the probe was plain), then `setLanguage('pyext')` lights it and
+  its spans EQUAL the golden table ROW FOR ROW (second compiled parser +
+  same query == same table — the drift the tour leg 5 kills). The UPSERT
+  face: same-id reload with a comment-only `.scm` file swaps the query
+  LIVE through the engine's generation reconcile (comments-only spans,
+  `вкладок: 1`, no setLanguage). The FUTURE-TAB face: `setLanguageForSuffix`
+  then a fresh `.pyext` tab equals the swapped table. Three refusal faces
+  each false + exact status + registry unmoved: LIBRARY (missing .so),
+  QUERY (unreadable .scm — the handle loads, the table does not move),
+  VALIDATION (libbogus.so LOADS non-zero yet the scratch-parser check
+  refuses it). Teardown: `unregisterGrammar` + the suffix unbind — the
+  registry is process-wide and the S1-4 tour slot's before-face leans on
+  a clean `availableLanguages()`; the probe tab falls to plain on its
+  next pass (pinned).
+  `grammarCliDoorZipsOccurrencesAndFailsLoud` (tst_demo, the S1-1 spawn
+  class): the full companion zip rides exit 0; and the stem-derived
+  NEGATIVE (no `--grammar-symbol`: `libqmn_pygrammar.so` derives
+  `tree_sitter_qmn_pygrammar`, which does not exist) FAILS LOUD by itself
+  — stderr `--grammar failed` + exit 1, so a silent companion drop flips
+  the positive leg on its own. Malformed `--grammar-suffix` pairs exit 1
+  with the `<suffix:<id>` shape on stderr.
+- DoD (met 2026-11-25): ctest 7/7 green (one NOTE outside S1's closure:
+  tst_lsp's `lspCapabilityRegistryAndApplyEditDoor` flaked 2/8 ISOLATED
+  runs that day, each failing run at ~91.5s = three of its own documented
+  30000ms QTRY windows starved — the slot's own comment names the busy-
+  host class; nothing in S1-2 links into tst_lsp (no view/glue/lsp source
+  changed), the binary byte-matched the earlier 7/7 run, and the full
+  ctest came up 7/7 twice). No public view door added; the Python doors
+  already cross — no three-copies edit.
+
+### Machine S1-3 — DAP controls: typed hub doors + demo doors + the dapfake step arm
+
+- **Shelf (qmn_glue, additive)**: four plain-typed doors on `DapHub` —
+  `continueDebugging()`, `stepOver()`, `stepIn()`, `stepOut()` — each
+  `bool`: true iff the request went out (Ready + a known stopped thread;
+  DAP's `threadId` rides the last `debugStopped`, the single-thread v1
+  shape). They ride the existing fire-and-forget `request()` seam, so the
+  wire shape (no event frames from the client, answers ride events) is
+  byte-unchanged. `stopDebugging()/terminateDebugging()` already exist —
+  the demo door for stop is pure app glue.
+- **Codegen (three copies)**: NO new type — the methods cross on the
+  already-bound `DapHub`; the close's `--codegen` run must SHOW the four
+  doors in the generated face and the rejected-log diff (the E4/E5
+  drop-SET baseline) gains nothing but the usual noise.
+- **dapfake (support binary, NOT a ctest entry)**: the step battery lands
+  in a NEW mode `steps2` (argv: frame path, line, col + the step-arm
+  frame line), so the D3 `steps` pins stay byte-frozen. `steps2` = the
+  full `steps` conversation plus `next/stepIn/stepOut` → ok + a SECOND
+  `stopped` event (reason `step`, new frame line from argv), then the
+  `continue`/`terminate` arms and the terminate-before-disconnect rule
+  unchanged.
+- **Demo**: `MainWindow::debugContinue()/debugStep()/debugStop()` status
+  doors (Step = stepOver, the everyday button; the hub's own answers ride
+  the already-wired status signals) + CLI `--debug-continue`,
+  `--debug-step`, `--debug-stop` (the tour calls the doors directly).
+  Stop routes through `terminateDebugging()` where the caps allow (the
+  dapfake/adapter terminate-before-disconnect demand, live-probe-pinned).
+- **Tripwires**: `dapControlDoorsStepStopAndReapThroughTheDemo` (tst_demo,
+  `steps2`) — the exact status-string sequence pause → step → pause(new
+  frame, caret on the new frame line) → continue → terminated/ended;
+  the caret-follow pin (OWNER-only is fine: the tour opens ONE C tab); the
+  teardown exits dapfake 0 (the terminate arm). The hub-level typed-door
+  pins live in tst_dap (same grow rule).
+- DoD: shelf minor bump queued for the close (1.1.0 → 1.2.0, additive
+  Python-visible growth — the E-close comment at the bump site carries the
+  rule); tst_dap + tst_demo + full ctest green.
+- **BUILT 2026-11-26** (host ctest 7/7 green, the S1-2 lsp flake class did
+  NOT reappear — 108.7s total, `dap` 19.3s = the grown binary). Built-face
+  deltas and the records the code pins:
+  (1) The four doors share one private `threadControl(command)` helper
+  riding `request()`; true iff `isReady() && lastThreadId_ != 0`. The
+  thread memory is RETIRED by zeroing `lastThreadId_` in the hub's
+  `continued` and `terminated` event arms — no existing reader survives
+  those emissions, so NO D3 pin moved. A fifth public `stoppedThreadId()`
+  door was considered at build and DROPPED: the surface stays exactly the
+  four PLAN names.
+  (2) `MainWindow::debugStop()` refuses only when there is no session
+  (`!dapHub_ || !isDebugging()`); it calls `terminateDebugging()` (which
+  internally falls back to `stopDebugging()` where the caps say no) and
+  does NOT read that false as a refusal — the hub's `sessionEnded` string
+  is the session's real report.
+  (3) The CLI flags are a QUEUED RIDE, not startup calls (a control door
+  called at startup could only ever refuse — the session is async):
+  `MainWindow::queueDebugRide(actions)` + a private `maybeFireDebugRide`
+  fired from the ALREADY-wired `debugStopped`/`debugContinued` status
+  lambdas; step/continue press at a `stopped`, stop at `stopped` OR
+  `continued`; the queue is cleared on sessionEnded, on disarm and on
+  re-arm. LOUD face: the flags WITHOUT `--dap` are stderr + exit 1.
+  The presses ride a 300 ms BEAT (`QTimer::singleShot`), not the signal
+  emission itself — the first shape fired each door inside the emission
+  and the ride slot pinned the defect: every status string flickered by
+  in one round trip, unreadable and unobservable. The beat makes the
+  CLI walk readable, keeps the doors out of the hub's emission
+  re-entrance, and a session that dies mid-beat meets an honest refusal.
+  (4) `steps2` grew one arm the demo walk forced: a `setBreakpoints`
+  answer (ALL verified at the same line — the dots are witnesses, the
+  step ride is the point). The demo stores its {2,6} pair BEFORE
+  startDebugging (the hub's legal order), so the Ready push lands in
+  steps2 too. `steps` mode keeps that arm FATAL — its D3 pins never
+  push a breakpoint and stay byte-frozen, next/stepIn/stepOut there
+  still exit 2 on purpose.
+  (5) Tripwire slot names (all four green at first run after the beat
+  fix): `dapHubTypedControlDoorsGateStepAndRetireThroughTheWire`
+  (tst_dap — the gates where the client cannot audit itself: false
+  pre-Ready, false Ready-but-never-stopped (deterministic: the stopped
+  event only ever follows our own `configurationDone`), false again
+  after `continued`, false after the session ends; plus the steps2
+  happy leg where the far side audits `arguments.threadId==7` on EVERY
+  step arm and the post-step stackTrace answers the argv[5] line — band
+  2→3, caret (2,5)→(3,5), the 2-hint set shrinks to the ONE
+  ` = 42` hint at (3,1));
+  `dapControlDoorsStepStopAndReapThroughTheDemo` (tst_demo — the same
+  walk through the DEMO doors with the exact Russian status literals,
+  because they ARE the tour's pin literals — pause `(breakpoint)` →
+  `debugStep()` → pause `(step)` → `debugContinue()` → `продолжено` →
+  `debugStop()` → `сессия завершена (stopped)` — plus the three refusal
+  faces after the end and the disarm face; dapfake exits 0 = the
+  far-side receipt of debugStop's terminate-first routing);
+  `debugRideQueueWalksTheSessionWithoutAnyManualPress` (tst_demo, IN
+  PROCESS — the CLI queue's semantics with NO hand on the doors, the
+  slot that caught the flicker defect and pins the beat);
+  `debugCliRideFlagsNeedTheAdapterAndRideClean` (tst_demo, the S1-1
+  spawn class — flags-without-`--dap` exit 1 naming `--debug-step` on
+  stderr, and the full adapter+file+three-flags walk exit 0 on the
+  self-quit timer, pinning the parser registration from both sides).
+
+### Machine S1-4 — `--tour`: the SHARED PIN TABLE (the risk-3 artifact)
+
+The table below is THE artifact both demos mirror (one table, two drivers).
+Rules: the tour is a scripted walk of the DEMO's OWN doors (the tour calls
+`openPath/setDiffDocuments`-via-`openDiffPair/loadGrammarLibrary/debug*`
+— never a private seam), prints one probe-style line per pin
+(`PASS n: leg — detail`, the `probe_dap.sh` shape), prints skips as skips,
+EXITS NONZERO at the FIRST failed pin (the print lands first), otherwise 0.
+Output rides `qDebug()` (the ctest face captures it at the message
+handler; the CLI face installs its own stderr printer for the run —
+off a TTY Qt routes debug logs to the journal, see the BUILT record).
+Waits ride a local spin helper (processEvents + 20 ms tick + deadline —
+Qt6::Test NEVER links into `qmn_demo_app`: only test binaries see it).
+
+**The corpus** — frozen literals in the shared tour file
+(`src/app/ShowcaseTour.{hpp,cpp}` in `qmn_demo_app`; S2 re-declares the
+same strings as Python literals — the corpus itself is the drift check).
+FOUR files, as frozen at build (the block's original draft had drifted —
+its 4-line tour.py carried neither the `sum ` leg-3 selection nor leg 2's
+`lineCount()==5`, and "model lines 1 and 4" disagreed with the demo's
+stored breakpoint PAIR, see the BUILT record's delta list below; THE
+LITERALS BELOW ARE THE TRUTH S2 COPIES BYTE-FOR-BYTE):
+
+```python tour.py                       (5 lines, NO trailing newline)
+import sys
+values = [1, 2]
+x = sum (values)
+def greet():
+    return x  # greet
+```
+```text diff_orig.txt / diff_mod.txt  (the exact pair, 5 lines each, TWO
+alpha\none\nbeta\ntwo\ngamma          replace-hunks at MODIFIED lines 1
+alpha\nONE\nbeta\nTWO\ngamma          and 3 (0-based))
+```
+```c demo.c
+int main(void) { return 0; }
+```
+There is NO separate DAP source: **tour.py ITSELF is the dap-dapfake
+leg's session document** — tab 0 never closes and the door's auto-start
+rides `editorAt(0)`, so the steps2 frames carry tour.py's abs path (the
+DAP leg identity-pins `editorAt(0) == the boot-leg editor` first).
+probe.pyext + future.pyext are grammar-leg DERIVED copies of tour.py's
+content (same golden table), not frozen entries. tour.py is deliberately
+NOT executable (no shebang, no exec bit) — see the live-adapter face.
+
+**The golden highlight table** (the highlight leg prints it row-per-span
+over tour.py's whole document — 15 spans, from the frozen vendored py
+query; the grammar legs pin the pyext tabs' spans EQUAL it; this is THE
+drift killer between the two drivers): `0-6:Keyword 7-10:Variable
+11-17:Variable 18-19:Operator 21-22:Number 24-25:Number 27-28:Variable
+29-30:Operator 31-34:FunctionBuiltin 36-42:Variable 44-47:Keyword
+48-53:Function 61-67:Keyword 68-69:Variable 71-78:Comment`
+
+**The printed table** — 14 rows, frozen order. Measured offline face
+(`QMN_TOUR_NO_LIVE_DAP=1`, exit 0, 11 PASS + 3 SKIP); the detail texts
+are the printed ones (abridged where marked `…`). NOTE the row numbers
+are the PRINTED counter, not the code's leg labels (the code walks 9
+legs: the grammar leg prints rows 6–8, corpus and teardown print their
+own rows; `qmn-demo --tour` numbers and S2 mirrors the ROW TABLE, leg-
+for-row):
+
+```
+PASS 1: corpus — 4 frozen files under <dir>
+PASS 2: boot — 1 tab, lineCount 5, caret {0,0}
+PASS 3: model — setPosition {2,4}, selection 'sum ', insertTextEdits
+        's'->`sums `, undo byte-identical
+PASS 4: highlight — 15 spans: <the golden table>
+PASS 5: diff — the door's 3 tabs (tour-side count 4, the witnesses
+        still open), diff focused, F7 walk 1->3->3->1->1,
+        text == modified corpus
+PASS 6: grammar — before-face: pyext absent, a pre-set tab stays plain
+        (language() empty, zero spans)
+PASS 7: grammar-load — load==вкладок: 0, probe stays plain until
+        setLanguage, spans EQUAL the golden table, future .pyext tab too…
+PASS 8: grammar-refusal — bogus library false + exact status, registry
+        unmoved
+PASS 9: settings — 4-knob subset (tabStop 7, ruler 80, softWrap on,
+        Dark preset) rode options()+theme() and collected back, baseline
+        restored
+SKIP 10: lsp-clangd — clangd is not on PATH …   (live host: PASS —
+        claimed + 3 diagnostics after `bad(` on clangd 23.1.5)
+PASS 11: dap-dapfake — exact status walk: запущена -> пауза 7
+        (breakpoint) [band 2, caret {2,5}, dots {2,6} verbatim past EOF,
+        hint {2,1}=' = 42' first-wins] -> step [пауза 7 (step), band 3,
+        caret {3,5}, hints 0 on def greet()] -> продолжено [band
+        cleared] -> завершена (stopped) -> three exact refusals ->
+        адаптер остановлен; sequence exact
+SKIP 12: dap-lldb-dap — <reason>    SKIP 13: dap-gdb — <reason>
+        (ctest face: `%1: the ctest face forces the PATH legs off (the
+        --lsp no-guarantee law) — the host ritual owns these rows`;
+        CLI kill-switch: `%1: scoped off by the operator (QMN_TOUR_NO_-
+        LIVE_DAP=1) — the binary may well be installed, the leg just
+        did not run`; discovery face: `%1 not found on PATH`)
+PASS 14: teardown — every leg tab closed, every hub disarmed, tab
+        count 0 …
+```
+
+**Doors per leg** (ONLY the demo's public doors + public VIEW doors,
+never a private seam; S2's wheel names ride 1:1 on the demo doors —
+`qmn.Monaco`'s `open_path/open_diffs/load_grammar`-style surface is
+S2's own catch-up question, pinned at S2): boot `openPath`; model
+`setPosition/selectedText/applyTextEdits/undo/toPlainText`; highlight
+`highlightSpans`; diff
+`openDiffPair` + raw F7/Shift+F7 `QKeyEvent`s through `QApplication::
+sendEvent` + `position()`; grammar `loadGrammarLibrary/setLanguageFor-
+Suffix/setLanguage/availableLanguages` + the bogus fixture; settings
+`applyEditorSettings/collectSettings/options()/theme()`; lsp
+`setLspEnabled` + `openPath(demo.c)` + `applyTextEdits("bad(")` +
+`diagnostics()`; dap `setDapAdapter(program, {"steps2", <tour.py abs>,
+"3","6","4"})` (armed LATE -> auto-start registers tab 0 = tour.py) +
+`debugStep/debugContinue/debugStop` + `breakpointLines/highlightedLines-
+Start/position/inlayHints/dapEnabled`; teardown `closeTabAt` +
+`dapEnabled/lspEnabled`. Every wait rides the local spin helper;
+Qt6::Test is NEVER linked into `qmn_demo_app`.
+
+**BUILT 2026-11-26** — `src/app/ShowcaseTour.{hpp,cpp}` (in
+`qmn_demo_app`; `demo_main.cpp` registers `--tour`), tst_demo's
+`tourTableRunsGreenMinusTheServerLegs`. Delta vs this car's original
+spec (all owner-settled in code-reading; the code + the printed faces
+above ARE the record):
+
+- Corpus: FOUR files (the spec's separate DAP source is DROPPED —
+  tour.py is itself the session doc, tab 0 never closes, the auto-start
+  rides `editorAt(0)`; the DAP leg's first pin is that tab-0 identity).
+  The spec's `import demo` 4-line draft is REPLACED by the 5-line
+  literal block above — `sum (values)` is what makes the {2,4} +
+  4xShift+Right `sum ` selection and the 15-span golden table work.
+- `DapHub::setBreakpoints` takes 0-BASED MODEL lines and the demo's
+  stored PAIR is `{2, 6}` (MainWindow.cpp, wire lines 3/7) — the spec's
+  "model lines 1 and 4" note was wrong. On the 5-line tour.py line 6 is
+  PAST EOF, and `breakpointLines()` reads the pair back VERBATIM (the
+  decoration store keeps what it was given; no dot painted past EOF) —
+  pinned exactly. steps2 argv is `{"steps2", <tour.py abs>, "3", "6",
+  "4"}` (DAP 1-based frame lines; MODEL 2 then 3 -> band 2 -> 3, carets
+  `{2,5}` -> `{3,5}`, the tst_demo S1-3 slot's frozen pair byte-for-
+  byte). The model's `x = sum (values)` frame line yields exactly ONE
+  value hint `{2,1," = 42"}` (first-wins over dapfake's WRONG-DUP `x`);
+  the `def greet():` step frame yields ZERO hints — the tst slot's
+  2->1->0 shape was THAT fixture's line content, not a law.
+- The whole spoken status sequence is pinned BYTE-EXACT and IN ORDER
+  (`QStatusBar::messageChanged` collector on a scope-lifetime receiver,
+  so no pin can be overtaken by a later face): arm face `адаптер %1 —
+  сессия начнётся с первой вкладкой` -> запущена -> пауза (breakpoint)
+  -> пауза (step) -> продолжено -> завершена (stopped), then the three
+  exact refusal faces (шаг / продолжение / остановка) and the disarm
+  face `адаптер остановлен`.
+- The diff leg's tab arithmetic rides the live tour (tour.py + probe/
+  future witnesses still open): count 4 / currentIndex 3 — the 3-tab
+  shape stays pinned in tst_demo; the tour-side pin is on the FOCUS and
+  the F7 walk (the frozen hop table itself is the S1-1 strict-edge
+  no-wrap law, pinned in `tst_codeeditor`).
+- The settings leg rides a 4-knob SUBSET (tabStop 7, ruler 80, soft-
+  Wrap ON — pinned against the OFF baseline via `!collected.softWrap-
+  Enabled` — Dark preset) and RESTORES the baseline afterwards, so
+  later legs see the demo's defaults; the 15-knob surface itself
+  untouched.
+- Fixture plumbing (CLI `--tour`): corpus dir under a temp dir unless
+  `QMN_TOUR_OUT` names one; build-tree guesses off the executable, each
+  overridable by env (`QMN_TOUR_PYGRAMMAR/PYQUERY/FAKEGRAMMAR/DAPFAKE`);
+  <=3 positional tail args override (corpusDir, dapfake, bogus); the
+  bogus candidate is `build/tests/libbogus.so` (OUTPUT_NAME `bogus`);
+  clangd/lldb-dap/gdb ride PATH (`QStandardPaths`),
+  `QMN_TOUR_NO_LIVE_DAP=1` prints those legs as skips, and a NAMED-but-
+  missing adapter path (`QMN_TOUR_LLDBDAP`/`QMN_TOUR_GDB`) is a LOUD
+  stderr + exit 1. Same law on the fixture side (measured): an env-
+  NAMED-but-nonexistent grammar lib is NOT a skip — the leg FAILs with
+  the door's own face (`FAIL 7: grammar-load — loadGrammarLibrary
+  returned false`) and the table stops there; only a DISCOVERY-EMPTY
+  path prints its SKIP.
+- **The pin table channel**: the CLI face installs its own stderr
+  message handler around the run — off a TTY Qt routes `qDebug()` to
+  the JOURNAL and a piped `--tour` printed ZERO pin lines (measured);
+  the tst face captures at `qInstallMessageHandler` and restores.
+- LIVE-adapter face (host: clangd 23.1.5 + lldb-dap + gdb present,
+  re-measured at this build): rows 1–11 all PASS (clangd claimed
+  demo.c, 3 diagnostics after `bad(`; the dapfake leg's exact walk
+  green on the live table too); row 12 FAILs with the adapter's own
+  face — `DAP: пуск отклонён: (no message)` — because the auto-start
+  launches tour.py ITSELF, which has no shebang and no exec bit
+  (ENOEXEC); the table stops at the first FAIL (exit 1), so the gdb
+  leg never prints. This
+  exit-1 is the owner-ACCEPTED live face (settled 2026-11-26): the
+  exact live adapter pins stay `tools/probe_dap.sh`'s (its launches use
+  REAL binaries); an operator scopes the ritual to the offline-green
+  table with `QMN_TOUR_NO_LIVE_DAP=1` (measured: exit 0, 11 PASS +
+  3 SKIP).
+- ctest face: the slot runs LAST in tst_demo (slot order is
+  load-bearing — the grammar slots' own `unregisterGrammar("pyext")`
+  teardown runs BEFORE it, so the grammar before-face's honest "pyext
+  absent" holds; the tour leaves pyext registered behind itself and
+  nothing runs after). The slot pins the printed table ITSELF: 14
+  lines, frozen PASS/SKIP prefixes in frozen order, zero FAIL, the
+  golden 15-span LITERAL (so the S2 drift artifact is frozen in CI,
+  not only printed), the diff detail's `1->3->3->1->1` walk, the
+  dap-dapfake detail's frozen witnesses (`dots {2,6}`, both carets,
+  `= 42`, `sequence exact`), `EQUAL the golden table`, `baseline
+  restored`, `tab count 0`, and both forced-off SKIP reasons (the
+  honesty law is part of the pinned table). The
+  tour NEVER spawns clangd/lldb-dap/gdb from ctest (the `--lsp`
+  no-guarantee law); dapfake IS spawned (the CI-built far-side oracle;
+  its exit stays 0 through the terminate arm). Tripwires: the two slots
+  `tourCliDoorFailsLoudOnBadTailAndMissingNamedAdapter` (the CLI wiring's
+  loud faces — a spawn that NEVER runs the table, the knot stays intact)
+  and `tourTableRunsGreenMinusTheServerLegs` (tst_demo, 23 slots now);
+  the offline CLI face (14 rows, exit 0) and the live host face above
+  were both MEASURED runs, not assertions.
+- DoD (met 2026-11-26): the 14-row table prints and tst_demo pins it
+  (23 slots); ctest 7/7 green on the shipping run PLUS three extra
+  `-j 7 --repeat until-fail:3` full passes (the LAST of those ran with
+  the recorded tst_lsp liveness fix below in the tree); the offline CLI
+  face exits 0
+  (11 PASS + 3 SKIP, honest reasons) and the live host face exits 1 at
+  row 12 (the owner-accepted adapter face). No new public view door
+  (`CodeEditor.hpp` untouched — only the S1-1 `.cpp` no-wrap law), the
+  four plain-typed `DapHub` doors ride the already-bound class (m7
+  precedent, no three-copies edit), and `Qt6::Test` stays out of
+  `qmn_demo_app` (the link line proves it; the tour's waits ride its
+  own spin helper).
+- NOTE (CAPTURED defect + fix, in `tests/tst_lsp.cpp` only): a full
+  ctest run showed `lsp` Failed; the slot was caught red-handed from
+  the log BEFORE any rerun:
+  `hubViewHandoverKeepsWireFeedsAndMarksStanding` — its LAST liveness
+  leg sampled `reqCount(stderrSpy, "textDocument/foldingRange") >
+  asksAfterJoin` immediately after `waitUntil(version()==2)`. The
+  mechanism is a fixed-race, not load magic: on an edit the fold feed
+  re-arms at `kFoldRefreshMs` 300 ms and the syncer flushes at
+  `kDefaultDebounceMs` 400 ms, so the version bump returns ~100 ms
+  after the ask is SENT — and that was the whole budget for the ask's
+  round trip into the fakeserver's stderr echo landing in the spy.
+  Measured face: **6/30 isolated failures at this head AND 6/30 in a
+  throwaway `HEAD` (= v1.13.0) worktree** — the flake PREDATES S1 (the
+  earlier "matches the recorded starved-host class" attribution was
+  WRONG and is retracted: it is a DIFFERENT slot than
+  `lspCapabilityRegistryAndApplyEditDoor` and the cause is the
+  100 ms window, not starved 30 s QTRYs). The fix follows the slot's
+  OWN idiom (the leg two steps up already `waitUntil`s on the req
+  count): the pin now WAITS for the far-side witness — a dead feed
+  still fails (the ask never arrives, the 8 s wait times out), only
+  the "must arrive inside the version pump" coupling died. Verified:
+  0/30 isolated after the fix (was 6/30) and the `-j7
+  --repeat until-fail:3` full-suite stress (the load that surfaced
+  it) came up 7/7 ×3, 1563 PASS lines, zero failures. This change is
+  a TEST-only edit — no src/ file beyond the already-recorded S1 set
+  rides it.
+
+CI shape: tst_demo's `tourTableRunsGreenMinusTheServerLegs` builds a
+`TourConfig` with the fixture paths (`QMN_TEST_PY_GRAMMAR`,
+`QMN_TEST_PY_QUERY`, `QMN_TEST_FAKE_GRAMMAR`, `QMN_TEST_DAP_SERVER` —
+the DAP slot composes the steps2 args itself), clangd/lldb-dap/gdb legs
+forced off, and asserts the tour function returns TRUE with legs 1–9,
+dap-dapfake and teardown all PASS — the table ITSELF is thus pinned in
+CI; the tour binary flag stays a live ritual, never a ctest entry (the
+knot). The live shape (host): `qmn-demo --tour` resolves clangd/lldb-
+dap/gdb from PATH and prints the full table; the S2 close diffs the two
+tours' printed tables leg-for-leg.
+
+### Machine S1-5 — the close (target 1.14.0)
+
+Two package literals + the wheel half (rebuild + repair + smoke + the
+FOURTH literal `pydemo/pyproject.toml` re-point + green headless pydemo —
+the 1.9.0 lesson), the SHELF literal 1.1.0 → 1.2.0 (S1-3's Python-visible
+growth; the bump-site comment carries the rule), the `--codegen`
+rejected-log diff against the E4/E5 drop-SET baseline (the four hub doors
+must be ABSENT from the log; a drop the log does not show crossed by
+accident — both ways), CHANGELOG + README/AGENTS wording (the F7/F8
+chord joins the keymap records; the `--diff/--grammar/--tour` CLI joins
+the demo records), then the fresh out-of-tree ask as always.
+
 ### Car S2 — pydemo mirrors the showcase door-for-door
 
 argparse grows the SAME flags (`--diff`, `--lsp`, `--dap`, `--dap-arg`,
