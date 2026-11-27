@@ -3,6 +3,162 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.15.0] — 2026-11-28 — GATE 4 cars I0+I1 CLOSED — the IDE dogfood train opens: `qmn-ide-demo` living ONLY on the exported surface, the QtCore-only `src/search/` library, and LEDGER catch #1 found and closed in the SAME car
+
+### Added
+- **The IDE pair** (car I0): `qmn-ide-demo` — the repo's SECOND full
+  app, and the gate's whole point: it consumes ONLY the exported
+  surface (`qmn::view` + `qmn::glue` + `qmn::search`, all through
+  public doors; its header knows the shelf and the engine only behind
+  forward-decls). The shape mirrors the demo pair in kind: the window
+  compiles into the `qmn_ide_app` STATIC lib and `ide_main.cpp` is a
+  thin main, so `tst_ide` drives the exact doors the dock widgets
+  call, offscreen, and NO dialog is ever exec()ed.
+  The doors: `openProject(dir)` (ONE door carries the tree root, the
+  session's workspace root and the `.qmn/lsp.json` fold — the demo
+  set its root at the first openPath because it had no project
+  concept; the IDE knows the root EARLIER), `openFile(path)` (a
+  failed read is false + the non-modal status-bar message, the
+  demo's drivability law), and the CLI face: one positional
+  DIRECTORY, a FILE root refuses LOUD (stderr + exit 1, measured at
+  the smoke), `--exit-after-ms` headless door, `--lsp` OFF by default.
+- **The ONE-tab law** (the deliberately first real pressure point):
+  the IDE keeps ONE tab per path — re-opening a path FOCUSES the
+  existing tab (never a second tab, never a second registration), and
+  a LEXICAL variant of the same path (`dir/./file`) focuses the same
+  tab (the tab key is the normalized absolute path). `tst_ide` pins
+  the tab-count + focus-message face, plus the close→reopen face (the
+  session drop rides `closeTabAt`, so no registry squatter is left).
+  The sketch's "one registration, one `didOpen`" registration pin
+  stays tst_glue's JOIN turf — the IDE offers no second-VIEW face yet,
+  and an observation door the app itself does not need was NOT added.
+- **`src/search/` — the first new layer since Gate 2's five** (car
+  I1, the promotion law's BORN-HEADLESS exception): QtCore ONLY,
+  export set `qmn::search` (a REAL export like core — NOT the
+  link-only internal_diff mechanism; the IDE app IS the consumer and
+  links it directly). Pure faces `Engine::queryRefusal/scanText/
+  scanFile` + the paced `SearchSession` walk (`start/cancel`, 8 files
+  per zero-timer tick — a big tree never freezes the UI), results
+  over SIGNALS (car E's law: `fileMatched/fileSkipped/progress/
+  finished`, every record a plain-Qt struct — wrappable by Shiboken
+  from birth, though the wheel crossing is NOT taken until a Python
+  consumer asks). The frozen stop-face prefixes: `""` = completed,
+  `"query: …"`, `"root: …"`, `"cancelled"`, `"budget: …"` — a
+  cancelled walk never retracts the partial `fileMatched` signals and
+  never poses as a clean zero-hit success. REFUSAL faces (bad query,
+  bad root) emit `finished` SYNCHRONOUSLY inside `start()` — the
+  connect-before-start law, car E's mechanism, now WRITTEN AT THE
+  DOOR. The walk contract: dot-hidden entries and the `.git` subtree
+  default-skipped (their un-skipped faces are doors), a NUL in the
+  first 8 KiB = Binary, stat-first 5 MiB cap = TooLarge, maxDepth,
+  the 200 000-file budget; per-directory entry order is the engine's
+  own CODEPOINT sort (locale-independent — the locale-aware
+  `QDir::Name` sort is NOT it).
+- **The wholeWord SLIDE law** (caught at writing time, kept as a
+  named tripwire): the non-overlap law binds ACCEPTED matches only —
+  a REJECTED wholeWord occurrence SLIDES one position, it never skips
+  past its window ("a.a" over "xa.a.a": the occurrence at 1 has a
+  dirty left boundary, the nested one at 3 is CLEAN; slide answers
+  exactly 3-6, jump-past-window answers ZERO). Three mechanisms — the
+  fixed-string `indexOf` loop, the regex lookaround-wrap face (PCRE
+  slides lookaround-failed starts itself), and the naive reference's
+  manual slide loop — one answer: `tst_search::wholeWordNestedSlide`.
+- **The Find-in-Files panel** (car I1's half in the IDE): query row +
+  case/whole-word/regex toggles, the results tree (file groups, one
+  leaf row per MATCHED LINE, the label shows the line 1-BASED while
+  the engine row is 0-based), and row activation opens-or-focuses the
+  file and reveals caret + selection on the match through the PUBLIC
+  view doors. The panel refuses LOUD with no project open (never a
+  silent zero), and its Russian summary carries the engine's MACHINE
+  reason verbatim inside the human text (refusals, budget, cancel —
+  the panel never erases the truth the engine told). Read doors
+  `searchSummary/searchResultRowCount/searchResultFileAt/
+  searchResultLineAt` are the tst_ide observation channel —
+  panel-level doors; the engine keeps NO row-flattening concept.
+
+### Changed (recorded widenings, not redefinitions)
+- **LEDGER catch #1 — `CodeEditor::setSelection(anchor, caret)` went
+  PUBLIC.** The panel's reveal hit the first REAL API hole: the
+  frozen public surface carried only `selectAll`/`clearSelection`
+  plus the M11 a11y text-interface channel for programmatic
+  selection. The hole went into the LEDGER before any workaround, and
+  the a11y-driving workaround was NOT taken — the fix landed the same
+  car as an ADDITIVE widening: the raw door the a11y bridge and the
+  diff machinery already route through became public, contract
+  written at the declaration (both ends clamped through `clampPos`,
+  reversed ends legal because read/draw sort, the SECOND argument is
+  the CARET — `position()` returns it; D1 single-caret law: extra
+  carets cleared; any edit chain broken; `cursorMoved` +
+  `selectionChanged` fire on EVERY write, the collapse face
+  included; the view scrolls itself). Tripwire:
+  `tst_codeeditor::programmaticSetSelectionDoorReveals`. Wheel face:
+  plain-Qt-typed on an ALREADY-bound class — m7's precedent, NO
+  three-copies edit; the close `--codegen` run's rejected log carries
+  NO new line (the set rides the 1.13.0-baseline archive diff), and
+  the repaired wheel's presence check is recorded below.
+
+### Tests & ritual
+- ctest GROWS to NINE entries: `search` GUITLESS (the layer is
+  QtCore-only — no QT_QPA_PLATFORM story) and `ide` OFFSCREEN. PLAN's
+  I1 DoD said "8 entries" — a COUNT slip in the plan (the head rode
+  7); the record says nine, all green.
+- `tst_search` (guiless, 19 slots): the FIXED-SEED (0xC0FFEE) corpus
+  paired against a NAIVE per-position reference — the wholeWord-regex
+  face pairs two DIFFERENT mechanisms (the engine's lookaround-wrap
+  vs the reference's raw-iterator + manual boundary check + manual
+  slide; their agreement is the pin); astral-column UTF-16 legs (the
+  tree-sitter-2× trap's sibling class); the walk-contract faces; the
+  cancel leg's honest "cancelled"; the synchronous refusals + the
+  reentry law (a running() start emits NOTHING); scanFile≡scanText
+  face-agreement; and a generator slip (18 corpus files once hid
+  behind ONE path) tripwired by the exact reference-walk count.
+- `tst_ide` (offscreen, 11 slots): project round-trip, tab/language
+  faces, the failed-open face, one-tab + close/reopen, the panel rows
+  (engine walk order, out-of-range honesty), the reveal (caret at the
+  span END, selectedText == the needle), the refusal and cancel
+  faces, and the `--lsp` slot mirroring tst_demo's law whole — the
+  ONE hub slot opens only UNCLAIMED languages, nothing ever spawns.
+- Shake (the event-loop-paced class): `search|ide` under
+  `--repeat until-fail:10 -j8` plus 10 standalone runs of each —
+  zero flakes.
+- The measured perf record (NEVER a wall-clock pin — ctest pins the
+  CAP faces): `tools/bench_search.cpp` (the bench_model precedent) —
+  generated seeded corpus (500 files ≈ 16.3 MB UTF-16): BEST of 3
+  paced walks **81 ms** (162 µs/file, 449 566 spans reported), pure
+  `scanText` **73 ms**; the repo's OWN tree smoke: **142 ms** best of
+  3, 1510 files scanned / 368 skipped / 16 241 matches, pure face
+  53.6 MB in 80 ms — a snapshot of one day's tree, NOT a pin. Its
+  link needs `-fPIC` (the trap line rides the tool header and
+  AGENTS): this TU destructs inline QByteArray temporaries, and the
+  direct PC32 reference to Qt's PROTECTED `QByteArray::_empty`
+  becomes a copy relocation the PIE linker REJECTS — the bare
+  bench_model recipe does not ride on that luck.
+- The WHEEL half of the close ritual (the class the 1.9.0 close forgot):
+  the container rebuilt + repaired `qmn_native-1.15.0-cp310-abi3-
+  manylinux_2_34_x86_64` and the smoke/parity legs ran green (the
+  one-Qt maps check included — the `libQt6*` delta stayed empty), the
+  `--codegen` rejected-log set rode a BOTH-WAYS diff against the
+  archived 1.13.0 baseline: **1824 lines, ZERO delta** — no new silent
+  drop, and `setSelection` in particular is WRAPPED (presence +
+  behaviour checked LIVE against the REPAIRED wheel: `hasattr` true and
+  `setSelection(TextPosition, TextPosition)` produced the expected
+  selection through the wheel). pydemo's fourth literal moved to the
+  1.15.0 wheel and its headless close-ritual smoke ran green.
+
+### Meta
+- The package literals (root `project(VERSION)`, `pyproject.toml`, and
+  the pydemo wheel path-dep) all rode 1.14.0 → 1.15.0 in ONE commit
+  (the two-literals law + the wheel-half fourth). The GLUE shelf did
+  NOT bump (1.2.0 stands): nothing shelf-visible changed — the widening
+  is a VIEW-package door, an additive MINOR for the wheel because the
+  already-bound `CodeEditor` grew a callable.
+- GATE 4's LEDGER worked as designed on its first car: a hole was FOUND
+  by the app living only on the exported surface, WRITTEN before the
+  workaround, and CLOSED additively in the same car. The next planned
+  entries ride as seeds only: `LspHub::requestDocumentSymbol` (I3),
+  `requestWorkspaceSymbol` (decide at I2), the M5 gutter-kind check (I5)
+  and the read-only-editor-mode question (I4) — none asked yet.
+
 ## [1.14.0] — 2026-11-26 — GATE 3 car S1 CLOSED — the demo grows into the live showcase IN PLACE: the diff trio + F7 chords, the grammar door, typed DAP controls, and the `--tour` pin table
 
 ### Added

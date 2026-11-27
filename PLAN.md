@@ -2236,6 +2236,16 @@ own E1/E2 map.
 
 # GATE 3 — debt paydown and the live showcase (opened 2026-11-21)
 
+**STATUS (2026-11-28): CLOSED, with two cars DEFERRED by OWNER DECISION.**
+The ordered train defect pair → M10b → M8b → multi-observer → wheel-2 →
+S1 all CLOSED (1.9.2, 1.10.0, 1.11.0, 1.12.0, 1.13.0, 1.14.0 — every
+close ritual green, the S1 tour face MEASURED live on this host). S2
+and Py are DEFERRED, each carries its deferral record at its own
+section below; the deferral argument and the GATE 4 that replaced them
+live in the "# GATE 4" section at the end of this file. This is the
+sanctioned way an earlier gate releases a later one: the owner's call,
+written down, before any later-gate work starts.
+
 Everything in this gate was PRE-BOOKED: each debt item carries its own
 verbatim record in the sections above (the two recorded defects, the M8b
 and M10b follow-on lists, the CodeDocument multi-observer clause, the G3
@@ -4931,6 +4941,19 @@ the demo records), then the fresh out-of-tree ask as always.
 
 ### Car S2 — pydemo mirrors the showcase door-for-door
 
+**DEFERRED (owner decision 2026-11-28, not cancelled).** The car as
+designed below mirrors S1's showcase door-for-door and re-pins it from
+the wheel. Its tripwire VALUE (the two printed tables diffed
+leg-for-leg) only pays while the showcase-mirror story is the product
+showcase; the owner judged that story lost the dogfooding contest to
+GATE 4 (an IDE living IN the library finds API holes the mirror
+cannot). What survives regardless: pydemo stays the wheel smoke the
+close ritual already runs (headless green at every wheel-shipping
+close — that leg of S2 is ALREADY paid), and the attach-ctor lifetime
+question S1-4 recorded in PLAN stays open for whoever wants Python
+multi-view. REVISIT RULE: if a real Python consumer shows up, S2
+un-defers as pre-booked below, unchanged.
+
 argparse grows the SAME flags (`--diff`, `--lsp`, `--dap`, `--dap-arg`,
 `--dap-program`, `--tour`), the same Russian UX, the same status-bar
 visibility route. This car CANNOT precede car E (the DAP doors are the
@@ -4940,6 +4963,12 @@ against real clangd + lldb-dap is the gate-close ritual alongside
 `probe_dap.sh` and `probe_clangd.sh`.
 
 ### Car Py — the PyPI half (last, infra)
+
+**DEFERRED (owner decision 2026-11-28, rides the S2 deferral).** The
+CONTAINER pipeline keeps shipping wheels at every close (that half is
+the paid close ritual, unchanged); what defers is the test.pypi.org
+PUBLISH path below. Revisit when publishing actually matters to the
+owner.
 
 The staged `[tool.cibuildwheel]` config grows the missing before-all Qt
 bootstrap (the container trick — the PySide6 wheel ships no Qt headers;
@@ -4980,6 +5009,366 @@ painting stay "by design" where they are written.
    design; the gate-close ritual is the LIVE run (clangd + lldb-dap +
    gdb + dapfake all present), recorded in the CHANGELOG entry like the
    probe ritual's outcome was, or the gate may not close.
+
+# GATE 4 — the IDE dogfood train (opened 2026-11-28, owner decision)
+
+**STATUS (2026-11-28): cars I0+I1 CLOSED at 1.15.0** — the pair landed
+and closed as ONE version exactly as the version-rhythm record planned.
+The LEDGER rule paid its first fare: catch #1 (no public programmatic-
+selection door) was found by the app living only on the exported
+surface, written before any workaround, and CLOSED the same car
+additively (`CodeEditor::setSelection` public + tripwire; the a11y-
+channel workaround was NOT taken). The wheel half of the close ritual
+rode whole: the container rebuilt/repaired `qmn_native-1.15.0`, the
+`--codegen` rejected-log set rode a BOTH-WAYS diff against the archived
+1.13.0 baseline — 1824 lines, ZERO delta — and `setSelection` got a
+LIVE presence+behaviour pin against the REPAIRED wheel (callable
+through the wheel, produced the expected selection); pydemo's fourth
+literal + its headless smoke green. **I2 quick-open/palette is THE OPEN
+CAR.**
+
+**WHY (the owner's words, paraphrased):** a showcase that mirrors
+itself proves the surface is SELF-consistent; it does not prove the
+surface is USEFUL. The strongest test a text-editor library can get is
+an application living inside it — so the gate's product is a small but
+FULL IDE, `qmn-ide-demo`, built ONLY through the exported/public doors,
+while the real deliverable is what the walk exposes: API holes (the
+LEDGER), library seams worth promoting, and the binding shape those
+seams must keep. The IDE is a means; the honest library is the end.
+
+**CONSTANTS (never in question):** the frozen surface widens only
+additively; every public door speaks Shiboken-wrappable plain Qt types
+(car E's law: a Python-facing route for a callback rides a SIGNAL, not
+a `std::function`); a leg that cannot run prints as a skip, never as a
+pass; ctest is the far-side oracle where a far side exists (fakeserver/
+dapfake class — CI-built spawn IS allowed; clangd/live adapters are not
+CI guarantees, the `--lsp` no-guarantee law rides every new test face);
+no vision — every IDE face is pinned programmatically (state/numbers).
+
+**THE LEDGER rule (this gate's core ritual):** whenever the IDE needs
+a door the shelf does not have, the hole gets written in the ledger
+BEFORE any workaround; the fix lands as an ADDITIVE door in the car
+that needs it, with its own tripwires, and if the door crosses the
+wheel it rides the three-copies + rejected-log audit like every other
+crossing. Seeds already known from the S1-era surface audit (closed
+when a consumer actually asks):
+- `LspHub::requestDocumentSymbol` — the outline sidebar (I3);
+- `LspHub::requestWorkspaceSymbol` — symbol quick-open (decide at I2);
+- a possible M5 decoration KIND for gutter/git stripes (I5 — check what
+  the five shipped decoration records cover before declaring the hole);
+- a possible read-only editor mode for the task-OUTPUT panel (I4 —
+  check `CodeEditor`'s surface at I4 opening; if a door exists, the
+  output panel is a dogfooded editor; if not, ledger first).
+
+**LEDGER catch #1 (FOUND and CLOSED at car I1, 2026-11-28):** the panel's
+reveal (open the row's file, caret + selection on the match) hit a real
+hole — `CodeEditor::setSelection(anchor, caret)` was PRIVATE machinery:
+the frozen public surface carried only `selectAll`/`clearSelection` plus
+the M11 a11y text-interface `setSelection` channel for programmatic
+selection. The hole went into the ledger BEFORE any workaround, and the
+workaround (driving the a11y channel from app code) was NOT taken: the
+fix landed the same car as an ADDITIVE widening — the raw door that the
+a11y bridge and the diff machinery already route through became PUBLIC
+(contract written at the declaration: both ends clamped through
+`clampPos`, reversed ends legal because read/draw sort, the CARET is the
+second argument, D1 single-caret law — extra carets cleared, any edit
+chain broken, `cursorMoved` + `selectionChanged` fire on EVERY write
+including a collapse, the view scrolls itself). Tripwire:
+`tst_codeeditor::programmaticSetSelectionDoorReveals` (signals count,
+clamped/reversed/cross-line faces, the collapse face tells the truth).
+Wheel shape: a plain-Qt-typed door on the ALREADY-bound `CodeEditor` —
+m7's precedent, NO three-copies edit; the close-ritual `--codegen` audit
+must find it in the generated wrapper and its ABSENCE from the rejected
+log (both directions checked, as always).
+
+**LIBRARY-PROMOTION law (G1's precedent, stated general):** app code
+becomes a library when it earns a SECOND user — with one exception:
+code born headless and pure MAY start as a library on day one (the
+`src/search/` case, I1). A promoted/seeded library is QtCore-only
+(headless, benchmarkable, fuzzable — the core/diff class), keeps its
+public records plain-Qt-typed, and delivers results through SIGNALS on
+a QObject. Promotions happen at CAR BOUNDARIES with their own record —
+never mid-car surgery (this is what tempts refactor of `qmn_demo_app`
+mid-gate: resist, write the candidate down instead).
+
+**ctest shape:** every new lib grows its own guiless ctest entry (the
+textbuffer/diff precedent); the IDE app grows as STATIC lib + thin
+main (`qmn_ide_app` + `qmn-ide-demo`, the `qmn_demo_app`/`tst_demo`
+pattern) so its faces are drivable offscreen from `tst_ide`.
+
+**Version rhythm:** every car close bumps the package (Gate precedent);
+I0+I1 are planned to land and close as ONE version (1.15.0 target —
+the two cars are one shape: an app skeleton + the lib it consumes;
+revisit at close if I1 slips).
+
+## Train ordering (DECIDED 2026-11-28): I0 → I1 → I2 → I3 → I4 → I5
+
+### Car I0 — `qmn-ide-demo` skeleton: project folder, tree, tabs
+
+- New target pair in `src/app/ide/` (or `src/app/` siblings, mirror the
+  qmn-demo shape): `qmn_ide_app` STATIC lib + thin `qmn-ide-demo` main;
+  links `qmn::view` + `qmn::glue` (PRIVATE, like demo — no glue type in
+  an app-defined header beyond forward-decls).
+- The window: a sidebar dock (`QTreeView` over `QFileSystemModel` —
+  Qt's own tree, app code, nothing to promote; the qmn code is only
+  the open-on-double-click), the tab area (`CodeEditor` tabs), the
+  status bar (the SAME `messageChanged` visibility route the tour
+  reads — keep that channel honest for future tour legs), a project =
+  the folder from argv (`qmn-ide-demo <dir>`) or a folder dialog;
+  `.qmn/lsp.json` pickup and the `--lsp`/`--dap` door shapes ride
+  UNCHANGED from the demo.
+- FIRST REAL PRESSURE POINT, deliberately: the IDE keeps ONE tab per
+  path — opening the same file twice FOCUSES the existing tab. The
+  second tab-group story (same document, two views, ONE `didOpen`) is
+  car D's feature; the IDE is its first real consumer, and `tst_ide`
+  pins: double-open → one registration, one `didOpen` (the fakeserver-
+  style far side is unavailable in tst_ide — the pin rides the glue's
+  own `clientForUri`/registration reads, the tst_glue class), plus the
+  file-tree not double-listing.
+- I0 carries NO search, NO terminal (OUT OF SCOPE by owner decision —
+  a terminal drags PTY/pixel questions far from the library's honesty),
+  NO git (I5).
+- DoD: binary opens with a real project dir, tree-open → tab (offscreen
+  drivable), same-file double-open pin, headless `--exit-after-ms`
+  exit-0 face, ctest GAINS `ide` (offscreen; NO server spawn; the
+  no-guarantee law rides).
+
+**I0 CLOSED 2026-11-28 (rides the 1.15.0 pair-close) — what the code
+actually says:**
+- The pair landed as `src/app/` SIBLINGS (not an `ide/` subdir):
+  `qmn_ide_app` STATIC (`IdeWindow.cpp`) + thin `ide_main.cpp`;
+  `qmn_glue` + `qmn_search` linked PRIVATE — `tst_ide` compiles against
+  `IdeWindow.hpp` (glue/search types stay fwd-decl'd behind unique_ptrs,
+  the AGENTS app-header law) and never names one itself.
+- The project door `openProject(dir)` is EARLIER than the demo's
+  first-openPath root: the tree root, the session's workspace root and
+  the `.qmn/lsp.json` fold all land on this one door; the CLI face names
+  it from argv and refuses a FILE root LOUD (stderr + exit 1, measured).
+- The ONE-tab law pinned AS ADOPTED: a re-open FOCUSES (tab count stays,
+  the status bar says the focus happened — never silence), and a
+  LEXICAL variant of the same path (`dir/./file`) focuses the same tab
+  (tab key = the normalized absolute path). DEVIATION from the car
+  sketch, stated honestly: the sketch asked tst_ide to pin "one
+  registration, one didOpen" through glue registration reads — tst_ide
+  has NO such reading door (adding one was rejected: an observation door
+  the app itself does not need), so that face stays tst_glue's JOIN
+  territory and the IDE pin rides the tab-count + focus-message face.
+  When a later car gives the IDE a second-VIEW face, that is the moment
+  the JOIN story appears in the IDE with its own record — not now.
+- `tst_ide` (offscreen, `QTEST_MAIN`): 11 slots green — project door
+  round-trip, tab/language faces (session suffix table; unmapped suffix
+  honest plain), the failed-open face (false + non-modal status message),
+  one-tab + close/reopen (no squatter), the panel faces (see I1), and
+  the `--lsp` door slot mirrors tst_demo's law whole: the ONE hub slot
+  opens only UNCLAIMED languages, nothing ever spawns.
+- Headless faces measured: `qmn-ide-demo examples --exit-after-ms 300`
+  exit 0; a file as the project root exits 1 LOUD.
+
+### Car I1 — `src/search/`: the engine library + Find-in-Files panel
+
+- The FIRST new layer since the Gate-2 five: `src/search/`, export set
+  `qmn::search`, **QtCore ONLY** — headless like core/diff, its own
+  guiless ctest entry from day one (born-headless promotion exception,
+  stated above). The IDE app PRIVATE-links it (the `qmn_view`⟶
+  `qmn::diff` precedent's mechanism: internal export target is NOT
+  needed here — search is a real export set the app links directly).
+- TWO faces on one engine: (a) the PROJECT walk — bounded recursive
+  scan of the project dir with the walk CONTRACT pinned by tests:
+  hidden entries skipped, binary sniff (a NUL in the first read chunk
+  skips the file), size cap, hard-skips (`.git`), plus the user's
+  ignore globs later cars may add (NOT I1's question); (b) the
+  IN-BUFFER face over an open document's text — the same engine fed a
+  `QString` (the 0-based UTF-16-code-unit `[start,end)` law holds for
+  its offsets, exactly like everywhere else).
+- PUBLIC shape (wrappability from birth): records
+  `SearchQuery{text, caseSensitive, wholeWord, isRegex}`,
+  `MatchSpan{startCol, endCol}`, `FileMatch{filePath, line, spans,
+  preview}` — plain Qt types only; the searcher is a QObject with
+  `start(query, roots)` / `cancel()` / progress + results as SIGNALS
+  (car E's law — a Python-facing callback route is a signal); a bogus
+  REGEX pattern is a loud QUERY-REFUSAL record, never a crash and
+  never an empty-looking success. The fixed-string path never compiles
+  a regex (the perf path); wholeWord rides word-boundary handling on
+  the regex path.
+- TESTS are the heart (guiless, deterministic): property test against
+  a NAIVE `QString::indexOf`-style reference on a `QTemporaryDir`
+  corpus generated with a FIXED seed (the `tst_textbuffer` style), the
+  case/wholeWord/regex faces, the walk-contract faces (binary skip,
+  size cap, hidden skip), the cancel leg (a half-scan cancels and
+  reports honestly, NOT zero-results-as-success), and the UTF-16
+  column pins — a match AFTER an astral character must speak UTF-16
+  UNITS (this leg is what catches the byte-offset slip; the tree-sitter
+  2× trap's sibling class).
+- The PANEL (in the IDE): a query row (case/word/regex toggles) +
+  results tree; double-click opens the file (or focuses the tab) and
+  the caret lands + the selection reveals the match — pinned
+  offscreen through `tst_ide` (counts, caret, selection text). Status
+  bar: the Russian UX law keeps working (`N файлов, M совпадений,
+  K пропущено`).
+- Bounded perf face (a MEASURED record, not a frozen ctest pin):
+  `tools/bench_search.cpp` (the `bench_model` precedent) over a
+  generated corpus; the DoD records the measured number, and the
+  ctest pins the CAP behavior instead of wall-clock (the AGENTS
+  vacuous-pass style for timing).
+- DoD: ctest 8 entries (search guiless + ide offscreen both green),
+  the panel faces in tst_ide, the measured bench number in the record;
+  the engine scanned against the repo's OWN tree as a smoke whose
+  COUNT is a recorded measurement, not a pin (trees drift).
+
+**I1 CLOSED 2026-11-28 (rides the 1.15.0 pair-close) — the honest
+shape, code over sketch:**
+- `src/search/` shipped as sketched: QtCore-ONLY, real export set
+  `qmn::search` (core-shape install, NOT the internal_diff link-only
+  mechanism), the app PRIVATE-links it, `tst_search` GUITLESS from day
+  one. (The DoD's "ctest 8 entries" was a COUNT SLIP in the plan — the
+  head rode 7 entries; search + ide make NINE, all green.)
+- The public records deviate from the sketch in ONE way and the record
+  says so: `FileMatch{filePath, lines}` NESTS a per-line
+  `LineMatch{line, spans, lineText}` (the panel needs whole-file groups
+  and per-line rows; the sketch's flat line/spans/preview spelling
+  cannot carry a file's many lines). `lineText` IS the capped PREVIEW
+  (240 units + '…', cap+1 length; the CR of a CRLF line is stripped for
+  PRINT only — spans speak the raw between-`'\n'` slice). Query/refusal/
+  walk-knobs/stopReason prefixes all froze as written at the door
+  (header): `""`, `"query: …"`, `"root: …"`, `"cancelled"`,
+  `"budget: …"`; refusal faces emit `finished` SYNCHRONOUSLY inside
+  `start()` — the connect-before-start law written at the door, paid
+  once in the panel's CTOR.
+- A real semantic divergence CAUGHT AT WRITING TIME and kept as a named
+  tripwire (`tst_search::wholeWordNestedSlide`): the non-overlap law
+  binds ACCEPTED matches only — a REJECTED wholeWord occurrence must
+  SLIDE one position, never skip past its window ("a.a" over "xa.a.a":
+  the occurrence at 1 has a dirty left boundary, the nested one at 3 is
+  clean; jump-past-window answers ZERO hits, slide answers exactly
+  3-6). The fixed-string `indexOf` loop and the regex pattern-wrap face
+  (PCRE slides lookaround-failed starts by itself) agree at 3-6; the
+  naive reference carries its OWN slide loop — three mechanisms, one
+  answer, that is the pin. Documented seam kept OUT of the corpus on
+  purpose: regex `\w` with unicode properties covers combining MARKS,
+  which the shared letter/number/'_' boundary class does not — a face-
+  agreement question for the ledger IF a consumer ever needs marks.
+- `tst_search` (guiless): 19 slots — the FIXED-SEED (0xC0FFEE) corpus
+  vs a NAIVE per-position reference (the wholeWord-regex face pairs two
+  DIFFERENT mechanisms: the engine's lookaround-wrap vs the reference's
+  raw-iterator + manual boundary check + manual slide), the astral-
+  column UTF-16 legs (the tree-sitter-2× trap's sibling class), the
+  walk-contract faces (binary NUL sniff, stat-first size cap, hidden +
+  `.git` default-skip and their un-skipped faces, maxDepth, budget cap,
+  the cancel leg's honest "cancelled" never a clean zero), the
+  scanFile≡scanText face-agreement, and the synchronous-refusal +
+  reentry legs.
+- The PANEL (I1's half in the IDE): query row + case/word/regex toggles,
+  the results tree (file groups, matched-LINE leaves), rows → the engine
+  walk's own deterministic order (the engine sorts per-directory
+  codepoint-order, locale-INDEPENDENT — spelled inside the engine, not
+  the locale-aware `QDir::Name` sort); row activation opens-or-focuses
+  the file and reveals caret+selection through the PUBLIC view doors
+  (that is LEDGER catch #1 above, closed in this same car). Panel read
+  doors `searchResultRowCount/searchResultFileAt/searchResultLineAt/
+  searchSummary` are the tst_ide observation channel (app-level doors,
+  NOT library widenings — the engine keeps no row-flattening concept,
+  that is the panel's own model). `tst_ide` pins rows/lines out-of-range
+  honesty, the reveal faces (caret at span END, selectedText == the
+  needle), the refusal faces riding the engine's MACHINE reason verbatim
+  inside the Russian UX, and the panel-level cancel face ("остановлен ·
+  частичный", never the completed spelling).
+- The MEASURED perf record (`tools/bench_search.cpp`, the bench_model
+  precedent — release-built archive, this time `-fPIC`-linked: THIS TU
+  destructs inline QByteArray temporaries and a direct PC32 reference
+  to Qt's PROTECTED `QByteArray::_empty` gets a copy relocation the
+  linker REJECTS in a PIE link — the bare bench_model recipe does not
+  ride on that luck, the trap line sits at the tool header):
+  * generated corpus (seeded, 500 files × 400 lines ≈ 16.3 MB UTF-16,
+    "const" fixed-string, caps OFF): BEST of 3 event-loop-paced walks
+    **81 ms** (162 µs/file, 449 566 spans reported); pure `scanText`
+    face **73 ms** over the same corpus in one buffer;
+  * the repo's OWN tree smoke (working tree incl. `build/`, .git
+    default-skipped): **142 ms** best of 3, 1510 files scanned / 368
+    skipped / 16 241 matches, pure face 53.6 MB in 80 ms — a snapshot
+    measurement of one day's tree, NOT a pin (the DoD's own law).
+  ctest pins the CAP faces (budget/cancel/sizes), never wall-clock —
+  the vacuous-pass law rides the timing class.
+- The wheel crossing of `qmn::search` was NOT taken at this close: the
+  library is wrappable BY CONSTRUCTION (plain-Qt records, signal
+  routes — the header states it) but no consumer asked for a Python
+  face yet; the crossing is a three-copies entry whenever one does.
+
+### Car I2 stub — quick open + command palette
+
+`Ctrl+P` fuzzy file finder (rides I1's walker for the file list +
+app-local fuzzy scoring; the `qmn::fuzzy` promotion decision is taken
+AT this car: if quick-open AND the palette AND a search-boost all use
+the scorer, it promotes per the law — headless QtCore lib with a
+subsequence-soundness property test vs a brute-force reference, fixed
+seed). `Ctrl+Shift+P` over the window's own command registry. Symbol
+quick-open decides here: grep-style vs the ledger's
+`requestWorkspaceSymbol` door. Chord-table law: NEVER re-bind a frozen
+view chord (F7 is diff-nav since S1 — the IDE's palette chords must
+mask against the view's keymap table at I2 opening).
+
+### Car I3 stub — LSP depth + outline
+
+Rename (F2), references (land in the SAME results panel — the panel's
+second user, promotion pressure noted but a WIDGET is not a library),
+definition jump, code actions, formatting — ALL through the EXISTING
+nine `request*` doors (the FeatureHandler shape is fine in C++; nothing
+crosses to Python and the rejected-log diff must show ZERO new
+drop lines from I3's app code). The outline dock needs the ledger's
+`LspHub::requestDocumentSymbol` — the gate's first shelf widening:
+additive, plain-Qt record list, fakeserver far-side leg in tst_lsp
+(grows machine-by-machine, the inside-car rule), the three-copies +
+rejected-log run BEFORE deciding whether it crosses the wheel NOW or
+the door rides C++-only until a Python consumer asks (the honest
+default: door exists, wheel crossing is a MINOR shelf bump, decided at
+that car's close).
+
+### Car I4 stub — tasks + problem matcher
+
+`.qmn/tasks.json` (label/command/cwd/problemMatcher) — rides the
+ProjectSession config-fold precedent's file layout. The runner is app
+QProcess; the OUTPUT panel tries the dogfood bet (an editor view as
+the output pane IF the read-only surface exists — ledger otherwise).
+The problem matcher parses compiler-shaped lines into the SAME
+`FileMatch` records (the engine's third user — this is `src/search/`
+earning its keep as a lib) fed as diagnostics through the M5 door.
+`tools/` gets no new spawn rule: tst_ide drives one task against a
+CI-built fake command (the dapfake spawn class), and the repo-building
+itself is a MEASURED record (the ninja task run against this repo,
+errors deliberately seeded in a scratch file).
+
+### Car I5 stub — git gutter
+
+`git diff` SUBPROCESS (no libgit2 — the dependency bar stays what CI
+already ships) → the hunks compared with the editor's ORIGINAL side
+through `qmn::diff` (the layer earns a third user) → gutter stripes
+through the decoration API after checking whether the five shipped
+records already cover a line-stripe kind (ledger entry if not —
+additive, and M5 records are view-nested so the three-copies question
+fires immediately if it crosses). Git status colors in the file tree.
+BLAME is OUT (its own future train if ever). Tests run against a
+`QTemporaryDir` scratch repo (init/config/commit) — git IS
+CI-safe-when-built class, but the no-guarantee law still rides: the
+slot SKIPS honestly where git is absent, pinned skip, not a fake pass.
+
+### Gate 4 risks
+
+1. **Scope creep toward 'real VS Code'** — the train's product is the
+   library's honesty, not feature parity; anything that would BREAK a
+   frozen door stops at the door (the ledger grows; nothing else).
+2. **Mid-car promotion surgery** — the second-user temptation attacks
+   DURING a car (the results panel, the settings dialog, the tree);
+   promotions land only at car boundaries with their own record.
+3. **Search perf cliffs** — the walk caps/skips are ENGINE CONTRACT,
+   tested; wall-clock is a bench tool + a measured record, never a
+   flaky ctest pin (the recorded timing class).
+4. **ctest creep** — tst_ide must not quietly become a second
+   tst_glue-with-servers; spawn is legal only for CI-built far sides
+   (dapfake class), clangd/live adapters stay out.
+5. **UI without vision** — every IDE pin is state/numeric (the No-
+   vision law); 'looks right' is never a DoD.
+6. **Ledger rot** — an entry opened must close in a named car or be
+   explicitly carried; a hole found and not written down is worse than
+   the hole.
 
 ## Top risks
 

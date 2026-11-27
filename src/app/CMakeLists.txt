@@ -21,6 +21,25 @@ target_link_libraries(qmn_demo_app PRIVATE qmn_glue)
 qt_add_executable(qmn-demo
     demo_main.cpp)
 target_link_libraries(qmn-demo PRIVATE qmn_demo_app)
+
+# GATE 4 car I0: the IDE dogfood app — the SAME shape as the demo pair
+# (window in a static lib, thin main) so tst_ide drives the exact doors
+# the panel slots call, offscreen. The app is a CLIENT of the glue shelf
+# and of the car-I1 search library (the AGENTS clause: app targets link
+# qmn_glue; no glue type beyond fwd-decls in the app header) — PRIVATE
+# both, so tst_ide compiles against IdeWindow.hpp without ever naming a
+# glue or search type itself (the SearchSession/SearchQuery uses all
+# live in IdeWindow.cpp).
+qt_add_library(qmn_ide_app STATIC
+    IdeWindow.cpp)
+target_link_libraries(qmn_ide_app PUBLIC qmn_view)
+target_link_libraries(qmn_ide_app PRIVATE qmn_glue qmn_search)
+
+qt_add_executable(qmn-ide-demo
+    ide_main.cpp)
+target_link_libraries(qmn-ide-demo PRIVATE qmn_ide_app)
+target_compile_definitions(qmn-ide-demo PRIVATE
+    QMN_PACKAGE_VERSION="${PROJECT_VERSION}")
 # S1-4 (--tour): the CLI face's build-tree fixture GUESS needs the vendored
 # python .scm at run time — a configure-time path define (the tests/ face
 # hands tst_demo the very same path as QMN_TEST_PY_QUERY). Kept on the

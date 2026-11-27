@@ -16,6 +16,12 @@ qt_add_executable(tst_diff tst_diff.cpp)
 target_link_libraries(tst_diff PRIVATE qmn_diff Qt6::Test)
 add_test(NAME diff COMMAND tst_diff)
 
+# The search engine (GATE 4 car I1): guiless like textbuffer/diff (the
+# layer is QtCore-only — no QT_QPA_PLATFORM property, no display).
+qt_add_executable(tst_search tst_search.cpp)
+target_link_libraries(tst_search PRIVATE qmn_search Qt6::Test)
+add_test(NAME search COMMAND tst_search)
+
 # The 5th ctest entry (M8 machine 1, PLAN amended 2026-11-17): one binary
 # that grows machine by machine — protocol framing/transports/RpcClient
 # now, the QProcess fakeserver + LspClient tests with machine 2 into THIS
@@ -144,3 +150,14 @@ target_compile_definitions(tst_demo PRIVATE
 add_dependencies(tst_demo qmn_fakegrammar qmn_pygrammar)
 add_test(NAME demo COMMAND tst_demo)
 set_tests_properties(demo PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
+
+# GATE 4 car I0/I1: drives the qmn-ide-demo surface (IdeWindow) through
+# the same programmatic doors the docks/panel call - offscreen, no dialog
+# exec, and NO server ever spawns (the --lsp no-guarantee law rides: the
+# one hub slot opens only unclaimed languages). The test names no glue or
+# search type: IdeWindow.hpp keeps those behind fwd-decls, and the panel
+# read doors carry the observations.
+qt_add_executable(tst_ide tst_ide.cpp)
+target_link_libraries(tst_ide PRIVATE qmn_ide_app Qt6::Test)
+add_test(NAME ide COMMAND tst_ide)
+set_tests_properties(ide PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

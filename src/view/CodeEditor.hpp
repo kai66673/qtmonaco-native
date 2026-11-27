@@ -135,6 +135,19 @@ public:
     void selectAll();
     void clearSelection();
 
+    // GATE 4 car I1 ADDITIVE WIDENING (the LEDGER records the hole):
+    // the Find-in-Files reveal needed a programmatic ANCHOR+CARET
+    // selection and the frozen surface had only selectAll/clearSelection
+    // plus the M11 a11y text-interface channel. This door is the raw
+    // one both the a11y bridge and the diff machinery already route
+    // through, made public: both ends are CLAMPED text positions and
+    // may be reversed (painting and selectedText sort; `caret` is the
+    // ACTIVE end — position() returns it and the next keystroke moves
+    // it). A programmatic selection is single-caret (the D1 law: extra
+    // carets are cleared), ends any edit chain, fires cursorMoved +
+    // selectionChanged, and scrolls the view to the caret.
+    void setSelection(TextPosition anchor, TextPosition caret);
+
     // Clipboard (M1b). With no selection, copy/cut target the whole current
     // line (newline included) — Monaco semantics. paste() inserts the
     // clipboard text, replacing the selection, with CRLF normalized to '\n'.
@@ -1307,7 +1320,8 @@ private:
     TextPosition clampPos(TextPosition pos) const;
     void setCaret(TextPosition pos); // always collapses the selection
     void moveCaret(TextPosition target, bool extend);
-    void setSelection(TextPosition anchor, TextPosition caret);
+    // setSelection moved to PUBLIC in GATE 4 car I1 (the LEDGER record +
+    // contract comment ride the declaration in the selection block).
     bool deleteSelection(); // true if a selection was removed; pushes a
     // core undo group but appends NO UndoMark — the enclosing action owns
     // the mirror (captureEditMark + reconcileUndoMarks; see deleteLineAt,

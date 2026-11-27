@@ -5,7 +5,10 @@ Native code editor widget for Qt6, built from scratch on a raw `QWidget`
 QPlainTextEdit, no Chromium. Long-term hobby project; roadmap in `README.md`,
 phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
 
-## Current state (v1.14.0 — GATE 2 CLOSED 2026-11-21, GATE 3 cars 0/B/C/D/E/S1 CLOSED) — gates and the frozen surface
+## Current state (v1.15.0 — GATE 3 CLOSED 2026-11-28 with S2/Py DEFERRED
+by owner decision; **GATE 4 (the IDE dogfood train) IS THE OPEN TRAIN** —
+cars I0+I1 CLOSED at this version, I2 is the open car) — gates and the
+frozen surface
 
 - Gate 1 (editor v1) froze the public API at tag `v1.0`; Gate 1.5 (usability
   train M20–M24) closed 2026-11-12 at tag `v1.5.0`; **GATE 2 CLOSED
@@ -53,15 +56,54 @@ steps PROBE-OK on clangd 23.1.5) →
   walk, presence-shaped clangd/live-adapter legs; exit NONZERO at the
   first failed pin, honest SKIP reasons; a LIVE ritual, NEVER a ctest
   entry, while tst_demo pins the TABLE with the server legs forced
-  off)** → S2 (pydemo
-  mirrors it door-for-door — THE OPEN CAR) → PyPI/cibuildwheel. Grapheme segmentation
+  off)** → S2 and Py are **DEFERRED by owner decision 2026-11-28**
+  (the showcase-mirror story lost the dogfooding contest — the
+  deferral + revisit records sit at their PLAN sections; pydemo keeps
+  riding its headless close-ritual smoke either way) — **GATE 4 IS THE
+  OPEN TRAIN since 2026-11-28: the IDE dogfood train, `qmn-ide-demo`
+  living ONLY on the exported surface; the deliverable is the LEDGER
+  of API holes and the headless QtCore-only library seams it earns
+  (first: `src/search/`); **cars I0+I1 CLOSED at 1.15.0 (2026-11-28,
+  the pair-close as planned): I0 = the IDE skeleton — `qmn_ide_app`
+  STATIC lib + thin `ide_main.cpp`, ONE project door (tree root +
+  workspace root + `.qmn/lsp.json` fold on one door), the
+  ONE-tab-per-path FOCUS law, the loud CLI root refusal, tst_ide's 11
+  offscreen slots with the no-spawn law riding tst_demo's shape whole;
+  I1 = the QtCore-only `src/search/` engine (a REAL export
+  `qmn::search`, the paced SearchSession walk over signals,
+  synchronous loud refusals, the wholeWordNestedSlide tripwire —
+  REJECTED matches SLIDE, never jump; tst_search's 19 guiless slots =
+  the naive-reference property pair on a fixed seed) + the IDE's
+  Find-in-Files panel (rows/refusals/cancel/reveal pinned in tst_ide;
+  the measured bench record: 81 ms generated corpus / 142 ms repo
+  tree — the caps pinned in ctest, never wall-clock) — and **LEDGER
+  catch #1 found and CLOSED the SAME car: `CodeEditor::setSelection`
+  went PUBLIC** (the additive reveal channel; tripwire
+  `tst_codeeditor::programmaticSetSelectionDoorReveals`; m7's
+  no-three-copies rule rode); ctest is now NINE entries (`search`
+  guiless + `ide` offscreen)** → **I2 quick-open/palette is THE OPEN
+  CAR** → I3 LSP depth + outline (first shelf widening
+  planned: `LspHub::requestDocumentSymbol`) → I4 tasks + problem
+  matcher → I5 git gutter; NO terminal by owner decision; the
+  frozen-surface/additive + wrappability + skip-honesty laws ride
+  UNCHANGED** → Grapheme segmentation
   is OWNER-EXCLUDED from this gate (its own future train — the README
   not-implemented record stays). The full design record is the PLAN.md
   "GATE 3" section — read it (and the "GATE 2" records it consumes)
   before starting a car. Never start work for a later gate while an
   earlier one is open.
 - The frozen surface widens **only additively** (Gate 1.5 precedent): no new
-  view mapping/geometry primitives. The M5 decoration API already covers
+  view mapping/geometry primitives. **GATE 4 LEDGER catch #1 (car I1,
+  2026-11-28) made the first such widening actually NEEDED:
+  `CodeEditor::setSelection(anchor, caret)` moved from PRIVATE to PUBLIC**
+  — the raw door the a11y bridge and the diff machinery already routed
+  through, now the Find-in-Files reveal channel (contract at the
+  declaration: clamped ends, reversed ends sort, second argument is the
+  CARET, D1 single-caret, cursorMoved+selectionChanged fire every write;
+  tripwire `tst_codeeditor::programmaticSetSelectionDoorReveals`). Plain-
+  Qt-typed on an already-bound class: NO three-copies edit (m7
+  precedent); the close `--codegen` audit must find the door WRAPPED and
+  absent from the rejected log. The M5 decoration API already covers
   diagnostics, breakpoints and inlay hints. Two sanctioned Gate-2 deviations
   (decided 2026-11-15, both in PLAN): the `CodeEditor::buffer_` value member
   moves into `CodeDocument` (ownership surgery, not API surgery), and the
@@ -133,7 +175,15 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
   child QObjects, `HighlightEngine`) — core + QtWidgets + PRIVATE vendored
   tree-sitter (it never crosses core or the public view API).
 - `src/app/` — view only (`qmn-spike` bench/spike harness and `qmn-demo`
-  tabbed demo app). `qmn-demo`'s window/dialog logic lives in the
+  tabbed demo app; since GATE 4 car I0 also the `qmn-ide-demo` IDE pair —
+  same shape: window in the `qmn_ide_app` STATIC lib, thin `ide_main.cpp`,
+  `tst_ide` drives it offscreen; the IDE links `qmn_glue` + `qmn_search`
+  PRIVATE and its header keeps both behind fwd-decls).
+  **GATE 4 car I1 note: the app layer may link
+`qmn::search` directly (the app IS its consumer) — and the demo's tab
+  pair keeps its OWN `readTextFile` copy until a third home or a bug-fix
+  divergence promotes it (promotion law: car boundaries only, never
+  mid-car surgery).** `qmn-demo`'s window/dialog logic lives in the
   `qmn_demo_app` STATIC lib (`demo_main.cpp` is a thin main) because
   `tst_demo` links the lib and drives it offscreen. **G1 promotion
   (2026-11-21) retired the old M8 amendment:** the hub is no longer app
@@ -170,6 +220,16 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
   `qmn::internal_tree_sitter` mechanism (internal export target, link-only,
   consumers never link it themselves). `CodeDocument` (M25) joins
   `src/view/` as an editor-owned child QObject and owns the `TextBuffer`.
+- `src/search/` — **QtCore ONLY** (GATE 4 car I1, 2026-11-28: the first
+  new layer since the Gate-2 five; the promotion law's born-headless
+  exception): the Find-in-Files engine (pure `Engine::scanText/scanFile`
+  faces + the paced `SearchSession::start/cancel` walk over signals). A
+  REAL export set `qmn::search` (the core-shape install, NOT link-only
+  like internal_diff — the IDE app IS the consumer and links it
+  directly, PRIVATE); its records/queries speak plain Qt types with
+  SIGNAL result routes (wrappable from birth, but the wheel crossing is
+  NOT taken until a Python consumer asks). The view/core know nothing of
+  it; only `qmn_ide_app` links it today.
 - `pydemo/` — a uv project, NOT built by CMake: the Python analog of
   `qmn-demo` running on the shipped wheel (path dep into gitignored
   `dist/`; `uv.lock` stays uncommitted). Mirrors the C++ demo door-for-door
@@ -304,8 +364,12 @@ ninja -C build
 ctest --test-dir build --output-on-failure
 ```
 
-Seven ctest tests: `textbuffer` (core property tests), `diff` (the pure
-line-diff engine, M10), `lsp` (M8: JsonFraming + transports + RpcClient, then
+Nine ctest tests (GATE 4 pair-close 2026-11-28): `textbuffer` (core
+property tests), `diff` (the pure
+line-diff engine, M10), `search` (I1: the qmn::search engine — naive-
+reference property pair on a fixed-seed corpus, the walk-contract/cancel/
+refusal faces; GUITLESS like textbuffer/diff, the layer is QtCore-only),
+`lsp` (M8: JsonFraming + transports + RpcClient, then
 the fakeserver/LspClient/DocumentSyncer/LspHub machines — this binary GROWS
 machine by machine through M8, no further ctest entries inside the car),
 `glue` (G2: `ProjectSession` over REAL editors — resolution, registry,
@@ -319,7 +383,12 @@ a ctest entry, its exit code is the far-side oracle), `codeeditor`
 since D4 one slot drives the `--dap` door against `$<TARGET_FILE:dapfake>`
 — spawning IS allowed here, unlike the `--lsp` door, because dapfake is
 CI-built; the LIVE-adapter ritual `tools/probe_dap.sh` is manual, never
-CI, but car 4 may not close without it). Two wire facts pinned by the
+CI, but car 4 may not close without it), `ide` (I0/I1: drives the
+qmn-ide-demo surface — project door, one-tab focus law, close/reopen
+face, the Find-in-Files panel rows/refusals/cancel/reveal — through the
+same programmatic doors the docks call; NO server ever spawns: the
+one-hub-slot-opens-only-unclaimed-languages law rides tst_demo's shape
+whole). Two wire facts pinned by the
 car-4 live probe (2026-11-21, both adapters): on the DAP wire
 `initialized` is the **ADAPTER'S** event — the client NEVER sends event
 frames (a client-side one CRASHES gdb's python DAP server; dapfake exits
@@ -329,11 +398,11 @@ frames (a client-side one CRASHES gdb's python DAP server; dapfake exits
 `setBreakpoints` pushes but never gates it on the `launch` answer
 (gdb answers `launch` only AFTER `configurationDone` — gating there
 deadlocks the two sides).
-`textbuffer` and `diff` are guiless; since M8 machine 4 the `lsp` binary
+`textbuffer`, `diff` and `search` are guiless; since M8 machine 4 the `lsp` binary
 drives real `CodeEditor`s too (and D3 flipped `dap` to
 `QTEST_MAIN`), so ctest sets
-`QT_QPA_PLATFORM=offscreen` for `lsp`, `glue`, `dap`, `codeeditor` and `demo`
-(via `set_tests_properties`). Run one test:
+`QT_QPA_PLATFORM=offscreen` for `lsp`, `glue`, `dap`, `codeeditor`, `demo`
+and `ide` (via `set_tests_properties`). Run one test:
 
 ```bash
 ctest --test-dir build -R codeeditor --output-on-failure
@@ -565,7 +634,14 @@ git worktree add /tmp/wt-base HEAD~1 && cmake -S /tmp/wt-base -B /tmp/wt-base/bu
 
 The perf-table document (61 MiB / 1,000,001 lines) is regenerable
 deterministically — recipe in `README.md` "Model micro-benchmark".
-`tools/` also has `bench_highlight.cpp` and `bench_ts_split.cpp`.
+`tools/` also has `bench_highlight.cpp` and `bench_ts_split.cpp` — and
+since I1 `bench_search.cpp` (the qmn::search walk + pure-scanText faces;
+its link needs `-fPIC` on the Arch host: the TU destructs inline
+QByteArray temporaries and a direct PC32 reference to Qt's PROTECTED
+`QByteArray::_empty` becomes a REJECTED copy relocation in a PIE link —
+the bare bench_model recipe does not ride on that luck; the measured
+numbers ride PLAN's I1 close record, ctest pins the CAPS, never
+wall-clock).
 
 ## Reference points
 

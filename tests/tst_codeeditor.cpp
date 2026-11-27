@@ -94,6 +94,7 @@ private slots:
     void mouseDragSelectsBackwards();
     void selectAllThenTypeReplacesAll();
     void escapeClearsSelection();
+    void programmaticSetSelectionDoorReveals(); // GATE 4 I1 (LEDGER widening)
     void graphemeSafeBackspaceAndDelete();
 
     void graphemeArrowKeysMoveOneCluster();
@@ -1022,6 +1023,51 @@ void TestCodeEditor::escapeClearsSelection()
     // Without a selection Escape propagates (ignored) — smoke: nothing breaks.
     QTest::keyClick(editor, Qt::Key_Escape);
     QVERIFY(!editor->hasSelection());
+}
+
+void TestCodeEditor::programmaticSetSelectionDoorReveals()
+{
+    // GATE 4 car I1 LEDGER widening: setSelection(anchor, caret) is now
+    // PUBLIC (the Find-in-Files reveal channel — the frozen surface had
+    // selectAll/clearSelection plus the a11y channel only). The pins
+    // read the door's documented contract WHOLE: ends are CLAMPED, ends
+    // may be REVERSED (read/draw sorts), the CARET is the second
+    // argument (position() returns it), cursorMoved + selectionChanged
+    // fire on EVERY write through the door — the collapse face included.
+    editor->setPlainText(QStringLiteral("hello\nworld"));
+    QSignalSpy cursorSpy(editor, &CodeEditor::cursorMoved);
+    QSignalSpy selSpy(editor, &CodeEditor::selectionChanged);
+
+    editor->setSelection({0, 0}, {0, 3});
+    QCOMPARE(cursorSpy.count(), 1);
+    QCOMPARE(selSpy.count(), 1);
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 3})); // the
+    // ACTIVE end rides the second argument (the next keystroke moves it)
+    QCOMPARE(editor->selectedText(), QStringLiteral("hel"));
+    QCOMPARE(editor->selectedLength(), 3);
+
+    // Reversed ends are LEGAL and sort for reading — the caret still
+    // lands on the second argument:
+    editor->setSelection({0, 5}, {0, 2});
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+    QCOMPARE(editor->selectedText(), QStringLiteral("llo"));
+
+    // The clamp is setPosition's clampPos law (the panel hands
+    // line-local spans; the door is general and cross-line):
+    editor->setSelection({0, 0}, {1, 99});
+    QVERIFY(editor->hasSelection());
+    QCOMPARE(editor->selectedText(), QStringLiteral("hello\nworld"));
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{1, 5}));
+
+    // A zero-width pair COLLAPSES (the caret sits, no selection) — and
+    // the write still tells the truth on the signals:
+    editor->setSelection({0, 2}, {0, 2});
+    QVERIFY(!editor->hasSelection());
+    QCOMPARE(editor->position(), (qmn::view::TextPosition{0, 2}));
+    QCOMPARE(cursorSpy.count(), 4);
+    QCOMPARE(selSpy.count(), 4);
 }
 
 void TestCodeEditor::graphemeSafeBackspaceAndDelete()
@@ -10322,10 +10368,11 @@ void TestCodeEditor::foreignEditMapsBystanderCaretAndSelection()
     QCOMPARE(selSpy.count(), 0);
 
     // A selection straddling the insert point survives: the end strictly
-    // RIGHT of the insert shifts, the end left of it stays. (The raw
-    // selection doors are private machinery — the a11y text-interface
-    // setSelection channel is this file's programmatic-selection door,
-    // cf. the M11 pins.)
+    // RIGHT of the insert shifts, the end left of it stays. (The a11y
+    // setSelection channel is what THIS file used before GATE 4 car I1
+    // and still exercises here — cf. the M11 pins; since I1 the RAW
+    // door is public too and programmaticSetSelectionDoorReveals pins
+    // it directly.)
     auto* ti = QAccessible::queryAccessibleInterface(editor)->textInterface();
     QVERIFY(ti);
     ti->setSelection(0, 3, 8); // offsets on the OWNER (the bystander here)
