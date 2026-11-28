@@ -66,11 +66,16 @@ decision, and GATE 4 — the IDE dogfood train — is now the open train: cars
 I0+I1 (1.15.0) shipped `qmn-ide-demo`, a second app that lives ONLY on the
 exported surface, plus the QtCore-only `src/search/` Find-in-Files library
 it earned; car I2 (1.16.0) added quick open + the command palette and the
-second born-headless library the scorer earned (`src/fuzzy/`); and car I3
+second born-headless library the scorer earned (`src/fuzzy/`); car I3
 (1.17.0) took the IDE to LSP depth — definition, references, rename, code
 actions, formatting and the outline dock — with ONE new shelf door
 (`LspHub::requestDocumentSymbol`, the tenth feature sibling) and zero new
-view API.
+view API; and car I4 (1.18.0) shipped TASKS + THE PROBLEM MATCHER — a
+`.qmn/tasks.json` fold, a `QProcess` runner that is NOT a terminal, the
+output pane as a REAL read-only `CodeEditor`, two matchers whose regex
+arithmetic makes the cross-refusal symmetric, and problems as the results
+panel's third producer plus the gutter's tagged diagnostics feed — with
+ZERO new glue, ZERO new library and ZERO new view API.
 
 ## Layout & layering
 
@@ -100,12 +105,15 @@ src/app/    qmn-spike  — demo/bench harness, depends on view
             qmn-demo   — full demo app: tabbed editors + settings dialog
             (links qmn_glue PRIVATE for the --lsp door; no glue type ever
             crosses its headers beyond a forward-decl)
-            qmn-ide-demo — GATE 4's IDE dogfood pair (I0+I1+I2+I3): project
+            qmn-ide-demo — GATE 4's IDE dogfood pair (I0…I4): project
             tree, tabs (one tab per path), Find-in-Files over qmn::search
-            (also fed by Shift+F12 references), quick open (Ctrl+P) +
-            command palette (Ctrl+Shift+P) over the qmn::fuzzy scorer, and
-            the LSP-depth set — F12 definition, F2 rename, Ctrl+. code
-            actions, Shift+Alt+F formatting, the OUTLINE dock; the window
+            (also fed by Shift+F12 references AND the task problem matcher),
+            quick open (Ctrl+P) +
+            command palette (Ctrl+Shift+P) + the task picker over the
+            qmn::fuzzy scorer, the LSP-depth set — F12 definition, F2 rename,
+            Ctrl+. code actions, Shift+Alt+F formatting, the OUTLINE dock —
+            and TASKS: a `.qmn/tasks.json` fold, a QProcess runner, a real
+            read-only editor as the output pane; the window
             lives in the qmn_ide_app STATIC lib + thin ide_main.cpp,
             qmn_glue/qmn_search/qmn_fuzzy linked PRIVATE, all behind
             fwd-decls
@@ -135,8 +143,12 @@ ctest --test-dir build          # core tests need no display
 ./build/src/app/qmn-demo [files...]   # tabbed demo: Файл->Открыть…, Настройки
 ./build/src/app/qmn-ide-demo <dir>    # GATE 4 IDE: project tree + tabs +
                                       # Find-in-Files + quick open (Ctrl+P)
-                                      # + palette (Ctrl+Shift+P) — a FILE as
-                                      # the project fails loud, exit 1
+                                      # + palette (Ctrl+Shift+P) + tasks
+                                      # (Ctrl+Shift+B / Ctrl+Shift+R) — a
+                                      # FILE as the project fails loud, exit
+                                      # 1; --task LABEL runs ONE configured
+                                      # task and the CLI's exit code IS the
+                                      # task's (a task NEVER auto-runs)
 ```
 
 Headless smoke/bench run:
@@ -162,7 +174,7 @@ ride a queued DAP control walk (the flags without `--dap` fail loud), and
 `tst_demo` pins the table itself with the server legs forced off). `--lsp`
 and `--dap` stay the off-by-default doors they were.
 
-The IDE doors (GATE 4 cars I0+I1+I2): `qmn-ide-demo <project-dir>` is the
+The IDE doors (GATE 4 cars I0…4): `qmn-ide-demo <project-dir>` is the
 first consumer that lives ONLY on the exported surface — project dock (Qt's
 own QFileSystemModel tree), editor tabs (ONE tab per path: re-opening
 FOCUSES), and a Find-in-Files panel over the QtCore-only `src/search/`
@@ -178,7 +190,30 @@ additive answer: names only, contents never read) and scores with the
 second born-headless library `src/fuzzy/` (score DESC, ties by path); the
 command palette (`Ctrl+Shift+P`) runs the window's own command registry;
 the popup's Esc is child-scoped so the view's frozen Escape stays the
-editor's own. `--lsp` is the same off-by-default door as the demo's.
+editor's own. Car I3 put the IDE at LSP depth over the shelf's feature doors:
+definition (`F12`), references (`Shift+F12` — the SAME results panel, with
+`resultsProducer()` naming who owns it), rename (`F2`, applied as ONE undo
+group; a refusal keeps the overlay open), code actions (`Ctrl+.` — v1 never
+runs a server's arbitrary command, so a command-only row stays visible and
+refuses through the applier), formatting (`Shift+Alt+F`) and the outline
+dock (the refresh policy is the app's: open / tab switch / a 600 ms edit
+debounce / the dock button / a palette command — never the hub's feed).
+Car I4 added TASKS + THE PROBLEM MATCHER: `.qmn/tasks.json` next to
+`lsp.json` (labels, a command + args, an optional cwd, a problem matcher),
+a `QProcess` runner that is deliberately NOT a terminal (one-shot, no shell,
+no PTY, no stdin, stdout+stderr merged in true arrival order, one run at a
+time, NEVER auto-run, terminate→kill grace, dies at a project switch and at
+window close), the OUTPUT PANE as a real read-only `CodeEditor` (a build
+log gets the same wrap, selection and search as the editor), task pick
+(`Ctrl+Shift+R`) / run default (`Ctrl+Shift+B`) / stop, and TWO matchers
+(`gcc`, `msvc`) that refuse each other's rows by construction — the noise a
+real build prints stays text, and a compiler naming a file that no longer
+exists stays VISIBLE with `openFile`'s own loud refusal at the reveal.
+Problems land in the same results panel (its THIRD producer) and in the
+gutter under the M5 diagnostics feed, tagged so a clear restores whatever
+another producer owned. `--task LABEL` / `--task-default` is the CLI face,
+and its exit code IS the task's (`1…255` verbatim, everything else → 1 — a
+wrapper that reports success for a failing build is a lie).
 
 ### Python demo (pydemo/)
 
@@ -499,10 +534,48 @@ terminal by owner decision.
       (no view click-out door); `requestWorkspaceSymbol` STILL unshipped —
       no I3 feature asked for a workspace-wide list, it rides to the car
       that asks
-- [ ] Car I4 — tasks + problem matcher (THE OPEN CAR; ledger question: a read-only
-      editor mode for the output panel)
-- [ ] Car I5 — git gutter (ledger question: an M5 gutter-stripe kind —
-      check the five decoration records before declaring)
+- [x] Car I4 — tasks + problem matcher (CLOSED, 1.18.0): `.qmn/tasks.json`
+      read by APP code at the ONE config door (tree root + workspace root +
+      `lsp.json` + `tasks.json`), a `QProcess` runner that is NOT a terminal
+      (one-shot, no shell/PTY/stdin, `MergedChannels` for TRUE arrival order,
+      one run at a time, NEVER auto-run, terminate→kill grace, dies at a
+      project switch and at window close), the OUTPUT PANE as a real
+      `CodeEditor` under the M19 read-only lock (readOnly is an OPTIONS knob —
+      the view's own setter stays private; the lock refuses typing/undo/redo,
+      copy + selection + the programmatic replace stay free), a paced
+      whole-text replace with a 2000-line tail cap + VISIBLE hidden count (the
+      APPEND door NOT taken — the close MEASURED the replace: ~183 µs at the
+      cap, ~0.09 µs/line, so a 60 ms burst is ~0.4 % of a core; the tail
+      follow is the superlinear half, which is the real argument for the cap),
+      two matchers `gcc`/`msvc` (+ `none`) refusing each other's rows by
+      REGEX ARITHMETIC (no name table), the noise a real build prints staying
+      TEXT, the PHANTOM row visible with `openFile`'s own refusal at the
+      reveal, and problems as the results panel's THIRD producer
+      (`resultsProducer()` gained "problems"; severity/message app-side, the
+      search records untouched) plus the M5 feed tagged `source = "qmn-tasks"`
+      riding the DapHub merge/restore posture — with `LspHub`'s whole-list
+      `published` paint EVICTING task rows RECORDED as the coexistence limit,
+      never pinned as a pass. THREE caps are class constants a test can name
+      (2000 pane / 500 panel rows / 2000 feed — the panel cap never caps the
+      gutter), the skip faces are COUNTED AND SHOWN, and the new mutation
+      control on the panel cap says the pin is load-bearing. `qmn::fuzzy`'s
+      THIRD user is the task picker (third popup on the I2 overlay law), SIX
+      palette appends (10 → 16), TWO new chords (Ctrl+Shift+B / Ctrl+Shift+R)
+      both mask-free. ZERO glue, ZERO new library, ZERO new view API: the
+      `--codegen` rejected-FUNCTION sets are byte-identical when sorted (1825
+      lines) and the generated sets IDENTICAL at 47 files, ZERO app lines,
+      shelf literal 1.2.0. Far side: `tests/faketask/` (CI-built,
+      `QMN_TEST_FAKE_TASK`, exit code the oracle, it WRITES the file its own
+      diagnostics name) — and NO PATH COMPILER is EVER spawned by ctest; the
+      real-toolchain story is the live ritual (real g++: 2 rows from 8 lines;
+      the matcher vs a naive pass over the SAME real build text: 9 vs 9).
+      THREE fixes the drills earned: ONE Esc QAction per popup (a second made
+      the shortcut map AMBIGUOUS — reproduced), the project-switch reset ORDER
+      (retire the finished run's faces, THEN kill), and the paced replace's
+      selection reset documented. The CLI's exit code IS the task's. tst_ide
+      28 → 44 slots; ctest stays TEN
+- [ ] Car I5 — git gutter (THE OPEN CAR; ledger question: an M5 gutter-stripe
+      kind — check the five decoration records before declaring)
 
 Out of scope by design: vim mode. The `set_vim_mode_enabled` setter is still
 exposed by the Python binding for API compatibility, but only warns (see

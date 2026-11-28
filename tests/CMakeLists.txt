@@ -55,6 +55,18 @@ set_target_properties(fakeserver PROPERTIES WIN32_EXECUTABLE FALSE
 target_compile_definitions(tst_lsp PRIVATE
     QMN_TEST_LSP_SERVER=\"$<TARGET_FILE:fakeserver>\")
 
+# The TASK faketask (GATE 4 car I4): a tests support binary, NOT a ctest
+# entry — the fakeserver/dapfake sibling for the task runner. tst_ide's task
+# slots spawn it through the IDE's OWN runner (the command path rides the
+# .qmn/tasks.json the slot writes), its modes travel in argv, and its exit
+# code is the far-side oracle. NO PATH COMPILER IS SPAWNED BY CTEST — the
+# problem matcher's subject is this binary's compiler-SHAPED TEXT (PLAN's I4
+# spawn law); the real-compiler story is a measured live ritual, never CI.
+qt_add_executable(faketask faketask/main.cpp)
+target_link_libraries(faketask PRIVATE Qt6::Core)
+set_target_properties(faketask PROPERTIES WIN32_EXECUTABLE FALSE
+                                          MACOSX_BUNDLE FALSE)
+
 # The 6th ctest entry (G2 of the glue shelf, PLAN "the glue shelf +
 # ProjectSession"): the document session over REAL CodeEditors. Offscreen
 # (the editors are real widgets); NO server ever spawns — the claimed-
@@ -172,8 +184,12 @@ set_tests_properties(demo PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 # window's own read doors carry the observations.
 qt_add_executable(tst_ide tst_ide.cpp)
 target_link_libraries(tst_ide PRIVATE qmn_ide_app Qt6::Test)
-add_dependencies(tst_ide fakeserver) # the spawn target must exist at run time
+add_dependencies(tst_ide fakeserver faketask) # spawn targets must exist at run
+                                              # time (I4: the task runner's
+                                              # far side joins the I3 grant's
+                                              # family)
 target_compile_definitions(tst_ide PRIVATE
-    QMN_TEST_LSP_SERVER=\"$<TARGET_FILE:fakeserver>\")
+    QMN_TEST_LSP_SERVER=\"$<TARGET_FILE:fakeserver>\"
+    QMN_TEST_FAKE_TASK=\"$<TARGET_FILE:faketask>\")
 add_test(NAME ide COMMAND tst_ide)
 set_tests_properties(ide PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

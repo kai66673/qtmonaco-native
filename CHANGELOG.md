@@ -3,6 +3,228 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.18.0] — 2026-11-28 — GATE 4 car I4 CLOSED — TASKS + THE PROBLEM MATCHER in the IDE (`.qmn/tasks.json`, a `QProcess` runner that is NOT a terminal, the output pane as a REAL read-only `CodeEditor`, `gcc`/`msvc` matchers that refuse each other by regex arithmetic, problems as the results panel's THIRD producer + the tagged gutter feed), the `tests/faketask` far side joins the CI-built spawn family, and ZERO new glue surface / ZERO new library / ZERO new view API
+
+### Added
+- **`.qmn/tasks.json`, read by APP code at the ONE config door** (the tree
+  root + the workspace root + `lsp.json` + `tasks.json` — the shelf is not
+  asked to read an app's config file). Schema: `label`, `command`, `args?`,
+  `cwd?` (default = the project root), `problemMatcher?` (default `gcc`, the
+  `${WORKSPACE_ROOT}` token expands in `args` and `cwd`). The refusals are
+  LOUD and whole-config, never partial: a task missing `label`/`command`, a
+  duplicate label, TWO `"default": true` rows, an unknown matcher name — all
+  refuse the whole read, and the refusal text rides `taskConfigSummary()` and
+  the run face VERBATIM (an ask never paraphrases another door's answer).
+  Unknown KEYS are ignored; a missing file is zero tasks in silence.
+- **The runner — `QProcess` in the app, deliberately NOT a terminal** (the
+  owner's NO-TERMINAL decision made concrete): one-shot and
+  run-to-completion, NO shell (no `sh -c`), no PTY, no stdin (a task that
+  wants input hangs and STOP is its answer, said out loud), stdout+stderr
+  MERGED in true arrival order (`QProcess::MergedChannels` — the opening
+  record's "per-line stream mark" clause DIED at code: a mark needs the
+  channels separate and separate channels carry no cross-stream order), ONE
+  run at a time (a second ask is a refusal, never a queue), NEVER auto-run
+  (chord, picker row, palette command or the CLI ask), terminate → kill with
+  a grace, dies at a project switch and at window close. Two honest faces
+  where the opening sketch was wrong: a SIGKILL'd child has NO voice, so the
+  child's witness is only on the `terminate()` leg (faketask catches SIGTERM
+  and prints `TERM-CAUGHT` into the pane) while an escalated kill's witness
+  is the app's own face (`kTaskExitCrashed` + "остановлена (пришлось убить)"),
+  pinned AS the app's verdict; and the run's truths ride TWO doors —
+  `taskConfigSummary()` (the config read) and `taskRunSummary()` (the run).
+- **THE OUTPUT PANE IS A REAL `CodeEditor` UNDER THE M19 READ-ONLY LOCK** —
+  the car's dogfood bet, PAID. `options()->setReadOnly(true)` (readOnly is an
+  OPTIONS knob; `CodeEditor::setReadOnly` stays PRIVATE — ZERO view API added
+  to get here), soft wrap on. `tst_ide` pins the lock on that real editor:
+  typing, undo and redo are refused; selection, copy and the programmatic
+  replace stay free.
+- **A paced WHOLE-TEXT REPLACE with a 2000-line tail cap and a VISIBLE
+  hidden count** — the APPEND door NOT taken, and the measurement (below) is
+  why. One replace per 60 ms burst plus a final one at the run's end; the
+  newest 2000 lines are kept and the hidden count is a face
+  (`taskOutputHiddenLines()`), the skip-honesty law I2 froze. The tail follow
+  rides the I1 public `setSelection` + the view's own `revealAt(…, Minimal)`.
+- **TWO matchers, `gcc` and `msvc` (+ `none`)**, and the cross-refusal is
+  REGEX ARITHMETIC, not a name table — the gcc pattern cannot match an msvc
+  row and the msvc pattern cannot match a gcc row, so each family refuses the
+  other by construction and both directions are pinned. The noise a real
+  build prints stays TEXT (header/`In file included from`, the caret lines,
+  `collect2:`, `In function`/`At global scope`, an option-noise line with no
+  path shape). THE PHANTOM ROW (a compiler naming a file that is gone) stays
+  VISIBLE with `problemFileExistsAt(row)` false, and its reveal walks into
+  `openFile`'s own loud refusal — the app never invents a buffer to make a
+  row clickable.
+- **Problems are the results panel's THIRD producer** (find-in-files I1,
+  references I3, problems I4) over the engine's own `FileMatch` currency;
+  `resultsProducer()` gained "problems"; severity / message / file-exists live
+  app-side in a parallel table (`problemSeverityAt`, `problemFileExistsAt`,
+  the message through the panel's own `searchResultTextAt`) — the search
+  records stay UNTOUCHED. In the editor they ride the M5 diagnostics feed
+  tagged `source = "qmn-tasks"`, the DapHub merge/restore posture applied
+  app-side (a new run replaces its own tag's rows and never a foreign
+  producer's; a clear restores the foreign rows exactly), and a document
+  opened AFTER a run CATCHES UP on the standing feed (the join analogue).
+- **THE THREE CAPS ARE CLASS CONSTANTS A TEST CAN NAME**: `kOutputMaxLines`
+  = 2000 (pane tail), `kProblemMaxRows` = 500 (PANEL rows), `kProblemFeedMax`
+  = 2000 (the decoration feed). The panel cap deliberately does NOT cap the
+  feed — the gutter truth stays whole — and both excesses are COUNTED AND
+  SHOWN ("ещё N не показаны" on the panel, "(матчер пропустил N)" on the run).
+- **THE TASK PICKER (`Ctrl+Shift+R`) is `qmn::fuzzy`'S THIRD USER** and the
+  THIRD popup on the I2 overlay law (one overlay, one Esc owner); run-default
+  is `Ctrl+Shift+B`; SIX palette commands APPEND after I2's four and I3's six
+  (10 → 16 — the palette's tie law rides registry order, so the frozen rows
+  are undisturbed). Both chords are mask-FREE against the view's frozen table,
+  which binds NO `Key_B` and NO `Key_R` ever.
+- **`tests/faketask/` joins the CI-built spawn family** (fakeserver/dapfake's
+  class): `$<TARGET_FILE:faketask>` is handed to the fixture through the
+  `QMN_TEST_FAKE_TASK` define, `add_dependencies(tst_ide fakeserver faketask)`.
+  Modes: `gcc` / `msvc` (each prints its own family + the OTHER family's line
+  it must refuse + the real noise + a `gone.cpp` phantom, and WRITES the
+  subject file `fake_src.cpp` so the reveal leg has a real buffer), `stderr`
+  (OUT-1/ERR-1/OUT-2 — the arrival-order pin), `big N` (the pane's tail cap),
+  `many N` (the two problem caps), `cwd` (prints `CWD=<abs>` +
+  `ARGS=<argv[2..]>` so `${WORKSPACE_ROOT}` expansion is the CHILD's
+  testimony), `slow MS`, `hang` / `hang stubborn` (terminate/kill), `exit C`.
+  The EXIT CODE is the oracle in every mode. **A PATH COMPILER IS NEVER
+  SPAWNED BY CTEST** — a toolchain is no more a CI guarantee than clangd.
+- **The CLI face `--task LABEL` / `--task-default`**, loud refusals on stderr
+  + exit 1, the run's `taskRunSummary()` printed when the run ENDS, and **the
+  CLI's exit code IS the task's**: 0 → 0, 1…255 → the child's code VERBATIM
+  (the far-side oracle law), anything else (signal death, failed spawn, a
+  code over 255) → 1, because the shell's exit slot cannot hold the truth —
+  the printed summary carries WHICH kind. A wrapper that reports success for
+  a failing build is a lie.
+
+### Fixed / changed behavior
+- **ONE Esc QAction per popup** (three new drills, one shared mechanism): the
+  task picker's second Esc action made the shortcut map AMBIGUOUS — Qt
+  matched NEITHER action and the QLineEdit ate the keypress, so the popup
+  never closed. The pin was re-run as a control: with the second action
+  re-added the leg FAILS, with it removed it passes.
+- **THE PROJECT-SWITCH RESET ORDER**: retire the finished run's faces FIRST,
+  then kill. The killed live run's own testimony (`kTaskExitCrashed` + "задача
+  «X» прервана") was being erased by the switch it triggered;
+  `killRunningTask()` now reports whether something live was running, so
+  `taskRunLabel_` clears only when nothing live needed the face.
+- **THE CAPS RAISE THEIR FACES, AND THE PANEL CAP NEVER TOUCHES THE GUTTER**:
+  1200 rows in a log ⇒ 1200 in the feed AND in `diagnostics()`, 500 panel
+  rows, "ещё 700 не показаны"; 2500 rows ⇒ feed capped at 2000 with "(матчер
+  пропустил 500)" and the panel's "ещё 1500 не показаны"; 12 rows ⇒ every
+  row shown and NEITHER face present (a cap never invents a skip).
+  NEGATIVE CONTROL: raising `kProblemMaxRows` to 1200 makes the pin FAIL.
+- **A run NEVER saves a document and NEVER reverts one, and the dirty-buffer
+  divergence is pinned as the divergence**: on a buffer the user edited, the
+  user's edit survives a re-run that rewrites the file underneath, and the
+  reveal lands on the buffer's line of the same NUMBER — the compiler's
+  coordinates are a statement about the FILE, and a task never went through
+  the syncer, so no mirror face exists to re-map. The pane says NOTHING about
+  saving: the law is a refusal to touch, not a warning to read.
+- **THE COEXISTENCE LIMIT, RECORDED AND NOT PINNED AS A PASS**:
+  `LspHub`'s `published` paint is a WHOLE-LIST replace, so on a hub-served
+  document a later `publishDiagnostics` EVICTS the task rows (the next run or
+  a re-open puts them back). The comment at `mergeTaskDiagnostics` carries
+  it; the view has no per-producer replace door and none was asked (the hub
+  owns its own list) — the door belongs to the car that needs both feeds live
+  at once.
+- **The paced replace resets the pane's selection** — recorded as v1's cost:
+  the tail follow re-establishes the position the user cares about and the
+  app never fights the view over the caret.
+
+### Tests
+- `tst_ide` grew **28 → 44 slots** (16 new `i4*` drills): the config read +
+  every refusal face, the picker's rank/activation/refusal-stays-open faces,
+  cwd + `${WORKSPACE_ROOT}` expansion proven by the CHILD's own printout, the
+  one-at-a-time refusal, the terminate/kill pair (TERM-CAUGHT in the pane in
+  arrival order vs the app's own "пришлось убить" face), survival across a
+  tab close, death at a project switch and at window close, the pane's lock
+  faces on the real editor, the paced flush + tail cap + hidden count, the
+  arrival-order pin, both matchers' cross-refusal + noise-stays-text + the
+  phantom reveal refusal, the problems panel as third producer + the
+  diagnostics merge/restore pair, the two caps with their skip faces, and the
+  dirty-buffer law. The older palette pins moved COUNT 10 → 16, not content.
+- `tests/CMakeLists.txt`: the `faketask` target + the `QMN_TEST_FAKE_TASK`
+  define + `add_dependencies(tst_ide fakeserver faketask)`.
+
+### The close ritual (measured, not assumed)
+- **The measurement gate the opening record promised** (asked BEFORE any
+  append door): a throwaway offscreen bench, 200 paced replaces, ONE build,
+  all sizes back to back — `setPlainText` of the kept tail: 200 lines 21 µs,
+  500 47 µs, 1000 94 µs, **2000 (the cap) 183 µs**, 4000 382 µs, 20 000
+  2039 µs, 60 000 6379 µs; the tail follow (`setSelection` + `revealAt
+  Minimal`): 23 / 26 / 32 / **42** / 67 / 332 / 1172 µs. At the cap one burst
+  ≈225 µs against a 60 ms pace ≈ **0.4 % of one core**, the replace is LINEAR
+  (~0.09 µs/line) and the FOLLOW is the superlinear half — which is the real
+  argument for the tail cap. The repaint leg (≈1 µs) is recorded as a FLOOR:
+  under `offscreen` nothing paints, so it measures the call, not a paint.
+  No LEDGER entry, no append door.
+- **ctest stays TEN entries, 10/10 green TWICE at the bumped literals**
+  (129.0 s mid-close, then 127.8 s at the final tree — `lsp` ≈74 s, `dap`
+  ≈19.5 s, `ide` 17.5–17.7 s, `codeeditor` ~8 s, `demo` ~8.3 s; nothing but
+  docs changed between the two runs), and
+  `tst_ide` ran FIVE standalone repeats (46 lines incl. init/cleanup,
+  17.4–17.7 s, exit 0 every time) — the I4 drills pump real event loops
+  against real spawned children. One blemish recorded honestly: the first
+  ctest invocation of the close started against a MUTANT binary (the caps
+  control had just raised `kProblemMaxRows`), was killed unfinished, the tree
+  was rebuilt and the suite re-ran clean; that killed run's numbers are not
+  in this record.
+- **The `--codegen` audit reads the LOG both ways**: at the I4 tree the
+  rejected-function sets are BYTE-IDENTICAL when sorted against the archived
+  1.17.0 set (1825 lines each, empty `diff`), the generated-file sets are
+  IDENTICAL at 47 files (no new bound type, the THREE copies untouched), ZERO
+  lines mention `src/app/` or `IdeWindow`, 45 `qmn::glue::` drop lines, and
+  the SHELF LITERAL STAYS 1.2.0 — confirmed in the installed pack
+  (`qmnConfigVersion` 1.18.0 vs `qmnGlueConfigVersion` 1.2.0).
+  `git diff --name-only HEAD` touches no file under `src/view/`, `src/glue/`
+  or `bindings/`. (An UNNORMALIZED compare of the two generated lists differs
+  only by the `/tmp/gen/_qmn/` prefix the newer run prints — recorded so a
+  future close does not read that cosmetic delta as a change.)
+- **The package + wheel half, run whole**: `cmake --install` to a fresh
+  prefix + `examples/consumer` configured and built against it, both smokes
+  green ("qmn consumer smoke OK (installed package, 41 units, 9 spans)", "qmn
+  glue consumer smoke OK (installed shelf, no server and no adapter
+  spawned)"); the wheel REBUILT —
+  `qmn_native-1.18.0-cp310-abi3-manylinux_2_34_x86_64.whl`, smoke OK, qtmonaco
+  parity OK (28 `text_changed` announcements), the whole `/libQt6*` delta
+  EMPTY; the FOURTH literal (the `pydemo/pyproject.toml` wheel path-dep)
+  bumped and the headless pydemo run green; the wheel-surface presence/absence
+  pair re-read: `LspHub`/`DapHub`/`ProjectSession` present, `SearchSession`/
+  `FuzzyMatch` ABSENT (no Python consumer asked), `setSelection` still
+  wrapped, and ZERO task/problem names on the module (the app layer never
+  enters codegen at all).
+- **The LIVE ritual (never a ctest entry):** REAL g++ over a seeded error —
+  8 output lines, 2 problems, 6 lines refused as noise (the never-invent law
+  holds against a real compiler). THE MATCHER CROSS-CHECK over the same
+  real-toolchain text, run sequentially (an earlier attempt raced two scripts
+  over the same build dirs and produced garbage — recorded, not rerolled):
+  a plain pipe, 220 lines, 9 gcc-shaped rows by a naive pass over the
+  matcher's OWN pattern, vs the IDE's own runner+matcher over an identical
+  fresh build dir, 196 lines / 9 problems — the COUNTS AGREE; the witness is
+  count-level plus side A's printed rows (the CLI prints no per-row dump), and
+  byte-exact row identity stays ctest's job (faketask). A fresh full repo
+  build through the IDE's own task: 196 lines / 9 problems / 191 s, and the 9
+  are the repo's REAL pre-existing warnings; the two-file incremental leg
+  reads 54 lines / 9 problems / 41.6 s. NO live leg ever met the pane's cap
+  (196 ≪ 2000), so the tail-cap faces stay CTEST's (`big N`); an earlier
+  mid-car repo-wide run printed past the cap ("строк вывода: 2000 (скрыто
+  4958)") and its log was never archived, so it stands as an OBSERVATION, not
+  a citable number. The CLI exit legs: `exit 7` → 7, `exit 200` → 200, a
+  clean run → 0, a missing binary → 1 with the execve truth, `gcc` mode (child
+  code 1) → 1, an unknown label → 1 listing the configured labels.
+
+### Carried honestly (PLAN's I4 record)
+- The `LspHub`-vs-tasks feed eviction is the RECORDED coexistence limit; a
+  per-producer replace door in the view rides the car that needs both feeds
+  standing at once. A task's coordinates never re-map onto a dirty buffer —
+  the mirror face belongs to the syncer and no car has asked for it there.
+- Tool families beyond `gcc`/`msvc` (a real clang/cl or MSBuild shape) ride
+  the car that asks; the CLI exit-code law is live-ritual-pinned, and
+  ctest-pinning it would need a test binary that links the thin main, which
+  no car has asked for.
+- NO TERMINAL stands: the runner is the whole interface. The append door
+  stays unasked because a measurement answered it; a streaming pane would
+  re-ask with a number, not the same question cold.
+
 ## [1.17.0] — 2026-11-28 — GATE 4 car I3 CLOSED — LSP depth in the IDE (definition, references, rename, code actions, formatting, the OUTLINE dock), the shelf's ONE new door for the car (the TENTH feature sibling `requestDocumentSymbol`), and the owner-granted fakeserver spawn inside `tst_ide` (the dapfake class)
 
 ### Added

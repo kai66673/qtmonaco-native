@@ -5,10 +5,10 @@ Native code editor widget for Qt6, built from scratch on a raw `QWidget`
 QPlainTextEdit, no Chromium. Long-term hobby project; roadmap in `README.md`,
 phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
 
-## Current state (v1.17.0 — GATE 3 CLOSED 2026-11-28 with S2/Py DEFERRED
+## Current state (v1.18.0 — GATE 3 CLOSED 2026-11-28 with S2/Py DEFERRED
 by owner decision; **GATE 4 (the IDE dogfood train) IS THE OPEN TRAIN** —
 cars I0+I1 CLOSED at 1.15.0, car I2 CLOSED at 1.16.0, car I3 CLOSED at
-1.17.0, I4 is the open car) — gates and the
+1.17.0, car I4 CLOSED at 1.18.0, I5 is the open car) — gates and the
 frozen surface
 
 - Gate 1 (editor v1) froze the public API at tag `v1.0`; Gate 1.5 (usability
@@ -149,9 +149,61 @@ steps PROBE-OK on clangd 23.1.5) →
   answer's snapshot (no staleness guard app-side — the applier's version
   guard covers documentChanges only); ctest stays TEN entries (no new
   binary — the fakeserver is a support target, now also a dependency of
-  tst_ide)** → **I4 tasks + problem matcher is THE OPEN CAR** → I5 git
-  gutter; NO terminal by owner decision; the frozen-surface/additive +
-  wrappability + skip-honesty laws ride UNCHANGED** → Grapheme segmentation
+  tst_ide)** → **car I4 CLOSED at 1.18.0 (2026-11-28, the single-car close):
+  TASKS + THE PROBLEM MATCHER in the IDE — `.qmn/tasks.json` read by APP code at
+  the openProject door (ONE config door: tree root + workspace root + lsp.json +
+  tasks.json), a `QProcess` runner that is NOT a terminal (one-shot, NO
+  shell/PTY/stdin, `MergedChannels` for TRUE arrival order, one run at a time,
+  NEVER auto-run, terminate→kill grace, dies at a project switch and at window
+  close), the OUTPUT PANE as a REAL `CodeEditor` under the M19 read-only LOCK
+  (readOnly is an OPTIONS knob — the view keeps its own setter private; the lock
+  refuses typing/undo/redo while copy, selection and the programmatic replace
+  stay free, and tst_ide pins that dogfood bet on the real editor), a paced
+  WHOLE-TEXT REPLACE with a 2000-line tail cap and a VISIBLE hidden count (the
+  APPEND door NOT taken — the close MEASURED it: ~236 µs per 2000-line replace,
+  ~0.12 µs/line, so one burst per 60 ms pace is ~0.4 % of a core; the tail follow
+  rides `setSelection` + the view's own `revealAt(…, Minimal)` — ZERO new view
+  API), two matchers `gcc`/`msvc` (+ `none`) whose REGEX ARITHMETIC makes the
+  cross-refusal SYMMETRIC (no name table), the noise a real build prints staying
+  TEXT, and the PHANTOM row (a compiler naming a gone file) VISIBLE with
+  `openFile`'s own loud refusal at the reveal; problems land in the SAME results
+  panel as its THIRD producer (`resultsProducer()` gains "problems";
+  severity/message live app-side in a parallel table — the search records
+  UNTOUCHED) and in the M5 diagnostics feed tagged `source = "qmn-tasks"` riding
+  the DapHub merge/restore posture (the pins merge over a foreign producer AND
+  restore it exactly), with `LspHub`'s whole-list `published` paint EVICTING task
+  rows recorded as the coexistence limit rather than pinned as a pass.
+  `qmn::fuzzy`'s THIRD user = the task picker (the third popup on the I2 overlay
+  law), TWO new chords (Ctrl+Shift+B / Ctrl+Shift+R — mask-free, the view binds
+  NO Key_B/Key_R EVER). ZERO glue surface, ZERO new library, ZERO new view API:
+  the `--codegen` rejected log is IDENTICAL to 1.17.0 (1825 rejected lines, 47
+  generated files, ZERO app lines) and the shelf literal STAYS 1.2.0. Far side:
+  `tests/faketask/` joins the CI-built spawn family (`QMN_TEST_FAKE_TASK` — the
+  fakeserver/dapfake class, exit code the oracle, its TEXT the fixture the
+  matcher eats, and it WRITES the file its own diagnostics name so the reveal leg
+  gets a real file); NO PATH compiler is EVER spawned by ctest, while the
+  real-toolchain story is the live ritual (real g++ over a seeded error: 2 rows
+  out of 8 real lines, the never-invent law holding against a REAL compiler;
+  PLAN's I4 record carries the repo-build numbers). THREE real behavior fixes the
+  drills earned: ONE Esc QAction per popup (the picker's second made the shortcut
+  map AMBIGUOUS — Qt matched NEITHER and the QLineEdit ate the Escape; the
+  negative control re-ran and reproduced the failure), the project-switch reset
+  ORDER (retire the finished run's faces FIRST, then kill — a killed live run's
+  own testimony was being erased), and the paced replace's selection reset
+  documented as v1's cost. THE THREE CAPS ARE CLASS CONSTANTS a test can NAME
+  (`kOutputMaxLines` 2000 pane tail / `kProblemMaxRows` 500 PANEL rows /
+  `kProblemFeedMax` 2000 feed — the panel cap never caps the gutter feed, and both
+  skip faces ("ещё N не показаны", "(матчер пропустил N)") are pinned with a
+  mutation control on `kProblemMaxRows`). THE CLI'S EXIT CODE IS THE TASK'S (0 →
+  0, 1…255 VERBATIM — the far-side oracle law — anything else → 1 with the
+  WHICH-kind truth in the printed summary; a wrapper that reports success for a
+  failing build is a lie); a run NEVER saves or reverts a DIRTY buffer and the
+  reveal rides the FILE's line number (pinned as the divergence, not smoothed
+  over). tst_ide grew 28 → 44 slots, ctest stays TEN entries
+  (faketask is a support target, also a dependency of tst_ide)** → **I5 git
+  gutter is THE OPEN CAR**; NO terminal by owner decision; the
+  frozen-surface/additive + wrappability + skip-honesty laws ride
+  UNCHANGED** → Grapheme segmentation
   is OWNER-EXCLUDED from this gate (its own future train — the README
   not-implemented record stays). The full design record is the PLAN.md
   "GATE 3" section — read it (and the "GATE 2" records it consumes)
@@ -461,8 +513,9 @@ ninja -C build
 ctest --test-dir build --output-on-failure
 ```
 
-Ten ctest tests (GATE 4 car I3 close 2026-11-28 — unchanged count: the
-fakeserver is a support target, now also a build dependency of `tst_ide`):
+Ten ctest tests (GATE 4 car I4 close 2026-11-28 — unchanged count: the
+fakeserver AND the new `faketask` are support targets, both build dependencies
+of `tst_ide`):
 `textbuffer` (core
 property tests), `diff` (the pure
 line-diff engine, M10), `search` (I1: the qmn::search engine — naive-
@@ -490,7 +543,7 @@ a ctest entry, its exit code is the far-side oracle), `codeeditor`
 since D4 one slot drives the `--dap` door against `$<TARGET_FILE:dapfake>`
 — spawning IS allowed here, unlike the `--lsp` door, because dapfake is
 CI-built; the LIVE-adapter ritual `tools/probe_dap.sh` is manual, never
-CI, but car 4 may not close without it), `ide` (I0/I1/I2/I3: drives the
+CI, but car 4 may not close without it), `ide` (I0…I4: drives the
 qmn-ide-demo surface — project door, one-tab focus law, close/reopen
 face, the Find-in-Files panel rows/refusals/cancel/reveal, the quick-open
 pool/rank/activation/truncation/pool-switch-seam faces, the palette
@@ -505,18 +558,33 @@ producer (`resultsProducer()` names the owner), rename as ONE undo group +
 its workspace-edit refusal face, the code-action row faces (applied edit /
 command-only refusal), formatting through the applier, and the
 bounded-wait-then-refuse face of a server that never becomes Ready — all
-through the same programmatic doors the docks call. THE SPAWN BOUNDARY
-(owner grant, 2026-11-28, PLAN's I3 opening record): the I3 LSP-depth
+through the same programmatic doors the docks call, and since I4 the TASK
+faces — the `.qmn/tasks.json` read + its loud refusals, the picker/palette/CLI
+run doors, the one-at-a-time refusal + the terminate/stop legs, the pane's
+read-only LOCK faces (typing/undo/redo refused, copy/selection/programmatic
+replace free) + the paced replace's tail cap and hidden count, the two
+matchers' SYMMETRIC cross-refusal + the noise-stays-text + the PHANTOM row's
+reveal refusal, the three caps' skip faces, and problems-as-the-panel's-THIRD
+producer with the diagnostics merge/restore pair — all through the window's own
+doors). THE SPAWN BOUNDARY
+(owner grant, 2026-11-28, PLAN's I3 opening record; I4's far side joins the
+same class): the I3 LSP-depth
 drill slots DO spawn — the CI-built deterministic `fakeserver`,
 `$<TARGET_FILE:fakeserver>`, the dapfake class tst_demo's --dap slot
 already rides — armed through the window's own `armLspServer` door UNDER
 THE BUILT-IN'S NAME ("clangd" replaced whole, so PATH clangd is still
-NEVER spawned). Every OTHER slot keeps the old law whole (a hub slot
+NEVER spawned); I4's runner slots spawn the CI-built `tests/faketask/`
+(`$<TARGET_FILE:faketask>` handed to the config file through the
+`QMN_TEST_FAKE_TASK` define the test substitutes into `.qmn/tasks.json`), and
+A PATH COMPILER IS NEVER SPAWNED BY CTEST — a toolchain is no more a CI
+guarantee than clangd, and the real-toolchain story is the live ritual (PLAN's
+I4 close record). Every OTHER slot keeps the old law whole (a hub slot
 without an explicit spec path opens only UNCLAIMED languages), and the
 real-user `.qmn/lsp.json` fold leg is pinned end-to-end once. The test
-still names NO glue/lsp/search type — IdeWindow.hpp keeps those behind
+still names NO glue/lsp/search/QProcess type — IdeWindow.hpp keeps those behind
 fwd-decls and the window's own read doors (outline*/jump/rename/format/
-codeAction/resultsProducer/searchResult*) carry every observation). Two wire facts pinned by the
+codeAction/resultsProducer/searchResult*/task*/problem*/outputPane) carry every
+observation. Two wire facts pinned by the
 car-4 live probe (2026-11-21, both adapters): on the DAP wire
 `initialized` is the **ADAPTER'S** event — the client NEVER sends event
 frames (a client-side one CRASHES gdb's python DAP server; dapfake exits
