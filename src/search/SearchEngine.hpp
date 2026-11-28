@@ -159,11 +159,33 @@ public:
     // Refusal face (finished, stopReason non-empty, scanned 0) or the
     // walk. Synchronous refusal emits land inside THIS call.
     void start(const QString& rootPath, const SearchQuery& query);
+
+    // The LIST face (GATE 4 car I2, LEDGER catch #2 — quick-open needs
+    // the pool of EVERY listed file, and the query walk's signals carry
+    // only MATCHED and SKIPPED files: a clean miss is silent, and no
+    // never-matching-query trick enumerates names without reading every
+    // file's contents). The SAME tree walk, the SAME filters (hidden/
+    // dir-name/depth), the SAME pacing and budget caps, the SAME frozen
+    // stop faces — but file CONTENTS ARE NEVER READ: no size decision,
+    // no binary sniff, no fileSkipped, no fileMatched. fileListed()
+    // fires for every file that PASSES the filters (name enumeration
+    // only); in finished(), filesScanned counts the LISTED files, and
+    // filesWithMatches/totalMatches/skipped are honest zeros (the
+    // content decisions simply were never made — a listed file may yet
+    // be binary at OPEN time, that decision belongs to the open).
+    // CONNECT-BEFORE-START rides: the root refusal faces land
+    // SYNCHRONOUSLY inside this call too.
+    void startList(const QString& rootPath);
+
     void cancel();
 
 signals:
     void fileMatched(const qmn::search::FileMatch& match);
     void fileSkipped(const QString& filePath, qmn::search::SkipReason reason);
+    // LIST mode ONLY (startList): every file that passed the filters,
+    // walk order, contents never read. The query walk (start()) never
+    // emits it — the I1 signal contract rides UNCHANGED.
+    void fileListed(const QString& filePath);
     void progress(int filesScanned);
     void finished(int filesScanned, int filesWithMatches, int totalMatches,
                   int skipped, const QString& stopReason);

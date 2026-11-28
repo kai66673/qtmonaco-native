@@ -1588,9 +1588,6 @@ private slots:
                                                           .toString()
                                                       == QLatin1String("battery edit"));
                          });
-        h.client->start(TestHarness::initParams());
-        QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 30000);
-
         // The registry flips as the battery's registrations come and go:
         // 9006 registers hover (flip #1), 9007 unregisters it (flip #2).
         // The 9005 invalid batch answers -32803 and registers NOTHING, so
@@ -1601,7 +1598,13 @@ private slots:
         // battery's two registration rounds can land inside one qWait
         // slice (0 -> 2 with no observable midpoint), but the lambda runs
         // INSIDE each emission, so the recorded hover-gate sequence is the
-        // race-free observation.
+        // race-free observation. CONNECT-BEFORE-START rides here too, and
+        // an oversubscribed host (measured 2026-11-28: 8 busy loops on a
+        // 12-core box) wrote the lesson the hard way: the ready window can
+        // deliver the initialize response AND both registration rounds in
+        // ONE readyRead batch, and a recorder connected after the ready
+        // QTRY had then MISSED both flips (hoverFlips stayed 0 through a
+        // 30 s timeout). The recorder connects before the start.
         QStringList hoverFlips;
         QObject::connect(h.client.get(),
                          &qmn::lsp::LspClient::registrationsChanged,
@@ -1612,9 +1615,23 @@ private slots:
                                                  ? QStringLiteral("on")
                                                  : QStringLiteral("off"));
                          });
+
+        h.client->start(TestHarness::initParams());
+        // Synchronous right after start RETURNS: no event loop has run
+        // yet, so not one frame (not even the initialize response) can
+        // have been processed — the fresh-registry face is pinned HERE,
+        // where it is race-free by construction, not in any post-ready
+        // window (a post-ready qWait loop can already have batched the
+        // response AND both registration rounds — the loaded-host run
+        // showed hoverFlips at 2 by then).
         QCOMPARE(hoverFlips.size(), 0);
         QCOMPARE(h.client->isRegistered(QStringLiteral("textDocument/hover")),
                  false);
+        QTRY_COMPARE_WITH_TIMEOUT(readySpy.count(), 1, 30000);
+
+        // The battery's TAIL unregister round cannot precede this list:
+        // the battery sits behind the 9009 applyEdit door, and this slot
+        // opens that door only after this leg.
         QTRY_COMPARE_WITH_TIMEOUT(hoverFlips,
                                   (QStringList{QStringLiteral("on"),
                                                QStringLiteral("off")}),

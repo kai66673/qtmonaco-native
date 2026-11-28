@@ -240,6 +240,7 @@ struct SearchSession::Walk {
     int totalMatches = 0;
     int skipped = 0;
     bool cancelRequested = false;
+    bool listOnly = false; // the startList face: names, never contents
 };
 
 SearchSession::SearchSession(QObject* parent)
@@ -323,6 +324,37 @@ void SearchSession::start(const QString& rootPath, const SearchQuery& query)
     pump_.start(0);
 }
 
+void SearchSession::startList(const QString& rootPath)
+{
+    if (running())
+        return; // the same ignored-start law as start() (one walk per
+                // session, whichever face opened it)
+
+    // The SAME root refusal faces, synchronous (connect-before-start).
+    const QFileInfo rootInfo(rootPath);
+    if (!rootInfo.isDir()) {
+        emit finished(0, 0, 0, 0,
+                      QStringLiteral("root: not a directory: %1").arg(rootPath));
+        return;
+    }
+    if (!rootInfo.isReadable()) {
+        emit finished(0, 0, 0, 0,
+                      QStringLiteral("root: not readable: %1")
+                          .arg(rootInfo.absoluteFilePath()));
+        return;
+    }
+
+    walk_ = std::make_unique<Walk>();
+    walk_->listOnly = true; // the query stays default: NEVER consulted
+    walk_->maxFileSize = maxFileSize_;
+    walk_->maxFiles = maxFiles_;
+    walk_->skipHidden = skipHidden_;
+    walk_->skipDirNames = skipDirNames_;
+    walk_->maxDepth = maxDepth_;
+    walk_->dirs.push_back({rootInfo.absoluteFilePath(), 0});
+    pump_.start(0);
+}
+
 void SearchSession::cancel()
 {
     if (walk_)
@@ -386,6 +418,14 @@ void SearchSession::pumpChunk()
         }
 
         const QString path = w->files.dequeue();
+        if (w->listOnly) {
+            // The LIST face: name enumeration only — no stat, no open,
+            // no sniff; the budget cap above still binds, the walk
+            // order and filters are the query walk's own.
+            ++w->scanned;
+            emit fileListed(path);
+            continue;
+        }
         const FileScan fs = Engine::scanFile(path, w->query, w->maxFileSize);
         ++w->scanned;
         switch (fs.skip) {

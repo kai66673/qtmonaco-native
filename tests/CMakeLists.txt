@@ -22,6 +22,15 @@ qt_add_executable(tst_search tst_search.cpp)
 target_link_libraries(tst_search PRIVATE qmn_search Qt6::Test)
 add_test(NAME search COMMAND tst_search)
 
+# The 10th ctest entry (GATE 4 car I2, PLAN): the fuzzy scorer — GUITLESS
+# like textbuffer/diff/search (the layer is QtCore-only): hand-computed
+# faces of the frozen law + the fixed-seed fuzz pair against a
+# brute-force full-enumeration reference (the tie law pinned from BOTH
+# mechanisms; see tests/tst_fuzzy.cpp).
+qt_add_executable(tst_fuzzy tst_fuzzy.cpp)
+target_link_libraries(tst_fuzzy PRIVATE qmn_fuzzy Qt6::Test)
+add_test(NAME fuzzy COMMAND tst_fuzzy)
+
 # The 5th ctest entry (M8 machine 1, PLAN amended 2026-11-17): one binary
 # that grows machine by machine — protocol framing/transports/RpcClient
 # now, the QProcess fakeserver + LspClient tests with machine 2 into THIS

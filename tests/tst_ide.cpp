@@ -1,6 +1,7 @@
-// Drives the qmn-ide-demo app (GATE 4 car I0 skeleton + car I1 panel)
-// fully offscreen through the SAME programmatic doors the dock widgets
-// and panel buttons call — no dialog exec, no file dialogs, and NO
+// Drives the qmn-ide-demo app (GATE 4 car I0 skeleton + car I1 panel +
+// car I2 quick-open/palette) fully offscreen through the SAME
+// programmatic doors the dock widgets, popups and panel buttons call —
+// no dialog exec, no file dialogs, and NO
 // server ever spawns (the --lsp door's tst_demo law rides whole: the
 // one slot touching the hub opens only languages NO built-in spec
 // claims). tst_ide never includes a glue or search header: IdeWindow.hpp
@@ -12,6 +13,7 @@
 
 #include "view/CodeEditor.hpp"
 
+#include <QApplication>
 #include <QFile>
 #include <QFileInfo>
 #include <QStatusBar>
@@ -66,6 +68,13 @@ private slots:
                                                  // session/panel state is
                                                  // slot-local by
                                                  // construction
+        // The overlays are CHILD widgets: their visibility doors read
+        // true only under a shown window (Qt's own visibility law) — so
+        // the window is shown for EVERY slot (offscreen, no exec, the
+        // no-dialog law untouched).
+        window_->show();
+        window_->activateWindow();
+        QTest::qWait(20);
     }
     void cleanup()
     {
@@ -284,6 +293,273 @@ private slots:
                                                                                                               // the
                                                                                                               // completed
                                                                                                               // face
+    }
+
+    // --------------------------------------------- car I2: quick open + palette
+
+    void quickOpenPoolRidesTheListFace()
+    {
+        writeFile(QStringLiteral("a.py"), "sum = 1\n");
+        writeFile(QStringLiteral("z.py"), "sum = 2\n");
+        writeFile(QStringLiteral("sub/b.py"), "sum = 3\n");
+        writeFile(QStringLiteral(".hidden.txt"), "sum\n"); // filtered OUT
+        writeFile(QStringLiteral(".git/obj.txt"), "sum\n"); // subtree OUT
+        window_->openProject(temp_->path());
+        QVERIFY(window_->projectFilesWalking()); // the LIST-face walk rode
+                                                 // the project door
+        QVERIFY2(waitUntil([this] { return !window_->projectFilesWalking(); }),
+                 "the pool walk never finished");
+        QCOMPARE(window_->projectFileCount(), 3); // hidden/git never listed
+
+        window_->showQuickOpen();
+        QCOMPARE(window_->quickOpenRowCount(), 3);
+        // EMPTY needle = the POOL WALK ORDER (files of a dir before its
+        // subdirs, per-dir codepoint sort — the engine's own order, pool
+        // untouched by the scorer):
+        QCOMPARE(window_->quickOpenPathAt(0), temp_->filePath(QStringLiteral("a.py")));
+        QCOMPARE(window_->quickOpenPathAt(1), temp_->filePath(QStringLiteral("z.py")));
+        QCOMPARE(window_->quickOpenPathAt(2), temp_->filePath(QStringLiteral("sub/b.py")));
+        QCOMPARE(window_->quickOpenPathAt(3), QString()); // honest out-
+        QCOMPARE(window_->quickOpenPathAt(-1), QString()); // of-range
+        QVERIFY(window_->quickOpenSummary().contains(QStringLiteral("3")));
+        QVERIFY(window_->quickOpenSummary().contains(
+            QStringLiteral("\u0412\u0441\u0435\u0433\u043e"))); // "total"
+    }
+
+    void quickOpenFuzzyRankIsScoreThenPath()
+    {
+        // The frozen ranking law on a hand-computed score table (the
+        // qmn::fuzzy law at src/fuzzy/FuzzyMatcher.hpp):
+        //   foo/bar.cpp     "fb": f@0 (start 4) + b@4 ('/' seam 4) = 8
+        //   a/fb2.txt       "fb": 4 + (1 + adjacency 2) = 7 — TIED
+        //   b/fb1.txt       "fb": 7                                     —
+        //   fb.md           "fb": 7          ties resolve by DISPLAYED
+        //   src/fizzbuzz.txt"fb": f@4 (4) + b@8 (base 1) = 5  PATH asc
+        writeFile(QStringLiteral("foo/bar.cpp"), "// x\n");
+        writeFile(QStringLiteral("fb.md"), "x\n");
+        writeFile(QStringLiteral("src/fizzbuzz.txt"), "x\n");
+        writeFile(QStringLiteral("a/fb2.txt"), "x\n");
+        writeFile(QStringLiteral("b/fb1.txt"), "x\n");
+        window_->openProject(temp_->path());
+        QVERIFY2(waitUntil([this] { return !window_->projectFilesWalking(); }),
+                 "the pool walk never finished");
+        QCOMPARE(window_->projectFileCount(), 5);
+
+        window_->showQuickOpen();
+        window_->typeQuickOpenQuery(QStringLiteral("fb"));
+        QCOMPARE(window_->quickOpenRowCount(), 5);
+        const QStringList want {
+            QStringLiteral("foo/bar.cpp"), QStringLiteral("a/fb2.txt"),
+            QStringLiteral("b/fb1.txt"), QStringLiteral("fb.md"),
+            QStringLiteral("src/fizzbuzz.txt")};
+        QStringList got;
+        for (int r = 0; r < 5; ++r)
+            got << QDir(temp_->path()).relativeFilePath(window_->quickOpenPathAt(r));
+        QCOMPARE(got, want);
+
+        // Case-insensitive needle, and a needle that NO file embeds:
+        window_->typeQuickOpenQuery(QStringLiteral("FB"));
+        QCOMPARE(window_->quickOpenRowCount(), 5); // same table, same order
+        window_->typeQuickOpenQuery(QStringLiteral("qqqzzz"));
+        QCOMPARE(window_->quickOpenRowCount(), 0); // the scorer says no —
+        QVERIFY(window_->quickOpenSummary().contains(
+            QStringLiteral("\u041d\u0435\u0442 \u0441\u043e\u0432\u043f\u0430\u0434\u0435\u043d\u0438\u0439"))); // "no matches", LOUD
+    }
+
+    void quickOpenActivationFaces()
+    {
+        writeFile(QStringLiteral("x.py"), "first tab\n");
+        writeFile(QStringLiteral("y.py"), "second tab\n");
+        window_->openProject(temp_->path());
+        QVERIFY2(waitUntil([this] { return !window_->projectFilesWalking(); }),
+                 "the pool walk never finished");
+
+        window_->showQuickOpen();
+        QVERIFY(window_->quickOpenVisible());
+        // Row 1 = y.py (walk order): activation opens the tab AND closes
+        // the overlay:
+        QVERIFY(window_->activateQuickOpen(1));
+        QCOMPARE(window_->editorCount(), 1);
+        QCOMPARE(window_->currentEditor()->toPlainText(), QStringLiteral("second tab\n"));
+        QVERIFY(!window_->quickOpenVisible());
+
+        // Out of range: honest false, the popup STAYS open (another row
+        // may still be the truth):
+        window_->showQuickOpen();
+        QVERIFY(window_->quickOpenVisible());
+        QVERIFY(!window_->activateQuickOpen(99));
+        QVERIFY(!window_->activateQuickOpen(-1));
+        QVERIFY(window_->quickOpenVisible());
+        QCOMPARE(window_->editorCount(), 1);
+
+        // The file vanished after the list: false + the openFile truth
+        // on the bar, the popup stays, the tab count stands:
+        QVERIFY(QFile::remove(temp_->filePath(QStringLiteral("x.py"))));
+        QVERIFY(!window_->activateQuickOpen(0));
+        QVERIFY(window_->quickOpenVisible());
+        QCOMPARE(window_->editorCount(), 1);
+        QVERIFY(window_->statusBar()->currentMessage().contains(
+            QStringLiteral("\u041d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c")));
+        // …and the OTHER row still works (the panel is not dead):
+        QVERIFY(window_->activateQuickOpen(1)); // one-tab law: y re-Focuses
+        QCOMPARE(window_->editorCount(), 1);
+        QVERIFY(!window_->quickOpenVisible());
+    }
+
+    void quickOpenRefusalIsLoud()
+    {
+        // NO project ever opened (fresh window_ from init): the quick-open
+        // refuses with words, never a silent zero-hit list (the search
+        // panel's law, sibling face).
+        window_->showQuickOpen();
+        QCOMPARE(window_->quickOpenRowCount(), 0);
+        QCOMPARE(window_->quickOpenPathAt(0), QString());
+        QVERIFY(window_->quickOpenSummary().contains(
+            QStringLiteral("\u043e\u0442\u043a\u0440\u043e\u0439\u0442\u0435"))); // "open a project first"
+    }
+
+    void quickOpenTruncationIsVisible()
+    {
+        for (int i = 0; i < 60; ++i) // past the row cap ON PURPOSE: the
+            writeFile(QStringLiteral("f%1.py").arg(i, 3, 10, QLatin1Char('0')),
+                      "x\n");       // cap must SHOW itself (skip-honesty)
+        window_->openProject(temp_->path());
+        QVERIFY2(waitUntil([this] { return !window_->projectFilesWalking(); }),
+                 "the pool walk never finished");
+        QCOMPARE(window_->projectFileCount(), 60);
+
+        window_->showQuickOpen(); // empty needle: walk order, capped
+        QCOMPARE(window_->quickOpenRowCount(), IdeWindow::kQuickOpenMaxRows);
+        QVERIFY(window_->quickOpenSummary().contains(
+            QStringLiteral("\u041f\u043e\u043a\u0430\u0437\u0430\u043d\u044b \u043f\u0435\u0440\u0432\u044b\u0435 50"))); // "first 50 shown"
+        QVERIFY(window_->quickOpenSummary().contains(QStringLiteral("60")));
+
+        window_->typeQuickOpenQuery(QStringLiteral("f")); // ALL 60 embed
+        QCOMPARE(window_->quickOpenRowCount(), IdeWindow::kQuickOpenMaxRows);
+        QVERIFY(window_->quickOpenSummary().contains(
+            QStringLiteral("\u0441\u043a\u0440\u044b\u0442\u043e"))); // "hidden [10 more]"
+        QVERIFY(window_->quickOpenSummary().contains(QStringLiteral("10")));
+    }
+
+    void poolReplacesOnProjectSwitchSeam()
+    {
+        // The cancel→restart seam: two openProject calls WITHOUT an
+        // event-loop beat between them. The first walk is cancelled (its
+        // files never reach the pool), the restart lands in onPoolFinished
+        // (the engine retired walk_ before the emit — the sanctioned
+        // restart face). The final pool is project B's set, WHOLE and
+        // ONLY B's.
+        for (int i = 0; i < 2; ++i)
+            writeFile(QStringLiteral("A/f%1.py").arg(i), "x\n");
+        for (int i = 0; i < 3; ++i)
+            writeFile(QStringLiteral("B/g%1.py").arg(i), "x\n");
+        const QString aRoot = temp_->filePath(QLatin1String("A"));
+        const QString bRoot = temp_->filePath(QLatin1String("B"));
+
+        window_->openProject(aRoot); // starts the walk
+        window_->openProject(bRoot); // mid-walk: pending restart, no
+                                     // second session, no leak
+        QVERIFY2(waitUntil([this] { return !window_->projectFilesWalking(); }),
+                 "the replaced pool walk never finished");
+        QCOMPARE(window_->projectFileCount(), 3);
+        window_->showQuickOpen();
+        QCOMPARE(window_->quickOpenRowCount(), 3);
+        for (int r = 0; r < 3; ++r)
+            QVERIFY(window_->quickOpenPathAt(r).startsWith(bRoot));
+    }
+
+    void paletteRegistryFilterAndRun()
+    {
+        window_->showCommandPalette();
+        QCOMPARE(window_->commandRowCount(), 4); // the built-ins,
+        QCOMPARE(window_->commandLabelAt(0).contains(
+            QStringLiteral("\u0411\u044b\u0441\u0442\u0440\u043e\u0435 \u043e\u0442\u043a\u0440\u044b\u0442\u0438\u0435")), true); // REGISTRY
+        QCOMPARE(window_->commandLabelAt(1).contains(
+            QStringLiteral("\u041f\u0430\u043b\u0438\u0442\u0440\u0430")), true);      // ORDER for the
+        QCOMPARE(window_->commandLabelAt(3).contains(
+            QStringLiteral("\u0417\u0430\u043a\u0440\u044b\u0442\u044c")), true);      // empty needle
+        QCOMPARE(window_->commandLabelAt(99), QString()); // out of range
+
+        window_->typePaletteQuery(QStringLiteral("\u043f\u0430\u043b\u0438\u0442\u0440")); // "palitr" (lower
+        QCOMPARE(window_->commandRowCount(), 1);                                        // folds onto the
+        QVERIFY(window_->commandLabelAt(0).contains(                                     // capital П)
+            QStringLiteral("\u041f\u0430\u043b\u0438\u0442\u0440\u0430")));
+        window_->typePaletteQuery(QString()); // back to registry order
+        QCOMPARE(window_->commandRowCount(), 4);
+
+        // Run the CLOSE-TAB command through the palette (real effect —
+        // the registry is not a poster):
+        writeFile(QStringLiteral("a.py"), "x\n");
+        window_->openProject(temp_->path());
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("a.py"))));
+        QCOMPARE(window_->editorCount(), 1);
+        QVERIFY(window_->runPaletteCommand(3)); // "Закрыть активную
+        QCOMPARE(window_->editorCount(), 0);    // вкладку" at registry
+        QVERIFY(!window_->commandPaletteVisible()); // row 3 — overlay
+                                                     // closed BEFORE run
+        // The close→run ORDER face: the quick-open command run from the
+        // palette leaves the PALETTE hidden and QUICK-OPEN up — a
+        // post-run hide would have killed it:
+        window_->showCommandPalette();
+        QVERIFY(window_->runPaletteCommand(0));
+        QVERIFY(!window_->commandPaletteVisible());
+        QVERIFY(window_->quickOpenVisible());
+        // Out of range: false and NOTHING ran:
+        window_->closeOverlay();
+        window_->showCommandPalette();
+        QVERIFY(!window_->runPaletteCommand(99));
+        QCOMPARE(window_->commandRowCount(), 4); // rows intact
+        QVERIFY(window_->commandPaletteVisible()); // palette stays
+    }
+
+    void paletteChordsRideTheWindowNotTheView()
+    {
+        // The chord-table audit as a TRIPWIRE (the I2-stub law): the IDE's
+        // palette chords live on the WINDOW (QShortcut, WindowShortcut)
+        // while the VIEW's frozen keymap never sees them — the editor
+        // keeps focus, the document stays byte-identical, and the tabs
+        // are untouched. (The chords the VIEW binds — Ctrl+A/C/V/X/Z/Y/D,
+        // Tab/BackTab, Escape, F7/Shift+F7, the nav set — contain NO
+        // Ctrl+P / Ctrl+Shift+P / Ctrl+W: this slot IS the mask face.)
+        writeFile(QStringLiteral("a.py"), "keepme\n");
+        window_->openProject(temp_->path());
+        QVERIFY2(waitUntil([this] { return !window_->projectFilesWalking(); }),
+                 "the pool walk never finished");
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("a.py"))));
+        CodeEditor* editor = window_->currentEditor();
+        QVERIFY(editor);
+        const QString textBefore = editor->toPlainText();
+        editor->setFocus();
+        QTest::qWait(20);
+
+        QTest::keyClick(editor, Qt::Key_P, Qt::ControlModifier);
+        QVERIFY(window_->quickOpenVisible());
+        QVERIFY(!window_->commandPaletteVisible());
+        QCOMPARE(editor->toPlainText(), textBefore); // the view typed NOTHING
+        QCOMPARE(editor, window_->currentEditor());  // and stole no focus
+
+        window_->closeOverlay();
+        QTest::keyClick(editor, Qt::Key_P, Qt::ControlModifier | Qt::ShiftModifier);
+        QVERIFY(window_->commandPaletteVisible());
+        QVERIFY(!window_->quickOpenVisible());
+        QCOMPARE(editor->toPlainText(), textBefore);
+
+        window_->closeOverlay();
+        QTest::keyClick(editor, Qt::Key_W, Qt::ControlModifier);
+        QCOMPARE(window_->editorCount(), 0); // the close-tab chord runs
+                                             // through the SAME command
+                                             // body (deleteLater has not
+                                             // spun — no touching the
+                                             // dying editor beyond this)
+        // Esc closes the popup while ITS subtree has focus (child-scoped
+        // shortcut — the view's frozen Escape stays the editor's own):
+        window_->showQuickOpen();
+        QVERIFY(window_->quickOpenVisible());
+        QTest::qWait(20); // let the focus law settle offscreen
+        QWidget* focused = QApplication::focusWidget();
+        QVERIFY2(focused != nullptr, "the overlay edit did not take focus");
+        QTest::keyClick(focused, Qt::Key_Escape);
+        QVERIFY(!window_->quickOpenVisible());
     }
 
     // --------------------------------------------- the --lsp door (I0)

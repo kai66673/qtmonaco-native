@@ -33,7 +33,7 @@ target_link_libraries(qmn-demo PRIVATE qmn_demo_app)
 qt_add_library(qmn_ide_app STATIC
     IdeWindow.cpp)
 target_link_libraries(qmn_ide_app PUBLIC qmn_view)
-target_link_libraries(qmn_ide_app PRIVATE qmn_glue qmn_search)
+target_link_libraries(qmn_ide_app PRIVATE qmn_glue qmn_search qmn_fuzzy)
 
 qt_add_executable(qmn-ide-demo
     ide_main.cpp)

@@ -550,6 +550,119 @@ private slots:
         QVERIFY(doneSpy.at(0).at(4).toString().isEmpty());
     }
 
+    void listModeFaces()
+    {
+        // The startList face (LEDGER catch #2, car I2): the SAME walk
+        // order/filters/budget/stop faces, names ONLY — contents never
+        // read. The expected order is hand-pinned from the order law
+        // (sorted files of a dir drain before its subdirs, subdirs in
+        // codepoint order — the pump's queue discipline, mirrored in the
+        // TEST, never borrowed from the engine).
+        QTemporaryDir small;
+        QVERIFY(small.isValid());
+        writeRaw(small.filePath(QStringLiteral("big.txt")),
+                 QByteArray("sum sum sum sum"));         // 17 B — OVER a 12B cap
+        writeRaw(small.filePath(QStringLiteral("bin/data.bin")),
+                 QByteArray("sum \0sum", 9));            // NUL in the sniff
+        writeRaw(small.filePath(QStringLiteral(".hidden.txt")),
+                 QByteArray("sum hidden\n"));            // hidden: never listed
+        writeRaw(small.filePath(QStringLiteral(".git/objects.txt")),
+                 QByteArray("sum git\n"));               // subtree: never listed
+        writeRaw(small.filePath(QStringLiteral("ok.txt")), QByteArray("ok\n"));
+        writeRaw(small.filePath(QStringLiteral("sub/d.txt")), QByteArray("d\n"));
+
+        SearchSession session;
+        session.setMaxFileSize(12); // the cap belongs to READING: a list
+                                    // walk judges NO sizes (pinned below
+                                    // by big.txt riding with skipped==0)
+        QSignalSpy listSpy(&session, &SearchSession::fileListed);
+        QSignalSpy skipSpy(&session, &SearchSession::fileSkipped);
+        QSignalSpy matchSpy(&session, &SearchSession::fileMatched);
+        QSignalSpy doneSpy(&session, &SearchSession::finished);
+        session.startList(small.path());
+        QVERIFY(waitFinished(doneSpy));
+
+        QStringList names; // project-relative, walk order
+        for (const QList<QVariant>& a : listSpy) {
+            names << QDir(small.path()).relativeFilePath(a.at(0).toString());
+        }
+        QStringList want;
+        want << QStringLiteral("big.txt") << QStringLiteral("ok.txt")
+             << QStringLiteral("bin/data.bin") << QStringLiteral("sub/d.txt");
+        QCOMPARE(names, want);
+        // Names only: no content decisions happened — the binary and
+        // the over-cap file were LISTED, the size cap judged NOTHING,
+        // and skipped/matched are honest zeros (the decisions belong to
+        // the open, not to the list).
+        QCOMPARE(skipSpy.count(), 0);
+        QCOMPARE(matchSpy.count(), 0);
+        QCOMPARE(doneSpy.at(0).at(0).toInt(), 4); // scanned = LISTED
+        QCOMPARE(doneSpy.at(0).at(1).toInt(), 0);
+        QCOMPARE(doneSpy.at(0).at(2).toInt(), 0);
+        QCOMPARE(doneSpy.at(0).at(3).toInt(), 0);
+        QVERIFY(doneSpy.at(0).at(4).toString().isEmpty());
+
+        { // the budget cap binds on the LIST face too:
+            SearchSession s2;
+            s2.setMaxFiles(2);
+            QSignalSpy listSpy2(&s2, &SearchSession::fileListed);
+            QSignalSpy doneSpy2(&s2, &SearchSession::finished);
+            s2.startList(small.path());
+            QVERIFY(waitFinished(doneSpy2));
+            QCOMPARE(listSpy2.count(), 2); // PARTIAL list, never retracted
+            QVERIFY(doneSpy2.at(0).at(4).toString().startsWith(
+                QStringLiteral("budget:")));
+        }
+        { // the root refusal lands SYNCHRONOUSLY inside startList (the
+          // same connect-before-start law — no qWait between):
+            SearchSession s3;
+            QSignalSpy listSpy3(&s3, &SearchSession::fileListed);
+            QSignalSpy doneSpy3(&s3, &SearchSession::finished);
+            s3.startList(small.filePath(QStringLiteral("no-such-dir")));
+            QCOMPARE(doneSpy3.count(), 1); // SYNCHRONOUS, checked the
+                                           // very next statement
+            QCOMPARE(listSpy3.count(), 0);
+            QVERIFY(doneSpy3.at(0).at(4).toString().startsWith(
+                QStringLiteral("root: not a directory:")));
+        }
+        { // reentry + cancel ride the LIST face the same way: a start
+          // while running is IGNORED (one finished total), and the
+          // cancel stop is the honest "cancelled" with the partial list
+          // kept.
+            SearchSession s4;
+            QSignalSpy doneSpy4(&s4, &SearchSession::finished);
+            QSignalSpy listSpy4(&s4, &SearchSession::fileListed);
+            s4.startList(m_dir.path());
+            SearchQuery q;
+            q.text = QStringLiteral("sum");
+            s4.start(m_dir.path(), q); // IGNORED (running) — emits nothing
+            QVERIFY(s4.running());
+            s4.cancel();
+            QVERIFY(waitFinished(doneSpy4));
+            QCOMPARE(doneSpy4.count(), 1);
+            QVERIFY(doneSpy4.at(0).at(4).toString() == QLatin1String("cancelled"));
+            // cancel lands between pumps: at most the first chunk got
+            // listed before the stop (kChunkFiles per tick) — partial
+            // counts as scanned, never retracted:
+            QVERIFY(listSpy4.count() <= SearchSession::kChunkFiles);
+            QCOMPARE(doneSpy4.at(0).at(0).toInt(), listSpy4.count());
+        }
+        { // the BOTH-WAYS audit of the widening: the QUERY walk (start)
+          // never emits fileListed — the I1 signal contract is UNCHANGED
+          // on the query face.
+            SearchSession s5;
+            QSignalSpy listSpy5(&s5, &SearchSession::fileListed);
+            QSignalSpy doneSpy5(&s5, &SearchSession::finished);
+            SearchQuery q;
+            q.text = QStringLiteral("sum");
+            s5.start(small.path(), q);
+            QVERIFY(waitFinished(doneSpy5));
+            QCOMPARE(listSpy5.count(), 0);
+            QVERIFY(doneSpy5.at(0).at(1).toInt() >= 1); // the QUERY face
+                                                        // still works
+        }
+    }
+
     void walkUnskippedAndDepthFaces()
     {
         { // hidden VISIBLE + .git un-skipped:

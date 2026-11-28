@@ -5012,20 +5012,25 @@ painting stay "by design" where they are written.
 
 # GATE 4 — the IDE dogfood train (opened 2026-11-28, owner decision)
 
-**STATUS (2026-11-28): cars I0+I1 CLOSED at 1.15.0** — the pair landed
-and closed as ONE version exactly as the version-rhythm record planned.
-The LEDGER rule paid its first fare: catch #1 (no public programmatic-
-selection door) was found by the app living only on the exported
-surface, written before any workaround, and CLOSED the same car
-additively (`CodeEditor::setSelection` public + tripwire; the a11y-
-channel workaround was NOT taken). The wheel half of the close ritual
-rode whole: the container rebuilt/repaired `qmn_native-1.15.0`, the
-`--codegen` rejected-log set rode a BOTH-WAYS diff against the archived
-1.13.0 baseline — 1824 lines, ZERO delta — and `setSelection` got a
-LIVE presence+behaviour pin against the REPAIRED wheel (callable
-through the wheel, produced the expected selection); pydemo's fourth
-literal + its headless smoke green. **I2 quick-open/palette is THE OPEN
-CAR.**
+**STATUS (2026-11-28): cars I0+I1 CLOSED at 1.15.0; car I2 CLOSED at
+1.16.0 the SAME DAY** — the pair landed and closed as ONE version
+exactly as the version-rhythm record planned, and I2 rode its own
+single-car close per the same rhythm. The LEDGER rule paid its first
+TWO fares: catch #1 (no public programmatic-selection door) was found
+by the app living only on the exported surface, written before any
+workaround, and CLOSED the same car additively (`CodeEditor::
+setSelection` public + tripwire; the a11y-channel workaround was NOT
+taken); catch #2 (no file-pool enumeration face for quick-open) the
+same shape — the impossible-query trick was NOT taken, the engine
+grew the LIST face (`startList` + `fileListed`, contents never read).
+The wheel half of both close rituals rode whole: the container
+rebuilt/repaired `qmn_native-1.15.0` and `qmn_native-1.16.0`, the
+`--codegen` rejected-log set rode BOTH-WAYS diffs against the archived
+1.13.0 baseline and the 1.15.0 set — 1824 lines, ZERO delta at both
+closes; `setSelection` got a LIVE presence+behaviour pin against the
+REPAIRED 1.15.0 wheel (callable through the wheel, produced the
+expected selection); pydemo's fourth literal + its headless smoke
+green at both wheels. **I3 LSP-depth+outline is THE OPEN CAR.**
 
 **WHY (the owner's words, paraphrased):** a showcase that mirrors
 itself proves the surface is SELF-consistent; it does not prove the
@@ -5305,6 +5310,168 @@ quick-open decides here: grep-style vs the ledger's
 `requestWorkspaceSymbol` door. Chord-table law: NEVER re-bind a frozen
 view chord (F7 is diff-nav since S1 — the IDE's palette chords must
 mask against the view's keymap table at I2 opening).
+
+**I2 CLOSED 2026-11-28 (rides its own 1.16.0 single-car close) — quick
+open + command palette shipped; two LEDGER rulings and one promotion,
+each told honestly:**
+
+- THE FUZZY PROMOTION: the stub's conjunction (quick-open AND palette
+  AND a search-boost all using the scorer) did NOT fully materialize —
+  TWO users ride it (quick-open, the palette); the search-boost is NOT
+  shipped (the Find-in-Files row order law pinned at I1 is the engine's
+  WALK order, and re-ranking shipped rows was not a feature this car
+  was asked for). The promotion was taken ANYWAY under the same
+  born-headless exception `src/search/` rode at I1, and the reason is
+  written at the boundary: this car's real test deliverable is the
+  subsequence-soundness property pair vs a brute-force reference, and
+  that needs a LINKABLE face (a static helper in the app TU cannot be
+  property-tested from a foreign binary); the scorer also earns its
+  living as a REAL export set `qmn::fuzzy` (QtCore ONLY, own GUITLESS
+  ctest entry, plain-Qt records — wrappable by construction, wheel
+  crossing NOT taken, no Python consumer asked). The law's mechanism
+  (promotion only at a car boundary, never mid-car surgery) was paid;
+  the strict three-user condition was a SUFFICIENT trigger, and where
+  it did not fire the deviation is recorded here rather than quietly
+  kept.
+- THE SCORER LAW froze at the header and is pinned from BOTH
+  mechanisms: score = Σ per matched char (start/boundary/camelCase +4,
+  base +1 — the boundary set " \t/\\_-:.~" spelled in the law, not a
+  class reference) + Σ per ADJACENT PAIR +2, taken as the MAX TOTAL
+  over all embeddings — adjacency is a PAIR bonus INSIDE one embedding,
+  never an occurrence property (`tst_fuzzy::
+  adjacencyIsPairBonusNotOccurrenceProperty` pins the two-sided
+  reading: a consecutive occurrence NOT in the reported max vector
+  carries no bonus); ties between max-total embeddings resolve to the
+  LEXICALLY EARLIEST position vector — the DP enforces it with the
+  greedy left-to-right walk ("smallest position that can still COMPLETE
+  to max"), the brute-force reference walks embeddings in lex order and
+  keeps only STRICT improvements; the empty needle MATCHES (score 0,
+  empty positions — the caller shows its unfiltered list); a needle
+  longer than the haystack never matches (LENGTH decides); SIMPLE case
+  folding only (`toLower` both sides — the documented 'ß'/'SS' seam,
+  pinned both directions); offsets are UTF-16 code-unit indices (the
+  astral surrogate legs pin it — the tree-sitter-2× trap's sibling
+  class).
+- THE DP'S WRONG FIRST ATTEMPT, told as it happened: the first
+  reconstruction decided each step from PREFIX-OPTIMAL prefix scores —
+  FALSE (a max embedding's prefix need not be prefix-optimal: "ab" in
+  "aab" puts the lex-earliest max vector through position 0, which the
+  prefix-optimal 'a' at 1 cannot complete to); caught at writing time
+  and replaced by the greedy carrying the FACTUAL prefix score along
+  the chosen chain. Two more slips fell to the pair before any pin was
+  trusted: a step-0 transition that counted adjacency for the FIRST
+  matched char, and a max-chain that dropped the sentinel identity at
+  the row edge. The hand-computed "pins" in the first local driver
+  carried GUESSED expectations that were wrong ("ab" in "aab" cannot
+  embed at 0,1 at all) — the naive reference was the ORACLE and the
+  lesson rode the record: hand-computed score tables are claims, the
+  reference decides. Final pair: 40 000 fixed-seed (0xC0FFEE) pairs,
+  ZERO mismatches, 513 tie-class legs (the agreement is never vacuous);
+  plus a THIRD-mechanism self-consistency leg: the reported vector
+  embeds the needle and its total recomputes to the reported score.
+- LEDGER CATCH #2 (written before the workaround, closed the same
+  car): quick-open needs the pool of EVERY listed file, and the I1
+  query walk's signals carry only MATCHED and SKIPPED files — a
+  scanned-clean miss is silent, and no never-matching-query trick
+  enumerates names without reading every file's contents. The
+  impossible-query face was NOT taken; the missing door was granted
+  ADDITIVELY: `SearchSession::startList(root)` + the `fileListed
+  (filePath)` signal — the SAME tree walk, filters, pacing, budget caps
+  and frozen stop faces, but contents are NEVER READ (no size decision,
+  no binary sniff, no `fileSkipped`; the list face's matched/skipped
+  counts are honest ZEROS — the content decisions belong to the OPEN,
+  not to the list). `fileListed` fires ONLY in list mode: the I1 signal
+  contract rides UNCHANGED, pinned both ways by the leg where the QUERY
+  walk never emits it. The list root refusal lands SYNCHRONOUSLY inside
+  `startList` — the connect-before-start law paid again at the pool's
+  CTOR connections.
+- THE QUICK-OPEN LAW (IDE side): the pool re-arms at the SAME project
+  door the tree re-arms at; a mid-walk `openProject` takes the cancel→
+  pending→restart-inside-`finished` seam (the engine retires `walk_`
+  before the emit — its own sanctioned restart face), pinned by
+  `poolReplacesOnProjectSwitchSeam`: two openProject calls with NO
+  event-loop beat between, and the pool ends as project B's set, WHOLE
+  and ONLY B's. The ranking law froze: empty needle = the POOL's walk
+  order (the scorer is never called); otherwise fuzzy score DESC, ties
+  by the displayed project-relative path CODEPOINT ASC — a total order.
+  The scorer scores the DISPLAY string — what the user reads is what
+  gets matched (the absolute path's shared root would dilute every
+  boundary seam). The row cap `kQuickOpenMaxRows = 50` TRUNCATES
+  VISIBLY (the summary spells the hidden count — the skip-honesty law),
+  a still-filling pool is a VISIBLE face ("… ещё строится"), no project
+  is a LOUD refusal, never a silent zero list. Activation rides the
+  openFile truth whole (the one-tab law included): success closes the
+  overlay; a FALSE keeps it open (another row may still be the truth)
+  and the status bar carries the failure — the vanished-file leg pins
+  false + popup-survives + "Не удалось" + the other rows still working.
+- THE PALETTE LAW: the window's OWN registry, built ONCE in the ctor in
+  a frozen order (quick-open, command-palette, find-in-files-focus,
+  close-tab); empty needle = REGISTRY order; the filter is fuzzy over
+  LABELS, score DESC, ties by REGISTRY ORDER (the tie law); commands
+  run CLOSE-then-RUN, pinned by the ordering face — the quick-open
+  command run FROM the palette leaves the palette hidden and quick-open
+  UP (a post-run hide would have killed it); out-of-range run = false,
+  NOTHING ran; the idempotence guard: re-triggering the ALREADY-open
+  overlay (chord or command) is a NO-OP — a retriger never wipes the
+  query being typed — while the OTHER popup still switches through the
+  same close-first seam.
+- SYMBOL QUICK-OPEN DECIDED (the stub's question): NOT shipped at I2.
+  grep-style symbol quick-open is Find-in-Files in a hat (the I1 engine
+  already answers text-symbol search through the pinned panel), and the
+  GOOD face needs `LspHub::requestWorkspaceSymbol` — the ledger SEED
+  that belongs to car I3's LSP-depth plan, where the door gets asked
+  as part of that shelf widening. A half-face shipped now would be the
+  workaround the ledger law refuses; the seed rides I3.
+- THE CHORD-TABLE AUDIT (the stub's law, paid at this car): I2 adds
+  exactly THREE window chords — Ctrl+P, Ctrl+Shift+P, Ctrl+W — and the
+  VIEW's frozen keymap table contains NO Key_P and NO Key_W ever (its
+  Ctrl set: A/C/V/X/Z/Y/D/Return + the nav set; Tab/BackTab; Escape;
+  F7/Shift+F7 are the S1 diff-nav chords). The mask face is TRIPWIRED
+  by `paletteChordsRideTheWindowNotTheView`: the chords reach the
+  WINDOW while the editor keeps focus and the document stays byte-
+  identical. Ctrl+F7/Alt+F7 stay free (the S1 masking policy rides);
+  F7/Shift+F7 ride UNBOUND in the IDE (no diff mode there yet). The
+  popup's Esc is a CHILD-scoped shortcut (`WidgetWithChildrenShortcut`)
+  — the view's frozen Escape stays the editor's own while the EDITOR
+  holds focus.
+- TESTS: ctest GROWS to TEN entries (`fuzzy` GUITLESS — QtCore-only
+  layer). `tst_fuzzy` 12 slots (the hand faces of the frozen law, the
+  pair-bonus two-sided reading, the lex-earliest tie class, the ß seam,
+  the astral legs, and the 40k-pair fixed-seed pair). `tst_search` 20
+  slots (`listModeFaces`: the hand-pinned walk order, names-NEVER-
+  content decisions, the budget/root-synchronous/cancel/reentry legs,
+  and the BOTH-WAYS audit leg: the query walk never emits `fileListed`).
+  `tst_ide` 19 slots (EIGHT new: the pool walk-order face with hidden/
+  .git filtered OUT, the hand-computed score-then-path table WITH tie
+  legs, the activation faces incl. the vanished-file leg, the loud no-
+  project refusal, the truncation-VISIBLE face at the cap, the pool
+  replacement seam, the palette registry/filter/run incl. the close→
+  run order and out-of-range honesty, and the chord-mask tripwire with
+  the child-scoped Esc). Shake: `search|ide|fuzzy` under
+  `--repeat until-fail:10 -j8` + 10 standalone runs each — ZERO flakes.
+- THE `tst_lsp` STARVATION HOLE, FOUND AND CLOSED AT THIS CLOSE (the
+  1.14 fold-liveness precedent's shape, not an I2 mechanism — lsp was
+  untouched by the car): the first 1.16.0 full ctest crashed `tst_lsp`
+  ONCE (SEGFAULT) during the window where the container wheel build
+  was oversubscribing the host; 10 solo + 10 ctest until-fail idle
+  repeats were green. The INTENTIONAL oversubscription repro (8 busy
+  loops on the 12-core box — the exact scenario the slot's own comment
+  already warns about, a class recorded since before this car) failed
+  `lspCapabilityRegistryAndApplyEditDoor` CLEANLY — not segfault — and
+  that clean fail exposed the slot's OWN connect-order hole: the
+  `hoverFlips` per-emission recorder connected AFTER the ready QTRY,
+  while a starved batch can deliver the initialize response AND both
+  registration rounds in ONE readyRead pass, so both flips land BEFORE
+  the recorder exists (hoverFlips stayed 0 through the 30 s window);
+  the fresh-registry pin ALSO cannot ride post-ready (by then
+  hoverFlips was already 2). The fix is the repo's oldest connect law:
+  the recorder connects BEFORE `start()`, and the fresh-registry face
+  is pinned at the SYNCHRONOUS point right after `start()` RETURNS
+  (no event loop has run — no frame can exist yet). Verified: TWO full
+  `tst_lsp` runs (101 slots, exit 0) pass under the same 8-loop
+  oversubscription, plus idle solo/ctest runs after. The SEGFAULT tail
+  stayed unreproduced at 20+ idle repeats and stands recorded as-is;
+  the known loaded-trigger surface this repro exposed is closed.
 
 ### Car I3 stub — LSP depth + outline
 

@@ -5,9 +5,10 @@ Native code editor widget for Qt6, built from scratch on a raw `QWidget`
 QPlainTextEdit, no Chromium. Long-term hobby project; roadmap in `README.md`,
 phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
 
-## Current state (v1.15.0 — GATE 3 CLOSED 2026-11-28 with S2/Py DEFERRED
+## Current state (v1.16.0 — GATE 3 CLOSED 2026-11-28 with S2/Py DEFERRED
 by owner decision; **GATE 4 (the IDE dogfood train) IS THE OPEN TRAIN** —
-cars I0+I1 CLOSED at this version, I2 is the open car) — gates and the
+cars I0+I1 CLOSED at 1.15.0, car I2 CLOSED at 1.16.0, I3 is the open
+car) — gates and the
 frozen surface
 
 - Gate 1 (editor v1) froze the public API at tag `v1.0`; Gate 1.5 (usability
@@ -81,9 +82,30 @@ steps PROBE-OK on clangd 23.1.5) →
   went PUBLIC** (the additive reveal channel; tripwire
   `tst_codeeditor::programmaticSetSelectionDoorReveals`; m7's
   no-three-copies rule rode); ctest is now NINE entries (`search`
-  guiless + `ide` offscreen)** → **I2 quick-open/palette is THE OPEN
-  CAR** → I3 LSP depth + outline (first shelf widening
-  planned: `LspHub::requestDocumentSymbol`) → I4 tasks + problem
+  guiless + `ide` offscreen)** → **car I2 CLOSED at 1.16.0 (2026-11-28,
+  the single-car close per the rhythm): quick-open (Ctrl+P) + the
+  command palette (Ctrl+Shift+P) in the IDE, and the `src/fuzzy/`
+  scorer promoted as the second born-headless lib (real export
+  `qmn::fuzzy`, own GUITLESS ctest entry — the 10th; the law: max-total
+  subsequence score, boundary/camelCase +4, adjacency a PAIR bonus +2,
+  ties resolve to the lex-earliest position vector — pinned by a
+  40 000-pair fixed-seed fuzz vs a brute-force full-enumeration
+  reference); LEDGER catch #2 found and CLOSED the SAME car: the quick-
+  open file pool had no enumeration face (`fileMatched`/`fileSkipped`
+  carry only hit/skipped files) — the impossible-query workaround was
+  NOT taken, `SearchSession::startList` + the `fileListed` signal
+  landed additively (SAME walk/filters/pacing/stop faces, contents
+  NEVER read; `fileListed` fires ONLY in list mode, the I1 signal
+  contract pinned unchanged both ways); the chord-table audit rode as
+  a TRIPWIRE (Ctrl+P/Ctrl+Shift+P/Ctrl+W mask against the view's frozen
+  table: Key_P/Key_W absent from it; the popup's Esc is child-scoped so
+  the view's Escape stays the editor's own); symbol quick-open DECIDED
+  at the car — NOT shipped, the `requestWorkspaceSymbol` seed moves to
+  I3 where the door gets asked; ctest is now TEN entries (`fuzzy`
+  guiless)** → **I3 LSP depth + outline is THE OPEN CAR** (first shelf
+  widening
+  planned: `LspHub::requestDocumentSymbol`; the `requestWorkspaceSymbol`
+  decision rides here too) → I4 tasks + problem
   matcher → I5 git gutter; NO terminal by owner decision; the
   frozen-surface/additive + wrappability + skip-honesty laws ride
   UNCHANGED** → Grapheme segmentation
@@ -177,8 +199,10 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
 - `src/app/` — view only (`qmn-spike` bench/spike harness and `qmn-demo`
   tabbed demo app; since GATE 4 car I0 also the `qmn-ide-demo` IDE pair —
   same shape: window in the `qmn_ide_app` STATIC lib, thin `ide_main.cpp`,
-  `tst_ide` drives it offscreen; the IDE links `qmn_glue` + `qmn_search`
-  PRIVATE and its header keeps both behind fwd-decls).
+  `tst_ide` drives it offscreen; the IDE links `qmn_glue` + `qmn_search` + `qmn_fuzzy`
+  PRIVATE and its header keeps glue and search behind fwd-decls — and
+  the fuzzy scorer never appears in the header AT ALL, its doors speak
+  plain Qt only).
   **GATE 4 car I1 note: the app layer may link
 `qmn::search` directly (the app IS its consumer) — and the demo's tab
   pair keeps its OWN `readTextFile` copy until a third home or a bug-fix
@@ -223,13 +247,29 @@ Enforced only by convention + CMake link deps — nothing checks it automaticall
 - `src/search/` — **QtCore ONLY** (GATE 4 car I1, 2026-11-28: the first
   new layer since the Gate-2 five; the promotion law's born-headless
   exception): the Find-in-Files engine (pure `Engine::scanText/scanFile`
-  faces + the paced `SearchSession::start/cancel` walk over signals). A
+  faces + the paced `SearchSession::start/cancel` walk over signals;
+  since I2 the LIST face `startList`/`fileListed` — LEDGER catch #2's
+  additive answer: the same walk/filters/pacing/stop faces, names only,
+  contents NEVER read, `fileListed` firing only in list mode). A
   REAL export set `qmn::search` (the core-shape install, NOT link-only
   like internal_diff — the IDE app IS the consumer and links it
   directly, PRIVATE); its records/queries speak plain Qt types with
   SIGNAL result routes (wrappable from birth, but the wheel crossing is
   NOT taken until a Python consumer asks). The view/core know nothing of
   it; only `qmn_ide_app` links it today.
+- `src/fuzzy/` — **QtCore ONLY** (GATE 4 car I2, 2026-11-28: the second
+  born-headless promotion, same exception): the subsequence scorer
+  behind the IDE's quick-open and command palette (its TWO users at the
+  promotion; the plan's third, a search-boost, was not shipped and the
+  deviation is recorded in PLAN). The score law (boundary/camelCase +4
+  context, adjacency a PAIR bonus +2, max TOTAL over embeddings, ties
+  to the LEXICALLY EARLIEST position vector, simple `toLower` folding
+  only, UTF-16 code-unit positions) is FROZEN at the header and pinned
+  from both mechanisms (DP vs a brute-force full-enumeration reference,
+  fixed seed). A REAL export set `qmn::search`-shape (`qmn::fuzzy`, the
+  IDE links it PRIVATE); wrappable records (`FuzzyMatch` plain struct +
+  `QVector<int>`) but NO wheel crossing — no Python consumer asked. The
+  view/core know nothing of it.
 - `pydemo/` — a uv project, NOT built by CMake: the Python analog of
   `qmn-demo` running on the shipped wheel (path dep into gitignored
   `dist/`; `uv.lock` stays uncommitted). Mirrors the C++ demo door-for-door
@@ -364,11 +404,19 @@ ninja -C build
 ctest --test-dir build --output-on-failure
 ```
 
-Nine ctest tests (GATE 4 pair-close 2026-11-28): `textbuffer` (core
+Ten ctest tests (GATE 4 car I2 close 2026-11-28): `textbuffer` (core
 property tests), `diff` (the pure
 line-diff engine, M10), `search` (I1: the qmn::search engine — naive-
 reference property pair on a fixed-seed corpus, the walk-contract/cancel/
-refusal faces; GUITLESS like textbuffer/diff, the layer is QtCore-only),
+refusal faces, and since I2 the LIST face `startList`/`fileListed` —
+names-only enumeration, the both-ways contract audit that the query
+walk never emits `fileListed`; GUITLESS like textbuffer/diff, the layer
+is QtCore-only), `fuzzy` (I2: the qmn::fuzzy scorer — hand faces of the
+frozen score law (boundary/camelCase seams, the adjacency-as-PAIR-bonus
+two-sided reading, the lex-earliest tie class, the 'ß' simple-fold seam,
+astral UTF-16 legs) + the 40 000-pair fixed-seed (0xC0FFEE) fuzz vs a
+brute-force full-enumeration reference (the tie law pinned from BOTH
+mechanisms, 513 tie-class legs, never vacuous); GUITLESS),
 `lsp` (M8: JsonFraming + transports + RpcClient, then
 the fakeserver/LspClient/DocumentSyncer/LspHub machines — this binary GROWS
 machine by machine through M8, no further ctest entries inside the car),
@@ -383,9 +431,12 @@ a ctest entry, its exit code is the far-side oracle), `codeeditor`
 since D4 one slot drives the `--dap` door against `$<TARGET_FILE:dapfake>`
 — spawning IS allowed here, unlike the `--lsp` door, because dapfake is
 CI-built; the LIVE-adapter ritual `tools/probe_dap.sh` is manual, never
-CI, but car 4 may not close without it), `ide` (I0/I1: drives the
+CI, but car 4 may not close without it), `ide` (I0/I1/I2: drives the
 qmn-ide-demo surface — project door, one-tab focus law, close/reopen
-face, the Find-in-Files panel rows/refusals/cancel/reveal — through the
+face, the Find-in-Files panel rows/refusals/cancel/reveal, and since
+I2 the quick-open pool/rank/activation/truncation/pool-switch-seam
+faces, the palette registry/filter/run faces and the chord-mask
+tripwire — through the
 same programmatic doors the docks call; NO server ever spawns: the
 one-hub-slot-opens-only-unclaimed-languages law rides tst_demo's shape
 whole). Two wire facts pinned by the
@@ -398,7 +449,7 @@ frames (a client-side one CRASHES gdb's python DAP server; dapfake exits
 `setBreakpoints` pushes but never gates it on the `launch` answer
 (gdb answers `launch` only AFTER `configurationDone` — gating there
 deadlocks the two sides).
-`textbuffer`, `diff` and `search` are guiless; since M8 machine 4 the `lsp` binary
+`textbuffer`, `diff`, `search` and `fuzzy` are guiless; since M8 machine 4 the `lsp` binary
 drives real `CodeEditor`s too (and D3 flipped `dap` to
 `QTEST_MAIN`), so ctest sets
 `QT_QPA_PLATFORM=offscreen` for `lsp`, `glue`, `dap`, `codeeditor`, `demo`

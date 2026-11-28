@@ -3,6 +3,10 @@ add_subdirectory(diff)
 # The search engine (GATE 4 car I1): the QtCore-only sibling of core/diff
 # (headless walk + in-buffer scan; the IDE panel is its first consumer).
 add_subdirectory(search)
+# The fuzzy scorer (GATE 4 car I2): the same born-headless family — the
+# quick-open + command-palette ranking (the promotion law paid at the
+# car opening: TWO users the very car it is written for).
+add_subdirectory(fuzzy)
 add_subdirectory(protocol)
 add_subdirectory(lsp)
 # The DAP layer (car 4, machine D2): sibling of lsp over the protocol

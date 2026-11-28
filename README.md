@@ -62,10 +62,11 @@ one document (shared text/undo/parse, per-view carets and popups), and
 DAP decorations fanning out to every view of a document. Car S1 (1.14.0)
 made `qmn-demo` itself the live showcase (`--diff` trio, grammar door,
 typed DAP controls, the `--tour` pin table); S2/Py are DEFERRED by owner
-decision, and GATE 4 — the IDE dogfood train — is now the open train: its
-first pair (cars I0+I1, 1.15.0) shipped `qmn-ide-demo`, a second app that
-lives ONLY on the exported surface, plus the QtCore-only `src/search/`
-Find-in-Files library it earned.
+decision, and GATE 4 — the IDE dogfood train — is now the open train: cars
+I0+I1 (1.15.0) shipped `qmn-ide-demo`, a second app that lives ONLY on the
+exported surface, plus the QtCore-only `src/search/` Find-in-Files library
+it earned, and car I2 (1.16.0) added quick open + the command palette and
+the second born-headless library the scorer earned (`src/fuzzy/`).
 
 ## Layout & layering
 
@@ -87,16 +88,22 @@ src/search/ SearchEngine + SearchSession — the Find-in-Files engine
             (QtCore ONLY too — GATE 4 car I1, born headless: a REAL export
             set qmn::search the IDE app links directly; plain-Qt records,
             results over SIGNALS)
+src/fuzzy/  FuzzyMatcher — the quick-open/command-palette scorer
+            (QtCore ONLY — GATE 4 car I2, the second born-headless
+            promotion: real export set qmn::fuzzy, the score law frozen
+            at the header, pinned by a fuzz vs a brute-force reference)
 src/app/    qmn-spike  — demo/bench harness, depends on view
             qmn-demo   — full demo app: tabbed editors + settings dialog
             (links qmn_glue PRIVATE for the --lsp door; no glue type ever
             crosses its headers beyond a forward-decl)
-            qmn-ide-demo — GATE 4's IDE dogfood pair (I0+I1): project tree,
-            tabs (one tab per path), Find-in-Files over qmn::search; the
-            window lives in the qmn_ide_app STATIC lib + thin ide_main.cpp,
-            qmn_glue/qmn_search linked PRIVATE, all behind fwd-decls
-tests/      nine ctest entries: textbuffer + diff + search are guiless,
-            lsp + glue + dap + codeeditor + demo + ide run on
+            qmn-ide-demo — GATE 4's IDE dogfood pair (I0+I1+I2): project
+            tree, tabs (one tab per path), Find-in-Files over qmn::search,
+            quick open (Ctrl+P) + command palette (Ctrl+Shift+P) over the
+            qmn::fuzzy scorer; the window lives in the qmn_ide_app STATIC
+            lib + thin ide_main.cpp, qmn_glue/qmn_search/qmn_fuzzy linked
+            PRIVATE, all behind fwd-decls
+tests/      ten ctest entries: textbuffer + diff + search + fuzzy are
+            guiless, lsp + glue + dap + codeeditor + demo + ide run on
             QT_QPA_PLATFORM=offscreen
 tools/      standalone micro-benches (model, highlight latency tree split,
             search) + probe_clangd.sh (the manual live-server ritual, never
@@ -120,8 +127,9 @@ ctest --test-dir build          # core tests need no display
 ./build/src/app/qmn-spike [file]
 ./build/src/app/qmn-demo [files...]   # tabbed demo: Файл->Открыть…, Настройки
 ./build/src/app/qmn-ide-demo <dir>    # GATE 4 IDE: project tree + tabs +
-                                      # Find-in-Files (a FILE as the project
-                                      # fails loud, exit 1)
+                                      # Find-in-Files + quick open (Ctrl+P)
+                                      # + palette (Ctrl+Shift+P) — a FILE as
+                                      # the project fails loud, exit 1
 ```
 
 Headless smoke/bench run:
@@ -147,17 +155,23 @@ ride a queued DAP control walk (the flags without `--dap` fail loud), and
 `tst_demo` pins the table itself with the server legs forced off). `--lsp`
 and `--dap` stay the off-by-default doors they were.
 
-The IDE doors (GATE 4 cars I0+I1): `qmn-ide-demo <project-dir>` is the first
-consumer that lives ONLY on the exported surface — project dock (Qt's own
-QFileSystemModel tree), editor tabs (ONE tab per path: re-opening FOCUSES),
-and a Find-in-Files panel over the new QtCore-only `src/search/` library:
-case/whole-word/regex toggles, an event-loop-paced cancellable walk with
-honest stop faces, results grouped per file with per-line rows, and row
-activation that opens-or-focuses the file and reveals caret + selection on
-the match — the reveal needed a public door the frozen surface did not have,
-and GATE 4's ledger rule closed it the additive way: `CodeEditor::setSelection
-(anchor, caret)` is now public (the raw the a11y bridge and the diff machinery
-already used). `--lsp` is the same off-by-default door as the demo's.
+The IDE doors (GATE 4 cars I0+I1+I2): `qmn-ide-demo <project-dir>` is the
+first consumer that lives ONLY on the exported surface — project dock (Qt's
+own QFileSystemModel tree), editor tabs (ONE tab per path: re-opening
+FOCUSES), and a Find-in-Files panel over the QtCore-only `src/search/`
+library: case/whole-word/regex toggles, an event-loop-paced cancellable
+walk with honest stop faces, results grouped per file with per-line rows,
+and row activation that opens-or-focuses the file and reveals caret +
+selection on the match — the reveal needed a public door the frozen surface
+did not have, and GATE 4's ledger rule closed it the additive way:
+`CodeEditor::setSelection (anchor, caret)` is now public (the raw the a11y
+bridge and the diff machinery already used). Quick open (`Ctrl+P`) rides the
+same library's LIST face (`startList` + `fileListed` — LEDGER catch #2's
+additive answer: names only, contents never read) and scores with the
+second born-headless library `src/fuzzy/` (score DESC, ties by path); the
+command palette (`Ctrl+Shift+P`) runs the window's own command registry;
+the popup's Esc is child-scoped so the view's frozen Escape stays the
+editor's own. `--lsp` is the same off-by-default door as the demo's.
 
 ### Python demo (pydemo/)
 
@@ -429,10 +443,23 @@ terminal by owner decision.
       PUBLIC as the additive reveal channel; the bench record is measured
       (81 ms over a generated 500-file corpus; 142 ms over the repo's own
       tree; the caps, never wall-clock, are ctest-pinned)
-- [ ] Car I2 — quick open (`Ctrl+P`, riding I1's walker) + command
-      palette; THE OPEN CAR
+- [x] Car I2 — quick open + command palette (CLOSED, 1.16.0): quick open
+      (`Ctrl+P`) rides I1's walker through the LIST face — LEDGER catch #2
+      (no file-pool enumeration door) found and closed the SAME car:
+      `SearchSession::startList` + `fileListed` landed additively, contents
+      NEVER read, the I1 signal contract pinned unchanged both ways; the
+      `src/fuzzy/` scorer promoted as the second born-headless lib (real
+      export `qmn::fuzzy`, own GUITLESS ctest entry — the 10th; the score
+      law frozen at the header, a 40 000-pair fixed-seed fuzz vs a
+      brute-force reference pins the tie class from BOTH mechanisms); the
+      palette (`Ctrl+Shift+P`) rides the window's own command registry
+      (close-then-run, registry-order ties); the chord-table audit rode as
+      a tripwire (no frozen view chord re-bound, Key_P/Key_W absent from
+      the view's table, the popup Esc child-scoped); symbol quick-open
+      DECIDED — NOT shipped, the `requestWorkspaceSymbol` seed rides to I3
 - [ ] Car I3 — LSP depth + outline (first planned shelf widening:
-      `LspHub::requestDocumentSymbol`)
+      `LspHub::requestDocumentSymbol`; the `requestWorkspaceSymbol`
+      decision rides here too) — THE OPEN CAR
 - [ ] Car I4 — tasks + problem matcher (ledger question: a read-only
       editor mode for the output panel)
 - [ ] Car I5 — git gutter (ledger question: an M5 gutter-stripe kind —
