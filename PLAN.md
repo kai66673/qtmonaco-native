@@ -5030,7 +5030,8 @@ rebuilt/repaired `qmn_native-1.15.0` and `qmn_native-1.16.0`, the
 closes; `setSelection` got a LIVE presence+behaviour pin against the
 REPAIRED 1.15.0 wheel (callable through the wheel, produced the
 expected selection); pydemo's fourth literal + its headless smoke
-green at both wheels. **I3 LSP-depth+outline is THE OPEN CAR.**
+green at both wheels. **I3 CLOSED at 1.17.0 (its own record below); I4
+tasks + problem matcher is THE OPEN CAR.**
 
 **WHY (the owner's words, paraphrased):** a showcase that mirrors
 itself proves the surface is SELF-consistent; it does not prove the
@@ -5473,7 +5474,7 @@ each told honestly:**
   stayed unreproduced at 20+ idle repeats and stands recorded as-is;
   the known loaded-trigger surface this repro exposed is closed.
 
-### Car I3 stub — LSP depth + outline
+### Car I3 — LSP depth + outline (CLOSED at 1.17.0, 2026-11-28)
 
 Rename (F2), references (land in the SAME results panel — the panel's
 second user, promotion pressure noted but a WIDGET is not a library),
@@ -5488,6 +5489,231 @@ rejected-log run BEFORE deciding whether it crosses the wheel NOW or
 the door rides C++-only until a Python consumer asks (the honest
 default: door exists, wheel crossing is a MINOR shelf bump, decided at
 that car's close).
+
+**I3 OPENED 2026-11-28 — the opening audit, decisions BEFORE code:**
+
+- THE DOOR SHAPE (settled at opening, over the stub's sketch wording):
+  `requestDocumentSymbol(editor, FeatureHandler)` is the TENTH sibling
+  of the nine feature doors — raw-reply delivery, byte-identical idiom.
+  The stub's "plain-Qt record list" phrase was SKETCH language; the
+  deviation is told here, not quietly kept: the RECORDS land app-side
+  (the results panel's row currency is the engine's own plain-Qt
+  `FileMatch`/`LineMatch` — the panel's second producer after search —
+  and the outline's rows are app-local), while the DOOR rides the
+  sibling shape. Why raw is right here, mechanism over taste:
+  `featureGate` already fires the handler with a LOCAL REFUSAL Reply
+  (kRefusalNoServer / kRefusalNoProvider + the machine reason) — the
+  FeatureHandler is the whole truth channel (success / server error /
+  local refusal), and a decoded-payload handler type would LOSE the
+  refusal reason the IDE's loud faces need. Decoded payload would also
+  split the feature surface into two handler species for no wire gain.
+  The hub keeps decoding where it already decodes (the auto-FEEDS —
+  diagnostics/hints/folds/popups — and the apply* appliers); I3 adds
+  only TWO app-side decodes (a locations list, a symbol tree) and the
+  edit trees ride the EXISTING applier doors (`applyWorkspaceEdit`/
+  `applyCodeAction`/`applyReplyEdit` — public glue, C++-only via the
+  defaulted-client tail) — zero new glue decode sites, zero new glue
+  records.
+- THE WHEEL QUESTION ANSWERS ITSELF at the codegen run, not at the
+  design table: a FeatureHandler (std::function) door DROPS BY TYPE
+  ABSENCE like the nine before it — the tenth honest C++-only absence.
+  No new record type crosses, the THREE COPIES are untouched, the SHELF
+  LITERAL STAYS 1.2.0, and the close audit expects the rejected log to
+  GROW exactly ONE new expected line (the new door, PRESENT in the log
+  — a drop the log does NOT show would mean it crossed by accident) and
+  ZERO lines from app code (the stub's law).
+- `requestWorkspaceSymbol` DECIDED at opening (the seed moved from I2):
+  NOT shipped at I3, and the reason is the FEATURE LIST, not the
+  wire: no I3 feature consumes a workspace-wide symbol list — the
+  outline is `documentSymbol` (per document), definition/references/
+  rename ride a position, and grep-style symbol search is already
+  Find-in-Files (pinned at I1). Shipping a door no shipped feature
+  calls would be the ledger growing an UNUSED door. The seed is
+  EXPLICITLY CARRIED (the ledger-rot law: an entry closes in a named
+  car or is carried on the record — this paragraph is the carry): it
+  rides to the car that actually ASKS (a symbol quick-open feature —
+  Ctrl+T class — is its natural buyer), and the question gets asked
+  AGAIN at the gate-close review.
+- THE SPAWN-LAW EXTENSION (OWNER-GRANTED 2026-11-28, the opening
+  question): `tst_ide` GROWS fakeserver-spawn legs — the RISK-4 law's
+  own class ("spawn is legal only for CI-built far sides (dapfake
+  class)"): the fakeserver via `$<TARGET_FILE:fakeserver>` (CI-built,
+  deterministic, exit-code far-side oracle — exactly tst_demo's `--dap`
+  /dapfake slot shape), pinning the SIX IDE features END-TO-END (real
+  window + real wire). The clangd law STANDS UNTOUCHED: every slot
+  WITHOUT an explicit spec pin still opens only UNCLAIMED languages —
+  no PATH-dependent server is ever spawned by tst_ide, and
+  probe_clangd.sh stays clangd's ritual. The AGENTS ide line is
+  rewritten at the close to carry the grant's exact boundary.
+- THE CHORD AUDIT PAID AT OPENING (the I2 precedent): I3 adds FOUR
+  window chords — F12 (definition), Shift+F12 (references), F2 (rename),
+  Shift+Alt+F (format) — and the view's frozen keymap binds NO Key_F2,
+  NO Key_F12 and NO plain Key_F ever (its only function keys are
+  F7/Shift+F7 since S1; Ctrl set A/C/V/X/Z/Y/D/Return, nav, Tab/
+  BackTab, Escape, zoom Ctrl+/-/0). All four are mask-FREE; the tripwire
+  rides at the close like I2's. NO Ctrl+click definition jump: the view
+  has no click-supply door and an eventFilter over the view is the
+  fragile sibling — chord-only v1, recorded.
+- prepareRename is NOT written into the ledger (the audit names WHY):
+  the single `requestRename` door + the honest answer faces ALREADY
+  carry the refusal truth — a null answer ("cannot rename") and an
+  error Reply reach the handler through the same truth channel, so the
+  IDE's rename overlay shows the server's NO face LOUD; a prepare round
+  trip would only move the question earlier, a UX-polish enrichment
+  that is NOT a missing door. The overlay prefills from the view's
+  selection/caret word through EXISTING view doors.
+- THE OUTLINE REFRESH LAW (decided at the machine, sketched here): the
+  dock re-pulls on tab-change + file-open + a document-change debounce
+  (the editApplied/cursorMoved view signals, app-side timer — the
+  search panel's paced-walk precedent's honesty, not the hub's feed
+  machinery: I3 adds NO auto-feed to the hub) + a MANUAL refresh door +
+  a palette command; an out-of-capability or refusal document empties
+  the dock LOUD in the summary, never a stale tree posing as current.
+
+**I3 CLOSED 2026-11-28 at 1.17.0 (single-car close per the rhythm) — what
+actually ran, and the three things the drills taught:**
+
+- THE SHELF DOOR LANDED AS DESIGNED (the opening record's shape held):
+  `LspHub::requestDocumentSymbol` is the tenth `FeatureHandler` sibling,
+  the `documentSymbolProvider` gate rides `featureGate`'s LOCAL refusal
+  route, `initialize` now declares
+  `textDocument.documentSymbol {hierarchicalDocumentSymbolSupport:true}`,
+  flush-before-ask, car-D resolution through ANY live view. THE WHEEL
+  ANSWER CAME BACK FROM THE CODEGEN RUN, NOT FROM THE TABLE: the 1.17.0
+  rejected-function set is **1825 lines vs 1824 at 1.16.0 — ONE added
+  line, and that line IS the tenth door** (`unmatched type
+  'const qmn::glue::LspHub::FeatureHandler&' in parameter #2 "onReply"…
+  Cannot find type entry for "std::function"`), ZERO lines from
+  `src/app/`; the generated-file set is IDENTICAL (47 files both runs —
+  no new bound type, the THREE COPIES untouched); the SHELF LITERAL
+  STAYED 1.2.0 (additive but not Python-visible is neither a break nor a
+  MINOR bump). Both directions of the audit read clean.
+- FAR SIDES: the fakeserver grew the `documentsymbol`/`symflat` legs on a
+  MARKER PROTOCOL the test controls line for line (`SYM <kind> <name>[ |
+  <detail>]` opens, `END` closes the innermost, EOF closes the rest; a
+  malformed marker is the feed's own bug, exit 2), an advertise block
+  that READS THE CLIENT'S CLAIM BACK (no `documentSymbol` claim → exit 2;
+  tree mode requires `hierarchicalDocumentSymbolSupport==true`; provider
+  advertised as the OBJECT `{}` truthy form) and an answer-handler
+  tripwire (an ask reaching a provider-less server is exit 2 — the
+  foldingRange/inlayHint tripwire restated for the tenth sibling).
+  `symflat` answers the FLAT `SymbolInformation[]` shape (containerName +
+  a non-spec junk member) DESPITE the true claim — the sloppy-server
+  class. `tst_lsp` grew three machines: the marker tree pinned as BYTES
+  (both shapes), the flat answer arriving WHOLE (the door CARRIES, it
+  does not filter), the flush-before-ask proof (markers MOVED by an edit
+  come back MOVED), and the LOCAL refusal pair with the `reqCount`
+  far-side witness that the OFF-provider wire stayed SILENT.
+- THE IDE FEATURES (all six) RODE THE ALREADY-SHELF: five existing
+  `request*` doors + this car's tenth, the `apply*` appliers
+  (`applyReplyEdit` makes the rename ONE undo group per document;
+  `applyCodeAction` reaches inside `command.arguments[0]` for the
+  WorkspaceEdit a real server hides there (the shape this car's drill RUNS —
+  the item's own `edit` shape is the applier's, pinned at the shelf in
+  `tst_lsp`, and the row-order law keeps the pinned sequence drift-free by
+  anchoring the two applied edits at the document's two ENDS); `applyTextEditList` takes the
+  bare formatting shape), and I1's public `setSelection` for EVERY
+  reveal. Reveal CARRIERS pinned as behavior: definition keeps the CARET
+  where it was and SELECTS the token (caret at the SELECTION START); the
+  references panel and the outline put the CARET at the row's END.
+  `resultsProducer()` names who owns the shared panel (search vs
+  references) — the panel's second producer, still a WIDGET not a
+  library, the stub's promotion pressure left un-promised. A purely
+  `command` or create-file code-action row stays honest VISIBLE and
+  REFUSES THROUGH THE APPLIER: v1 never runs a server's arbitrary
+  command. Chord count CORRECTED against the opening audit: FIVE chords
+  (the opening paragraph counted four and forgot Ctrl+. when it wrote
+  the audit sentence) — F12/Shift+F12/F2/Shift+Alt+F/Ctrl+., all five
+  MASK-FREE (the view's frozen table binds no Key_F12/Key_F2/plain Key_F
+  with modifiers/Ctrl+period), pinned by
+  `i3NewChordsRideTheWindowNotTheViewAndRefuseLocally` (no hub: every
+  door refuses LOUD+LOCAL, the view typed NOTHING through any of the
+  five).
+- THE OUTLINE'S POLICY IS THE APP'S, and its truth channel is its OWN
+  label: refresh on open / tab switch / a 600 ms edit debounce (a
+  window-side QTimer — NO view signal is named for it) / the dock button
+  / the manual door / a palette command; a refusal clears the rows LOUD
+  (a stale tree never poses as current) and a generation counter retires
+  superseded pulls — its VISIBLE face (newest ask wins after a fast
+  edit) is pinned; a genuinely OUT-OF-ORDER reply never happens on the
+  ordered stdio transport, so the counter is a belt for TCP, and that is
+  said here rather than implied by a test. A claimed document whose
+  server is still handshaking gets a BOUNDED out-loud wait (10 tries)
+  because at the hub's door a SLOW server and a DEAD spawn wear the same
+  `-32002` face — the honest pair is the bounded wait plus the plain
+  refusal after the cap, and the SECOND ask past the cap does NOT
+  re-negotiate the wait. Both wire shapes decode app-side; the flat one
+  REBUILDS from `containerName` by "the LAST earlier row of that name
+  adopts" (preorder ⇒ that row is the innermost containing symbol) and
+  the rebuild ADMITS itself in the summary.
+- WHAT THE DRILLS ACTUALLY TAUGHT (three, all real behavior, none
+  theoretical): (1) `addEditorTab`'s ORDER LAW — the session open lands
+  BEFORE `tabs_->addTab()`, because addTab emits `currentChanged` and the
+  outline's first ask used to reach the hub BEFORE the document was
+  registered: a "not registered" refusal the retry law CANNOT tell apart
+  from a real one (no syncer to wait on). (2) THE OUTLINE NEVER POSTS TO
+  THE SHARED STATUS BAR — the I0 project-message pin caught the steal,
+  the dock's own label is the face. (3) THE READINESS GATE IS THE
+  WINDOW'S OWN ASK: polling a dozen feature summaries for "not sent yet"
+  read the wire as RED when it was merely YOUNG; an outline ask cycle
+  that FINISHED is the proof a server ANSWERED, so every depth drill
+  gates on that (the tenth door is the gate exactly because it is the
+  window's own ask, the arm advertising the tenth provider by default).
+  THE NEGATIVE CONTROL RAN AND BITE: with the fake's advertise flag
+  removed, the tenth door refused LOCALLY (-32601 capability
+  "documentSymbolProvider" is not offered) and the outline drill FAILED
+  — the far-side legs are load-bearing, not decorative.
+- tst_ide is now 28 TEST slots (17 before + 11 depth slots — the QTest
+  `Totals:` line reads 30 because initTestCase/cleanupTestCase ride it);
+  the spawn grant's
+  boundary is exactly PLAN's opening record and the AGENTS ide line
+  carries it: explicit-spec slots spawn the CI-built fakeserver (armed
+  UNDER THE BUILT-IN'S NAME — `armLspServer` takes the SPEC NAME and
+  "clangd" replaced whole is the deterministic arm, so PATH clangd stays
+  UNSPAWNED), the real-user `.qmn/lsp.json` fold overriding the built-in
+  program is pinned end-to-end once, and every other slot keeps the I0
+  law. ctest stays TEN entries (the fakeserver is a support target, now
+  also a build dependency of tst_ide). The live clangd probe grew three
+  legs (definition/references/documentSymbol — presence-shaped where
+  versions drift, the hierarchical shape WE claimed is the pin):
+  PROBE-OK, 14 steps, clangd 23.1.5.
+- CARRIED, TOLD LOUD: `requestWorkspaceSymbol` STILL unshipped (no I3
+  feature asked — the opening carry stands, riding to the symbol
+  quick-open car and re-asked at gate-close review); no Ctrl+click jump
+  (no view click-out door, the app never steals the view's mouse);
+  code-action rows are the ANSWER'S SNAPSHOT — no app-side staleness
+  guard when replaying a row against changed text (the applier's version
+  guard covers `documentChanges` only), and the pinned sequence is
+  drift-free BY CONSTRUCTION (the two applied edits anchor at the
+  document's two ends) rather than by a guard; NO multi-file definition
+  far-side leg (the shape is the SAME decode; rename's multi-file
+  refusal face IS pinned); the IDE's reveal for a cross-file location
+  OPENS the file (the focus law) rather than keeping a per-file caret
+  ledger; a file the IDE already holds OPENED AND MODIFIED is refused for
+  the outline ask (the syncer mirror is the answer's truth — the applier
+  refuses stale-buffer writes too); no new VIEW API, and the I0
+  forward-decl law stands (the app HEADER names no glue/lsp/search type;
+  the app TU includes `lsp/PositionConverter.hpp` +
+  `protocol/PositionEncoding.hpp` and reads `DocumentSyncer::mirrorText`
+  + `LspClient::positionEncoding` — reachable through `qmn_glue`'s
+  PUBLIC `qmn_lsp` link, and `src/app/` links `qmn_glue` PRIVATE, so the
+  layering law is intact: an lsp TYPE never enters an app header). The
+  artifact-level version of the wheel audit also ran: against the
+  REPAIRED 1.17.0 wheel, `qmn.LspHub` is PRESENT and
+  `hasattr(qmn.LspHub, "requestDocumentSymbol")` is FALSE — the tenth door
+  is absent on the Python side exactly where the rejected log says it is.
+- THE RITUAL (measured): the TWO version literals moved to 1.17.0
+  (`CMakeLists.txt` + `pyproject.toml`), the SHELF literal STAYED 1.2.0
+  (the counter-case: an additive door that drops by type absence is NOT
+  Python-visible growth), the wheel rebuilt/repaired
+  `qmn_native-1.17.0-cp310-abi3-manylinux_2_34_x86_64` with the binding
+  smoke + qtmonaco parity green (28 `text_changed` announcements), the
+  FOURTH literal (pydemo's wheel path-dep) moved with it and pydemo's
+  headless smoke ran green twice, and the packaging smoke re-ran at the
+  bumped literals (install → external `find_package(qmn)` +
+  `find_package(qmnGlue)` consumer, both smokes green). ctest: TEN
+  entries, 124.7 s, and the `ide` binary repeated standalone FIVE times
+  because its slots pump real loops against real spawned servers.
 
 ### Car I4 stub — tasks + problem matcher
 

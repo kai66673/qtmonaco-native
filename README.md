@@ -65,8 +65,12 @@ typed DAP controls, the `--tour` pin table); S2/Py are DEFERRED by owner
 decision, and GATE 4 — the IDE dogfood train — is now the open train: cars
 I0+I1 (1.15.0) shipped `qmn-ide-demo`, a second app that lives ONLY on the
 exported surface, plus the QtCore-only `src/search/` Find-in-Files library
-it earned, and car I2 (1.16.0) added quick open + the command palette and
-the second born-headless library the scorer earned (`src/fuzzy/`).
+it earned; car I2 (1.16.0) added quick open + the command palette and the
+second born-headless library the scorer earned (`src/fuzzy/`); and car I3
+(1.17.0) took the IDE to LSP depth — definition, references, rename, code
+actions, formatting and the outline dock — with ONE new shelf door
+(`LspHub::requestDocumentSymbol`, the tenth feature sibling) and zero new
+view API.
 
 ## Layout & layering
 
@@ -96,12 +100,15 @@ src/app/    qmn-spike  — demo/bench harness, depends on view
             qmn-demo   — full demo app: tabbed editors + settings dialog
             (links qmn_glue PRIVATE for the --lsp door; no glue type ever
             crosses its headers beyond a forward-decl)
-            qmn-ide-demo — GATE 4's IDE dogfood pair (I0+I1+I2): project
-            tree, tabs (one tab per path), Find-in-Files over qmn::search,
-            quick open (Ctrl+P) + command palette (Ctrl+Shift+P) over the
-            qmn::fuzzy scorer; the window lives in the qmn_ide_app STATIC
-            lib + thin ide_main.cpp, qmn_glue/qmn_search/qmn_fuzzy linked
-            PRIVATE, all behind fwd-decls
+            qmn-ide-demo — GATE 4's IDE dogfood pair (I0+I1+I2+I3): project
+            tree, tabs (one tab per path), Find-in-Files over qmn::search
+            (also fed by Shift+F12 references), quick open (Ctrl+P) +
+            command palette (Ctrl+Shift+P) over the qmn::fuzzy scorer, and
+            the LSP-depth set — F12 definition, F2 rename, Ctrl+. code
+            actions, Shift+Alt+F formatting, the OUTLINE dock; the window
+            lives in the qmn_ide_app STATIC lib + thin ide_main.cpp,
+            qmn_glue/qmn_search/qmn_fuzzy linked PRIVATE, all behind
+            fwd-decls
 tests/      ten ctest entries: textbuffer + diff + search + fuzzy are
             guiless, lsp + glue + dap + codeeditor + demo + ide run on
             QT_QPA_PLATFORM=offscreen
@@ -457,10 +464,42 @@ terminal by owner decision.
       a tripwire (no frozen view chord re-bound, Key_P/Key_W absent from
       the view's table, the popup Esc child-scoped); symbol quick-open
       DECIDED — NOT shipped, the `requestWorkspaceSymbol` seed rides to I3
-- [ ] Car I3 — LSP depth + outline (first planned shelf widening:
-      `LspHub::requestDocumentSymbol`; the `requestWorkspaceSymbol`
-      decision rides here too) — THE OPEN CAR
-- [ ] Car I4 — tasks + problem matcher (ledger question: a read-only
+- [x] Car I3 — LSP depth + outline (CLOSED, 1.17.0): the IDE's six depth
+      features ride the ALREADY-SHELF — five existing `request*` doors + the
+      four `apply*` appliers + I1's public `setSelection` reveal, plus ONE
+      new shelf door, the tenth feature sibling `LspHub::requestDocumentSymbol`
+      (raw `Reply`, LOCAL `featureGate` refusals, `documentSymbolProvider`
+      gate, `initialize` now declares `hierarchicalDocumentSymbolSupport`)
+      — which drops from the wheel BY TYPE ABSENCE (the tenth honest
+      C++-only absence; the three codegen copies untouched, the shelf
+      literal stays 1.2.0). F12 definition (caret at the token START),
+      Shift+F12 references (the Find-in-Files panel's SECOND producer over
+      the engine's own FileMatch currency, `resultsProducer()` names the
+      owner), F2 rename (ONE undo group per document via `applyReplyEdit`;
+      a refusal keeps the overlay open; the prefill is the app's own
+      word/selection math), Ctrl+. code actions (`applyCodeAction` incl.
+      the WorkspaceEdit hidden in `command.arguments[0]`; command/create
+      items stay visible and refuse THROUGH the applier — v1 never runs a
+      server's arbitrary command), Shift+Alt+F formatting, and the outline
+      dock with the app-side refresh law (open / tab switch / 600 ms edit
+      debounce / dock button / palette) — both wire shapes decode, the flat
+      one REBUILT from `containerName` (the rebuild ADMITS itself in the
+      summary), a generation counter retires superseded pulls, refusals
+      clear the dock LOUDLY, and a claimed document with a still-handshaking
+      server gets a BOUNDED out-loud wait because the hub cannot tell a slow
+      server from a dead spawn at the door. Far sides: the fakeserver's
+      marker-protocol `documentsymbol`/`symflat` legs, three `tst_lsp`
+      machines (byte witnesses both shapes + the flush-before-ask proof +
+      LOCAL refusals with the reqCount silence witness), and the live clangd
+      probe's three new depth legs (PROBE-OK, 14 steps, clangd 23.1.5).
+      THE SPAWN GRANT (owner, 2026-11-28): tst_ide's depth drills DO spawn
+      the CI-built deterministic fakeserver under the built-in spec NAME
+      ("clangd" replaced whole — PATH clangd stays unspawned); every other
+      slot keeps the I0 no-spawn law. No new VIEW API; no Ctrl+click jump
+      (no view click-out door); `requestWorkspaceSymbol` STILL unshipped —
+      no I3 feature asked for a workspace-wide list, it rides to the car
+      that asks
+- [ ] Car I4 — tasks + problem matcher (THE OPEN CAR; ledger question: a read-only
       editor mode for the output panel)
 - [ ] Car I5 — git gutter (ledger question: an M5 gutter-stripe kind —
       check the five decoration records before declaring)

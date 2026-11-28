@@ -3,6 +3,203 @@
 All notable changes to this project are documented here.
 The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
+## [1.17.0] — 2026-11-28 — GATE 4 car I3 CLOSED — LSP depth in the IDE (definition, references, rename, code actions, formatting, the OUTLINE dock), the shelf's ONE new door for the car (the TENTH feature sibling `requestDocumentSymbol`), and the owner-granted fakeserver spawn inside `tst_ide` (the dapfake class)
+
+### Added
+- **`LspHub::requestDocumentSymbol` — the TENTH feature sibling** (the
+  gate's first shelf widening taken INSIDE car I3, and the car's only new
+  shelf surface): no position (the whole document is the subject), the
+  STATIC `documentSymbolProvider` gate, `featureGate`'s LOCAL refusal route
+  (the handler fires with the machine reason, the door returns 0 like every
+  sibling), flush-before-ask, car-D resolution through ANY live view. The
+  hub's `initialize` now declares
+  `textDocument.documentSymbol {hierarchicalDocumentSymbolSupport:true}`.
+  Its SHAPE deviates from the opening stub's sketch wording ("a plain-Qt
+  record list") on purpose: the `FeatureHandler`/raw-`Reply` idiom is kept —
+  it is the idiom that carries the refusal truth and leaves the DECODE
+  (hierarchical vs the sloppy flat answer) to whoever owns the outline rows.
+  Wheel face: the door drops BY TYPE ABSENCE (`std::function`) — the shelf's
+  TENTH honest C++-only absence, counted from the rejected log, never from
+  this file; the three codegen copies are untouched; the SHELF literal
+  STAYS 1.2.0 (a shelf bump is a break or Python-VISIBLE growth — this is
+  neither).
+- **`tests/fakeserver` grew the documentSymbol legs** (the
+  `documentsymbol` / `symflat` flags): a MARKER PROTOCOL the test controls
+  line for line (`SYM <kind> <name>[ | <detail>]` opens, `END` closes the
+  innermost, EOF closes the rest; a fixed kind table; a malformed marker is
+  exit 2), an advertise block that reads the CLIENT's claim back (no claim
+  → exit 2; tree mode requires `hierarchicalDocumentSymbolSupport==true` →
+  otherwise exit 2; `documentSymbolProvider` advertised as the OBJECT `{}`
+  truthy form), and a FLAT sloppy-server mode (SymbolInformation[] +
+  `containerName` + a non-spec junk member the decoder must ignore) with
+  the same exit-2 tripwires an OFF-provider ask would trip.
+- **The IDE's six LSP features** — all SIX ride the already-shipped shelf
+  (nine existing request doors + this car's tenth, the four `apply*`
+  appliers, and the I1 public `setSelection` reveal channel): ZERO new glue
+  surface beyond the ledger's own entry. Definition F12 (the jump reveals
+  with the CARET at the token START); references Shift+F12 (the Find-in-
+  Files panel's SECOND producer — rows are the engine's own FileMatch/
+  LineMatch currency, `activateSearchResult` unchanged, and
+  `resultsProducer()` says who owns the panel); rename F2 (prefill = the
+  selection or the word AT the caret, the app's own math over model doors;
+  `applyReplyEdit` so the rename is ONE undo group per document; a refusal
+  keeps the overlay OPEN, a blank name never reaches the wire); code
+  actions Ctrl+. (`applyCodeAction`: the item's own `edit` or the
+  WorkspaceEdit a real server hides in `command.arguments[0]` — the
+  hidden-in-command shape is what the IDE drill RUNS, the item-`edit` shape
+  is the applier's, already pinned at the shelf in `tst_lsp`; a
+  purely-command or create-file item is honest VISIBLE and refuses THROUGH
+  the applier — v1 never executes a server's arbitrary command); formatting Shift+Alt+F (`applyTextEditList`
+  for the bare TextEdit[] shape); and the outline dock, the tenth door's
+  consumer. The five new chords (F12 / Shift+F12 / F2 / Shift+Alt+F /
+  Ctrl+.) are mask-FREE against the view's frozen keymap — the chord
+  tripwire grew five legs.
+- **The outline dock and its OWN refresh law** (the policy lives in the
+  outline, the door has NO auto-feed by design): file open / tab switch
+  (`currentChanged`) / a 600 ms edit debounce on an app-side timer / the
+  dock's button / the manual door / a palette command. BOTH wire shapes
+  decode — the hierarchical tree, and a flat answer REBUILT from
+  `containerName` with the rule "the LAST earlier row of that name adopts"
+  (a flat SymbolInformation[] is preorder, so the parent precedes its
+  children); the read doors speak PREORDER rows
+  (`outlineRowCount` / `outlineTextAt` / `outlineParentAt` /
+  `outlineActivate` — the nesting face is how the rebuild gets pinned);
+  a refusal clears the rows LOUD (a stale tree never poses as current) and
+  an in-flight generation counter retires superseded pulls. The OUTLINE
+  also waits, out loud and BOUNDED (10 tries), for a claimed document whose
+  server is still finishing its handshake — at the hub's door a slow server
+  and a dead spawn wear the same -32002 refusal, so the bounded wait plus
+  the plain refusal face after the cap is the honest pair.
+- **`tst_ide`'s SPAWN GRANT** (owner decision 2026-11-28, PLAN's I3 opening
+  record): the LSP-depth drills DO spawn — the CI-built deterministic
+  fakeserver, `$<TARGET_FILE:fakeserver>`, the dapfake class tst_demo's
+  `--dap` slot already rides. The window's own `armLspServer` door arms it
+  under the built-in's NAME ("clangd" replaced whole — the deterministic
+  arm, and PATH clangd stays unspawned, exactly the I0 law). The REAL user
+  path (a `.qmn/lsp.json` fold overriding the built-in program) is pinned
+  end-to-end once. Every non-spawn slot keeps the old law whole.
+  **The drills carry their own Readiness gate**: an outline ask cycle that
+  FINISHED is the window's own proof that the server ANSWERED, and that is
+  what the depth legs wait on (the first drafts polled a dozen feature
+  summaries for "not sent yet" and read the wire as RED when it was merely
+  young). **A negative control ran at the close and BITE**: with the fake's
+  `documentsymbol` advertise flag removed, the hub's tenth door refused
+  LOCALLY (`-32601 capability "documentSymbolProvider" is not offered`) and
+  the outline drill failed — the legs are load-bearing, not decorative.
+- **The app's OWN read surface for its docks** (all on `IdeWindow`, plain Qt
+  types, no protocol/lsp type in an app header): `renamePrefill`, the outline
+  read doors `outlineRowCount`/`outlineTextAt`/`outlineParentAt`/
+  `outlineActivate`, and the five summary doors. The nesting face
+  `outlineParentAt` (parent indices into the PREORDER row list) is what pins
+  the flat-answer rebuild — including the NAMESAKE tie-break: the fake's
+  `containerName` is the parent's NAME, so two nested `Widget`s make a
+  child's "Widget" ambiguous, and the LAST earlier namesake (the inner one,
+  the flat list being preorder) is exactly the innermost containing symbol;
+  a first-match rule would nest the child one level too high and the pinned
+  leg fails there.
+- **`tst_lsp` grew three documentSymbol machines** — the marker-tree witness
+  pinned as BYTES (both shapes; the flat one arriving WHOLE with
+  `containerName` and the junk member, because the door CARRIES, it does
+  not filter), the flush-before-ask proof for this door (markers MOVED by an
+  edit come back MOVED — a stale mirror could not name the new lines), and
+  the LOCAL refusal pair with the `reqCount` far-side witness that the
+  OFF-provider wire stayed silent. **The live clangd probe grew three legs**
+  (definition / references / documentSymbol — presence-shaped where clangd
+  versions drift; the hierarchical shape WE claimed is the pin): PROBE-OK,
+  14 steps, clangd 23.1.5.
+
+### Fixed / changed behavior
+- **The IDE's `addEditorTab` order law**: the session open now lands BEFORE
+  `tabs_->addTab()`. `addTab` emits `currentChanged`, and the outline's
+  first ask used to reach the hub BEFORE the document was registered — a
+  "not registered" refusal the outline's retry law cannot tell apart from a
+  real one (no syncer to wait on). Discovered by the drill, not by theory.
+- **The outline never posts to the SHARED status bar**: its truth is the
+  dock's own label face (`outlineSummary()` + the label). The I0 slot's
+  project-message pin caught the steal at the car.
+- `tst_lsp`'s byte-witness failure MODE: a JSON witness now fails with the
+  WHOLE text (`pinWitnessJson`) — a truncated `QCOMPARE` diff hid ONE
+  missing brace inside an 850-character witness and cost a hunt.
+
+### The close ritual (measured, not assumed)
+- **ctest: TEN entries green** — `textbuffer`/`diff`/`search`/`fuzzy`
+  guiless, `lsp`/`glue`/`dap`/`codeeditor`/`demo`/`ide` offscreen, twice
+  at the bumped literals (125.0 s then 128.4 s real time; `lsp` ≈74 s,
+  `dap` ≈19 s, `ide` ≈13.8 s). No new entry this car. `tst_ide` also ran
+  FIVE standalone repeats (28 test slots + init/cleanup, exit 0 every
+  time) and `tst_lsp` THREE, because the new slots pump real event loops against real spawned
+  servers — the flakiness class the I1 close record named.
+- **The `--codegen` audit ran BOTH WAYS against the archived 1.16.0
+  rejected-function set: 1824 → 1825 lines, and the ONE added line IS
+  this car's door** — `qint64 qmn::glue::LspHub::requestDocumentSymbol
+  (qmn::view::CodeEditor*, const qmn::glue::LspHub::FeatureHandler&):
+  unmatched type … "onReply" … Cannot find type entry for
+  "std::function"`. ZERO lines mention `src/app/` (an app TU's includes
+  never enter codegen — the IDE's doors are plain-typed on a NON-bound
+  class), and the generated-file set is IDENTICAL at 47 files: no new
+  bound type, the three copies untouched, and the SHELF LITERAL STAYED
+  1.2.0 (verified in the installed package:
+  `qmnGlueConfigVersion.cmake` says `PACKAGE_VERSION "1.2.0"`). **The
+  artifact itself was asked, not just the log**: against the REPAIRED
+  1.17.0 wheel, `qmn.LspHub` is present and
+  `hasattr(qmn.LspHub, "requestDocumentSymbol")` is FALSE — the tenth
+  door is an honest Python-side absence at the wheel, exactly where the
+  rejected log says it is.
+- **The wheel half rode whole**: the container rebuilt/repaired
+  `qmn_native-1.17.0-cp310-abi3-manylinux_2_34_x86_64.whl` (binding
+  smoke OK, qtmonaco parity OK — 28 `text_changed` announcements seen,
+  the one-Qt maps check riding). pydemo's FOURTH literal moved to the
+  1.17.0 wheel path-dep and its headless close-ritual smoke ran green
+  TWICE (bare, and over `examples/demo.py` + `examples/demo.json`).
+- **The packaging smoke re-ran at the bumped literals**:
+  `cmake --install` → `find_package(qmn)` + `find_package(qmnGlue)` in
+  the external `examples/consumer` project, both smokes green
+  (`41 units, 9 spans`; the glue smoke spawns no server and no
+  adapter).
+- **The live clangd probe (a LIVE ritual, never ctest)**: `PROBE-OK`,
+  **14 steps, clangd 23.1.5**, the three I3 legs landing at steps
+  6/7/8 (definition names the uri; references land 2 sites on it;
+  `documentSymbol` answers clangd's real hierarchical tree naming
+  `main` + `alphaLocal`).
+- The car's own code compiles CLEAN. The ONE warning in the build is
+  pre-existing and NOT this car's line (`LspHub.cpp:2448`,
+  `requestHintsNow`'s narrowing conversion, a car-M8-era site) — left
+  untouched rather than folded into this car's diff.
+
+### Carried honestly (PLAN's I3 record)
+- **A claimed document whose server is still handshaking, or whose spec will
+  never spawn, wears the SAME hub face** (`-32002 no live server serves …`) —
+  the hub cannot tell a slow server from a dead spawn at its door, so the
+  OUTLINE chose the honest pair: a BOUNDED, out-loud 10-try wait, then the
+  plain refusal, and no re-negotiation of the wait per ask (`outlineSummary`
+  carries both faces). The same face appears when a document is NOT registered
+  at all: the IDE's outline door refuses a file it opened through the plain
+  read path without a session registration, because the syncer's mirror — the
+  text the answer was computed against — is then unknown and a reveal would be
+  built against a guess.
+- **No app-side staleness guard for the overlays** (code actions / rename): a
+  row is the ANSWER'S snapshot, and the applier's version guard is the only
+  freshness law (`documentChanges` paths). The pinned sequence is drift-free by
+  construction (the fake's two applied edits anchor at the document's two
+  ends), and v1 keeps the row honest: command-only and create-file rows STAY
+  VISIBLE and REFUSE THROUGH THE APPLIER rather than hiding.
+- `requestWorkspaceSymbol` is STILL not shipped — no I3 feature consumes a
+  workspace-wide list. It rides to the car that asks (symbol quick-open, the
+  Ctrl+T class) and is asked again at gate-close review.
+- NO new VIEW API this car — the I1 `setSelection` widening carried every
+  reveal (definition/reveal caret law carried by the same door: the CARET ends
+  at the selection START for a jump, at the row END for a panel/outline row).
+  No Ctrl+click jump either: the view has no click-supply door and the app
+  never installs an eventFilter over the view; jumps ride the chords, the
+  palette, and an outline/panel row.
+  The app TU decodes wire positions through
+  `qmn::lsp::PositionConverter`, `DocumentSyncer::mirrorText` and
+  `LspClient::positionEncoding` (reachable through `qmn_glue`'s PUBLIC
+  `qmn_lsp` link) and stores NO protocol/lsp value in an app header — the
+  I0 forward-decl law stands.
+- ctest stays TEN entries: no new binary; the fakeserver remains a support
+  target (now also a build dependency of `tst_ide`).
+
 ## [1.16.0] — 2026-11-28 — GATE 4 car I2 CLOSED — quick open (Ctrl+P) and the command palette (Ctrl+Shift+P) in the IDE, the `src/fuzzy/` scorer library (its own guiless ctest entry — the 10th), LEDGER catch #2 (the file pool) found and closed in the SAME car, and the chord-table audit tripwired
 
 ### Added

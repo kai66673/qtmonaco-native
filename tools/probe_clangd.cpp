@@ -3,7 +3,10 @@
 // is the manual proof that the WHOLE stack agrees with a REAL server: the
 // hub's built-in clangd spec, the lazy spawn + handshake, the syncer mirror
 // against clangd's own parser, the diagnostics decode, hover/completion/
-// formatting/rename replies, the version-pinned applier round trip against
+// formatting/rename replies, and since GATE 4 car I3 the three depth doors —
+// definition, references, and the TENTH one (documentSymbol, the outline's
+// ask: the hierarchical shape we CLAIMED is what the leg pins, with the
+// symbol SET left as clangd's call) — the version-pinned applier round trip against
 // clangd's REAL documentChanges (not a fakeserver echo), and the save door —
 // including the machine-6 willSaveWaitUntil detour IF the live clangd
 // advertises it (the observed branch is printed; both are legal).
@@ -279,6 +282,147 @@ bool runProbe(qmn::view::CodeEditor& editor, qmn::glue::LspHub& hub,
                             "(%2 edits) and reversed by ONE undo")
                  .arg(fmt.reply.result.toArray().size())
                  .arg(applied.editsApplied));
+    }
+    {
+        // GATE 4 car I3 (definition, LIVE): the caret on gammaTotal's
+        // DECLARATION must answer a location naming THIS uri — both faces of
+        // the reply-shape law (Location's "uri", LocationLink's "targetUri")
+        // are accepted, exactly as the hub's door comment freezes them.
+        // Presence-shaped on purpose: the range's exact columns are clangd's
+        // call and drift across versions; naming the right DOCUMENT is not.
+        FeatureProbe definition;
+        if (hub.requestDefinition(&editor, qmn::view::TextPosition(1, 6),
+                                 definition.handler())
+            <= 0)
+            return err() << "PROBE-FAIL definition: door refused locally\n",
+                   false;
+        if (!waitUntil([&] { return definition.arrived; }, 20000)
+            || definition.reply.isError)
+            return err() << "PROBE-FAIL definition: "
+                         << (definition.arrived ? definition.reply.message
+                                                : QStringLiteral("never answered"))
+                         << Qt::endl,
+                   false;
+        const QJsonArray defLocations = definition.reply.result.toArray();
+        if (defLocations.isEmpty())
+            return err() << "PROBE-FAIL definition: clangd answered nothing at "
+                            "the caret on gammaTotal: "
+                         << jsonDump(definition.reply.result) << Qt::endl,
+                   false;
+        int ours = 0;
+        for (const QJsonValue& v : defLocations) {
+            const QJsonObject o = v.toObject();
+            const QString target = o.contains(QStringLiteral("targetUri"))
+                                       ? o.value(QStringLiteral("targetUri"))
+                                             .toString()
+                                       : o.value(QStringLiteral("uri")).toString();
+            if (target == uri)
+                ++ours;
+        }
+        if (ours == 0)
+            return err() << "PROBE-FAIL definition: no answer names this "
+                            "document: "
+                         << jsonDump(definition.reply.result) << Qt::endl,
+                   false;
+        step(QStringLiteral("definition: %1 location(s), %2 naming this uri")
+                 .arg(defLocations.size())
+                 .arg(ours));
+    }
+
+    {
+        // GATE 4 car I3 (references, LIVE): the SAME caret, includeDeclaration
+        // TRUE (the IDE panel's law) — gammaTotal is decl + use, so AT LEAST
+        // two locations on this uri (a floor, not an exact count: clangd
+        // versions add cross-file sites and index noise).
+        FeatureProbe references;
+        if (hub.requestReferences(&editor, qmn::view::TextPosition(1, 6), true,
+                                 references.handler())
+            <= 0)
+            return err() << "PROBE-FAIL references: door refused locally\n",
+                   false;
+        if (!waitUntil([&] { return references.arrived; }, 20000)
+            || references.reply.isError)
+            return err() << "PROBE-FAIL references: "
+                         << (references.arrived ? references.reply.message
+                                                : QStringLiteral("never answered"))
+                         << Qt::endl,
+                   false;
+        const QJsonArray refLocations = references.reply.result.toArray();
+        int ours = 0;
+        for (const QJsonValue& v : refLocations) {
+            const QJsonObject o = v.toObject();
+            if (o.value(QStringLiteral("uri")).toString() == uri
+                || o.value(QStringLiteral("targetUri")).toString() == uri)
+                ++ours;
+        }
+        if (ours < 2)
+            return err() << "PROBE-FAIL references: gammaTotal is decl + use, "
+                            "clangd answered "
+                         << ours << " site(s) on this uri of "
+                         << refLocations.size() << ": "
+                         << jsonDump(references.reply.result) << Qt::endl,
+                   false;
+        step(QStringLiteral("references: %1 location(s), %2 on this uri")
+                 .arg(refLocations.size())
+                 .arg(ours));
+    }
+
+    {
+        // GATE 4 car I3 (the TENTH door, LIVE): textDocument/documentSymbol
+        // against clangd's real parser. The shape we CLAIMED is the pin —
+        // hierarchicalDocumentSymbolSupport:true means EVERY entry carries
+        // name + selectionRange, so a clangd answering flat
+        // SymbolInformation[] fails HERE (the fakeserver's flat leg pins the
+        // app-side rebuild; this pins a conforming server at the door). The
+        // symbol SET is clangd's call, so the name check is a floor: the
+        // drill doc's own two decls must appear SOMEWHERE in the tree.
+        FeatureProbe symbols;
+        if (hub.requestDocumentSymbol(&editor, symbols.handler()) <= 0)
+            return err() << "PROBE-FAIL documentSymbol: door refused locally\n",
+                   false;
+        if (!waitUntil([&] { return symbols.arrived; }, 20000)
+            || symbols.reply.isError)
+            return err() << "PROBE-FAIL documentSymbol: "
+                         << (symbols.arrived ? symbols.reply.message
+                                             : QStringLiteral("never answered"))
+                         << Qt::endl,
+                   false;
+        if (!symbols.reply.result.isArray()
+            || symbols.reply.result.toArray().isEmpty())
+            return err() << "PROBE-FAIL documentSymbol: clangd answered "
+                         << jsonDump(symbols.reply.result) << Qt::endl,
+                   false;
+        int count = 0;
+        bool hierarchical = true;
+        QStringList names;
+        std::function<void(const QJsonArray&)> walk = [&](const QJsonArray& arr) {
+            for (const QJsonValue& v : arr) {
+                const QJsonObject obj = v.toObject();
+                ++count;
+                if (!obj.contains(QStringLiteral("selectionRange")))
+                    hierarchical = false;
+                names << obj.value(QStringLiteral("name")).toString();
+                walk(obj.value(QStringLiteral("children")).toArray());
+            }
+        };
+        walk(symbols.reply.result.toArray());
+        if (!hierarchical)
+            return err() << "PROBE-FAIL documentSymbol: the answer is NOT the "
+                            "hierarchical shape we claimed (an entry without "
+                            "selectionRange): "
+                         << jsonDump(symbols.reply.result) << Qt::endl,
+                   false;
+        for (const QString& wanted :
+             {QStringLiteral("main"), QStringLiteral("alphaLocal")})
+            if (!names.contains(wanted))
+                return err() << "PROBE-FAIL documentSymbol: clangd's tree never "
+                                "names \""
+                             << wanted << "\"; names were: "
+                             << names.join(QStringLiteral(", ")) << Qt::endl,
+                       false;
+        step(QStringLiteral("documentSymbol: clangd's real tree, %1 entries, "
+                            "hierarchical, naming main + alphaLocal")
+                 .arg(count));
     }
 
     {

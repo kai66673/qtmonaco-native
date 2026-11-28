@@ -160,13 +160,20 @@ add_dependencies(tst_demo qmn_fakegrammar qmn_pygrammar)
 add_test(NAME demo COMMAND tst_demo)
 set_tests_properties(demo PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")
 
-# GATE 4 car I0/I1: drives the qmn-ide-demo surface (IdeWindow) through
+# GATE 4 car I0/I1/I3: drives the qmn-ide-demo surface (IdeWindow) through
 # the same programmatic doors the docks/panel call - offscreen, no dialog
-# exec, and NO server ever spawns (the --lsp no-guarantee law rides: the
-# one hub slot opens only unclaimed languages). The test names no glue or
-# search type: IdeWindow.hpp keeps those behind fwd-decls, and the panel
-# read doors carry the observations.
+# exec. THE SPAWN FACE (owner grant, 2026-11-28, PLAN's I3 opening record):
+# the I3 LSP-depth drills DO spawn a server - the CI-built deterministic
+# fakeserver, the dapfake class tst_demo's --dap slot already rides, its exit
+# code the far-side oracle. Every OTHER slot keeps the I0 law whole: no slot
+# without an explicit spec path opens a claimed language, and PATH clangd is
+# never spawned here (clangd is no CI guarantee). The test names no glue,
+# lsp or search type: IdeWindow.hpp keeps those behind fwd-decls, and the
+# window's own read doors carry the observations.
 qt_add_executable(tst_ide tst_ide.cpp)
 target_link_libraries(tst_ide PRIVATE qmn_ide_app Qt6::Test)
+add_dependencies(tst_ide fakeserver) # the spawn target must exist at run time
+target_compile_definitions(tst_ide PRIVATE
+    QMN_TEST_LSP_SERVER=\"$<TARGET_FILE:fakeserver>\")
 add_test(NAME ide COMMAND tst_ide)
 set_tests_properties(ide PROPERTIES ENVIRONMENT "QT_QPA_PLATFORM=offscreen")

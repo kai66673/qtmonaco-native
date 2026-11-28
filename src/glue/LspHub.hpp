@@ -246,6 +246,25 @@ public:
     qint64 requestRename(qmn::view::CodeEditor* editor,
                          const qmn::view::TextPosition& position,
                          const QString& newName, const FeatureHandler& onReply);
+    // GATE 4 car I3 (the ledger's requestDocumentSymbol, the gate's FIRST
+    // shelf widening — additive, the TENTH sibling): textDocument/
+    // documentSymbol for the OUTLINE dock. No position (the whole document
+    // is the subject); the gate is the STATIC documentSymbolProvider
+    // capability (object shapes count, the sibling rule), refusals ride
+    // featureGate's LOCAL REFUSAL route (the handler fires with the machine
+    // reason — the door returns 0 as its siblings do). The client declares
+    // textDocument.documentSymbol { hierarchicalDocumentSymbolSupport:
+    // true } in initialize — the hub answers arrive as the WIRE shape
+    // (hierarchical DocumentSymbol[] from a conforming server; a sloppy
+    // server's flat SymbolInformation[] with containerName is decoded
+    // APP-side by whoever owns the outline rows — the hub decodes its
+    // auto-FEEDS, and this is not a feed; PLAN's opening record tells the
+    // deviation from the stub's sketch wording, and why the FeatureHandler
+    // idiom keeps the refusal truth that a decoded-payload handler would
+    // lose). Like every feature door: resolves through ANY live view
+    // (car D), flushes the syncer first, never lazy-spawns a server.
+    qint64 requestDocumentSymbol(qmn::view::CodeEditor* editor,
+                                 const FeatureHandler& onReply);
 
     // --- popup TRIGGERING (the M8 close-train sliver, PLAN: "All triggering
     //     is glue-side (cursorMoved/editApplied)") ---------------------------

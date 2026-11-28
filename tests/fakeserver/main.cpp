@@ -123,6 +123,27 @@
 //            "test/pullState" echoes the answered-ask count and how many
 //            mirror lines the last full report marked — the flush-before-
 //            ask proof, far side.
+//            GATE 4 car I3 adds the OUTLINE authority: "documentsymbol"
+//            advertises documentSymbolProvider (as an OBJECT {}, the
+//            truthy-door shape) — after reading the CLIENT's
+//            textDocument.documentSymbol claim back (absent is exit 2; and
+//            in the TREE mode a hierarchicalDocumentSymbolSupport that is
+//            not true is exit 2 too: this server answers DocumentSymbol
+//            TREES and a client that never said it parses them holds a
+//            shape it never claimed) — and answers every ask from its own
+//            text mirror via the MARKER PROTOCOL (featureDocumentSymbol's
+//            comment is the law): "SYM <kind> <name>[ | <detail>]" lines
+//            nest through the open-stack, "END" closes, EOF closes the
+//            rest; malformed markers are the feed's OWN bug and exit 2 —
+//            a far-side oracle that guesses stops being one. "symflat"
+//            answers the FLAT SymbolInformation[] shape (containerName
+//            carrying the parent, plus a non-spec junk member on entries
+//            with details — the decoder must ignore unknowns) DESPITE the
+//            client's true hierarchical claim: the sloppy-server class.
+//            A documentSymbol ask reaching a provider-less server is exit
+//            2 like every OFF sibling — and liveness rides the mirror: a
+//            didChange that MOVES a marker makes the NEXT answer a moved
+//            tree, the flush-before-ask proof far-side.
 //
 // The exit code IS the oracle for the answers the client side cannot see
 // (the battery's wire shapes); tst_lsp asserts exitCode 0 where the mode's
@@ -240,6 +261,25 @@ int g_hintMany = 0;       // argv "hintmany=<N>": answer N synthetic hints —
 int g_hintDelayMs = 0;    // argv "hintdelay=<N>": hold the answer (the
                           // close-over-in-flight cancel pin)
 int g_hintAsks = 0;       // inlayHint asks this server has ANSWERED
+bool g_documentSymbol = false; // GATE 4 car I3: documentSymbolProvider +
+                          // the featureDocumentSymbol marker answer over
+                          // this server's own text MIRROR (RIDES sync mode
+                          // exactly like the fold/hint flags: the tree must
+                          // answer the SYNCED text — the flush-before-ask
+                          // proof is a tree that MOVED after a didChange).
+                          // Advertises documentSymbolProvider as an OBJECT
+                          // {} (the truthy-door pin the definitionProvider
+                          // object shape already rides, restated for the
+                          // new door) — after reading the CLIENT's
+                          // textDocument.documentSymbol claim back: absent
+                          // is exit 2, the car-C conversation-nobody-had
+                          // rule.
+bool g_symFlat = false;   // argv "symflat" (rides documentsymbol): answer
+                          // the FLAT SymbolInformation[] shape (with
+                          // containerName) EVEN THOUGH the client declared
+                          // hierarchicalDocumentSymbolSupport — the
+                          // sloppy-server class the app-side outline
+                          // decode must rebuild from, far-side witnessed.
 bool g_pullDiag = false;    // GATE 3 car C (C5): the PULL DIAGNOSTICS
 // authority flag ("pull", RIDES sync mode like every car-C flag: the pull
 // report decodes against the sync frame, so didChange tracking IS the
@@ -2080,6 +2120,171 @@ void featureRename(const QJsonValue& id, const QJsonObject& params)
     send(response(id, QJsonObject{{QStringLiteral("changes"), changes}}));
 }
 
+void featureDocumentSymbol(const QJsonValue& id, const QJsonObject& params)
+{
+    // The OUTLINE leg (GATE 4 car I3): the DOCUMENT TEXT ITSELF spells the
+    // symbol tree — a marker protocol the TEST controls line for line, so
+    // the expected answer is a WITNESS the feed built, never a
+    // re-derivation the test could agree with by sharing its bugs:
+    //   "SYM <kind> <name>[ | <detail>]" opens a symbol (nesting = the
+    //     stack of open markers); <kind> is the fixed table
+    //     cl=5 Class, mth=6 Method, fld=8 Field, fn=12 Function,
+    //     var=13 Variable — a kind outside the table, an END that closes
+    //     nothing, or a marker without a name is the FEED's own protocol
+    //     error and exits 2 LOUD (a fake that guesses a malformed marker
+    //     is a far-side oracle that stopped being one);
+    //   "END" closes the innermost open symbol; an unclosed marker runs to
+    //     EOF.
+    // selectionRange is the NAME TOKEN on its line; range spans from the
+    // SYM line (char 0) to the line AFTER the closing END (or after EOF),
+    // char 0 — the exclusive past-the-end the wire prescribes.
+    // "symflat" answers the FLAT SymbolInformation[] shape instead — with
+    // containerName carrying the parent — DESPITE the client's
+    // hierarchicalDocumentSymbolSupport declaration: the sloppy-server
+    // class the app-side outline decode must rebuild from (and the answer
+    // the flat-decode tripwire in tst_ide rides through a REAL window).
+    ModelDoc& d = featureDoc(params,
+                              QStringLiteral("textDocument/documentSymbol"));
+    const QString uri = params.value(QStringLiteral("textDocument"))
+                            .toObject()
+                            .value(QStringLiteral("uri"))
+                            .toString();
+    const QStringList lines = modelLines(d.text);
+    struct Sym {
+        int kind = -1;
+        QString name, detail;
+        int symLine = -1, nameCol = -1, parent = -1, endLine = -1;
+    };
+    QVector<Sym> syms;
+    QVector<int> open; // stack of indices into syms
+    for (int i = 0; i < lines.size(); ++i) {
+        const QString trimmed = lines.at(i).trimmed();
+        if (trimmed == QLatin1String("END")) {
+            if (open.isEmpty())
+                fail(QStringLiteral("documentSymbol protocol: an END at "
+                                    "line %1 closes nothing").arg(i));
+            syms[open.takeLast()].endLine = i + 1; // exclusive past the END
+            continue;
+        }
+        if (!trimmed.startsWith(QLatin1String("SYM ")))
+            continue;
+        const QString rest = trimmed.mid(4);
+        QString head = rest;
+        QString detail;
+        const int bar = head.indexOf(QStringLiteral(" | "));
+        if (bar >= 0) { // the FIRST " | " delimits the optional detail
+            detail = head.mid(bar + 3).trimmed();
+            head = head.left(bar);
+        }
+        const int sp = head.indexOf(QLatin1Char(' '));
+        if (sp <= 0)
+            fail(QStringLiteral("documentSymbol marker at line %1 has no "
+                                "kind/name split: \"%2\"").arg(i).arg(trimmed));
+        const QString kindTok = head.left(sp);
+        const QString name = head.mid(sp + 1).trimmed();
+        int kind = -1;
+        if (kindTok == QLatin1String("cl"))
+            kind = 5;
+        else if (kindTok == QLatin1String("mth"))
+            kind = 6;
+        else if (kindTok == QLatin1String("fld"))
+            kind = 8;
+        else if (kindTok == QLatin1String("fn"))
+            kind = 12;
+        else if (kindTok == QLatin1String("var"))
+            kind = 13;
+        else
+            fail(QStringLiteral("documentSymbol marker kind \"%1\" at line "
+                                "%2 is not in the protocol table")
+                     .arg(kindTok).arg(i));
+        if (name.isEmpty())
+            fail(QStringLiteral("documentSymbol marker at line %1 names "
+                                "nothing").arg(i));
+        Sym s;
+        s.kind = kind;
+        s.name = name;
+        s.detail = detail;
+        s.symLine = i;
+        // The NAME token's MODEL column on the RAW line (marker lines may
+        // ride indentation — the nesting is the STACK, not the column, but
+        // the selectionRange must name the token where it REALLY sits).
+        const int kindAt = lines.at(i).indexOf(kindTok,
+                                                lines.at(i).indexOf(
+                                                    QStringLiteral("SYM "))
+                                                + 4);
+        s.nameCol = lines.at(i).indexOf(name, kindAt + kindTok.size() + 1);
+        if (s.nameCol < 0) // the trimmed parse cannot outrun the raw line
+            fail(QStringLiteral("documentSymbol marker name \"%1\" vanished "
+                                "from line %2").arg(name).arg(i));
+        s.parent = open.isEmpty() ? -1 : open.last();
+        syms.append(s);
+        open.append(syms.size() - 1);
+    }
+    for (int idx : open)
+        syms[idx].endLine = lines.size(); // EOF-closed, exclusive past-the-end
+
+    if (g_symFlat) {
+        QJsonArray flat;
+        for (const Sym& s : syms) {
+            QJsonObject entry{
+                {QStringLiteral("name"), s.name},
+                {QStringLiteral("kind"), s.kind},
+                {QStringLiteral("location"),
+                 QJsonObject{{QStringLiteral("uri"), uri},
+                             {QStringLiteral("range"),
+                              rangeWire(d.text, s.symLine, s.nameCol,
+                                        s.symLine,
+                                        s.nameCol
+                                            + int(s.name.size()))}}}};
+            if (!s.detail.isEmpty())
+                entry.insert(QStringLiteral("hover"),
+                             QJsonObject{{QStringLiteral("contents"),
+                                          s.detail}}); // unused by the
+                                                       // decode — presence
+                                                       // noise on purpose
+            if (s.parent >= 0)
+                entry.insert(QStringLiteral("containerName"),
+                             syms[s.parent].name); // the ONLY hierarchy a
+                                                   // flat answer carries
+            flat.append(entry);
+        }
+        send(response(id, flat));
+        return;
+    }
+
+    QHash<int, QVector<int>> kids; // parent index -> child indices
+    QVector<int> roots;
+    for (int i = 0; i < syms.size(); ++i) {
+        if (syms.at(i).parent < 0)
+            roots.append(i);
+        else
+            kids[syms.at(i).parent].append(i);
+    }
+    auto node = [&syms, &kids, &d](auto&& self, int idx) -> QJsonObject {
+        const Sym& s = syms.at(idx);
+        QJsonObject o{
+            {QStringLiteral("name"), s.name},
+            {QStringLiteral("kind"), s.kind},
+            {QStringLiteral("range"),
+             rangeWire(d.text, s.symLine, 0, s.endLine, 0)},
+            {QStringLiteral("selectionRange"),
+             rangeWire(d.text, s.symLine, s.nameCol, s.symLine,
+                       s.nameCol + int(s.name.size()))}};
+        if (!s.detail.isEmpty())
+            o.insert(QStringLiteral("detail"), s.detail);
+        QJsonArray children;
+        for (int c : kids.value(idx))
+            children.append(self(self, c));
+        if (!children.isEmpty())
+            o.insert(QStringLiteral("children"), children);
+        return o;
+    };
+    QJsonArray top;
+    for (int r : roots)
+        top.append(node(node, r));
+    send(response(id, top));
+}
+
 void featureHover(const QJsonValue& id, const QJsonValue& paramsValue)
 {
     if (!g_hoverOn)
@@ -2533,6 +2738,48 @@ void handleInitialize(const QJsonObject& request)
                                 "textDocument.inlayHint capability"));
         capabilities.insert(QStringLiteral("inlayHintProvider"), true);
     }
+    if (g_documentSymbol) {
+        // GATE 4 car I3: the OUTLINE authority. The client declared
+        // `documentSymbol: {hierarchicalDocumentSymbolSupport: true}` — a
+        // provider for a client that declared NOTHING about document symbols
+        // would be a capability conversation nobody had (the car-C rule,
+        // restated), and a client that declared the hierarchical support
+        // FALSE while this server answers TREES is a claim the decode was
+        // never promised — either shape is exit 2, read off the real
+        // initialize params. The advertisement is the OBJECT {} shape: the
+        // truthy-door pin definitionProvider already rides, restated for
+        // this door so a future capability-helper drift cannot silently
+        // spare the tenth sibling.
+        const QJsonObject symClaim
+            = g_initializeParams.value(QStringLiteral("capabilities"))
+                  .toObject()
+                  .value(QStringLiteral("textDocument"))
+                  .toObject()
+                  .value(QStringLiteral("documentSymbol"))
+                  .toObject();
+        if (!g_initializeParams.value(QStringLiteral("capabilities"))
+                 .toObject()
+                 .value(QStringLiteral("textDocument"))
+                 .toObject()
+                 .contains(QStringLiteral("documentSymbol")))
+            fail(QStringLiteral("a documentSymbolProvider was asked for "
+                                "symbols while the client declared no "
+                                "textDocument.documentSymbol capability"));
+        if (g_symFlat) {
+            // THE POINT of this mode is answering flat DESPITE the true
+            // claim — a feed that forgot to declare at all is a different
+            // bug class and still dies above.
+            Q_UNUSED(symClaim);
+        } else if (!symClaim.value(
+                        QStringLiteral("hierarchicalDocumentSymbolSupport"))
+                        .toBool()) {
+            fail(QStringLiteral("this server answers DocumentSymbol TREES "
+                                "while the client declared no "
+                                "hierarchicalDocumentSymbolSupport"));
+        }
+        capabilities.insert(QStringLiteral("documentSymbolProvider"),
+                            QJsonObject{});
+    }
     if (g_pullDiag && !g_pullDyn) {
         // Car C (C5): the PULL DIAGNOSTICS authority. The client declared
         // `diagnostic: {relatedDocumentSupport:false}` — the honest v1 shape
@@ -2895,6 +3142,16 @@ void runLoop()
                 } else if ((g_features)
                            && method == QLatin1String("textDocument/rename")) {
                     featureRename(id, params.toObject());
+                } else if (method == QLatin1String(
+                               "textDocument/documentSymbol")) {
+                    if (!g_documentSymbol)
+                        fail(QStringLiteral(
+                            "textDocument/documentSymbol reached a server "
+                            "that never advertised documentSymbolProvider: "
+                            "the hub's outline door ignored the capability "
+                            "gate (the foldingRange/inlayHint tripwire, "
+                            "restated for the tenth sibling)"));
+                    featureDocumentSymbol(id, params.toObject());
                 } else if (!id.isUndefined()) {
                     if (g_mode == QLatin1String("basic")
                         || g_mode == QLatin1String("stderr"))
@@ -2967,7 +3224,9 @@ int main(int argc, char** argv)
                  && !enc.startsWith(QLatin1String("pullfail="))
                  && !enc.startsWith(QLatin1String("pullid="))
                  && !enc.startsWith(QLatin1String("completiondelay="))
-                 && !enc.startsWith(QLatin1String("sigdelay=")))
+                 && !enc.startsWith(QLatin1String("sigdelay="))
+                 && enc != QLatin1String("documentsymbol")
+                 && enc != QLatin1String("symflat"))
             fail(QStringLiteral("sync mode: bad encoding \"%1\"").arg(enc));
         for (int i = 2; i < args.size(); ++i) {
             if (args.at(i) == QLatin1String("crashonce"))
@@ -3133,6 +3392,23 @@ int main(int argc, char** argv)
                                         "got \"%1\"").arg(args.at(i)));
                 g_sigDelayMs = ms; // holds the signatureHelp answer so a test
                                    // can supersede an IN-FLIGHT ask
+            } else if (args.at(i) == QLatin1String("documentsymbol")) {
+                g_documentSymbol = true; // GATE 4 car I3: the OUTLINE
+                                         // authority — documentSymbolProvider
+                                         // + featureDocumentSymbol over this
+                                         // server's own text mirror (the
+                                         // marker protocol; RIDES sync like
+                                         // the fold/hint flags, so the tree
+                                         // answers the SYNCED text and the
+                                         // liveness leg's edited markers
+                                         // come back MOVED — the flush-
+                                         // before-ask proof for this door)
+            } else if (args.at(i) == QLatin1String("symflat")) {
+                g_symFlat = g_documentSymbol = true; // rides documentsymbol:
+                                                     // the FLAT answer anyway
+                                                     // (the sloppy-server
+                                                     // class the outline
+                                                     // decode must survive)
             }
         }
     }

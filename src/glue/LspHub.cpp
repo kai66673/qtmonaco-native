@@ -625,7 +625,25 @@ QJsonObject LspHub::buildInitializeParams(const ServerSpec& spec) const
                           {QStringLiteral("diagnostic"),
                            QJsonObject{
                                {QStringLiteral("relatedDocumentSupport"),
-                                false}}}}},
+                                false}}},
+                          // GATE 4 car I3: the OUTLINE claim. ONLY
+                          // hierarchicalDocumentSymbolSupport is declared —
+                          // the tree shape is what the outline dock paints
+                          // DIRECTLY (children nest under their container),
+                          // and tag support (deprecated/declaration markers)
+                          // is NOT claimed: the dock is a plain text tree
+                          // and cannot paint strike-through or dimming, so
+                          // an honest false beats a lie the server would
+                          // hold us to (the car C claim-honesty law). A
+                          // server that ignores the claim and answers the
+                          // FLAT SymbolInformation[] list is still READ
+                          // (the app-side outline decode rebuilds from
+                          // containerName — the fakeserver's symflat leg is
+                          // its far-side witness), never ignored.
+                          {QStringLiteral("documentSymbol"),
+                           QJsonObject{
+                               {QStringLiteral("hierarchicalDocumentSymbolSupport"),
+                                true}}}}},
             {QStringLiteral("window"),
              QJsonObject{{QStringLiteral("workDoneProgress"), false}}}});
     // The template deep-merges ON TOP (its ${WORKSPACE_ROOT} expands first,
@@ -1736,6 +1754,27 @@ qint64 LspHub::requestRename(qmn::view::CodeEditor* editor,
     params.insert(QStringLiteral("newName"), newName);
     return t.client->request(QStringLiteral("textDocument/rename"), params,
                              onReply);
+}
+
+qint64 LspHub::requestDocumentSymbol(qmn::view::CodeEditor* editor,
+                                     const FeatureHandler& onReply)
+{
+    // The tenth sibling (I3): no position params — the document IS the
+    // subject. Everything else rides the sibling machinery unchanged:
+    // featureGate (local refusals fire the handler with the machine reason;
+    // 0 = nothing was sent), the syncer FLUSH before the frame (the tree
+    // answers the text the server HOLDS — the far-side model witness
+    // proves the flush, tst_lsp's liveness leg edits then re-asks), and
+    // car-D resolution through any live view.
+    FeatureTarget t;
+    if (!featureGate(editor, QStringLiteral("documentSymbolProvider"),
+                     onReply, &t))
+        return 0;
+    return t.client->request(
+        QStringLiteral("textDocument/documentSymbol"),
+        QJsonObject{{QStringLiteral("textDocument"),
+                     QJsonObject{{QStringLiteral("uri"), t.syncer->uri()}}}},
+        onReply);
 }
 
 // ------------------------------------------------- popup triggering (M8 sliver)

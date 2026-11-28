@@ -1,13 +1,22 @@
-// Drives the qmn-ide-demo app (GATE 4 car I0 skeleton + car I1 panel +
-// car I2 quick-open/palette) fully offscreen through the SAME
-// programmatic doors the dock widgets, popups and panel buttons call —
-// no dialog exec, no file dialogs, and NO
-// server ever spawns (the --lsp door's tst_demo law rides whole: the
-// one slot touching the hub opens only languages NO built-in spec
-// claims). tst_ide never includes a glue or search header: IdeWindow.hpp
-// keeps those types behind forward-decls, and the panel's own read doors
-// (searchSummary/searchResultFileAt/…) are the observation channel.
-// Assertions are on model/widget state, never on pixels.
+// Drives the qmn-ide-demo app (GATE 4 car I0 skeleton + car I1 panel + car
+// I2 quick-open/palette + car I3 LSP depth: definition, references, rename,
+// code actions, formatting, the outline dock) fully offscreen through the
+// SAME programmatic doors the dock widgets, popups and panel buttons call —
+// no dialog exec, no file dialogs. THE SPAWN FACE (owner grant, 2026-11-28,
+// PLAN's I3 opening record): the I3 depth drills DO spawn a server — the
+// CI-built deterministic `fakeserver` via $<TARGET_FILE:fakeserver>, the
+// dapfake class tst_demo's --dap slot already rides, its exit code the
+// far-side oracle — armed by the window's own `armLspServer` door UNDER THE
+// BUILT-IN SPEC NAME ("clangd" replaced whole), so PATH clangd is still
+// NEVER spawned here (clangd is no CI guarantee; probe_clangd.sh stays its
+// ritual). Every OTHER slot keeps the I0 law whole: a hub slot without an
+// explicit spec path opens only UNCLAIMED languages. The real-user
+// `.qmn/lsp.json` fold leg is pinned end-to-end once.
+// tst_ide never includes a glue, lsp or search header: IdeWindow.hpp keeps
+// those types behind forward-decls, and the window's own read doors
+// (searchSummary/outline*/jump*/rename*/format*/codeAction*/resultsProducer/
+// searchResult*) are the observation channel. Assertions are on model/widget
+// state, never on pixels.
 
 #include "app/IdeWindow.hpp"
 
@@ -38,6 +47,68 @@ bool waitUntil(const std::function<bool()>& cond, int timeoutMs = 15000)
         QTest::qWait(10);
     }
     return true;
+}
+
+QString i3MarkerSource()
+{
+    // The fake's marker protocol (see tests/fakeserver's
+    // featureDocumentSymbol law): a Class with two children, one
+    // EOF-CLOSED root Function, one marker-free line. The outline
+    // witness below is derived from that protocol BY HAND and byte-pinned
+    // — if fake and test ever drift, this string drifts LOUDLY.
+    return QStringLiteral(
+        "SYM cl Widget | class Widget\n"
+        "  SYM mth paint | void paint(Gfx*)\n"
+        "  END\n"
+        "  SYM fld count | int count\n"
+        "  END\n"
+        "END\n"
+        "SYM fn helper | int helper()\n"
+        "plain text line\n");
+}
+
+// The spawn arm, in one place: an explicit program path + the far side's
+// flags + the language it claims. THE TENTH PROVIDER RIDES THE DEFAULT ARM
+// on purpose: an outline ask cycle that FINISHED is the window's own proof
+// that a live server ANSWERED, and that is the readiness gate every depth
+// drill needs — the belt-and-braces alternative is polling a dozen feature
+// summaries for "not sent yet", which is what the first drafts did and what
+// made the wire look red when it was merely young. (A NEGATIVE CONTROL at
+// the close proved the legs are load-bearing: with the advertise flag gone
+// the hub's door refuses LOCALLY, -32601 capability "documentSymbolProvider"
+// is not offered, and the outline drill fails.) The spec name "clangd" REPLACES the
+// built-in claim whole (setServerSpec replaces the whole record) — the only
+// deterministic arm over c/cpp, and PATH clangd stays UNSPAWNED, which is
+// the I0 law intact. NO .qmn/lsp.json here (that real-user path gets its own
+// slot).
+void armTheFake(IdeWindow* window, const QStringList& extraFlags)
+{
+    window->armLspServer(QStringLiteral("clangd"),
+                         QStringLiteral(QMN_TEST_LSP_SERVER),
+                         QStringList{QStringLiteral("sync"),
+                                     QStringLiteral("utf-16"),
+                                     QStringLiteral("features"),
+                                     QStringLiteral("documentsymbol")}
+                             + extraFlags,
+                         {QStringLiteral("cpp")});
+}
+
+// THE WINDOW'S OWN READINESS GATE: an outline ask cycle that FINISHED means
+// a live server ANSWERED (an empty-symbol answer is still an answer). An
+// empty summary / "не подключён" / "поднимается" / "запрошены" all mean
+// not-yet. The drill gates ride this — no slot sleeps on a hope, and the
+// tenth door is the gate exactly because it is the window's own ask.
+bool outlineCycleFinished(IdeWindow* window)
+{
+    const QString s = window->outlineSummary();
+    return !s.isEmpty()
+        && !s.contains(QStringLiteral(
+            "LSP-\u0441\u0435\u0440\u0432\u0435\u0440 \u043d\u0435 "
+            "\u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0451\u043d"))
+        && !s.contains(QStringLiteral(
+            "\u043f\u043e\u0434\u043d\u0438\u043c\u0430\u0435\u0442\u0441\u044f"))
+        && !s.contains(QStringLiteral(
+            "\u0437\u0430\u043f\u0440\u043e\u0448\u0435\u043d\u044b"));
 }
 
 } // namespace
@@ -471,7 +542,10 @@ private slots:
     void paletteRegistryFilterAndRun()
     {
         window_->showCommandPalette();
-        QCOMPARE(window_->commandRowCount(), 4); // the built-ins,
+        QCOMPARE(window_->commandRowCount(), 10); // the built-ins — car I3
+        // appended SIX LSP commands at the END of the frozen registry order
+        // (rows 0..3 below are the I2 four, unmoved: an append never
+        // disturbs the tie law's registry order)
         QCOMPARE(window_->commandLabelAt(0).contains(
             QStringLiteral("\u0411\u044b\u0441\u0442\u0440\u043e\u0435 \u043e\u0442\u043a\u0440\u044b\u0442\u0438\u0435")), true); // REGISTRY
         QCOMPARE(window_->commandLabelAt(1).contains(
@@ -485,7 +559,7 @@ private slots:
         QVERIFY(window_->commandLabelAt(0).contains(                                     // capital П)
             QStringLiteral("\u041f\u0430\u043b\u0438\u0442\u0440\u0430")));
         window_->typePaletteQuery(QString()); // back to registry order
-        QCOMPARE(window_->commandRowCount(), 4);
+        QCOMPARE(window_->commandRowCount(), 10);
 
         // Run the CLOSE-TAB command through the palette (real effect —
         // the registry is not a poster):
@@ -508,7 +582,9 @@ private slots:
         window_->closeOverlay();
         window_->showCommandPalette();
         QVERIFY(!window_->runPaletteCommand(99));
-        QCOMPARE(window_->commandRowCount(), 4); // rows intact
+        QCOMPARE(window_->commandRowCount(), 10); // rows intact (I3's six
+                                                  // appended commands ride
+                                                  // this face too)
         QVERIFY(window_->commandPaletteVisible()); // palette stays
     }
 
@@ -589,6 +665,503 @@ private slots:
         window_->setLspEnabled(true); // second hub, never an early death
         window_->setLspEnabled(false);
         QVERIFY(!window_->lspEnabled());
+    }
+    // ============================================ GATE 4 car I3: the LSP
+    // depth drills. THE SPAWN GRANT (owner decision, 2026 11 28, recorded
+    // in PLAN's I3 opening record): these slots DO spawn a server — the
+    // deterministic CI-built `fakeserver`, the dapfake class tst_demo's
+    // --dap slot already rides ($<TARGET_FILE:fakeserver>, a build-dependency
+    // of this target, its exit code the far-side oracle). That grant does
+    // NOT touch the I0 law for every OTHER slot: no slot without an explicit
+    // spec path opens a claimed language, and PATH clangd is never spawned
+    // here (clangd is no CI guarantee). The arm door is IdeWindow's own
+    // (armLspServer) — the same hub/session path a .qmn/lsp.json fold builds,
+    // spelled programmatically; the JSON fold leg is pinned by the real-user
+    // path in i3ConfigFoldLegArmsTheSameServerFromDisk.
+    //
+    // What these slots pin is the WINDOW: the chords reach the window and
+    // not the view, the answers land in the panel/outline/summaries the docks
+    // read, the reveal faces carry their caret law, and refusals are LOUD and
+    // local. The wire itself is tst_lsp's turf.
+
+    void i3OutlineDrillReadsTheMarkerTreeFarSide()
+    {
+        writeFile(QStringLiteral("proj/a.cpp"),
+                  i3MarkerSource().toUtf8()); // the fixture is ASCII: the
+                                              // byte view IS the model view
+        window_->openProject(temp_->filePath(QStringLiteral("proj")));
+        armTheFake(window_.get(), {});
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("proj/a.cpp"))));
+        // THE STILL-STARTING FACE is part of this slot: the first ask fires
+        // while the handshake is still running (openFile beats the Ready
+        // door), the outline SAYS "сервер ещё поднимается", and the bounded
+        // re-arm lands the tree seconds later — no user retry, no stale tree.
+        QVERIFY2(waitUntil([this] { return window_->outlineRowCount() == 4; }),
+                 qPrintable(window_->outlineSummary()));
+        QCOMPARE(window_->outlineTextAt(0),
+                 QStringLiteral("class Widget \u00b7 class Widget"));
+        QCOMPARE(window_->outlineTextAt(1),
+                 QStringLiteral("method paint \u00b7 void paint(Gfx*)"));
+        QCOMPARE(window_->outlineTextAt(2),
+                 QStringLiteral("field count \u00b7 int count"));
+        QCOMPARE(window_->outlineTextAt(3),
+                 QStringLiteral("function helper \u00b7 int helper()"));
+        QCOMPARE(window_->outlineTextAt(4), QString()); // out of range is
+                                                        // empty, never a
+                                                        // wrap-around
+        // NESTING, the far side's own (the fake nests by the marker stack):
+        QCOMPARE(window_->outlineParentAt(0), -1); // Widget: a root
+        QCOMPARE(window_->outlineParentAt(1), 0);  // paint under Widget
+        QCOMPARE(window_->outlineParentAt(2), 0);  // count under Widget
+        QCOMPARE(window_->outlineParentAt(3), -1); // helper: its own root
+        QCOMPARE(window_->outlineParentAt(99), -2); // out of range is its
+                                                    // own face
+        QVERIFY2(window_->outlineSummary().contains(
+                     QStringLiteral("\u00b7 \u0438\u0435\u0440\u0430\u0440\u0445\u0438\u044f")),
+                 qPrintable(window_->outlineSummary())); // the hierarchy
+                                                         // shape, said out
+        // The activation face: caret at the token END (the panel's face; a
+        // JUMP is the START face — the two are pinned apart).
+        QVERIFY(window_->outlineActivate(1));
+        CodeEditor* editor = window_->currentEditor();
+        QVERIFY(editor);
+        QCOMPARE(editor->position(), (TextPosition{1, 15}));
+        QCOMPARE(editor->selectedText(), QStringLiteral("paint"));
+        QVERIFY(!window_->outlineActivate(9)); // out of range: false, no
+                                               // reveal, no crash
+        // THE EDIT-DEBOUNCE LEG of the refresh law (the policy is the
+        // outline's: the tenth door never auto-pulls): an edit re-arms the
+        // app-side timer and the ask that follows answers about the NEW text
+        // — the newest ask winning is also the generation guard's visible
+        // face (a late answer about the old text would leave FOUR rows).
+        editor->insertTextAt(TextPosition{0, 0},
+                             QStringLiteral("SYM var counter | int counter\n"
+                                            "END\n"));
+        QVERIFY2(waitUntil([this] { return window_->outlineRowCount() == 5; }),
+                 qPrintable(window_->outlineSummary()));
+        QCOMPARE(window_->outlineTextAt(0),
+                 QStringLiteral("variable counter \u00b7 int counter"));
+        QCOMPARE(window_->outlineParentAt(1), -1); // Widget: still a root,
+                                                   // now at row 1
+        QCOMPARE(window_->outlineParentAt(2), 1);  // paint under Widget
+        QCOMPARE(window_->outlineParentAt(4), -1); // helper, EOF-closed root
+    }
+
+    void i3OutlineFlatAnswerRebuildsByContainerName()
+    {
+        // The sloppy-server class DESPITE our hierarchicalDocumentSymbolSupport
+        // claim: SymbolInformation[] + containerName. tst_lsp pins the door
+        // carries that whole shape; THIS slot pins the app-side REBUILD —
+        // same four rows, same parents, and the summary ADMITS the rebuild
+        // (the skip-honesty law: the user is told the shape was not given).
+        writeFile(QStringLiteral("proj/a.cpp"), i3MarkerSource().toUtf8());
+        window_->openProject(temp_->filePath(QStringLiteral("proj")));
+        armTheFake(window_.get(), {QStringLiteral("documentsymbol"), QStringLiteral("symflat")});
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("proj/a.cpp"))));
+        QVERIFY2(waitUntil([this] { return window_->outlineRowCount() == 4; }),
+                 qPrintable(window_->outlineSummary()));
+        QCOMPARE(window_->outlineTextAt(0), QStringLiteral("class Widget"));
+        QCOMPARE(window_->outlineTextAt(1), QStringLiteral("method paint"));
+        QCOMPARE(window_->outlineTextAt(3), QStringLiteral("function helper"));
+        QCOMPARE(window_->outlineParentAt(1), 0);
+        QCOMPARE(window_->outlineParentAt(2), 0);
+        QCOMPARE(window_->outlineParentAt(3), -1);
+        QVERIFY2(window_->outlineSummary().contains(
+                     QStringLiteral("containerName")),
+                 qPrintable(window_->outlineSummary()));
+        // THE NAMESAKE LEG of the rebuild law ("the LAST earlier row of that
+        // name adopts"): the fake's containerName IS the parent's NAME, so two
+        // nested Widgets make the child's "Widget" ambiguous. The flat list is
+        // preorder, so the last earlier namesake is the INNER Widget — which is
+        // exactly the innermost containing symbol. A first-match rule would
+        // nest the child one level too high and fail HERE. (Second document,
+        // so the ask is fresh and the generation guard is not in play.)
+        writeFile(QStringLiteral("proj/b.cpp"),
+                  "SYM cl Widget | class Widget\n"
+                  "  SYM cl Widget | class Widget\n"
+                  "    SYM mth deep | void deep()\n"
+                  "    END\n"
+                  "  END\n"
+                  "END\n");
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("proj/b.cpp"))));
+        QVERIFY2(waitUntil([this] { return window_->outlineRowCount() == 3; }),
+                 qPrintable(window_->outlineSummary()));
+        QCOMPARE(window_->outlineTextAt(1), QStringLiteral("class Widget"));
+        QCOMPARE(window_->outlineParentAt(1), 0); // inner Widget rides the outer
+        QCOMPARE(window_->outlineTextAt(2), QStringLiteral("method deep"));
+        QCOMPARE(window_->outlineParentAt(2), 1); // the tie-break: LAST earlier,
+                                                  // the inner one
+        QCOMPARE(window_->outlineParentAt(0), -1);
+    }
+
+    void i3DefinitionJumpSelectsTheTokenWithCaretAtStart()
+    {
+        writeFile(QStringLiteral("proj/a.cpp"),
+                  "alpha beta alpha\n  beta tail\n");
+        window_->openProject(temp_->filePath(QStringLiteral("proj")));
+        armTheFake(window_.get(), {});
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("proj/a.cpp"))));
+        CodeEditor* editor = window_->currentEditor();
+        QVERIFY(editor);
+        editor->setPosition(TextPosition{0, 6}); // the caret lands on "beta"
+        QVERIFY2(waitUntil([this] {
+                     return window_->jumpToDefinition();
+                 }),
+                 qPrintable(window_->jumpSummary())); // the ask can only
+                                                      // cross once the server
+                                                      // is Ready — waiting
+                                                      // for the ask to be
+                                                      // SENT is the honest
+                                                      // face of a live wire
+        QVERIFY2(waitUntil([this] {
+                     return window_->jumpSummary().startsWith(
+                         QStringLiteral("\u043f\u0435\u0440\u0435\u0445\u043e\u0434: a.cpp"));
+                 }),
+                 qPrintable(window_->jumpSummary()));
+        // THE JUMP'S CARET FACE: the selection covers the token and the
+        // CARET sits at its START (the panel/outline reveal is the END face —
+        // both ride the ONE public setSelection door, the I1 widening).
+        QCOMPARE(editor->position(), (TextPosition{0, 6}));
+        QCOMPARE(editor->selectedText(), QStringLiteral("beta"));
+        QCOMPARE(editor->toPlainText(),
+                 QStringLiteral("alpha beta alpha\n  beta tail\n")); // a jump
+                                                                     // moves
+                                                                     // the
+                                                                     // caret,
+                                                                     // never
+                                                                     // the
+                                                                     // text
+    }
+
+    void i3ReferencesFillTheSamePanelWithFileMatchRows()
+    {
+        writeFile(QStringLiteral("proj/a.cpp"), "alpha beta alpha\n\ngamma alpha\n");
+        window_->openProject(temp_->filePath(QStringLiteral("proj")));
+        armTheFake(window_.get(), {});
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("proj/a.cpp"))));
+        CodeEditor* editor = window_->currentEditor();
+        QVERIFY(editor);
+        editor->setPosition(TextPosition{0, 0}); // the caret on the FIRST
+                                                 // "alpha" (the fake's own
+                                                 // declaration)
+        QVERIFY2(waitUntil([this] {
+                     return outlineCycleFinished(window_.get());
+                 }),
+                 qPrintable(window_->outlineSummary())); // the Readiness gate
+        QVERIFY(window_->findReferences());
+        QVERIFY2(waitUntil([this] { return window_->searchResultRowCount() == 3; }),
+                 qPrintable(window_->searchSummary()));
+        QCOMPARE(window_->resultsProducer(), QStringLiteral("references"));
+        // The SERVER's order is the row order, grouped per file in first-
+        // appearance order (the panel's I1 honesty, the second producer
+        // riding it unchanged):
+        const QString target = temp_->filePath(QStringLiteral("proj/a.cpp"));
+        for (int row = 0; row < 3; ++row)
+            QCOMPARE(window_->searchResultFileAt(row), target);
+        QCOMPARE(window_->searchResultLineAt(0), 0);
+        QCOMPARE(window_->searchResultLineAt(1), 0);
+        QCOMPARE(window_->searchResultLineAt(2), 2);
+        // A reference row activates through the SAME door as a search row —
+        // the row currency is the engine's own FileMatch/LineMatch:
+        QVERIFY(window_->activateSearchResult(2));
+        QCOMPARE(editor->position(), (TextPosition{2, 11})); // caret at the
+                                                             // END of the hit
+        QCOMPARE(editor->selectedText(), QStringLiteral("alpha"));
+        QVERIFY2(window_->searchSummary().contains(
+                     QStringLiteral("\u0421\u0441\u044b\u043b\u043e\u043a: 3")),
+                 qPrintable(window_->searchSummary()));
+        // The producer switch back: a fresh search owns the panel again.
+        window_->runSearch(QStringLiteral("beta"), false, false, false);
+        QCOMPARE(window_->resultsProducer(), QStringLiteral("search"));
+        QVERIFY2(waitUntil([this] { return window_->searchResultRowCount() == 1; }),
+                 qPrintable(window_->searchSummary()));
+    }
+
+    void i3RenameAppliesOneUndoGroupAndRefusesWorkspaceShapes()
+    {
+        writeFile(QStringLiteral("proj/a.cpp"), "alpha beta alpha\n\ngamma alpha\n");
+        window_->openProject(temp_->filePath(QStringLiteral("proj")));
+        armTheFake(window_.get(), {});
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("proj/a.cpp"))));
+        CodeEditor* editor = window_->currentEditor();
+        QVERIFY(editor);
+        editor->setPosition(TextPosition{0, 2}); // inside the first "alpha"
+        // The prefill law: no selection → the word AT the caret, app-side math
+        // over the model (no new view door).
+        QVERIFY(window_->openRenameOverlay());
+        QVERIFY(window_->renameOverlayVisible());
+        QCOMPARE(window_->renamePrefill(), QStringLiteral("alpha"));
+        const QString before = editor->toPlainText();
+        QVERIFY2(waitUntil([this] {
+                     return outlineCycleFinished(window_.get());
+                 }),
+                 qPrintable(window_->outlineSummary())); // the Readiness gate
+        window_->commitRename(QStringLiteral("zeta"));
+        QVERIFY2(waitUntil([this] {
+                     return window_->renameSummary().contains(
+                         QStringLiteral("\u043f\u0440\u0438\u043c\u0435\u043d\u0435\u043d\u043e"));
+                 }),
+                 qPrintable(window_->renameSummary()));
+        QCOMPARE(editor->toPlainText(),
+                 QStringLiteral("zeta beta zeta\n\ngamma zeta\n")); // ALL
+                                                                    // three
+                                                                    // hits,
+                                                                    // the
+                                                                    // fake's
+                                                                    // WorkspaceEdit
+        QVERIFY(!window_->renameOverlayVisible()); // success CLOSES the
+                                                   // overlay
+        // ONE undo group per document (the applier's frozen law, pinned here
+        // through the app's door): ONE undo restores the WHOLE rename.
+        editor->undo();
+        QCOMPARE(editor->toPlainText(), before);
+        // The refusal face keeps the overlay OPEN (the next name may yet be
+        // the truth) and a blank name never goes on the wire at all:
+        QVERIFY(window_->openRenameOverlay());
+        window_->commitRename(QStringLiteral("   "));
+        QVERIFY2(window_->renameSummary().contains(
+                     QStringLiteral("\u043f\u0443\u0441\u0442\u043e\u0435 \u0438\u043c\u044f")),
+                 qPrintable(window_->renameSummary()));
+        QVERIFY(window_->renameOverlayVisible());
+        window_->closeOverlay();
+        // The workspace-shape refusal: the fake's RENAMEMULTI answer edits a
+        // document this hub does not hold open, so the applier refuses ALL of
+        // it — the current document's own edits included, which is exactly
+        // what makes a half-applied rename impossible.
+        writeFile(QStringLiteral("proj/multi.cpp"), "alpha RENAMEMULTI\nalpha\n");
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("proj/multi.cpp"))));
+        CodeEditor* multi = window_->currentEditor();
+        QVERIFY(multi);
+        multi->setPosition(TextPosition{0, 2});
+        QVERIFY2(waitUntil([this] {
+                     return outlineCycleFinished(window_.get());
+                 }),
+                 qPrintable(window_->outlineSummary())); // the SECOND document
+                                                         // opened: its outline
+                                                         // cycle proves the
+                                                         // didOpen reached the
+                                                         // same live client
+        const QString multiBefore = multi->toPlainText();
+        window_->commitRename(QStringLiteral("omega"));
+        QVERIFY2(waitUntil([this] {
+                     return window_->renameSummary().contains(
+                         QStringLiteral("\u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e"));
+                 }),
+                 qPrintable(window_->renameSummary()));
+        QCOMPARE(multi->toPlainText(), multiBefore); // NOTHING half-applied
+    }
+
+    void i3FormattingRunsThroughTheApplier()
+    {
+        writeFile(QStringLiteral("proj/a.cpp"), "head line\ntail line\n");
+        window_->openProject(temp_->filePath(QStringLiteral("proj")));
+        armTheFake(window_.get(), {});
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("proj/a.cpp"))));
+        QVERIFY2(waitUntil([this] {
+                     return outlineCycleFinished(window_.get());
+                 }),
+                 qPrintable(window_->outlineSummary())); // the Readiness gate
+        QVERIFY(window_->formatDocument());
+        QVERIFY2(waitUntil([this] {
+                     return window_->formatSummary().contains(
+                         QStringLiteral("\u043f\u0440\u0438\u043c\u0435\u043d\u0435\u043d\u043e"));
+                 }),
+                 qPrintable(window_->formatSummary()));
+        CodeEditor* editor = window_->currentEditor();
+        QVERIFY(editor);
+        QVERIFY2(editor->toPlainText().startsWith(QStringLiteral("# fmt\n")),
+                 qPrintable(editor->toPlainText()));
+        QVERIFY2(editor->toPlainText().endsWith(QStringLiteral(" // fmt")),
+                 qPrintable(editor->toPlainText()));
+    }
+
+    void i3CodeActionsRowsRunOrRefuseThroughTheApplier()
+    {
+        writeFile(QStringLiteral("proj/a.cpp"), "head line\ntail line\n");
+        window_->openProject(temp_->filePath(QStringLiteral("proj")));
+        armTheFake(window_.get(), {});
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("proj/a.cpp"))));
+        QVERIFY2(waitUntil([this] {
+                     return outlineCycleFinished(window_.get());
+                 }),
+                 qPrintable(window_->outlineSummary())); // the Readiness gate
+        QVERIFY(window_->showCodeActions());
+        QVERIFY2(waitUntil([this] { return window_->codeActionRowCount() == 4; }),
+                 qPrintable(window_->codeActionsSummary()));
+        // The fake's four shapes, in the answer's order (the row order is the
+        // SERVER's, the panel law again):
+        QCOMPARE(window_->codeActionLabelAt(0), QStringLiteral("indent the head"));
+        QCOMPARE(window_->codeActionLabelAt(1), QStringLiteral("append the tail"));
+        QCOMPARE(window_->codeActionLabelAt(2), QStringLiteral("create a sidecar"));
+        QCOMPARE(window_->codeActionLabelAt(3), QStringLiteral("nothing to apply"));
+        CodeEditor* editor = window_->currentEditor();
+        QVERIFY(editor);
+        // Row 1 FIRST (clangd's hidden-in-command shape) because the pinned
+        // sequence never replays a stale range: rows 1 and 0 anchor at the
+        // document's two OPPOSITE ends, so either order is drift-free — and
+        // the sequence below says which one, LOUDLY, instead of leaving it to
+        // a lucky accident.
+        QVERIFY(window_->runCodeAction(1));
+        QVERIFY2(editor->toPlainText().endsWith(QStringLiteral(" // cmd")),
+                 qPrintable(editor->toPlainText()));
+        // v1 never executes a server's arbitrary command and never creates a
+        // file: BOTH non-applicable shapes refuse through the APPLIER, with
+        // its reasons riding the summary verbatim (the honest VISIBLE row is
+        // the point — the user sees the offer and reads why it did not run).
+        QVERIFY(!window_->runCodeAction(2));
+        QVERIFY2(window_->codeActionsSummary().contains(
+                     QStringLiteral("\u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e")),
+                 qPrintable(window_->codeActionsSummary()));
+        const QString afterRow1 = editor->toPlainText();
+        QVERIFY(!window_->runCodeAction(3));
+        QCOMPARE(editor->toPlainText(), afterRow1);
+        QVERIFY(!window_->runCodeAction(99)); // out of range: false, and
+                                              // nothing ran
+    }
+
+    void i3NewChordsRideTheWindowNotTheViewAndRefuseLocally()
+    {
+        // The chord-mask tripwire GROWS (the I2 law, five more legs): with NO
+        // hub raised the five new chords reach the WINDOW, every door refuses
+        // LOUDLY and LOCALLY (no server can spawn — no spec, no wire), and
+        // the document stays byte-identical.
+        writeFile(QStringLiteral("a.cpp"), "alpha\n");
+        window_->openProject(temp_->path());
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("a.cpp"))));
+        CodeEditor* editor = window_->currentEditor();
+        QVERIFY(editor);
+        const QString textBefore = editor->toPlainText();
+        editor->setFocus();
+        QTest::qWait(20);
+
+        QTest::keyClick(editor, Qt::Key_F12);
+        QVERIFY2(window_->jumpSummary().contains(
+                     QStringLiteral("LSP")),
+                 qPrintable(window_->jumpSummary()));
+        QTest::keyClick(editor, Qt::Key_F12, Qt::ShiftModifier);
+        QVERIFY(window_->resultsProducer().isEmpty()); // the references door
+                                                       // refused BEFORE it
+                                                       // ever claimed the
+                                                       // panel
+        QTest::keyClick(editor, Qt::Key_F2);
+        QVERIFY(!window_->renameOverlayVisible()); // no hub: the overlay
+                                                   // never opens
+        QTest::keyClick(editor, Qt::Key_F, Qt::ShiftModifier | Qt::AltModifier);
+        QVERIFY2(window_->formatSummary().contains(
+                     QStringLiteral("LSP")),
+                 qPrintable(window_->formatSummary()));
+        QTest::keyClick(editor, Qt::Key_Period, Qt::ControlModifier);
+        QCOMPARE(window_->codeActionRowCount(), 0);
+        QCOMPARE(editor->toPlainText(), textBefore); // the VIEW typed
+                                                     // NOTHING through any
+                                                     // of the five chords
+        QCOMPARE(editor, window_->currentEditor());
+        QVERIFY(window_->outlineRowCount() == 0); // the outline dock exists
+                                                  // and is honestly empty
+        QVERIFY2(window_->outlineSummary().contains(
+                     QStringLiteral("LSP")),
+                 qPrintable(window_->outlineSummary()));
+    }
+
+    void i3LspOffRetiresTheOutlineAndEverySummary()
+    {
+        writeFile(QStringLiteral("proj/a.cpp"), i3MarkerSource().toUtf8());
+        window_->openProject(temp_->filePath(QStringLiteral("proj")));
+        armTheFake(window_.get(), {QStringLiteral("documentsymbol")});
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("proj/a.cpp"))));
+        QVERIFY2(waitUntil([this] { return window_->outlineRowCount() == 4; }),
+                 qPrintable(window_->outlineSummary()));
+        window_->setLspEnabled(false);
+        // A stale tree never poses as current: the key going DOWN empties
+        // the dock LOUDLY and retires every feature summary with it.
+        QCOMPARE(window_->outlineRowCount(), 0);
+        QVERIFY2(window_->outlineSummary().contains(
+                     QStringLiteral("LSP-\u0441\u0435\u0440\u0432\u0435\u0440 "
+                                    "\u043d\u0435 "
+                                    "\u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0451\u043d")),
+                 qPrintable(window_->outlineSummary()));
+        const QString retired
+            = QStringLiteral("LSP-\u043a\u043b\u044e\u0447 \u043e\u043f\u0443\u0448\u0435\u043d");
+        QVERIFY2(window_->jumpSummary().contains(retired),
+                 qPrintable(window_->jumpSummary()));
+        QVERIFY2(window_->renameSummary().contains(retired),
+                 qPrintable(window_->renameSummary()));
+        QVERIFY2(window_->formatSummary().contains(retired),
+                 qPrintable(window_->formatSummary()));
+        QVERIFY2(window_->codeActionsSummary().contains(retired),
+                 qPrintable(window_->codeActionsSummary()));
+        // And the outline's re-ask after the key is down stays EMPTY (no
+        // wire to ask on, no crash, no phantom rows):
+        window_->refreshOutline();
+        QCOMPARE(window_->outlineRowCount(), 0);
+    }
+
+
+    void i3DeadSpecWaitsBoundedlyThenRefusesLoudly()
+    {
+        // THE BOUNDED FACE of the outline's still-starting law: a spec whose
+        // program cannot spawn is indistinguishable from a slow server at the
+        // hub's door (the same -32002 no-live-server refusal), so the outline
+        // WAITS — bounded at 10 tries — says so at every try, and then tells
+        // the plain refusal. No spin, no phantom rows, no crash, and the next
+        // ask after the cap refuses straight away (the wait is not re-litigated
+        // per keystroke).
+        writeFile(QStringLiteral("proj/a.cpp"), "int main() { return 0; }\n");
+        window_->openProject(temp_->filePath(QStringLiteral("proj")));
+        window_->armLspServer(QStringLiteral("clangd"),
+                              temp_->filePath(QStringLiteral("no-such-program")),
+                              {QStringLiteral("sync")}, {QStringLiteral("cpp")});
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("proj/a.cpp"))));
+        QVERIFY2(waitUntil([this] {
+                     return window_->outlineSummary().contains(
+                         QStringLiteral("\u043f\u043e\u043f\u044b\u0442\u043a\u0430 10"));
+                 }, 12000),
+                 qPrintable(window_->outlineSummary())); // the cap: ten tries,
+                                                         // out loud
+        QCOMPARE(window_->outlineRowCount(), 0);
+        QVERIFY2(waitUntil([this] {
+                     return window_->outlineSummary().contains(
+                         QStringLiteral("\u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u044b"));
+                 }, 5000),
+                 qPrintable(window_->outlineSummary())); // the plain refusal
+                                                         // face arrives
+        QCOMPARE(window_->outlineRowCount(), 0);
+        const QString refused = window_->outlineSummary();
+        window_->refreshOutline(); // past the cap: the SAME refusal, with no
+                                   // second bounded wait
+        QVERIFY2(window_->outlineSummary().contains(
+                     QStringLiteral("\u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u044b")),
+                 qPrintable(window_->outlineSummary()));
+        QVERIFY(!window_->outlineSummary().contains(
+            QStringLiteral("\u043f\u043e\u043f\u044b\u0442\u043a\u0430")));
+        QCOMPARE(window_->outlineSummary(), refused); // past the cap the SAME
+                                                      // refusal, verbatim: the
+                                                      // wait is not re-
+                                                      // negotiated per ask
+    }
+
+    void i3ConfigFoldLegArmsTheSameServerFromDisk()
+    {
+        // The REAL user path (the .qmn/lsp.json fold), pinned once end-to-end
+        // with the CI-built far side: the same server the arm door installs
+        // arrives through the config file the IDE reads at openProject.
+        writeFile(QStringLiteral("proj/.qmn/lsp.json"),
+                  QByteArray("{\"servers\": {\"fakecpp\": {\"program\": \"")
+                      + QByteArray(QMN_TEST_LSP_SERVER)
+                      + QByteArray("\", \"args\": [\"sync\", \"utf-16\", "
+                                   "\"features\", \"documentsymbol\"], "
+                                   "\"languages\": [\"cpp\"]}}}"));
+        writeFile(QStringLiteral("proj/a.cpp"), i3MarkerSource().toUtf8());
+        window_->setLspEnabled(true); // the hub FIRST: openProject replays
+                                      // the already-read config into it (the
+                                      // ide_main order, pinned here too)
+        window_->openProject(temp_->filePath(QStringLiteral("proj")));
+        QVERIFY(window_->openFile(temp_->filePath(QStringLiteral("proj/a.cpp"))));
+        QVERIFY2(waitUntil([this] { return window_->outlineRowCount() == 4; }),
+                 qPrintable(window_->outlineSummary()));
+        // The fold's OWN truth: the outline named the language through the
+        // CONFIG's spec, not the arm door — the same drill, the real path.
+        QVERIFY(!window_->projectRoot().isEmpty());
     }
 };
 

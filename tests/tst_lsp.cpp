@@ -482,6 +482,23 @@ struct FeatureProbe {
     }
 };
 
+// A JSON witness pin with a FULL-SHOW failure: a truncated QCOMPARE diff
+// hid ONE missing '}' inside an 850-char documentSymbol witness at the I3
+// tree pin and cost a hunt; for a byte-witness, the whole text IS the
+// failure message that matters. (The witness strings themselves stay
+// hand-spelled literals: they are feed-built claims, and the fakeserver —
+// not the test — is the oracle that adjudicates them.)
+void pinWitnessJson(const qmn::protocol::RpcClient::Reply& reply,
+                    const QString& expected, const char* what)
+{
+    const QString actual = QString::fromUtf8(
+        QJsonDocument(reply.result.toArray())
+            .toJson(QJsonDocument::Compact));
+    QVERIFY2(actual == expected,
+             qPrintable(QStringLiteral("%1\nACTUAL:   %2\nEXPECTED: %3")
+                            .arg(QString::fromUtf8(what), actual, expected)));
+}
+
 // The fold set as ONE comparable string list ("start:end", the door's own
 // start-ascending order) — car C (C3)'s oracle: the hub's decode and the C1
 // seam's normalization both show up here, and nothing else.
@@ -6965,6 +6982,238 @@ private slots:
         QTest::keyClick(&owner, Qt::Key_Z);
         QTest::qWait(700);
         QCOMPARE(stderrSpy.count(), armedReqs);
+    }
+
+    // ================================================= GATE 4 car I3: the
+    // TENTH feature door — textDocument/documentSymbol for the OUTLINE dock
+    // (the gate's first shelf widening; the door itself rides machine 5's
+    // battery idiom exactly). What these slots pin FAR SIDE (the machine-
+    // inside-car rule — the IDE's window integration is tst_ide's, riding
+    // the owner-granted fakeserver-class spawn): the marker-tree witness
+    // arrives BYTE EXACT (the fake answers the test's OWN markers, so the
+    // expectation is a feed-built witness, never a re-derivation), the
+    // flush-before-ask proof for this door (markers MOVED by an edit come
+    // back MOVED — a stale mirror could not name the new lines), the FLAT
+    // sloppy-server shape arrives WHOLE through the door (containerName +
+    // the non-spec junk member included: the door carries, it does not
+    // filter — the app-side decode that REBUILDS the hierarchy from it is
+    // pinned in tst_ide through a real window), and the refusal faces
+    // (no-session and no-provider) are LOCAL: the handler fires with the
+    // machine reason, the door returns 0, and the reqlog oracle says the
+    // wire saw NOTHING (the OFF-provider tripwire would exit 2 — silence
+    // is proven from the far side too).
+
+    // The I3 outline fixture: the marker protocol (see the fakeserver's
+    // featureDocumentSymbol law) spelled with a Class nesting a Method and
+    // a Field, one EOF-CLOSED root Function (the EOF-close leg), and one
+    // marker-free line. The exact expected tree below is DERIVED FROM THE
+    // PROTOCOL BY HAND and byte-pinned: if fake and test ever drift, this
+    // string drifts LOUDLY with them, visible as a witness mismatch.
+    static QString i3MarkerText()
+    {
+        return QStringLiteral(
+            "SYM cl Widget | class Widget\n"      // line 0: name col 7, len 6
+            "  SYM mth paint | void paint(Gfx*)\n" // 1: name col 10, len 5
+            "  END\n"                              // 2: closes paint
+            "  SYM fld count | int count\n"        // 3: name col 10, len 5
+            "  END\n"                              // 4: closes count
+            "END\n"                                // 5: closes Widget
+            "SYM fn helper | int helper()\n"       // 6: name col 7, len 6; EOF-closed
+            "plain text line\n");                  // 7: no marker — and the
+    }                                              // trailing '\n' makes the
+    // model NINE lines (the empty last one), so the EOF-close end is (9,0),
+    // exclusive past-the-end. A hand-count of EIGHT was this slot's first
+    // wrong witness — the protocol-correct fake is the oracle, recorded.
+
+    void hubDocumentSymbolDoorAnswersTheMarkerTreeFarSide()
+    {
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("documentsymbol"),
+                                 QStringLiteral("reqlog")});
+        h.installSpec(QStringLiteral("csrv"), {QStringLiteral("cpp")});
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("cpp"));
+        editor.setPlainText(i3MarkerText());
+        QVERIFY(h.hub.openDocument(
+            &editor, QStringLiteral("file:///outline-i3.cpp"),
+            QStringLiteral("cpp")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("csrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+        QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+
+        FeatureProbe ask1;
+        QVERIFY(h.hub.requestDocumentSymbol(&editor, ask1.handler()) > 0);
+        QVERIFY2(waitUntil([&] { return ask1.arrived; }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(!ask1.reply.isError, qPrintable(ask1.reply.message));
+        pinWitnessJson(ask1.reply,
+                       QStringLiteral(
+                     "[{\"children\":["
+                     "{\"detail\":\"void paint(Gfx*)\",\"kind\":6,"
+                     "\"name\":\"paint\","
+                     "\"range\":{\"end\":{\"character\":0,\"line\":3},"
+                     "\"start\":{\"character\":0,\"line\":1}},"
+                     "\"selectionRange\":{\"end\":{\"character\":15,\"line\":1},"
+                     "\"start\":{\"character\":10,\"line\":1}}},"
+                     "{\"detail\":\"int count\",\"kind\":8,"
+                     "\"name\":\"count\","
+                     "\"range\":{\"end\":{\"character\":0,\"line\":5},"
+                     "\"start\":{\"character\":0,\"line\":3}},"
+                     "\"selectionRange\":{\"end\":{\"character\":15,\"line\":3},"
+                     "\"start\":{\"character\":10,\"line\":3}}}"
+                     "],"
+                     "\"detail\":\"class Widget\",\"kind\":5,"
+                     "\"name\":\"Widget\","
+                     "\"range\":{\"end\":{\"character\":0,\"line\":6},"
+                     "\"start\":{\"character\":0,\"line\":0}},"
+                     "\"selectionRange\":{\"end\":{\"character\":13,\"line\":0},"
+                     "\"start\":{\"character\":7,\"line\":0}}},"
+                     "{\"detail\":\"int helper()\",\"kind\":12,"
+                     "\"name\":\"helper\","
+                     "\"range\":{\"end\":{\"character\":0,\"line\":9},"
+                     "\"start\":{\"character\":0,\"line\":6}},"
+                     "\"selectionRange\":{\"end\":{\"character\":13,\"line\":6},"
+                     "\"start\":{\"character\":7,\"line\":6}}}]"),
+                       "documentSymbol tree #1 (the marker witness)");
+
+        // THE FLUSH-BEFORE-ASK LEG for this door: the fake answers from its
+        // OWN mirror, so an ask that outran the didChange could NOT name a
+        // marker the server never saw. A stale mirror would answer the OLD
+        // tree — the moved witness below is the disambiguator.
+        editor.setPlainText(QStringLiteral("SYM var counter"));
+        FeatureProbe ask2;
+        QVERIFY(h.hub.requestDocumentSymbol(&editor, ask2.handler()) > 0);
+        QVERIFY2(waitUntil([&] { return ask2.arrived; }),
+                 qPrintable(stderrDump(stderrSpy)));
+        QVERIFY2(!ask2.reply.isError, qPrintable(ask2.reply.message));
+        pinWitnessJson(ask2.reply,
+                       QStringLiteral(
+                     "[{\"kind\":13,\"name\":\"counter\","
+                     "\"range\":{\"end\":{\"character\":0,\"line\":1},"
+                     "\"start\":{\"character\":0,\"line\":0}},"
+                     "\"selectionRange\":{\"end\":{\"character\":15,\"line\":0},"
+                     "\"start\":{\"character\":8,\"line\":0}}}]"),
+                       "the moved tree (the flush-before-ask proof)");
+
+        // Traffic honesty: TWO asks, exactly — the door asks when and only
+        // when the app calls it (NO auto-feed was born with this door: the
+        // refresh policy is the OUTLINE's, riding in the app, PLAN).
+        waitUntil([&] {
+            return reqCount(stderrSpy,
+                            QStringLiteral("textDocument/documentSymbol"))
+                >= 2;
+        });
+        QCOMPARE(reqCount(stderrSpy,
+                          QStringLiteral("textDocument/documentSymbol")),
+                 2);
+    }
+
+    void hubDocumentSymbolFlatAnswerArrivesWhole()
+    {
+        // The sloppy-server class: flat SymbolInformation[] DESPITE the
+        // client's hierarchical claim, containerName carrying the parent,
+        // and a non-spec "hover" member riding on entries that have
+        // details. The DOOR carries it whole (it does not filter the wire
+        // to please anyone); the decode that rebuilds the hierarchy from
+        // containerName and IGNORES the junk is pinned in tst_ide through
+        // the real window — here the witness is the whole shape arriving.
+        HubHarness h(QStringList{QStringLiteral("sync"),
+                                 QStringLiteral("utf-16"),
+                                 QStringLiteral("documentsymbol"),
+                                 QStringLiteral("symflat")});
+        h.installSpec(QStringLiteral("csrv"), {QStringLiteral("cpp")});
+        qmn::view::CodeEditor editor;
+        editor.setLanguage(QStringLiteral("cpp"));
+        editor.setPlainText(i3MarkerText());
+        QVERIFY(h.hub.openDocument(
+            &editor, QStringLiteral("file:///outline-flat.cpp"),
+            QStringLiteral("cpp")));
+        auto* client = h.hub.clientForSpec(QStringLiteral("csrv"));
+        QVERIFY(client);
+        QVERIFY(waitReady(client));
+
+        FeatureProbe ask;
+        QVERIFY(h.hub.requestDocumentSymbol(&editor, ask.handler()) > 0);
+        QVERIFY2(waitUntil([&] { return ask.arrived; }),
+                 "the flat documentSymbol never answered");
+        QVERIFY2(!ask.reply.isError, qPrintable(ask.reply.message));
+        pinWitnessJson(ask.reply,
+                       QStringLiteral(
+                     "[{\"hover\":{\"contents\":\"class Widget\"},\"kind\":5,"
+                     "\"location\":{\"range\":{\"end\":{\"character\":13,"
+                     "\"line\":0},\"start\":{\"character\":7,\"line\":0}},"
+                     "\"uri\":\"file:///outline-flat.cpp\"},"
+                     "\"name\":\"Widget\"},"
+                     "{\"containerName\":\"Widget\","
+                     "\"hover\":{\"contents\":\"void paint(Gfx*)\"},\"kind\":6,"
+                     "\"location\":{\"range\":{\"end\":{\"character\":15,"
+                     "\"line\":1},\"start\":{\"character\":10,\"line\":1}},"
+                     "\"uri\":\"file:///outline-flat.cpp\"},"
+                     "\"name\":\"paint\"},"
+                     "{\"containerName\":\"Widget\","
+                     "\"hover\":{\"contents\":\"int count\"},\"kind\":8,"
+                     "\"location\":{\"range\":{\"end\":{\"character\":15,"
+                     "\"line\":3},\"start\":{\"character\":10,\"line\":3}},"
+                     "\"uri\":\"file:///outline-flat.cpp\"},"
+                     "\"name\":\"count\"},"
+                     "{\"hover\":{\"contents\":\"int helper()\"},\"kind\":12,"
+                     "\"location\":{\"range\":{\"end\":{\"character\":13,"
+                     "\"line\":6},\"start\":{\"character\":7,\"line\":6}},"
+                     "\"uri\":\"file:///outline-flat.cpp\"},"
+                     "\"name\":\"helper\"}]"),
+                       "the FLAT sloppy-server shape arriving whole");
+    }
+
+    void hubDocumentSymbolRefusalsAreLocal()
+    {
+        { // an editor the hub never saw — the sibling face
+            HubHarness h(QStringList{QStringLiteral("sync"),
+                                     QStringLiteral("utf-16"),
+                                     QStringLiteral("documentsymbol")});
+            h.installSpec(QStringLiteral("pysrv"), {QStringLiteral("python")});
+            qmn::view::CodeEditor editor;
+            QVERIFY(h.hub.syncerFor(&editor) == nullptr);
+            FeatureProbe probe;
+            QCOMPARE(h.hub.requestDocumentSymbol(&editor, probe.handler()),
+                     qint64(0));
+            QVERIFY(probe.arrived); // SYNCHRONOUS, like every sibling
+            QVERIFY(probe.reply.isError);
+            QCOMPARE(probe.reply.code,
+                     int(qmn::lsp::LspClient::kWireServerNotInitialized));
+        }
+        { // a server WITHOUT the provider: LOCAL refusal (-32601), and the
+          // reqlog far side says the wire saw NOTHING — a request that
+          // reached the provider-less fake would trip the exit-2 wire and
+          // the clean-exit assertion below would fail too
+            HubHarness h(QStringList{QStringLiteral("sync"),
+                                     QStringLiteral("utf-16"),
+                                     QStringLiteral("reqlog")});
+            h.installSpec(QStringLiteral("csrv"), {QStringLiteral("cpp")});
+            qmn::view::CodeEditor editor;
+            editor.setLanguage(QStringLiteral("cpp"));
+            editor.setPlainText(i3MarkerText());
+            QVERIFY(h.hub.openDocument(
+                &editor, QStringLiteral("file:///outline-off.cpp"),
+                QStringLiteral("cpp")));
+            auto* client = h.hub.clientForSpec(QStringLiteral("csrv"));
+            QVERIFY(client);
+            QVERIFY(waitReady(client));
+            QSignalSpy stderrSpy(client, &qmn::lsp::LspClient::serverStderr);
+            FeatureProbe probe;
+            QCOMPARE(h.hub.requestDocumentSymbol(&editor, probe.handler()),
+                     qint64(0));
+            QVERIFY(probe.arrived);
+            QVERIFY(probe.reply.isError);
+            QCOMPARE(probe.reply.code, -32601);
+            QVERIFY(probe.reply.message.contains(
+                QStringLiteral("documentSymbolProvider")));
+            QTest::qWait(400); // let any phantom byte make itself seen
+            QCOMPARE(reqCount(stderrSpy,
+                              QStringLiteral("textDocument/documentSymbol")),
+                     0);
+        }
     }
 
 };

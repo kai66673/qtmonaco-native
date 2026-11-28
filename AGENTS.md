@@ -5,10 +5,10 @@ Native code editor widget for Qt6, built from scratch on a raw `QWidget`
 QPlainTextEdit, no Chromium. Long-term hobby project; roadmap in `README.md`,
 phased plan in `PLAN.md`, shipping history in `CHANGELOG.md`.
 
-## Current state (v1.16.0 — GATE 3 CLOSED 2026-11-28 with S2/Py DEFERRED
+## Current state (v1.17.0 — GATE 3 CLOSED 2026-11-28 with S2/Py DEFERRED
 by owner decision; **GATE 4 (the IDE dogfood train) IS THE OPEN TRAIN** —
-cars I0+I1 CLOSED at 1.15.0, car I2 CLOSED at 1.16.0, I3 is the open
-car) — gates and the
+cars I0+I1 CLOSED at 1.15.0, car I2 CLOSED at 1.16.0, car I3 CLOSED at
+1.17.0, I4 is the open car) — gates and the
 frozen surface
 
 - Gate 1 (editor v1) froze the public API at tag `v1.0`; Gate 1.5 (usability
@@ -102,13 +102,56 @@ steps PROBE-OK on clangd 23.1.5) →
   the view's Escape stays the editor's own); symbol quick-open DECIDED
   at the car — NOT shipped, the `requestWorkspaceSymbol` seed moves to
   I3 where the door gets asked; ctest is now TEN entries (`fuzzy`
-  guiless)** → **I3 LSP depth + outline is THE OPEN CAR** (first shelf
-  widening
-  planned: `LspHub::requestDocumentSymbol`; the `requestWorkspaceSymbol`
-  decision rides here too) → I4 tasks + problem
-  matcher → I5 git gutter; NO terminal by owner decision; the
-  frozen-surface/additive + wrappability + skip-honesty laws ride
-  UNCHANGED** → Grapheme segmentation
+  guiless)** → **car I3 CLOSED at 1.17.0 (2026-11-28, the single-car close):
+  LSP DEPTH in the IDE — definition (F12), references (Shift+F12, the
+  Find-in-Files panel's SECOND producer over the engine's own FileMatch
+  currency, `resultsProducer()` says who owns the panel), rename (F2,
+  applyReplyEdit ⇒ ONE undo group, a refusal keeps the overlay open), code
+  actions (Ctrl+., applyCodeAction; a purely-command/create item stays
+  honest VISIBLE and refuses THROUGH the applier — v1 never runs a server's
+  arbitrary command), formatting (Shift+Alt+F, applyTextEditList) and the
+  OUTLINE dock. The car's ONLY new shelf surface is the TENTH feature door
+  `LspHub::requestDocumentSymbol` (the tenth FeatureHandler sibling — raw
+  Reply, featureGate's LOCAL refusals, `documentSymbolProvider` gate,
+  `initialize` now declares `textDocument.documentSymbol
+  {hierarchicalDocumentSymbolSupport:true}`; it drops from the wheel BY TYPE
+  ABSENCE, the shelf's TENTH honest C++-only absence, so the three codegen
+  copies are untouched and the shelf literal STAYS 1.2.0 — additive but NOT
+  Python-visible). Five new chords are mask-FREE (the view's frozen table
+  binds no F12/F2/plain-F-with-modifiers/Ctrl+period); the outline's refresh
+  POLICY is the app's (open / tab switch / 600 ms edit debounce / the dock
+  button / the manual door / a palette command — the door has NO auto-feed),
+  its refusals clear the dock LOUDLY, a generation counter retires
+  superseded pulls, and a claimed document whose server is still handshaking
+  gets a BOUNDED out-loud wait (10) because at the hub's door a slow server
+  and a dead spawn wear the same -32002 face. Both wire shapes decode
+  app-side (the flat SymbolInformation[] REBUILT from containerName by
+  "last earlier namesake adopts" — the nesting face `outlineParentAt` is how
+  that gets pinned). TWO real behavior fixes the drills earned: the session
+  open lands BEFORE `tabs_->addTab()` (addTab's currentChanged used to fire
+  the outline's first ask before the document was registered), and the
+  outline never posts to the SHARED status bar (its own dock label is the
+  face — tst_ide's project-message pin caught the steal). NO new VIEW API
+  this car: the I1 `setSelection` widening carried every reveal; the app TU
+  decodes wire positions through PositionConverter / `mirrorText` /
+  `positionEncoding` (qmn_glue PUBLIC-links qmn_lsp) and stores NO
+  protocol/lsp value in an app header. Far sides: the fakeserver grew the
+  `documentsymbol`/`symflat` MARKER-PROTOCOL legs (the advertise block reads
+  the client's hierarchical claim back; exit 2 on the OFF-provider wire),
+  tst_lsp grew three machines (byte-pinned witnesses both shapes, the
+  flush-before-ask proof, LOCAL refusals with the reqCount silence witness),
+  and the live clangd probe grew definition/references/documentSymbol legs
+  (PROBE-OK, 14 steps, clangd 23.1.5 — a LIVE ritual, never ctest).
+  `requestWorkspaceSymbol` is STILL UNSHIPPED (no I3 feature asked for a
+  workspace-wide list) — carried to the car that asks (symbol quick-open) and
+  asked again at gate-close review; no Ctrl+click jump (no view click-out
+  door, the app never steals the view's mouse); code-action rows are the
+  answer's snapshot (no staleness guard app-side — the applier's version
+  guard covers documentChanges only); ctest stays TEN entries (no new
+  binary — the fakeserver is a support target, now also a dependency of
+  tst_ide)** → **I4 tasks + problem matcher is THE OPEN CAR** → I5 git
+  gutter; NO terminal by owner decision; the frozen-surface/additive +
+  wrappability + skip-honesty laws ride UNCHANGED** → Grapheme segmentation
   is OWNER-EXCLUDED from this gate (its own future train — the README
   not-implemented record stays). The full design record is the PLAN.md
   "GATE 3" section — read it (and the "GATE 2" records it consumes)
@@ -157,6 +200,13 @@ steps PROBE-OK on clangd 23.1.5) →
   car S1's close the SECOND, 1.1.0 → 1.2.0 (the four plain-typed
   `DapHub` control doors — additive Python-visible growth riding the
   already-bound class, m7's precedent: NO three-copies edit).
+  **Car I3 (1.17.0) is the COUNTER-CASE, and the codegen log — not the
+  intent — decides the class:** the tenth feature door is additive glue
+  surface, but the rejected-function log SHOWS it dropping by type
+  absence (`std::function` handler), so it is NOT Python-visible growth
+  and the shelf literal STAYS 1.2.0. A wheel-visible door (plain-typed on
+  an already-bound class) is the MINOR-bump case; a C++-only door rides
+  the package version alone.
   **G3 made the shelf's semver real to Python users too** — the wheel
   carries `qmn.LspHub`/`qmn.ProjectSession` and since car E `qmn.DapHub`:
   shelf breakage is now a wheel-visible story, not only a C++ one.
@@ -185,7 +235,14 @@ steps PROBE-OK on clangd 23.1.5) →
   carried 34 `LspHub` + 1 `ProjectSession` glue lines plus 9 `DapHub`
   lines, 17 public doors among them; PLAN's car E machine-E4 paragraph is
   the count record); a Python-facing answer route needs a SIGNAL, not a
-  callback.
+  callback. **Car I3's tenth feature door (`requestDocumentSymbol`) is the
+  TENTH honest `LspHub` C++-only absence of that same set** (its handler is
+  a `std::function`): the 1.17.0 `--codegen` run's rejected log grows by
+  EXACTLY that one line and NOTHING from `src/app/` (the IDE's five new
+  chords + `armLspServer`/feature doors are plain-typed on a NON-bound app
+  class — an app TU's includes never enter codegen at all), and the audit
+  reads that log BOTH ways: a door the log does not show has crossed by
+  accident.
 
 ## Hard rule: layering is contractual
 
@@ -404,7 +461,9 @@ ninja -C build
 ctest --test-dir build --output-on-failure
 ```
 
-Ten ctest tests (GATE 4 car I2 close 2026-11-28): `textbuffer` (core
+Ten ctest tests (GATE 4 car I3 close 2026-11-28 — unchanged count: the
+fakeserver is a support target, now also a build dependency of `tst_ide`):
+`textbuffer` (core
 property tests), `diff` (the pure
 line-diff engine, M10), `search` (I1: the qmn::search engine — naive-
 reference property pair on a fixed-seed corpus, the walk-contract/cancel/
@@ -431,15 +490,33 @@ a ctest entry, its exit code is the far-side oracle), `codeeditor`
 since D4 one slot drives the `--dap` door against `$<TARGET_FILE:dapfake>`
 — spawning IS allowed here, unlike the `--lsp` door, because dapfake is
 CI-built; the LIVE-adapter ritual `tools/probe_dap.sh` is manual, never
-CI, but car 4 may not close without it), `ide` (I0/I1/I2: drives the
+CI, but car 4 may not close without it), `ide` (I0/I1/I2/I3: drives the
 qmn-ide-demo surface — project door, one-tab focus law, close/reopen
-face, the Find-in-Files panel rows/refusals/cancel/reveal, and since
-I2 the quick-open pool/rank/activation/truncation/pool-switch-seam
-faces, the palette registry/filter/run faces and the chord-mask
-tripwire — through the
-same programmatic doors the docks call; NO server ever spawns: the
-one-hub-slot-opens-only-unclaimed-languages law rides tst_demo's shape
-whole). Two wire facts pinned by the
+face, the Find-in-Files panel rows/refusals/cancel/reveal, the quick-open
+pool/rank/activation/truncation/pool-switch-seam faces, the palette
+registry/filter/run faces, the chord-mask tripwire (since I3 FIVE MORE
+legs: F12 / Shift+F12 / F2 / Shift+Alt+F / Ctrl+. — none of those keys is
+in the view's frozen table, and the view never sees them), and since I3
+the LSP-depth faces — the outline dock's preorder rows + `outlineParentAt`
+nesting (both wire shapes, the flat one REBUILT with the namesake
+tie-break), the definition caret-at-START vs panel/outline caret-at-END
+reveal laws, the references panel as the Find-in-Files panel's SECOND
+producer (`resultsProducer()` names the owner), rename as ONE undo group +
+its workspace-edit refusal face, the code-action row faces (applied edit /
+command-only refusal), formatting through the applier, and the
+bounded-wait-then-refuse face of a server that never becomes Ready — all
+through the same programmatic doors the docks call. THE SPAWN BOUNDARY
+(owner grant, 2026-11-28, PLAN's I3 opening record): the I3 LSP-depth
+drill slots DO spawn — the CI-built deterministic `fakeserver`,
+`$<TARGET_FILE:fakeserver>`, the dapfake class tst_demo's --dap slot
+already rides — armed through the window's own `armLspServer` door UNDER
+THE BUILT-IN'S NAME ("clangd" replaced whole, so PATH clangd is still
+NEVER spawned). Every OTHER slot keeps the old law whole (a hub slot
+without an explicit spec path opens only UNCLAIMED languages), and the
+real-user `.qmn/lsp.json` fold leg is pinned end-to-end once. The test
+still names NO glue/lsp/search type — IdeWindow.hpp keeps those behind
+fwd-decls and the window's own read doors (outline*/jump/rename/format/
+codeAction/resultsProducer/searchResult*) carry every observation). Two wire facts pinned by the
 car-4 live probe (2026-11-21, both adapters): on the DAP wire
 `initialized` is the **ADAPTER'S** event — the client NEVER sends event
 frames (a client-side one CRASHES gdb's python DAP server; dapfake exits

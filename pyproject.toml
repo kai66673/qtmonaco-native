@@ -17,7 +17,7 @@ requires = [
 
 [project]
 name = "qmn-native"
-version = "1.16.0"
+version = "1.17.0"
 description = "Native Qt6 code-editor widget exposed to PySide6 (drop-in target for qtmonaco.Monaco)"
 # PEP 639: the wheel's license covers OUR code only (the C++ package carries
 # the same LICENSE); PySide6/Qt and the vendored MIT tree-sitter keep their

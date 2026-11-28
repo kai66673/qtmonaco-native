@@ -3,7 +3,15 @@
 #include "fuzzy/FuzzyMatcher.hpp"
 #include "glue/LspHub.hpp"
 #include "glue/ProjectSession.hpp"
+#include "lsp/DocumentSyncer.hpp" // car I3: the ENCODED decode — wire
+#include "lsp/LspClient.hpp"      //   positions reconcile through the
+#include "lsp/PositionConverter.hpp" // shelf's PUBLIC qmn_lsp link, and no
+                                  // protocol/lsp value is ever STORED (the
+                                  // header shows none: the I0 law stands)
+#include "protocol/RpcClient.hpp" // the FeatureHandler's Reply unpacking,
+                                  // inside this TU's lambdas only
 #include "search/SearchEngine.hpp"
+#include "view/CodeDocument.hpp" // car I3: the clamp math reads the model
 #include "view/CodeEditor.hpp"
 
 #include <QAction>
@@ -13,6 +21,11 @@
 #include <QFile>
 #include <QFileInfo>
 #include <QFileSystemModel>
+#include <QHash>
+#include <QJsonArray>
+#include <QJsonObject>
+#include <QSet>
+#include <QUrl>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QLabel>
@@ -62,6 +75,13 @@ QString readTextFile(const QString& path, QString* error)
 }
 
 constexpr int kRowRole = Qt::UserRole + 1; // the leaf item's row index
+constexpr int kOutlineMaxRetries = 10;     // car I3: the outline's bounded
+                                           // wait for a server still finishing
+                                           // its handshake
+
+// car I3: the outline's OWN refresh policy (the shelf's tenth door has no
+// auto-feed by design — the app owns the WHEN; PLAN's opening record).
+constexpr int kOutlineDebounceMs = 600;
 
 } // namespace
 
@@ -203,6 +223,81 @@ IdeWindow::IdeWindow(QWidget* parent)
     auto* scCloseTab = new QShortcut(QKeySequence(QStringLiteral("Ctrl+W")), this);
     connect(scCloseTab, &QShortcut::activated, this, &IdeWindow::closeActiveTabCommand);
 
+    // ---- car I3: the outline dock, its refresh policy, the LSP chords and
+    // the two feature overlays. The overlays are plain children again (the
+    // I2 no-exec law), and their Esc is CHILD-scoped (WidgetWithChildren-
+    // Shortcut) so the view's frozen Escape chord stays the editor's own.
+    buildOutlineDock();
+    outlineDebounce_ = new QTimer(this);
+    outlineDebounce_->setSingleShot(true);
+    outlineDebounce_->setInterval(kOutlineDebounceMs);
+    connect(outlineDebounce_, &QTimer::timeout, this,
+            [this] { refreshOutline(); });
+    // THE OUTLINE'S REFRESH LAW: a tab switch or a file-open-then-focus
+    // rides currentChanged (addTab sets the index), an edit re-arms the
+    // debounce per tab (addEditorTab), the dock button + the palette
+    // command + the manual door are the explicit asks. NOTHING auto-pulls
+    // per keystroke (the tenth door carries the ask, the outline owns the
+    // WHEN — PLAN's opening decision, spelled in code here).
+    connect(tabs_, &QTabWidget::currentChanged, this,
+            [this] { refreshOutline(); });
+    const auto addEsc = [this](QWidget* pop) {
+        auto* esc = new QAction(pop);
+        esc->setShortcut(QKeySequence(Qt::Key_Escape));
+        esc->setShortcutContext(Qt::WidgetWithChildrenShortcut);
+        connect(esc, &QAction::triggered, this, &IdeWindow::closeOverlay);
+        pop->addAction(esc);
+    };
+    renamePop_ = new QWidget(this);
+    renamePop_->setVisible(false);
+    {
+        auto* lay = new QVBoxLayout(renamePop_);
+        lay->setContentsMargins(6, 6, 6, 6);
+        renameEdit_ = new QLineEdit(renamePop_);
+        renameEdit_->setPlaceholderText(
+            QStringLiteral("\u043d\u043e\u0432\u043e\u0435 \u0438\u043c\u044f \u00b7 Enter \u2014 \u043f\u0440\u0438\u043c\u0435\u043d\u0438\u0442\u044c"));
+        lay->addWidget(renameEdit_);
+        connect(renameEdit_, &QLineEdit::returnPressed, this,
+                [this] { commitRename(renameEdit_->text()); });
+        addEsc(renamePop_);
+    }
+    actionsPop_ = new QWidget(this);
+    actionsPop_->setVisible(false);
+    {
+        auto* lay = new QVBoxLayout(actionsPop_);
+        lay->setContentsMargins(6, 6, 6, 6);
+        actionsList_ = new QListWidget(actionsPop_);
+        lay->addWidget(actionsList_, 1);
+        connect(actionsList_, &QListWidget::itemActivated, this,
+                [this](QListWidgetItem* item) {
+                    runCodeAction(actionsList_->row(item));
+                });
+        addEsc(actionsPop_);
+    }
+
+    // THE FIVE NEW CHORDS (the I2 chord-table audit rides: the view's frozen
+    // keymap binds F7/Shift+F7 among function keys — Key_F12 and Key_F2
+    // NEVER appear in it — and Ctrl+letters, so plain Ctrl+period is free
+    // too; the I2 trio and S1's F7 pair are untouched, and tst_ide's
+    // chord-mask tripwire grows these five legs).
+    auto* scDefinition = new QShortcut(QKeySequence(Qt::Key_F12), this);
+    connect(scDefinition, &QShortcut::activated, this,
+            [this] { jumpToDefinition(); });
+    auto* scReferences = new QShortcut(QKeySequence(Qt::SHIFT | Qt::Key_F12),
+                                       this);
+    connect(scReferences, &QShortcut::activated, this,
+            [this] { findReferences(); });
+    auto* scRename = new QShortcut(QKeySequence(Qt::Key_F2), this);
+    connect(scRename, &QShortcut::activated, this,
+            [this] { openRenameOverlay(); });
+    auto* scFormat = new QShortcut(
+        QKeySequence(QStringLiteral("Shift+Alt+F")), this);
+    connect(scFormat, &QShortcut::activated, this,
+            [this] { formatDocument(); });
+    auto* scActions = new QShortcut(QKeySequence(QStringLiteral("Ctrl+.")), this);
+    connect(scActions, &QShortcut::activated, this,
+            [this] { showCodeActions(); });
+
     registerBuiltInCommands();
 
     statusLabel_ = new QLabel(this);
@@ -231,6 +326,10 @@ void IdeWindow::openProject(const QString& dirPath)
     // restart inside that signal is the engine's own sanctioned face.
     kickPoolWalk(projectRoot_);
     statusBar()->showMessage(QStringLiteral("\u041f\u0440\u043e\u0435\u043a\u0442: %1").arg(projectRoot_));
+    // car I3: a project switch may have folded a NEW server in — the
+    // outline re-asks at the same door the tree and the pool re-arm at (and
+    // with no hub yet it clears LOUD, which is the honest pre-lsp face).
+    refreshOutline();
 }
 
 bool IdeWindow::openFile(const QString& path)
@@ -279,6 +378,17 @@ void IdeWindow::setLspEnabled(bool enabled)
         }
         session_->attachHub(nullptr);
         hub_.reset();
+        // car I3: with the key down, NOTHING can answer — the outline goes
+        // empty LOUDLY (a stale tree never poses as current) and the six
+        // feature summaries retire with the key. The generation bump
+        // retires an answer still on the wire (its handler now drops it).
+        outlineDebounce_->stop();
+        ++outlineGeneration_;
+        clearOutlineRows(QStringLiteral("\u0441\u0438\u043c\u0432\u043e\u043b\u044b: LSP-\u0441\u0435\u0440\u0432\u0435\u0440 \u043d\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0451\u043d"));
+        jumpSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0445\u043e\u0434: LSP-\u043a\u043b\u044e\u0447 \u043e\u043f\u0443\u0448\u0435\u043d");
+        renameSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435: LSP-\u043a\u043b\u044e\u0447 \u043e\u043f\u0443\u0448\u0435\u043d");
+        formatSummary_ = QStringLiteral("\u0444\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435: LSP-\u043a\u043b\u044e\u0447 \u043e\u043f\u0443\u0448\u0435\u043d");
+        actionsSummary_ = QStringLiteral("\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044f: LSP-\u043a\u043b\u044e\u0447 \u043e\u043f\u0443\u0448\u0435\u043d");
         statusBar()->showMessage(QStringLiteral("LSP: \u0441\u0435\u0440\u0432\u0435\u0440\u044b \u043e\u0441\u0442\u0430\u043d\u043e\u0432\u043b\u0435\u043d\u044b"));
         return;
     }
@@ -310,18 +420,15 @@ void IdeWindow::addEditorTab(const QString& path, const QString& text)
     editor->setPlainText(text);
 
     CodeEditor* raw = editor.release(); // the tab owns it from here
-    const int index = tabs_->addTab(raw, QFileInfo(path).fileName());
-    tabs_->tabBar()->setTabData(index, path);
 
-    connect(raw, &CodeEditor::cursorMoved, this, &IdeWindow::updateStatusLabel);
-    connect(raw, &CodeEditor::selectionChanged, this, &IdeWindow::updateStatusLabel);
-
-    // One session call owns the open: registration + the suffix-table
-    // language (the G2 shape unchanged). The one-tab guard above means
-    // the duplicate-uri leg cannot fire for a TAB duplicate; it CAN
-    // still answer false if a closed tab's release has not settled yet
-    // (closeTabAt's closeDocument is the orderly drop — and tst_ide's
-    // close-then-reopen slot pins the face).
+    // CAR I3 ORDER LAW (the outline's first ask depends on it): the SESSION
+    // open lands BEFORE the tab becomes current. tabs_->addTab() emits
+    // currentChanged, and the outline refresh riding that signal asks the hub
+    // about the CURRENT document — an ask that reaches the hub before the
+    // document is registered is a "not registered" refusal the outline's
+    // retry law cannot tell apart from a real one (no syncer to wait on).
+    // Register first, then raise the tab: the first ask then rides either a
+    // Ready server or the bounded still-starting wait.
     const QString language = session_->languageForSuffix(QFileInfo(path).suffix());
     if (!language.isEmpty())
         raw->setLanguage(language);
@@ -331,6 +438,18 @@ void IdeWindow::addEditorTab(const QString& path, const QString& text)
             raw->setLanguage(retry); // the demo's honest duplicate face
                                      // (grammar rides, registry stays)
     }
+
+    const int index = tabs_->addTab(raw, QFileInfo(path).fileName());
+    tabs_->tabBar()->setTabData(index, path);
+
+    connect(raw, &CodeEditor::cursorMoved, this, &IdeWindow::updateStatusLabel);
+    connect(raw, &CodeEditor::selectionChanged, this, &IdeWindow::updateStatusLabel);
+    // car I3's refresh law: an edit re-arms the outline's debounce (the ask
+    // lands a beat after the last keystroke — never per keystroke).
+    connect(raw, &CodeEditor::textChanged, this, [this] {
+        if (hub_)
+            outlineDebounce_->start();
+    });
 
     tabs_->setCurrentIndex(index);
 }
@@ -357,6 +476,9 @@ void IdeWindow::runSearch(const QString& text, bool caseSensitive,
     results_.clear();
     resultRows_.clear();
     resultsTree_->clear();
+    resultsProducer_ = QStringLiteral("search"); // the panel's producer
+                                                 // truth (I3: the same panel
+                                                 // is the references face)
 
     if (projectRoot_.isEmpty()) {
         searchSummary_ = QStringLiteral(
@@ -536,6 +658,27 @@ void IdeWindow::registerBuiltInCommands()
     reg(QStringLiteral("close-tab"),
         QStringLiteral("\u0417\u0430\u043a\u0440\u044b\u0442\u044c \u0430\u043a\u0442\u0438\u0432\u043d\u0443\u044e \u0432\u043a\u043b\u0430\u0434\u043a\u0443"),
         QStringLiteral("Ctrl+W"), [this] { closeActiveTabCommand(); });
+    // car I3: the six LSP commands APPEND to the frozen registry order (the
+    // palette's tie law rides registry order — an append never disturbs the
+    // I2 four).
+    reg(QStringLiteral("goto-definition"),
+        QStringLiteral("\u041f\u0435\u0440\u0435\u0445\u043e\u0434 \u043a \u043e\u043f\u0440\u0435\u0434\u0435\u043b\u0435\u043d\u0438\u044e"),
+        QStringLiteral("F12"), [this] { jumpToDefinition(); });
+    reg(QStringLiteral("find-references"),
+        QStringLiteral("\u041d\u0430\u0439\u0442\u0438 \u0441\u0441\u044b\u043b\u043a\u0438 \u2014 \u043f\u0430\u043d\u0435\u043b\u044c \u0440\u0435\u0437\u0443\u043b\u044c\u0442\u0430\u0442\u043e\u0432"),
+        QStringLiteral("Shift+F12"), [this] { findReferences(); });
+    reg(QStringLiteral("rename-symbol"),
+        QStringLiteral("\u041f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u0442\u044c \u0441\u0438\u043c\u0432\u043e\u043b"),
+        QStringLiteral("F2"), [this] { openRenameOverlay(); });
+    reg(QStringLiteral("format-document"),
+        QStringLiteral("\u0424\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u0442\u044c \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442"),
+        QStringLiteral("Shift+Alt+F"), [this] { formatDocument(); });
+    reg(QStringLiteral("code-actions"),
+        QStringLiteral("\u0411\u044b\u0441\u0442\u0440\u044b\u0435 \u043f\u0440\u0430\u0432\u043a\u0438 \u043e\u0442 \u0441\u0435\u0440\u0432\u0435\u0440\u0430"),
+        QStringLiteral("Ctrl+."), [this] { showCodeActions(); });
+    reg(QStringLiteral("outline-refresh"),
+        QStringLiteral("\u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c \u0441\u043f\u0438\u0441\u043e\u043a \u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432"),
+        QString(), [this] { refreshOutline(); });
 }
 
 void IdeWindow::closeActiveTabCommand()
@@ -630,6 +773,10 @@ void IdeWindow::closeOverlay()
 {
     quickOpenPop_->hide();
     palettePop_->hide();
+    if (renamePop_) // car I3's overlays share the ONE close face (the Esc
+        renamePop_->hide(); //   twins and the doors both route here)
+    if (actionsPop_)
+        actionsPop_->hide();
 }
 
 bool IdeWindow::quickOpenVisible() const
@@ -833,5 +980,1179 @@ void IdeWindow::updateStatusLabel()
                     .arg(editor->selectedLength());
     statusLabel_->setText(text);
 }
+
+
+// ================= GATE 4 car I3: LSP depth =============================
+// Six features (PLAN's I3 shape) ON TOP of what the shelf already ships:
+// definition, references, rename, code actions, formatting, and the OUTLINE
+// dock. New glue surface: exactly ONE door (requestDocumentSymbol, the tenth
+// feature sibling). Everything else rides the nine existing request doors,
+// the four apply* appliers, and the I1 public setSelection reveal channel —
+// zero workarounds, zero new shelf surface beyond the ledger's own entry.
+//
+// THE POSITION LAW all three location-bearing features share: a wire
+// Location/DocumentSymbol position is decoded through
+// qmn::lsp::PositionConverter against THE TEXT THE SERVER HOLDS — the
+// syncer's mirror for an OPEN document, the file ON DISK for a closed one
+// (that IS the text a server holds for a closed file) — and the decode-frame
+// coordinates are then CLAMPED at reveal time into whatever the document
+// became meanwhile. An edit racing an answer drifts a reveal; it never
+// corrupts (the converter's total clamping is the posture M4's diagnostics
+// feeding froze). PositionConverter is reached through qmn_glue's PUBLIC
+// qmn_lsp link — the app stores no protocol/lsp type anywhere (the header
+// never shows one), it only decodes through free statics in this TU.
+//
+// THE SYNC-REFUSAL LAW the six doors share (the hub's featureGate route, the
+// search engine's frozen face): a refusal fires the FeatureHandler
+// SYNCHRONOUSLY inside the call, so after a `false` return the summary face
+// ALREADY carries the machine reason VERBATIM — a door never overwrites what
+// its own handler just said, and a refusal never needs an answer poll.
+namespace {
+
+constexpr int kOutlineMaxDepth = 64;    // a hostile nesting cannot blow the
+                                        // decode recursion, and the cut says
+                                        // so in the summary (skip honesty)
+constexpr int kOutlineRowRole = Qt::UserRole + 3; // tree item -> outline row
+
+QString kindLabelFor(int kind)
+{
+    switch (kind) {
+    case 1: return QStringLiteral("file");
+    case 2: return QStringLiteral("module");
+    case 3: return QStringLiteral("namespace");
+    case 4: return QStringLiteral("package");
+    case 5: return QStringLiteral("class");
+    case 6: return QStringLiteral("method");
+    case 7: return QStringLiteral("property");
+    case 8: return QStringLiteral("field");
+    case 9: return QStringLiteral("constructor");
+    case 10: return QStringLiteral("enum");
+    case 11: return QStringLiteral("interface");
+    case 12: return QStringLiteral("function");
+    case 13: return QStringLiteral("variable");
+    case 14: return QStringLiteral("constant");
+    case 15: return QStringLiteral("string");
+    case 16: return QStringLiteral("number");
+    case 17: return QStringLiteral("boolean");
+    case 18: return QStringLiteral("array");
+    case 19: return QStringLiteral("object");
+    case 20: return QStringLiteral("key");
+    case 21: return QStringLiteral("null");
+    case 22: return QStringLiteral("enum member");
+    case 23: return QStringLiteral("struct");
+    case 24: return QStringLiteral("event field");
+    case 25: return QStringLiteral("operator");
+    case 26: return QStringLiteral("type parameter");
+    default: return QStringLiteral("symbol(%1)").arg(kind); // an out-of-range
+                                                            // claim rides
+                                                            // VISIBLY — it
+                                                            // is never
+                                                            // renamed away
+    }
+}
+
+qint64 wireInt(const QJsonObject& obj, const QString& key, qint64 fallback = 0)
+{
+    const QJsonValue v = obj.value(key);
+    if (v.isDouble())
+        return qint64(v.toDouble());
+    if (v.isBool())
+        return v.toBool() ? 1 : 0;
+    if (v.isString()) {
+        bool ok = false;
+        const qint64 parsed = v.toString().toLongLong(&ok);
+        if (ok)
+            return parsed;
+    }
+    return fallback;
+}
+
+QString wireStr(const QJsonObject& obj, const QString& key)
+{
+    const QJsonValue v = obj.value(key);
+    return v.isString() ? v.toString() : QString();
+}
+
+QJsonObject wireObj(const QJsonObject& obj, const QString& key)
+{
+    const QJsonValue v = obj.value(key);
+    return v.isObject() ? v.toObject() : QJsonObject();
+}
+
+// One wire Range -> its Positions as QPoint(x = character, y = line), still
+// the WIRE frame (the encoding is reconciled by the caller, per frame).
+QPair<QPoint, QPoint> wireRange(const QJsonObject& holder, const QString& key)
+{
+    const QJsonObject range = wireObj(holder, key);
+    auto side = [&range](const QString& name) {
+        const QJsonObject p = wireObj(range, name);
+        return QPoint(int(wireInt(p, QStringLiteral("character"))),
+                      int(wireInt(p, QStringLiteral("line"))));
+    };
+    return {side(QStringLiteral("start")), side(QStringLiteral("end"))};
+}
+
+// THE ONE Location decode — definition, references and the outline's flat
+// rows all read it (the reply-shape law frozen at the hub's definition door:
+// Location | Location[] | LocationLink[] | null, plus SymbolInformation's
+// {location} holder). Selection-range preference:
+// targetSelectionRange > selectionRange > location > targetRange > range.
+// An entry with no uri is INVALID — and invalid NEVER degrades into a zero
+// position posing as (0,0).
+struct WireLocation {
+    QString uri;     // the raw wire uri ("" = invalid)
+    QPoint selStart; // (character, line) — the wire frame
+    QPoint selEnd;   //   "   "
+    bool valid = false;
+};
+
+WireLocation decodeWireLocation(const QJsonValue& value)
+{
+    WireLocation out;
+    if (!value.isObject())
+        return out;
+    const QJsonObject obj = value.toObject();
+    out.uri = wireStr(obj, QStringLiteral("uri"));
+    if (out.uri.isEmpty())
+        out.uri = wireStr(obj, QStringLiteral("targetUri"));
+    if (out.uri.isEmpty())
+        return out; // no frame to decode in at all
+    const QJsonObject location = wireObj(obj, QStringLiteral("location"));
+    const QJsonObject selection
+        = wireObj(obj, QStringLiteral("targetSelectionRange"));
+    const QJsonObject plainSel = wireObj(obj, QStringLiteral("selectionRange"));
+    const QJsonObject target = wireObj(obj, QStringLiteral("targetRange"));
+    const QJsonObject plain = wireObj(obj, QStringLiteral("range"));
+    QPair<QPoint, QPoint> range;
+    if (!selection.isEmpty())
+        range = wireRange(obj, QStringLiteral("targetSelectionRange"));
+    else if (!plainSel.isEmpty())
+        range = wireRange(obj, QStringLiteral("selectionRange"));
+    else if (!location.isEmpty())
+        range = wireRange(location, QStringLiteral("range"));
+    else if (!target.isEmpty())
+        range = wireRange(obj, QStringLiteral("targetRange"));
+    else
+        range = wireRange(obj, QStringLiteral("range"));
+    out.selStart = range.first;
+    out.selEnd = range.second;
+    out.valid = true;
+    return out;
+}
+
+// A file:// uri -> a local path (`localOut` set); any other scheme keeps the
+// uri as the DISPLAY string and leaves localOut empty (a foreign location
+// still SHOWS its row; it just cannot be opened — the reveal says so).
+QString pathFromUri(const QString& uri, QString* localOut)
+{
+    const QUrl url(uri);
+    if (url.isLocalFile()) {
+        *localOut = url.toLocalFile();
+        return *localOut;
+    }
+    localOut->clear();
+    return uri;
+}
+
+// A preview of one line of a decode frame, truncated at the SEARCH engine's
+// own cap with the same trailing ellipsis: the results panel's rows are ONE
+// currency (FileMatch/LineMatch), so a reference row never dresses better
+// than a search row.
+QString previewOfLine(const QString& frame, int line)
+{
+    const QString text = frame.section(QLatin1Char('\n'), line, line);
+    if (text.size() <= qmn::search::kPreviewCap)
+        return text;
+    return text.left(qmn::search::kPreviewCap - 1) + QChar(0x2026);
+}
+
+} // namespace
+
+// ------------------------------------------------------------ the arm door
+void IdeWindow::armLspServer(const QString& specName, const QString& program,
+                             const QStringList& args,
+                             const QStringList& languages)
+{
+    // The TEST-ARM door — the owner-granted fakeserver-class shape (2026
+    // 11 28): an explicit program path, the far side's feature flags as
+    // args, and the hub raised over it. setLspEnabled alone cannot drive
+    // these faces offscreen: the built-in spec claims PATH clangd, which
+    // tst_ide never spawns (that law STANDS for every other slot). Built-in
+    // matrix users still call setLspEnabled; this door is additive app-side
+    // only — the shelf saw nothing new.
+    if (!hub_)
+        setLspEnabled(true);
+    qmn::glue::LspHub::ServerSpec spec;
+    spec.name = specName;
+    spec.program = program;
+    spec.args = args;
+    spec.languages = languages;
+    hub_->setServerSpec(spec); // the hub's language map routes the claim
+    statusBar()->showMessage(QStringLiteral("LSP: \u0442\u0435\u0441\u0442\u043e\u0432\u044b\u0439 \u0441\u043f\u0435\u043a ")
+                                 + program);
+}
+
+// ------------------------------------------------------ I3-3: definition
+bool IdeWindow::jumpToDefinition()
+{
+    CodeEditor* editor = currentEditor();
+    jumpTarget_.clear();
+    if (!hub_ || !editor) {
+        jumpSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0445\u043e\u0434: \u043d\u0435\u0442 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0433\u043e \u0440\u0435\u0434\u0430\u043a\u0442\u043e\u0440\u0430 \u0438\u043b\u0438 LSP-\u043a\u043b\u044e\u0447\u0430");
+        statusBar()->showMessage(jumpSummary_);
+        return false;
+    }
+    qmn::lsp::DocumentSyncer* syncer = hub_->syncerFor(editor);
+    const QString frame = syncer ? syncer->mirrorText() : QString();
+    qmn::lsp::LspClient* client = hub_->clientForUri(session_->uriForEditor(editor));
+    const QString wireEncoding = client ? client->positionEncoding() : QString();
+    const qint64 tag = hub_->requestDefinition(
+        editor, editor->position(),
+        [this, frame, wireEncoding](const qmn::protocol::RpcClient::Reply& r) {
+            onDefinitionAnswer(r.result, r.isError, r.code, r.message,
+                               frame, wireEncoding);
+        });
+    if (tag == 0) {
+        // The refusal fired the handler SYNCHRONOUSLY above: jumpSummary_
+        // already holds the machine reason. Re-showing it is fine; writing
+        // a fresh text over it is not.
+        statusBar()->showMessage(jumpSummary_);
+        return false;
+    }
+    jumpSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0445\u043e\u0434: \u0437\u0430\u043f\u0440\u043e\u0448\u0435\u043d\u2026");
+    statusBar()->showMessage(jumpSummary_);
+    return true;
+}
+
+void IdeWindow::onDefinitionAnswer(const QJsonValue& result, bool isError,
+                                   int code, const QString& message,
+                                   const QString& mirrorFrame,
+                                   const QString& wireEncoding)
+{
+    if (isError) {
+        jumpSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0445\u043e\u0434 \u043e\u0442\u043a\u043b\u043e\u043d\u0451\u043d: \u043a\u043e\u0434 %1 \u00b7 %2").arg(code).arg(message);
+        statusBar()->showMessage(jumpSummary_);
+        return;
+    }
+    if (result.isNull()) {
+        jumpSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0445\u043e\u0434: \u0441\u0435\u0440\u0432\u0435\u0440 \u043e\u0442\u0432\u0435\u0442\u0438\u043b \u043f\u0443\u0441\u0442\u043e");
+        statusBar()->showMessage(jumpSummary_);
+        return;
+    }
+    jumpTarget_ = decodeJumpTargets(result, mirrorFrame, wireEncoding);
+    if (jumpTarget_.isEmpty()) {
+        jumpSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0445\u043e\u0434: \u0432 \u043e\u0442\u0432\u0435\u0442\u0435 \u043d\u0435\u0442 \u043c\u0435\u0441\u0442\u043e\u043f\u043e\u043b\u043e\u0436\u0435\u043d\u0438\u0439");
+        statusBar()->showMessage(jumpSummary_);
+        return;
+    }
+    const bool revealed = revealJumpTarget(jumpTarget_.first(), true);
+    jumpSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0445\u043e\u0434: %1:%2")
+                       .arg(QFileInfo(jumpTarget_.first().path).fileName())
+                       .arg(jumpTarget_.first().startLine + 1);
+    if (jumpTarget_.size() > 1)
+        jumpSummary_ += QStringLiteral(" \u00b7 \u0432\u0430\u0440\u0438\u0430\u043d\u0442\u043e\u0432: %1").arg(jumpTarget_.size());
+    if (!revealed)
+        jumpSummary_ += QStringLiteral(" \u00b7 \u043e\u0442\u043a\u0440\u044b\u0442\u044c \u043d\u0435 \u0443\u0434\u0430\u043b\u043e\u0441\u044c");
+    statusBar()->showMessage(jumpSummary_);
+}
+
+QVector<IdeWindow::JumpTarget>
+IdeWindow::decodeJumpTargets(const QJsonValue& result,
+                             const QString& mirrorFrame,
+                             const QString& wireEncoding) const
+{
+    const auto enc = qmn::lsp::PositionConverter::fromWire(wireEncoding);
+    const QString currentPath
+        = tabs_->currentIndex() >= 0
+              ? tabs_->tabBar()->tabData(tabs_->currentIndex()).toString()
+              : QString();
+    QHash<QString, QString> frames;
+    frames.insert(currentPath, mirrorFrame);
+    auto frameFor = [&frames, &mirrorFrame](const QString& path) {
+        if (frames.contains(path))
+            return frames.value(path);
+        if (path.isEmpty())
+            return mirrorFrame;
+        QString error;
+        // A CLOSED file: the disk IS the text the server holds — decoding
+        // its positions against anything else would drift every column
+        // after a non-ASCII character on the line (clangd answers utf-8).
+        const QString disk = readTextFile(path, &error);
+        frames.insert(path, disk); // an unreadable file decodes against ""
+        return disk;               // (a total clamp, never a crash)
+    };
+    QVector<JumpTarget> out;
+    const auto addOne = [&](const QJsonValue& v) {
+        const WireLocation w = decodeWireLocation(v);
+        if (!w.valid)
+            return;
+        QString localPath;
+        pathFromUri(w.uri, &localPath); // "" for an external scheme
+        const QString frame = frameFor(localPath);
+        JumpTarget t;
+        t.path = localPath;
+        const qmn::lsp::ModelPosition s = qmn::lsp::PositionConverter::
+            toModelPosition(frame, w.selStart.y(), w.selStart.x(), enc);
+        const qmn::lsp::ModelPosition e = qmn::lsp::PositionConverter::
+            toModelPosition(frame, w.selEnd.y(), w.selEnd.x(), enc);
+        t.startLine = s.line;
+        t.startCol = s.col;
+        t.endLine = e.line;
+        t.endCol = e.col;
+        out.append(t);
+    };
+    if (result.isArray()) {
+        for (const QJsonValue& v : result.toArray())
+            addOne(v);
+    } else {
+        addOne(result);
+    }
+    return out;
+}
+
+bool IdeWindow::revealJumpTarget(const JumpTarget& target, bool caretAtStart)
+{
+    if (!target.path.isEmpty()) {
+        if (!QFileInfo(target.path).isFile())
+            return false; // the answer named a file that is gone (or a
+                          // foreign path) — loud via the jump summary
+        if (!openFile(target.path))
+            return false; // openFile says its own truth in the bar
+    }
+    CodeEditor* editor = currentEditor();
+    if (!editor)
+        return false;
+    qmn::view::CodeDocument* doc = editor->document();
+    const int lines = doc->lineCount();
+    auto clampTo = [doc, lines](int line, int col) {
+        line = qBound(0, line, lines - 1);
+        TextPosition pos;
+        pos.line = line;
+        pos.col = qBound(0, col, int(doc->lineText(line).size()));
+        return pos;
+    };
+    const TextPosition start = clampTo(target.startLine, target.startCol);
+    const TextPosition end = clampTo(target.endLine, target.endCol);
+    // THE TWO CARET FACES, one public door (the I1 widening): a JUMP puts
+    // the caret at the token START — the next keystroke belongs to the
+    // symbol's front; a PANEL/OUTLINE reveal puts it at the END (I1's
+    // frozen shape). Reversed ends are legal — setSelection sorts them.
+    if (caretAtStart) {
+        editor->setPosition(start);
+        editor->setSelection(end, start);
+    } else {
+        editor->setPosition(start);
+        editor->setSelection(start, end);
+    }
+    editor->setFocus();
+    return true;
+}
+
+QString IdeWindow::wordAtColumn(const QString& line, int col)
+{
+    auto isWord = [](QChar c) {
+        return c.isLetterOrNumber() || c == QLatin1Char('_')
+               || c == QLatin1Char('$');
+    };
+    if (col < 0 || col >= line.size() || !isWord(line.at(col)))
+        return {};
+    int start = col;
+    while (start > 0 && isWord(line.at(start - 1)))
+        --start;
+    int end = col;
+    while (end < line.size() && isWord(line.at(end)))
+        ++end;
+    return line.mid(start, end - start);
+}
+
+// ------------------------------------------------------ I3-3: references
+bool IdeWindow::findReferences()
+{
+    CodeEditor* editor = currentEditor();
+    if (!hub_ || !editor) {
+        resultsProducer_.clear();
+        searchSummary_ = QStringLiteral("\u0441\u0441\u044b\u043b\u043a\u0438: \u043d\u0435\u0442 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0433\u043e \u0440\u0435\u0434\u0430\u043a\u0442\u043e\u0440\u0430 \u0438\u043b\u0438 LSP-\u043a\u043b\u044e\u0447\u0430");
+        statusBar()->showMessage(searchSummary_);
+        return false;
+    }
+    qmn::lsp::DocumentSyncer* syncer = hub_->syncerFor(editor);
+    const QString frame = syncer ? syncer->mirrorText() : QString();
+    qmn::lsp::LspClient* client = hub_->clientForUri(session_->uriForEditor(editor));
+    const QString wireEncoding = client ? client->positionEncoding() : QString();
+    const qint64 tag = hub_->requestReferences(
+        editor, editor->position(), true,
+        [this, frame, wireEncoding](const qmn::protocol::RpcClient::Reply& r) {
+            onReferencesAnswer(r.result, r.isError, r.code, r.message,
+                               frame, wireEncoding);
+        });
+    if (tag == 0) {
+        resultsProducer_ = QStringLiteral("references");
+        statusBar()->showMessage(searchSummary_); // the refusal, verbatim
+        return false;
+    }
+    resultsProducer_ = QStringLiteral("references");
+    searchSummary_ = QStringLiteral("\u0441\u0441\u044b\u043b\u043a\u0438: \u0437\u0430\u043f\u0440\u043e\u0448\u0435\u043d\u044b\u2026");
+    statusBar()->showMessage(searchSummary_);
+    return true;
+}
+
+void IdeWindow::onReferencesAnswer(const QJsonValue& result, bool isError,
+                                   int code, const QString& message,
+                                   const QString& mirrorFrame,
+                                   const QString& wireEncoding)
+{
+    resultsProducer_ = QStringLiteral("references");
+    if (isError) {
+        showResultsFor({}, QStringLiteral("references"),
+                       QStringLiteral("\u0441\u0441\u044b\u043b\u043a\u0438 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u044b: \u043a\u043e\u0434 %1 \u00b7 %2").arg(code).arg(message));
+        return;
+    }
+    if (result.isNull()) {
+        showResultsFor({}, QStringLiteral("references"),
+                       QStringLiteral("\u0441\u0441\u044b\u043b\u043e\u043a \u043d\u0435\u0442: \u0441\u0435\u0440\u0432\u0435\u0440 \u043e\u0442\u0432\u0435\u0442\u0438\u043b \u043f\u0443\u0441\u0442\u043e"));
+        return;
+    }
+    const QVector<qmn::search::FileMatch> grouped
+        = groupReferences(result, mirrorFrame, wireEncoding);
+    int hits = 0;
+    for (const qmn::search::FileMatch& fm : grouped)
+        hits += fm.lines.size();
+    if (grouped.isEmpty()) {
+        showResultsFor({}, QStringLiteral("references"),
+                       QStringLiteral("\u0441\u0441\u044b\u043b\u043e\u043a \u043d\u0435\u0442 \u00b7 \u043d\u0435\u0433\u043e\u0434\u043d\u044b\u0445 \u0437\u0430\u043f\u0438\u0441\u0435\u0439 \u043e\u0442\u0432\u0435\u0442\u0430: %1")
+                           .arg(result.isArray() ? result.toArray().size()
+                                                 : 0));
+        return;
+    }
+    showResultsFor(grouped, QStringLiteral("references"),
+                   QStringLiteral("\u0421\u0441\u044b\u043b\u043e\u043a: %1 \u0432 %2 \u0444\u0430\u0439\u043b\u0430\u0445")
+                       .arg(hits)
+                       .arg(grouped.size()));
+}
+
+QVector<qmn::search::FileMatch>
+IdeWindow::groupReferences(const QJsonValue& result,
+                           const QString& mirrorFrame,
+                           const QString& wireEncoding) const
+{
+    const auto enc = qmn::lsp::PositionConverter::fromWire(wireEncoding);
+    const QString currentPath
+        = tabs_->currentIndex() >= 0
+              ? tabs_->tabBar()->tabData(tabs_->currentIndex()).toString()
+              : QString();
+    QHash<QString, QString> frames;
+    frames.insert(currentPath, mirrorFrame);
+    auto frameFor = [&frames, &mirrorFrame](const QString& path) {
+        if (frames.contains(path))
+            return frames.value(path);
+        if (path.isEmpty())
+            return mirrorFrame;
+        QString error;
+        const QString disk = readTextFile(path, &error);
+        frames.insert(path, disk);
+        return disk;
+    };
+    // Files in FIRST-APPEARANCE order of the server's own list; rows inside
+    // a file keep the SERVER's order (the panel's walk-order honesty, the
+    // I1 shape: the producer's order is the row order, never a re-sort).
+    QVector<qmn::search::FileMatch> out;
+    QHash<QString, int> fileRow;
+    const auto addOne = [&](const QJsonValue& v) {
+        const WireLocation w = decodeWireLocation(v);
+        if (!w.valid)
+            return; // a location that names no frame: it never becomes a
+                    // (0,0) phantom row
+        QString localPath;
+        pathFromUri(w.uri, &localPath);
+        const QString frame = frameFor(localPath);
+        const qmn::lsp::ModelPosition s = qmn::lsp::PositionConverter::
+            toModelPosition(frame, w.selStart.y(), w.selStart.x(), enc);
+        const qmn::lsp::ModelPosition e = qmn::lsp::PositionConverter::
+            toModelPosition(frame, w.selEnd.y(), w.selEnd.x(), enc);
+        const QString key = localPath.isEmpty() ? w.uri : localPath;
+        int index = -1;
+        auto it = fileRow.constFind(key);
+        if (it == fileRow.constEnd()) {
+            index = out.size();
+            fileRow.insert(key, index);
+            qmn::search::FileMatch fm;
+            fm.filePath = localPath.isEmpty() ? w.uri : localPath;
+            out.append(fm);
+        } else {
+            index = it.value();
+        }
+        qmn::search::LineMatch lm;
+        lm.line = s.line;
+        qmn::search::MatchSpan span;
+        span.startCol = s.col;
+        span.endCol = e.col;
+        lm.spans.append(span);
+        lm.lineText = previewOfLine(frame, s.line);
+        out[index].lines.append(lm);
+    };
+    if (result.isArray()) {
+        for (const QJsonValue& v : result.toArray())
+            addOne(v);
+    } else {
+        addOne(result);
+    }
+    return out;
+}
+
+void IdeWindow::showResultsFor(const QVector<qmn::search::FileMatch>& grouped,
+                               const QString& producer, const QString& summary)
+{
+    resultsProducer_ = producer;
+    results_.clear();
+    resultRows_.clear();
+    resultsTree_->clear();
+    for (const qmn::search::FileMatch& fm : grouped)
+        appendResultRows(fm); // the I1 door: file groups + per-line leaves,
+                              // row-aligned with resultRows_ — a reference
+                              // row activates through the SAME
+                              // activateSearchResult as a search row
+    searchSummary_ = summary;
+    statusBar()->showMessage(summary);
+}
+
+// ---------------------------------------------------------- I3-4: rename
+bool IdeWindow::openRenameOverlay()
+{
+    CodeEditor* editor = currentEditor();
+    if (!hub_ || !editor) {
+        renameSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435: \u043d\u0435\u0442 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0433\u043e \u0440\u0435\u0434\u0430\u043a\u0442\u043e\u0440\u0430 \u0438\u043b\u0438 LSP-\u043a\u043b\u044e\u0447\u0430");
+        statusBar()->showMessage(renameSummary_);
+        return false;
+    }
+    // The prefill is the app's own math over public model doors: the
+    // selection if there is one, else the word AT the caret (no new view
+    // door — the LEDGER stays clean).
+    QString prefill;
+    if (editor->hasSelection())
+        prefill = editor->selectedText();
+    if (prefill.isEmpty()) {
+        const TextPosition caret = editor->position();
+        prefill = wordAtColumn(editor->document()->lineText(caret.line),
+                               caret.col);
+    }
+    renameEdit_->setText(prefill);
+    renameEdit_->selectAll();
+    showOverlay(renamePop_, renameEdit_);
+    renameSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435: \u0432\u0432\u0435\u0434\u0438\u0442\u0435 \u0438\u043c\u044f \u0438 Enter");
+    statusBar()->showMessage(renameSummary_);
+    return true;
+}
+
+bool IdeWindow::renameOverlayVisible() const
+{
+    return renamePop_ && renamePop_->isVisible();
+}
+
+QString IdeWindow::renamePrefill() const
+{
+    return renameEdit_ ? renameEdit_->text() : QString();
+}
+
+void IdeWindow::commitRename(const QString& newName)
+{
+    CodeEditor* editor = currentEditor();
+    if (!hub_ || !editor) {
+        renameSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435: \u043d\u0435\u0442 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0433\u043e \u0440\u0435\u0434\u0430\u043a\u0442\u043e\u0440\u0430 \u0438\u043b\u0438 LSP-\u043a\u043b\u044e\u0447\u0430");
+        statusBar()->showMessage(renameSummary_);
+        return;
+    }
+    if (newName.trimmed().isEmpty()) {
+        // LOUD, and the overlay STAYS open: the name is the user's, not
+        // ours to invent (the quick-open empty-query face's sibling).
+        renameSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435: \u043f\u0443\u0441\u0442\u043e\u0435 \u0438\u043c\u044f \u2014 \u0437\u0430\u043f\u0440\u043e\u0441 \u043d\u0435 \u043e\u0442\u043f\u0440\u0430\u0432\u043b\u0435\u043d");
+        statusBar()->showMessage(renameSummary_);
+        return;
+    }
+    const QString uri = session_->uriForEditor(editor);
+    const qint64 tag = hub_->requestRename(
+        editor, editor->position(), newName,
+        [this, uri](const qmn::protocol::RpcClient::Reply& r) {
+            onRenameAnswer(r.result, r.isError, r.code, r.message, uri);
+        });
+    if (tag == 0) {
+        statusBar()->showMessage(renameSummary_); // the refusal, verbatim
+        return;                                   // the overlay stays open
+    }
+    renameSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435: \u0437\u0430\u043f\u0440\u043e\u0448\u0435\u043d\u043e\u2026");
+    statusBar()->showMessage(renameSummary_);
+}
+
+void IdeWindow::onRenameAnswer(const QJsonValue& result, bool isError, int code,
+                               const QString& message, const QString& docUri)
+{
+    if (isError) {
+        renameSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e: \u043a\u043e\u0434 %1 \u00b7 %2")
+                             .arg(code).arg(message);
+        statusBar()->showMessage(renameSummary_); // the overlay stays OPEN —
+                                                  // the next name may yet be
+                                                  // the truth
+        return;
+    }
+    if (result.isNull()) {
+        // The server's OWN cannot-rename face (prepareRename's null): no
+        // applier runs, nothing changes.
+        renameSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435: \u0441\u0435\u0440\u0432\u0435\u0440 \u043e\u0442\u0432\u0435\u0442\u0438\u043b \u043e\u0442\u043a\u0430\u0437\u043e\u043c null");
+        statusBar()->showMessage(renameSummary_);
+        return;
+    }
+    qmn::lsp::LspClient* client = hub_->clientForUri(docUri);
+    const qmn::glue::LspHub::ApplyReport report
+        = hub_->applyReplyEdit(result, client); // ONE undo group per document
+                                                // (the applier's frozen law —
+                                                // the app never hand-rolls
+                                                // the edit walk)
+    if (report.applied) {
+        renameSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435: \u043f\u0440\u0438\u043c\u0435\u043d\u0435\u043d\u043e \u00b7 \u043f\u0440\u0430\u0432\u043e\u043a: %1 \u00b7 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u043e\u0432: %2")
+                             .arg(report.editsApplied)
+                             .arg(report.documentsChanged);
+        closeOverlay();
+    } else {
+        renameSummary_ = QStringLiteral("\u043f\u0435\u0440\u0435\u0438\u043c\u0435\u043d\u043e\u0432\u0430\u043d\u0438\u0435 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e: %1")
+                             .arg(report.refused.join(QStringLiteral("; ")));
+    }
+    statusBar()->showMessage(renameSummary_);
+}
+
+// --------------------------------------------------- I3-4: code actions
+bool IdeWindow::showCodeActions()
+{
+    CodeEditor* editor = currentEditor();
+    if (!hub_ || !editor) {
+        actionsSummary_ = QStringLiteral("\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044f: \u043d\u0435\u0442 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0433\u043e \u0440\u0435\u0434\u0430\u043a\u0442\u043e\u0440\u0430 \u0438\u043b\u0438 LSP-\u043a\u043b\u044e\u0447\u0430");
+        statusBar()->showMessage(actionsSummary_);
+        return false;
+    }
+    codeActions_.clear();
+    actionsList_->clear();
+    const qint64 tag = hub_->requestCodeActions(
+        editor, editor->position(),
+        [this](const qmn::protocol::RpcClient::Reply& r) {
+            onCodeActionsAnswer(r.result, r.isError, r.code, r.message);
+        });
+    if (tag == 0) {
+        statusBar()->showMessage(actionsSummary_); // the refusal, verbatim
+        return false;
+    }
+    actionsSummary_ = QStringLiteral("\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044f: \u0437\u0430\u043f\u0440\u043e\u0448\u0435\u043d\u044b\u2026");
+    statusBar()->showMessage(actionsSummary_);
+    return true;
+}
+
+void IdeWindow::onCodeActionsAnswer(const QJsonValue& result, bool isError,
+                                    int code, const QString& message)
+{
+    if (isError) {
+        actionsSummary_ = QStringLiteral("\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044f \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u044b: \u043a\u043e\u0434 %1 \u00b7 %2")
+                              .arg(code).arg(message);
+        statusBar()->showMessage(actionsSummary_);
+        return;
+    }
+    if (!result.isArray()) {
+        actionsSummary_ = result.isNull()
+                              ? QStringLiteral("\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0439 \u043d\u0435\u0442: \u0441\u0435\u0440\u0432\u0435\u0440 \u043e\u0442\u0432\u0435\u0442\u0438\u043b \u043f\u0443\u0441\u0442\u043e")
+                              : QStringLiteral("\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u044f: \u043d\u0435\u043e\u0436\u0438\u0434\u0430\u043d\u043d\u044b\u0439 \u043e\u0442\u0432\u0435\u0442 \u2014 \u043d\u0435 \u0441\u043f\u0438\u0441\u043e\u043a");
+        statusBar()->showMessage(actionsSummary_);
+        return;
+    }
+    for (const QJsonValue& v : result.toArray()) {
+        codeActions_.append(v);
+        const QString title
+            = v.isObject() ? wireStr(v.toObject(), QStringLiteral("title"))
+                           : QString();
+        actionsList_->addItem(title.isEmpty()
+                                  ? QStringLiteral("\u0437\u0430\u043f\u0438\u0441\u044c \u0431\u0435\u0437 \u043d\u0430\u0437\u0432\u0430\u043d\u0438\u044f")
+                                  : title);
+    }
+    actionsSummary_ = QStringLiteral("\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0439: %1").arg(codeActions_.size());
+    statusBar()->showMessage(actionsSummary_);
+    if (!codeActions_.isEmpty())
+        showActionsOverlay(); // the rows EXIST even with no popup — the
+                              // count/label/run doors are the driving face
+}
+
+void IdeWindow::showActionsOverlay()
+{
+    closeOverlay(); // one overlay at a time
+    const int w = qMax(360, qMin(680, static_cast<int>(width() * 0.6)));
+    const int h = qMax(220, qMin(460, static_cast<int>(height() * 0.55)));
+    actionsPop_->setGeometry((width() - w) / 2,
+                             static_cast<int>(height() * 0.2), w, h);
+    actionsPop_->show();
+    actionsPop_->raise();
+    actionsList_->setFocus();
+}
+
+int IdeWindow::codeActionRowCount() const
+{
+    return codeActions_.size();
+}
+
+QString IdeWindow::codeActionLabelAt(int row) const
+{
+    if (row < 0 || row >= codeActions_.size()
+        || !codeActions_.at(row).isObject())
+        return {};
+    const QString title
+        = wireStr(codeActions_.at(row).toObject(), QStringLiteral("title"));
+    return title; // "" for an untitled entry — the row still RANKS, it is
+                  // just honest about having no label
+}
+
+bool IdeWindow::runCodeAction(int row)
+{
+    if (row < 0 || row >= codeActions_.size())
+        return false;
+    if (!hub_) {
+        actionsSummary_ = QStringLiteral("\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435: LSP-\u043a\u043b\u044e\u0447 \u0443\u0436\u0435 \u043e\u043f\u0443\u0449\u0435\u043d");
+        statusBar()->showMessage(actionsSummary_);
+        return false;
+    }
+    const QJsonValue v = codeActions_.at(row);
+    if (!v.isObject()) {
+        actionsSummary_ = QStringLiteral("\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e: \u0437\u0430\u043f\u0438\u0441\u044c \u043e\u0442\u0432\u0435\u0442\u0430 \u043d\u0435 \u043e\u0431\u044a\u0435\u043a\u0442");
+        statusBar()->showMessage(actionsSummary_);
+        return false;
+    }
+    const QJsonObject action = v.toObject();
+    const QString docUri = wireStr(action, QStringLiteral("documentUri"));
+    const QString uri = docUri.isEmpty()
+        ? (currentEditor() ? session_->uriForEditor(currentEditor()) : QString())
+        : docUri;
+    qmn::lsp::LspClient* client = hub_->clientForUri(uri);
+    // applyCodeAction is the applier's own door: the item's `edit`, or the
+    // WorkspaceEdit hidden in command.arguments[0] (clangd's tweak shape).
+    // An item that is PURELY a workspace command refuses THROUGH THE
+    // APPLIER with its reason — v1 never executes a server's arbitrary
+    // command (PLAN's v1 stance, and the refusal text is the record).
+    const qmn::glue::LspHub::ApplyReport report
+        = hub_->applyCodeAction(action, client);
+    if (report.applied) {
+        actionsSummary_ = QStringLiteral("\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u043f\u0440\u0438\u043c\u0435\u043d\u0435\u043d\u043e: \u043f\u0440\u0430\u0432\u043e\u043a %1 \u00b7 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u043e\u0432 %2")
+                              .arg(report.editsApplied)
+                              .arg(report.documentsChanged);
+        closeOverlay();
+    } else {
+        actionsSummary_ = QStringLiteral("\u0434\u0435\u0439\u0441\u0442\u0432\u0438\u0435 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e: %1")
+                              .arg(report.refused.join(QStringLiteral("; ")));
+    }
+    statusBar()->showMessage(actionsSummary_);
+    return report.applied;
+}
+
+// ------------------------------------------------------- I3-4: formatting
+bool IdeWindow::formatDocument()
+{
+    CodeEditor* editor = currentEditor();
+    if (!hub_ || !editor) {
+        formatSummary_ = QStringLiteral("\u0444\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435: \u043d\u0435\u0442 \u0430\u043a\u0442\u0438\u0432\u043d\u043e\u0433\u043e \u0440\u0435\u0434\u0430\u043a\u0442\u043e\u0440\u0430 \u0438\u043b\u0438 LSP-\u043a\u043b\u044e\u0447\u0430");
+        statusBar()->showMessage(formatSummary_);
+        return false;
+    }
+    const QString uri = session_->uriForEditor(editor);
+    const qint64 tag = hub_->requestFormatting(
+        editor, [this, uri](const qmn::protocol::RpcClient::Reply& r) {
+            onFormatAnswer(r.result, r.isError, r.code, r.message, uri);
+        });
+    if (tag == 0) {
+        statusBar()->showMessage(formatSummary_); // the refusal, verbatim
+        return false;
+    }
+    formatSummary_ = QStringLiteral("\u0444\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435: \u0437\u0430\u043f\u0440\u043e\u0448\u0435\u043d\u043e\u2026");
+    statusBar()->showMessage(formatSummary_);
+    return true;
+}
+
+void IdeWindow::onFormatAnswer(const QJsonValue& result, bool isError, int code,
+                               const QString& message, const QString& docUri)
+{
+    if (isError) {
+        formatSummary_ = QStringLiteral("\u0444\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e: \u043a\u043e\u0434 %1 \u00b7 %2")
+                             .arg(code).arg(message);
+        statusBar()->showMessage(formatSummary_);
+        return;
+    }
+    if (result.isNull()) {
+        formatSummary_ = QStringLiteral("\u0444\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435: \u0441\u0435\u0440\u0432\u0435\u0440 \u043e\u0442\u0432\u0435\u0442\u0438\u043b \u043f\u0443\u0441\u0442\u043e");
+        statusBar()->showMessage(formatSummary_);
+        return;
+    }
+    if (!result.isArray()) {
+        formatSummary_ = QStringLiteral("\u0444\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435: \u043d\u0435\u043e\u0436\u0438\u0434\u0430\u043d\u043d\u044b\u0439 \u043e\u0442\u0432\u0435\u0442 \u2014 \u043d\u0435 \u0441\u043f\u0438\u0441\u043e\u043a");
+        statusBar()->showMessage(formatSummary_);
+        return;
+    }
+    // The document is resolved BY URI at answer time (never a captured view
+    // pointer): a tab closed mid-flight leaves a null here, not a dangling
+    // CodeEditor the applier would write into.
+    CodeEditor* target = session_->editorForUri(docUri);
+    if (!target) {
+        formatSummary_ = QStringLiteral("\u0444\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435: \u0432\u043a\u043b\u0430\u0434\u043a\u0430 \u0434\u043e\u043a\u0443\u043c\u0435\u043d\u0442\u0430 \u0437\u0430\u043a\u0440\u044b\u0442\u0430, \u043f\u043e\u043a\u0430 \u0448\u0451\u043b \u043e\u0442\u0432\u0435\u0442");
+        statusBar()->showMessage(formatSummary_);
+        return;
+    }
+    qmn::lsp::LspClient* client = hub_->clientForUri(docUri);
+    const qmn::glue::LspHub::ApplyReport report
+        = hub_->applyTextEditList(target, result, client); // a BARE TextEdit[]
+                                                           // (the formatting
+                                                           // shape) — the
+                                                           // applier's door,
+                                                           // not a hand walk
+    if (report.applied) {
+        formatSummary_ = QStringLiteral("\u0444\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435: \u043f\u0440\u0438\u043c\u0435\u043d\u0435\u043d\u043e \u00b7 \u043f\u0440\u0430\u0432\u043e\u043a: %1")
+                             .arg(report.editsApplied);
+    } else {
+        formatSummary_ = QStringLiteral("\u0444\u043e\u0440\u043c\u0430\u0442\u0438\u0440\u043e\u0432\u0430\u043d\u0438\u0435 \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u043e: %1")
+                             .arg(report.refused.join(QStringLiteral("; ")));
+    }
+    statusBar()->showMessage(formatSummary_);
+}
+
+// --------------------------------------------------------- I3-5: outline
+void IdeWindow::buildOutlineDock()
+{
+    outlineDock_ = new QDockWidget(QStringLiteral("\u0421\u0438\u043c\u0432\u043e\u043b\u044b"), this);
+    auto* panel = new QWidget(outlineDock_);
+    auto* lay = new QVBoxLayout(panel);
+    auto* head = new QHBoxLayout();
+    outlineRefreshBtn_ = new QPushButton(QStringLiteral("\u041e\u0431\u043d\u043e\u0432\u0438\u0442\u044c"), panel);
+    outlineSummaryLabel_ = new QLabel(QStringLiteral("\u0441\u0438\u043c\u0432\u043e\u043b\u044b: LSP-\u0441\u0435\u0440\u0432\u0435\u0440 \u043d\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0451\u043d"), panel);
+    outlineSummaryLabel_->setWordWrap(true);
+    head->addWidget(outlineRefreshBtn_);
+    head->addWidget(outlineSummaryLabel_, 1);
+    lay->addLayout(head);
+    outlineTree_ = new QTreeWidget(panel);
+    outlineTree_->setHeaderLabels({QStringLiteral("\u0421\u0438\u043c\u0432\u043e\u043b"), QStringLiteral("\u0421\u0442\u0440\u043e\u043a\u0430")});
+    outlineTree_->header()->setSectionResizeMode(0, QHeaderView::ResizeToContents);
+    outlineTree_->setRootIsDecorated(true);
+    connect(outlineTree_, &QTreeWidget::itemDoubleClicked, this,
+            [this](QTreeWidgetItem* item, int) {
+                const QVariant row = item->data(0, kOutlineRowRole);
+                if (row.isValid())
+                    outlineActivate(row.toInt());
+            });
+    lay->addWidget(outlineTree_, 1);
+    outlineDock_->setWidget(panel);
+    addDockWidget(Qt::RightDockWidgetArea, outlineDock_);
+    connect(outlineRefreshBtn_, &QPushButton::clicked, this,
+            [this] {
+                outlineDebounce_->stop(); // a manual pull outranks a pending
+                                          // debounce — one ask, no queue
+                refreshOutline();
+            });
+}
+
+void IdeWindow::refreshOutline()
+{
+    ++outlineGeneration_; // EVERY refresh retires the pulls already on the
+                          // wire (a late answer for another tab or an older
+                          // text never paints over the newest ask)
+    outlineBusy_ = false;
+    CodeEditor* editor = currentEditor();
+    if (!hub_ || !editor) {
+        clearOutlineRows(QStringLiteral("\u0441\u0438\u043c\u0432\u043e\u043b\u044b: LSP-\u0441\u0435\u0440\u0432\u0435\u0440 \u043d\u0435 \u043f\u043e\u0434\u043a\u043b\u044e\u0447\u0451\u043d"));
+        return;
+    }
+    qmn::lsp::DocumentSyncer* syncer = hub_->syncerFor(editor);
+    const QString frame = syncer ? syncer->mirrorText() : QString();
+    qmn::lsp::LspClient* client =
+        hub_->clientForUri(session_->uriForEditor(editor));
+    const QString wireEncoding = client ? client->positionEncoding() : QString();
+    const int generation = outlineGeneration_;
+    const qint64 tag = hub_->requestDocumentSymbol(
+        editor, [this, generation, frame, wireEncoding](
+                    const qmn::protocol::RpcClient::Reply& r) {
+            onOutlineAnswer(generation, r.result, r.isError, r.code,
+                            r.message, frame, wireEncoding);
+        });
+    if (tag == 0) {
+        // The refusal fired the handler SYNCHRONOUSLY above (either it
+        // re-armed the debounce — the still-starting face — or it cleared
+        // the rows LOUDLY; a stale tree never poses as current).
+        return;
+    }
+    outlineRetry_ = 0; // an ask that MADE IT onto the wire resets the wait
+    outlineBusy_ = true;
+    outlineSummary_ = QStringLiteral("\u0441\u0438\u043c\u0432\u043e\u043b\u044b: \u0437\u0430\u043f\u0440\u043e\u0448\u0435\u043d\u044b\u2026");
+    outlineSummaryLabel_->setText(outlineSummary_);
+}
+
+void IdeWindow::onOutlineAnswer(int generation, const QJsonValue& result,
+                                bool isError, int code, const QString& message,
+                                const QString& mirrorFrame,
+                                const QString& wireEncoding)
+{
+    if (generation != outlineGeneration_)
+        return; // SUPERSEDED: the tab moved or the document moved on while
+                // the wire was in flight — painting this would pose an old
+                // text as the current one
+    outlineBusy_ = false;
+    // THE STILL-STARTING FACE (the outline's OWN policy — the tenth door
+    // only answers): a CLAIMED document whose server has not finished its
+    // handshake is not a truth the user should eat, so the outline re-arms
+    // its debounce, bounded by kOutlineMaxRetries, and the face SAYS so. A
+    // document NO spec claims never reaches this branch (no syncer), and the
+    // cap bounds even a server that never becomes ready — past the cap the
+    // refusal face is the honest one.
+    if (code == int(qmn::lsp::LspClient::kWireServerNotInitialized)
+        && hub_ && currentEditor() && hub_->syncerFor(currentEditor())
+        && outlineRetry_ < kOutlineMaxRetries) {
+        ++outlineRetry_;
+        outlineSummary_ = QStringLiteral("\u0441\u0438\u043c\u0432\u043e\u043b\u044b: \u0441\u0435\u0440\u0432\u0435\u0440 \u0435\u0449\u0451 \u043f\u043e\u0434\u043d\u0438\u043c\u0430\u0435\u0442\u0441\u044f \u00b7 \u043f\u043e\u043f\u044b\u0442\u043a\u0430 %1")
+                              .arg(outlineRetry_);
+        outlineSummaryLabel_->setText(outlineSummary_);
+        outlineDebounce_->start();
+        return;
+    }
+    if (isError) {
+        clearOutlineRows(QStringLiteral("\u0441\u0438\u043c\u0432\u043e\u043b\u044b \u043e\u0442\u043a\u043b\u043e\u043d\u0435\u043d\u044b: \u043a\u043e\u0434 %1 \u00b7 %2")
+                             .arg(code).arg(message));
+        return;
+    }
+    decodeOutline(mirrorFrame, wireEncoding, result);
+}
+
+void IdeWindow::clearOutlineRows(const QString& why)
+{
+    outlineRows_.clear();
+    outlineFlat_.clear();
+    if (outlineTree_)
+        outlineTree_->clear();
+    if (why.isEmpty())
+        return;
+    outlineSummary_ = why;
+    if (outlineSummaryLabel_)
+        outlineSummaryLabel_->setText(outlineSummary_);
+    // The outline NEVER posts to the status bar: that channel is the SHARED
+    // one the project/tab/search faces already own (tst_ide's project-
+    // message pin is the tripwire that caught this at the car), while the
+    // dock's OWN label is where an outline truth lives — one face, no steal.
+
+}
+
+void IdeWindow::decodeOutline(const QString& mirrorFrame,
+                              const QString& wireEncoding,
+                              const QJsonValue& result)
+{
+    outlineRows_.clear();
+    outlineFlat_.clear();
+    if (!result.isArray()) {
+        clearOutlineRows(result.isNull()
+                             ? QStringLiteral("\u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432 \u043d\u0435\u0442: \u0441\u0435\u0440\u0432\u0435\u0440 \u043e\u0442\u0432\u0435\u0442\u0438\u043b \u043f\u0443\u0441\u0442\u043e")
+                             : QStringLiteral("\u0441\u0438\u043c\u0432\u043e\u043b\u044b: \u043d\u0435\u043e\u0436\u0438\u0434\u0430\u043d\u043d\u044b\u0439 \u043e\u0442\u0432\u0435\u0442 \u2014 \u043d\u0435 \u0441\u043f\u0438\u0441\u043e\u043a"));
+        return;
+    }
+    const QJsonArray items = result.toArray();
+    if (items.isEmpty()) {
+        clearOutlineRows(QStringLiteral("\u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432 \u043d\u0435\u0442: \u0441\u0435\u0440\u0432\u0435\u0440 \u043e\u0442\u0432\u0435\u0442\u0438\u043b \u043f\u0443\u0441\u0442\u043e"));
+        return;
+    }
+    const auto enc = qmn::lsp::PositionConverter::fromWire(wireEncoding);
+    // THE TWO WIRE SHAPES, decoded per ENTRY (a conforming server answers
+    // DocumentSymbol[] with selectionRange/children; a sloppy one answers
+    // SymbolInformation[] with location + containerName DESPITE the client's
+    // hierarchicalDocumentSymbolSupport claim — tst_lsp's flat leg proves the
+    // door carries that whole shape, this is where it becomes a tree):
+    //   * tree entry  -> recursion, children nest UNDER the parent;
+    //   * flat entry  -> a parent-less row, adopted by the LAST earlier row
+    //     whose name equals containerName (a flat SymbolInformation[] is
+    //     preorder, so the parent always precedes its children — the LAST
+    //     such row is the innermost one; no containerName match = a root).
+    auto decodePos = [this, enc, &mirrorFrame](const QJsonObject& obj,
+                                               const QString& key,
+                                               int* startLine, int* startCol,
+                                               int* endLine, int* endCol) {
+        const QPair<QPoint, QPoint> r = wireRange(obj, key);
+        const qmn::lsp::ModelPosition s = qmn::lsp::PositionConverter::
+            toModelPosition(mirrorFrame, r.first.y(), r.first.x(), enc);
+        const qmn::lsp::ModelPosition e = qmn::lsp::PositionConverter::
+            toModelPosition(mirrorFrame, r.second.y(), r.second.x(), enc);
+        *startLine = s.line;
+        *startCol = s.col;
+        *endLine = e.line;
+        *endCol = e.col;
+    };
+    bool sawTree = false, sawFlat = false, depthCut = false;
+    std::function<int(const QJsonValue&, int)> addTree =
+        [&](const QJsonValue& value, int depth) -> int {
+        if (!value.isObject())
+            return -1;
+        const QJsonObject obj = value.toObject();
+        OutlineNode node;
+        node.name = wireStr(obj, QStringLiteral("name"));
+        node.detail = wireStr(obj, QStringLiteral("detail"));
+        const int kind = int(wireInt(obj, QStringLiteral("kind"), -1));
+        node.kindLabel = kindLabelFor(kind);
+        decodePos(obj, QStringLiteral("selectionRange"), &node.startLine,
+                  &node.startCol, &node.endLine, &node.endCol);
+        const int row = outlineRows_.size();
+        outlineRows_.append(node);
+        outlineFlat_.append(row); // PREORDER is the read order (row i of the
+                                  // read faces IS outlineFlat_[i])
+        if (depth < kOutlineMaxDepth) {
+            for (const QJsonValue& child :
+                 obj.value(QStringLiteral("children")).toArray())
+                if (const int childRow = addTree(child, depth + 1);
+                    childRow >= 0)
+                    outlineRows_[row].childRows.append(childRow);
+        } else {
+            depthCut = true;
+        }
+        return row;
+    };
+    for (const QJsonValue& v : items) {
+        if (!v.isObject())
+            continue;
+        const QJsonObject obj = v.toObject();
+        if (obj.contains(QStringLiteral("selectionRange"))
+            || obj.contains(QStringLiteral("children"))) {
+            sawTree = true;
+            addTree(v, 0);
+            continue;
+        }
+        sawFlat = true;
+        OutlineNode node;
+        node.name = wireStr(obj, QStringLiteral("name"));
+        const QJsonObject loc = wireObj(obj, QStringLiteral("location"));
+        const int kind = int(wireInt(obj, QStringLiteral("kind"), -1));
+        node.kindLabel = kindLabelFor(kind);
+        decodePos(loc, QStringLiteral("range"), &node.startLine, &node.startCol,
+                  &node.endLine, &node.endCol);
+        // The FLAT answer carries no detail; a non-spec extra member (the
+        // fake's "hover" witness) is simply NOT read — the door carried it,
+        // the outline has no use for it, and nothing about it is invented.
+        const int row = outlineRows_.size();
+        outlineRows_.append(node);
+        outlineFlat_.append(row);
+        const QString parentName = wireStr(obj, QStringLiteral("containerName"));
+        if (!parentName.isEmpty()) {
+            for (int i = row - 1; i >= 0; --i) {
+                if (outlineRows_.at(i).name == parentName) {
+                    outlineRows_[i].childRows.append(row); // LAST match wins:
+                                                           // the innermost
+                                                           // earlier namesake
+                    break;
+                }
+            }
+        }
+    }
+    rebuildOutlineTree();
+    if (outlineRows_.isEmpty()) {
+        clearOutlineRows(QStringLiteral("\u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432 \u043d\u0435\u0442: \u043d\u0438 \u043e\u0434\u043d\u0430 \u0437\u0430\u043f\u0438\u0441\u044c \u043e\u0442\u0432\u0435\u0442\u0430 \u043d\u0435 \u0440\u0430\u0437\u043e\u0431\u0440\u0430\u043d\u0430"));
+        return;
+    }
+    QString mode;
+    if (sawTree && sawFlat)
+        mode = QStringLiteral(" \u00b7 \u0432 \u043e\u0442\u0432\u0435\u0442\u0435 \u0441\u043c\u0435\u0448\u0430\u043d\u044b \u043e\u0431\u0435 \u0444\u043e\u0440\u043c\u044b");
+    else if (sawFlat)
+        mode = QStringLiteral(" \u00b7 \u043e\u0442\u0432\u0435\u0442 \u0441\u0435\u0440\u0432\u0435\u0440\u0430 \u043f\u043b\u043e\u0441\u043a\u0438\u0439, \u0438\u0435\u0440\u0430\u0440\u0445\u0438\u044f \u0441\u043e\u0431\u0440\u0430\u043d\u0430 \u043f\u043e containerName");
+    else
+        mode = QStringLiteral(" \u00b7 \u0438\u0435\u0440\u0430\u0440\u0445\u0438\u044f");
+    if (depthCut)
+        mode += QStringLiteral(" \u00b7 \u0441\u0440\u0435\u0437\u0430\u043d\u043e \u043f\u043e \u0433\u043b\u0443\u0431\u0438\u043d\u0435 %1").arg(kOutlineMaxDepth);
+    outlineSummary_ = QStringLiteral("\u0441\u0438\u043c\u0432\u043e\u043b\u043e\u0432: %1%2")
+                          .arg(outlineRows_.size())
+                          .arg(mode);
+    outlineSummaryLabel_->setText(outlineSummary_); // the dock's face, never
+                                                   // the shared bar
+}
+
+void IdeWindow::rebuildOutlineTree()
+{
+    outlineTree_->clear();
+    // The QTreeWidget MIRRORS outlineRows_ with the SAME row order the read
+    // doors expose (outlineFlat_ is preorder, so a parent row is always
+    // built before its children — one pass, no recursion).
+    QVector<int> parentOf(outlineRows_.size(), -1);
+    for (int row = 0; row < outlineRows_.size(); ++row)
+        for (int child : outlineRows_.at(row).childRows)
+            parentOf[child] = row;
+    QVector<QTreeWidgetItem*> items(outlineRows_.size(), nullptr);
+    for (int row : outlineFlat_) {
+        const OutlineNode& node = outlineRows_.at(row);
+        const int parentRow = parentOf.value(row, -1);
+        QTreeWidgetItem* parentItem
+            = (parentRow >= 0 && items.value(parentRow)) ? items.at(parentRow)
+                                                         : nullptr;
+        // A stranded row (its adopter is gone — adoption only ever points
+        // BACK to an earlier row, so a cycle is impossible and the miss is a
+        // belt, never a routine) still GETS A ROW at the top level: dropping
+        // a symbol would erase the server's truth.
+        auto* item = parentItem ? new QTreeWidgetItem(parentItem)
+                                : new QTreeWidgetItem(outlineTree_);
+        QString text = node.kindLabel + QLatin1Char(' ') + node.name;
+        if (!node.detail.isEmpty())
+            text += QStringLiteral(" \u00b7 ") + node.detail;
+        item->setText(0, text);
+        item->setText(1, QString::number(node.startLine + 1)); // 1-based
+                                                               // DISPLAY (the
+                                                               // panel's law)
+        item->setData(0, kOutlineRowRole, row);
+        items[row] = item;
+    }
+    outlineTree_->expandAll();
+}
+
+int IdeWindow::outlineParentAt(int row) const
+{
+    // THE NESTING FACE (the flat rebuild's proof: an adoption that never
+    // happened shows up here as nothing but -1 rows): the row's ADOPTER,
+    // -1 for a root, -2 when the row itself is out of range.
+    if (row < 0 || row >= outlineRows_.size())
+        return -2; // OUT of range — a value no real row can carry
+    for (int candidate = 0; candidate < outlineRows_.size(); ++candidate)
+        if (outlineRows_.at(candidate).childRows.contains(row))
+            return candidate;
+    return -1;
+}
+
+int IdeWindow::outlineRowCount() const
+{
+    return outlineFlat_.size();
+}
+
+QString IdeWindow::outlineTextAt(int row) const
+{
+    if (row < 0 || row >= outlineFlat_.size())
+        return {};
+    const OutlineNode& node = outlineRows_.at(outlineFlat_.at(row));
+    QString text = node.kindLabel + QLatin1Char(' ') + node.name;
+    if (!node.detail.isEmpty())
+        text += QStringLiteral(" \u00b7 ") + node.detail;
+    return text;
+}
+
+bool IdeWindow::outlineActivate(int row)
+{
+    if (row < 0 || row >= outlineFlat_.size())
+        return false;
+    if (!currentEditor())
+        return false; // the outline always describes the CURRENT document —
+                      // its rows never claim another file to open
+    const OutlineNode& node = outlineRows_.at(outlineFlat_.at(row));
+    JumpTarget target;
+    target.path = tabs_->tabBar()->tabData(tabs_->currentIndex()).toString();
+    target.startLine = node.startLine;
+    target.startCol = node.startCol;
+    target.endLine = node.endLine;
+    target.endCol = node.endCol;
+    return revealJumpTarget(target, false); // caret at the END (the panel's
+                                            // face; a jump is the START face)
+}
+
+QString IdeWindow::outlineSummary() const
+{
+    return outlineSummary_;
+}
+
+QString IdeWindow::jumpSummary() const { return jumpSummary_; }
+QString IdeWindow::renameSummary() const { return renameSummary_; }
+QString IdeWindow::formatSummary() const { return formatSummary_; }
+QString IdeWindow::codeActionsSummary() const { return actionsSummary_; }
+
 
 } // namespace qmn::app
